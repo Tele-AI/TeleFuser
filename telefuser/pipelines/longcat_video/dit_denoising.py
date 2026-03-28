@@ -18,6 +18,7 @@ from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.utils.torch_compile import set_compile_configs
 
 
 class LongCatDitDenoisingStage(BaseStage):
@@ -53,6 +54,13 @@ class LongCatDitDenoisingStage(BaseStage):
             else:
                 logger.info("enable async cpu offload for dit")
                 self._pending_async_offload = True
+
+        # Handle torch.compile - only compile in __init__ if single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if model_runtime_config.compile and parallel_cfg.world_size == 1:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
+            logger.info("enable torch.compile for longcat dit (single GPU mode)")
+            self.dit.compile()
 
     def load_loras(self):
         lora_configs = self.model_runtime_config.lora_configs
@@ -274,3 +282,9 @@ class LongCatDitDenoisingStage(BaseStage):
             if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
                 self.dit.cpu()
                 current_platform.empty_cache()
+
+        # Handle torch.compile after parallel setup
+        if self.model_runtime_config.compile and parallel_cfg.world_size > 1:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
+            logger.info("enable torch.compile for longcat dit (parallel mode)")
+            self.dit.compile()

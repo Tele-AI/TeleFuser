@@ -966,6 +966,84 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
         for block in self.blocks:
             block.attn.enable_bsa = False
 
+    def forward_blocks(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        t: torch.Tensor,
+        y_seqlens: list[int],
+        latent_shape: tuple[int, int, int],
+        freqs_cis: torch.Tensor,
+        num_cond_latents: int = 0,
+        return_kv: bool = False,
+        skip_crs_attn: bool = False,
+        offload_kv_cache: bool = False,
+        attn_impl: str = "sdpa",
+    ) -> torch.Tensor | tuple[torch.Tensor, dict]:
+        """Forward pass through transformer blocks only.
+
+        This method is separated from forward() to allow targeted compilation
+        of the compute-intensive block iteration loop.
+
+        Args:
+            hidden_states: Input hidden states [B, N, C]
+            encoder_hidden_states: Text encoder hidden states [1, N_valid_tokens, C]
+            t: Timestep embedding [B, T, C_t]
+            y_seqlens: List of valid text token lengths per batch item
+            latent_shape: Shape of latent grid (N_t, N_h, N_w)
+            freqs_cis: Precomputed 3D RoPE frequencies
+            num_cond_latents: Number of conditioning latent frames
+            return_kv: Whether to return KV cache
+            skip_crs_attn: Whether to skip cross attention
+            offload_kv_cache: Whether to offload KV cache to CPU
+            attn_impl: Attention implementation type
+
+        Returns:
+            If return_kv: tuple of (hidden_states, kv_cache_dict)
+            Otherwise: hidden_states tensor
+        """
+        N_t, N_h, N_w = latent_shape
+        kv_cache_dict_ret = {}
+
+        if self.use_usp:
+            sequence_parallel_shard(self.device_mesh, [hidden_states], [1], seq_divisions=[N_t])
+
+        for i, block in enumerate(self.blocks):
+            block_outputs = block(
+                x=hidden_states,
+                y=encoder_hidden_states,
+                t=t,
+                y_seqlen=y_seqlens,
+                latent_shape=latent_shape,
+                num_cond_latents=num_cond_latents,
+                return_kv=return_kv,
+                kv_cache=self.kv_cache_dict.get(i, None),
+                skip_crs_attn=skip_crs_attn,
+                attn_impl=attn_impl,
+                freqs_cis=freqs_cis,
+                use_usp=self.use_usp,
+                device_mesh=self.device_mesh,
+            )
+
+            if return_kv:
+                hidden_states, kv_cache = block_outputs
+                if offload_kv_cache:
+                    kv_cache_dict_ret[i] = (kv_cache[0].cpu(), kv_cache[1].cpu())
+                else:
+                    kv_cache_dict_ret[i] = (
+                        kv_cache[0].contiguous(),
+                        kv_cache[1].contiguous(),
+                    )
+            else:
+                hidden_states = block_outputs
+
+        if self.use_usp:
+            (hidden_states,) = sequence_parallel_unshard(self.device_mesh, [hidden_states], (1,), (N_t * N_h * N_w,))
+
+        if return_kv:
+            return hidden_states, kv_cache_dict_ret
+        return hidden_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1032,39 +1110,23 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
             encoder_hidden_states = encoder_hidden_states.squeeze(1).view(1, -1, hidden_states.shape[-1])
 
         # blocks
-        kv_cache_dict_ret = {}
-        if self.use_usp:
-            sequence_parallel_shard(self.device_mesh, [hidden_states], [1], seq_divisions=[N_t])
-        for i, block in enumerate(self.blocks):
-            block_outputs = block(
-                x=hidden_states,
-                y=encoder_hidden_states,
-                t=t,
-                y_seqlen=y_seqlens,
-                latent_shape=(N_t, N_h, N_w),
-                num_cond_latents=num_cond_latents,
-                return_kv=return_kv,
-                kv_cache=self.kv_cache_dict.get(i, None),
-                skip_crs_attn=skip_crs_attn,
-                attn_impl=attn_impl,
-                freqs_cis=freqs_cis,
-                use_usp=self.use_usp,
-                device_mesh=self.device_mesh,
-            )
-
-            if return_kv:
-                hidden_states, kv_cache = block_outputs
-                if offload_kv_cache:
-                    kv_cache_dict_ret[i] = (kv_cache[0].cpu(), kv_cache[1].cpu())
-                else:
-                    kv_cache_dict_ret[i] = (
-                        kv_cache[0].contiguous(),
-                        kv_cache[1].contiguous(),
-                    )
-            else:
-                hidden_states = block_outputs
-        if self.use_usp:
-            (hidden_states,) = sequence_parallel_unshard(self.device_mesh, [hidden_states], (1,), (N_t * N_h * N_w,))
+        blocks_output = self.forward_blocks(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            t=t,
+            y_seqlens=y_seqlens,
+            latent_shape=(N_t, N_h, N_w),
+            freqs_cis=freqs_cis,
+            num_cond_latents=num_cond_latents,
+            return_kv=return_kv,
+            skip_crs_attn=skip_crs_attn,
+            offload_kv_cache=offload_kv_cache,
+            attn_impl=attn_impl,
+        )
+        if return_kv:
+            hidden_states, kv_cache_dict_ret = blocks_output
+        else:
+            hidden_states = blocks_output
         hidden_states = self.final_layer(hidden_states, t, (N_t, N_h, N_w))  # [B, N, C=T_p*H_p*W_p*C_out]
 
         # if self.cp_split_hw[0] * self.cp_split_hw[1] > 1:
@@ -1129,6 +1191,43 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
                     module.cpu()
         else:
             self.cpu()
+
+    def compile(self, mode: str = "blocks", **kwargs) -> None:
+        """Compile model for better performance with torch.compile.
+
+        Args:
+            mode: Compilation mode:
+                - "blocks": Compile only forward_blocks (default, most effective)
+                - "full": Compile entire forward method
+            **kwargs: Arguments passed to torch.compile()
+        """
+        # Import mark_static from torch._dynamo
+        try:
+            from torch._dynamo import mark_static
+
+            # Mark module classes as static (instance attributes won't change after compile)
+            mark_static(LongCatVideoTransformer3DModel)
+            mark_static(LongCatSingleStreamBlock)
+            mark_static(Attention)
+            mark_static(MultiHeadCrossAttention)
+            mark_static(FeedForwardSwiGLU)
+            mark_static(FinalLayer_FP32)
+            mark_static(RotaryPositionalEmbedding)
+        except ImportError:
+            logger.warning("torch._dynamo.mark_static not available, skipping static marking")
+
+        # Compile based on mode
+        if mode == "blocks":
+            original_fn = self.forward_blocks
+            self.forward_blocks = torch.compile(original_fn, **kwargs)
+            logger.info(f"LongCatVideoTransformer3DModel compiled: mode={mode}")
+        elif mode == "full":
+            # Store original forward for fallback
+            self._original_forward = self.forward
+            self.forward = torch.compile(self.forward, **kwargs)
+            logger.info(f"LongCatVideoTransformer3DModel compiled: mode={mode}")
+        else:
+            raise ValueError(f"Unknown compile mode: {mode}")
 
 
 class LongCatVideoTransformer3DModelDictConverter:
