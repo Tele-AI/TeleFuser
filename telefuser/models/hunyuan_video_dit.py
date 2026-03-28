@@ -1765,32 +1765,36 @@ class HunyuanVideoDiT(BaseModel):
         ori_img = img
         cached_output = self.feature_cache_hook.pre_forward(img, cond_flag)
         if cached_output is None:
-            # Pass through double-stream blocks - no mask passed
-            for index, block in enumerate(self.double_blocks):
-                img, txt = block(
-                    img=img,
-                    txt=txt,
-                    vec=vec,
-                    freqs_cis=freqs_cis,
-                    block_idx=index,
-                )
-
-            txt_seq_len = txt.shape[1]
-            img_seq_len = img.shape[1]
-
-            # Merge image and text for single-stream blocks
-            x = torch.cat((img, txt), 1)
-
-            if len(self.single_blocks) > 0:
-                for index, block in enumerate(self.single_blocks):
-                    x = block(
-                        x=x,
+            # Use compiled blocks if available
+            if getattr(self, "_use_compiled_blocks", False):
+                img, txt = self._compiled_forward_blocks(img, txt, vec, freqs_cis)
+            else:
+                # Pass through double-stream blocks - no mask passed
+                for index, block in enumerate(self.double_blocks):
+                    img, txt = block(
+                        img=img,
+                        txt=txt,
                         vec=vec,
-                        txt_len=txt_seq_len,
-                        freqs_cis=(freqs_cos, freqs_sin),
+                        freqs_cis=freqs_cis,
+                        block_idx=index,
                     )
 
-            img = x[:, :img_seq_len, ...]
+                txt_seq_len = txt.shape[1]
+                img_seq_len = img.shape[1]
+
+                # Merge image and text for single-stream blocks
+                x = torch.cat((img, txt), 1)
+
+                if len(self.single_blocks) > 0:
+                    for index, block in enumerate(self.single_blocks):
+                        x = block(
+                            x=x,
+                            vec=vec,
+                            txt_len=txt_seq_len,
+                            freqs_cis=(freqs_cos, freqs_sin),
+                        )
+
+                img = x[:, :img_seq_len, ...]
             self.feature_cache_hook.post_forward(img, ori_img, cond_flag)
         else:
             img = cached_output
@@ -1813,6 +1817,78 @@ class HunyuanVideoDiT(BaseModel):
     def get_fsdp_module_names(self) -> list:
         """Return module names for FSDP sharding."""
         return ["double_blocks", "single_blocks"]
+
+    def compile(self, mode: str = "blocks", **kwargs) -> None:
+        """Compile model for better performance with torch.compile.
+
+        Args:
+            mode: Compilation mode:
+                - "blocks": Compile only block processing (default, most effective)
+                - "full": Compile entire forward method
+            **kwargs: Arguments passed to torch.compile()
+        """
+        # Import mark_static from torch._dynamo
+        try:
+            from torch._dynamo import mark_static
+
+            # Mark module classes as static (instance attributes won't change after compile)
+            mark_static(HunyuanVideoDiT)
+            mark_static(MMDoubleStreamBlock)
+            mark_static(MMSingleStreamBlock)
+            mark_static(IndividualTokenRefinerBlock)
+            mark_static(IndividualTokenRefiner)
+            mark_static(SingleTokenRefiner)
+        except ImportError:
+            logger.warning("torch._dynamo.mark_static not available, skipping static marking")
+
+        # Compile based on mode
+        if mode == "blocks":
+            # Create a wrapper function for block processing
+            def forward_blocks(
+                img: torch.Tensor,
+                txt: torch.Tensor,
+                vec: torch.Tensor,
+                freqs_cis: tuple,
+            ) -> tuple:
+                """Process through double and single stream blocks."""
+                for index, block in enumerate(self.double_blocks):
+                    img, txt = block(
+                        img=img,
+                        txt=txt,
+                        vec=vec,
+                        freqs_cis=freqs_cis,
+                        block_idx=index,
+                    )
+
+                txt_seq_len = txt.shape[1]
+                img_seq_len = img.shape[1]
+
+                # Merge image and text for single-stream blocks
+                x = torch.cat((img, txt), 1)
+
+                if len(self.single_blocks) > 0:
+                    freqs_cos, freqs_sin = freqs_cis if freqs_cis else (None, None)
+                    for index, block in enumerate(self.single_blocks):
+                        x = block(
+                            x=x,
+                            vec=vec,
+                            txt_len=txt_seq_len,
+                            freqs_cis=(freqs_cos, freqs_sin),
+                        )
+
+                img = x[:, :img_seq_len, ...]
+                return img, txt
+
+            self._compiled_forward_blocks = torch.compile(forward_blocks, **kwargs)
+            self._use_compiled_blocks = True
+            logger.info(f"HunyuanVideoDiT compiled: mode={mode}")
+        elif mode == "full":
+            # Store original forward for fallback
+            self._original_forward = self.forward
+            self.forward = torch.compile(self.forward, **kwargs)
+            logger.info(f"HunyuanVideoDiT compiled: mode={mode}")
+        else:
+            raise ValueError(f"Unknown compile mode: {mode}")
 
     @staticmethod
     def state_dict_converter():

@@ -14,6 +14,7 @@ from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.utils.logging import logger
+from telefuser.utils.torch_compile import set_compile_configs
 
 
 class HunyuanVideoDenoisingStage(BaseStage):
@@ -37,6 +38,13 @@ class HunyuanVideoDenoisingStage(BaseStage):
         # Auto-detect use_meanflow from model's time_r_in module
         self.use_meanflow = hasattr(self.dit, "time_r_in") and self.dit.time_r_in is not None
         self.model_names = ["dit"]
+
+        # Handle torch.compile - only compile in __init__ if single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if parallel_cfg.world_size == 1 and model_runtime_config.compile:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
+            logger.info("enable torch.compile for hunyuan video dit (single GPU mode)")
+            self.dit.compile()
 
     @with_model_offload(["dit"])
     @torch.inference_mode()
@@ -251,3 +259,17 @@ class HunyuanVideoDenoisingStage(BaseStage):
         # Concatenate latents and mask
         cond_latents = torch.cat([latents_concat, mask], dim=1)
         return cond_latents
+
+    def parallel_models(self):
+        """Configure parallel processing for the DiT model.
+
+        Note: HunyuanVideoDiT does not currently support USP or FSDP.
+        This method is provided for future expansion and torch.compile support.
+        """
+        parallel_cfg = self.model_runtime_config.parallel_config
+
+        # Handle torch.compile after parallel setup (for future distributed support)
+        if parallel_cfg.world_size > 1 and self.model_runtime_config.compile:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
+            logger.info("enable torch.compile for hunyuan video dit (parallel mode)")
+            self.dit.compile()

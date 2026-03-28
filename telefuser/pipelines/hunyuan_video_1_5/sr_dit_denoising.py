@@ -17,6 +17,8 @@ from tqdm import tqdm
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
+from telefuser.utils.logging import logger
+from telefuser.utils.torch_compile import set_compile_configs
 
 
 def _expand_dims(tensor: torch.Tensor, ndim: int) -> torch.Tensor:
@@ -69,6 +71,13 @@ class HunyuanVideoSRDenoisingStage(BaseStage):
         self.use_meanflow = hasattr(self.dit, "time_r_in") and self.dit.time_r_in is not None
         self.model_names = ["dit"]
         # Note: upsampler is handled by separate HunyuanVideoUpsamplerStage in pipeline
+
+        # Handle torch.compile - only compile in __init__ if single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if parallel_cfg.world_size == 1 and model_runtime_config.compile:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
+            logger.info("enable torch.compile for hunyuan video sr dit (single GPU mode)")
+            self.dit.compile()
 
     def _add_noise_to_lq(self, lq_latents: torch.Tensor) -> torch.Tensor:
         """Add noise to low-quality latents.
@@ -343,3 +352,17 @@ class HunyuanVideoSRDenoisingStage(BaseStage):
                 latents = scheduler_output[0] if isinstance(scheduler_output, tuple) else scheduler_output
 
         return latents
+
+    def parallel_models(self):
+        """Configure parallel processing for the DiT model.
+
+        Note: HunyuanVideoDiT does not currently support USP or FSDP.
+        This method is provided for future expansion and torch.compile support.
+        """
+        parallel_cfg = self.model_runtime_config.parallel_config
+
+        # Handle torch.compile after parallel setup (for future distributed support)
+        if parallel_cfg.world_size > 1 and self.model_runtime_config.compile:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
+            logger.info("enable torch.compile for hunyuan video sr dit (parallel mode)")
+            self.dit.compile()
