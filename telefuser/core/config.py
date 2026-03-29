@@ -287,6 +287,76 @@ class CompileConfig:
             raise ValueError("fullgraph=True and dynamic=True are incompatible")
 
 
+class QuantType(Enum):
+    """Available quantization types for online quantization.
+
+    Attributes:
+        FP8: Standard FP8 E4M3 format.
+        INT8: 8-bit integer quantization.
+        MXFP8: Microscaling FP8 (OCP standard).
+        MXFP6: Microscaling FP6 (OCP standard).
+        MXFP4: Microscaling FP4 (OCP standard).
+        NVFP4: NVIDIA FP4 format (Blackwell+).
+    """
+
+    FP8 = auto()
+    INT8 = auto()
+    MXFP8 = auto()
+    MXFP6 = auto()
+    MXFP4 = auto()
+    NVFP4 = auto()
+
+
+class QuantKernelBackend(Enum):
+    """Kernel backends for quantized operations."""
+
+    AUTO = auto()  # Auto-select best available
+    TF_KERNEL = auto()  # TeleFuser custom kernel
+    VLLM = auto()  # vLLM kernel
+    CUTLASS = auto()  # NVIDIA CUTLASS
+
+
+@dataclass
+class QuantConfig:
+    """Configuration for online quantization during model loading.
+
+    .. warning::
+        This is an interface definition only. The actual quantization
+        functionality is NOT yet implemented. This config serves as a
+        placeholder for future online quantization support.
+
+    Online quantization converts bf16/fp16 weights to lower precision (FP8/INT8/MXFP4/etc.)
+    at load time, reducing memory footprint without requiring pre-quantized checkpoint files.
+
+    Attributes:
+        enabled: Whether to enable online quantization.
+        quant_type: Target quantization type.
+        kernel_backend: Kernel backend for quantized operations.
+            AUTO selects the best available backend.
+        weight_block_size: Block size for block-wise quantization as (block_n, block_k).
+            None disables block-wise quantization (uses per-tensor/per-channel).
+            Common values: (128, 128) for FP8, (16, 16) for MX formats.
+
+    Example:
+        Future usage (not yet functional)::
+
+            config = ModelRuntimeConfig(
+                torch_dtype=torch.bfloat16,
+                quant_config=QuantConfig(
+                    enabled=True,
+                    quant_type=QuantType.FP8,
+                    weight_block_size=(128, 128),
+                ),
+            )
+            # Will load bf16 weights and quantize to fp8 at runtime
+    """
+
+    enabled: bool = False
+    quant_type: QuantType = QuantType.FP8
+    kernel_backend: QuantKernelBackend = QuantKernelBackend.AUTO
+    weight_block_size: tuple[int, int] | None = None
+
+
 @dataclass
 class ModelRuntimeConfig:
     """Complete runtime configuration for model execution."""
@@ -300,6 +370,7 @@ class ModelRuntimeConfig:
         default_factory=lambda: AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
     )
     compile_config: CompileConfig = field(default_factory=CompileConfig)
+    quant_config: QuantConfig = field(default_factory=QuantConfig)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     ray_config: RayConfig = field(default_factory=RayConfig)
     feature_cache_config: FeatureCacheConfig = field(default_factory=FeatureCacheConfig)
