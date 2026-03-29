@@ -8,8 +8,9 @@ from tqdm import tqdm
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_cfg_rank, get_cfg_world_size
 from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 from telefuser.metrics import with_metrics
 from telefuser.models.qwen_image_dit import QwenImageDiT
 from telefuser.platforms import current_platform
@@ -48,7 +49,6 @@ class DitDenoisingStage(BaseStage):
             self.dit.compile()
 
         self.model_names = ["dit"]
-        self.batch_cfg = False
         self.load_loras()
         self.scheduler = scheduler
 
@@ -75,7 +75,7 @@ class DitDenoisingStage(BaseStage):
     ) -> torch.Tensor:
         """Predict noise with classifier-free guidance.
 
-        Supports batched CFG (batch_cfg=True) for parallel processing efficiency.
+        Supports CFGP (cfg_degree > 1) for parallel processing efficiency.
         Applies norm preservation to maintain generation quality.
         """
         if cfg_scale == 1.0:
@@ -87,8 +87,39 @@ class DitDenoisingStage(BaseStage):
                 edit_latents=edit_latents,
                 cond_flag=True,
             )
-        if not self.batch_cfg:
-            # Separate forward passes for positive and negative prompts
+
+        # Check if CFGP is enabled
+        cfgp_enabled = get_cfg_world_size(self.dit.device_mesh) > 1
+
+        if cfgp_enabled:
+            # CFGP mode: each rank processes one branch (posi or nega)
+            cfg_rank = get_cfg_rank(self.dit.device_mesh)
+            is_posi = cfg_rank == 0
+
+            if is_posi:
+                prompt_emb = prompt_emb_posi
+                prompt_emb_mask = prompt_emb_mask_posi
+                cond_flag = True
+            else:
+                prompt_emb = prompt_emb_nega
+                prompt_emb_mask = prompt_emb_mask_nega
+                cond_flag = False
+
+            noise_pred = self.dit.forward(
+                latents=latents,
+                timestep=timestep,
+                prompt_emb=prompt_emb,
+                prompt_emb_mask=prompt_emb_mask,
+                edit_latents=edit_latents,
+                cond_flag=cond_flag,
+            )
+
+            # Unshard and compute CFG
+            noise_pred = cfg_parallel_unshard(self.dit.device_mesh, [noise_pred])[0]
+            noise_pred_posi = noise_pred[0:1]
+            noise_pred_nega = noise_pred[1:2]
+        else:
+            # Non-CFGP mode: sequential forward passes
             noise_pred_posi = self.dit.forward(
                 latents=latents,
                 timestep=timestep,
@@ -105,68 +136,7 @@ class DitDenoisingStage(BaseStage):
                 edit_latents=edit_latents,
                 cond_flag=False,
             )
-        else:
-            # Batched CFG: concatenate positive and negative for efficiency
-            max_txt_len = max(prompt_emb_mask_posi.sum(), prompt_emb_mask_nega.sum())
-            B, N1, D = prompt_emb_posi.shape
-            B, N2, D = prompt_emb_nega.shape
-            max_txt_len = max(N1, N2)
-            # Pad embeddings to same length for batching
-            if N1 < max_txt_len:
-                prompt_emb_posi = torch.cat(
-                    [
-                        prompt_emb_posi,
-                        torch.zeros(B, max_txt_len - N1, D).to(
-                            dtype=prompt_emb_posi.dtype,
-                            device=prompt_emb_posi.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-                prompt_emb_mask_posi = torch.cat(
-                    [
-                        prompt_emb_mask_posi,
-                        torch.zeros(B, max_txt_len - N1).to(
-                            dtype=prompt_emb_mask_posi.dtype,
-                            device=prompt_emb_mask_posi.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-            if N2 < max_txt_len:
-                prompt_emb_nega = torch.cat(
-                    [
-                        prompt_emb_nega,
-                        torch.zeros(B, max_txt_len - N2, D).to(
-                            dtype=prompt_emb_nega.dtype,
-                            device=prompt_emb_nega.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-                prompt_emb_mask_nega = torch.cat(
-                    [
-                        prompt_emb_mask_nega,
-                        torch.zeros(B, max_txt_len - N2).to(
-                            dtype=prompt_emb_mask_nega.dtype,
-                            device=prompt_emb_mask_nega.device,
-                        ),
-                    ],
-                    dim=1,
-                )
-            prompt_emb = torch.cat([prompt_emb_posi, prompt_emb_nega], dim=0)
-            prompt_emb_mask = torch.cat([prompt_emb_mask_posi, prompt_emb_mask_nega], dim=0)
-            latents = torch.cat([latents, latents], dim=0)
-            timestep = torch.cat([timestep, timestep], dim=0)
-            if edit_latents is not None:
-                edit_latents = [torch.cat([edit_latent, edit_latent], dim=0) for edit_latent in edit_latents]
-            noise_pred_posi, noise_pred_nega = self.dit.forward(
-                latents=latents,
-                timestep=timestep,
-                prompt_emb=prompt_emb,
-                prompt_emb_mask=prompt_emb_mask,
-                edit_latents=edit_latents,
-            )
+
         # Apply CFG formula with norm preservation
         comb_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
         cond_norm = torch.norm(noise_pred_posi, dim=-1, keepdim=True, dtype=latents.dtype)
@@ -243,9 +213,7 @@ class DitDenoisingStage(BaseStage):
         device_mesh = create_device_mesh_from_config(parallel_cfg)
         self.dit.set_attention_config(self.model_runtime_config.attention_config)
         self.dit.device_mesh = device_mesh
-        if parallel_cfg.cfg_degree > 1:
-            self.batch_cfg = True
-            self.dit.enable_cfgp()
+        # Note: CFGP is handled at stage level, no need to configure on model
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit.enable_usp()
         if parallel_cfg.enable_fsdp:

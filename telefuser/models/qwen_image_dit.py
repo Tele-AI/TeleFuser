@@ -10,10 +10,8 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
-from telefuser.distributed.device_mesh import get_cfg_rank, get_ulysses_group
+from telefuser.distributed.device_mesh import get_ulysses_group
 from telefuser.distributed.parallel_shard import (
-    cfg_parallel_shard,
-    cfg_parallel_unshard,
     sequence_parallel_shard,
     sequence_parallel_unshard,
 )
@@ -617,10 +615,6 @@ class QwenImageDiT(BaseModel):
         self.usp_flag = True
         QwenDoubleStreamAttention.usp_flag = True
 
-    def enable_cfgp(self):
-        logger.info("enable cfgp for qwen image dit")
-        self.cfgp_flag = True
-
     def forward(
         self,
         latents: torch.Tensor | None = None,
@@ -630,13 +624,6 @@ class QwenImageDiT(BaseModel):
         edit_latents: torch.Tensor | None = None,
         cond_flag: bool = True,
     ) -> torch.Tensor:
-        if self.cfgp_flag:
-            cfg_parallel_shard(
-                self.device_mesh,
-                (latents, timestep, prompt_emb, prompt_emb_mask, *(edit_latents if edit_latents is not None else ())),
-            )
-            cond_flag = False if get_cfg_rank(self.device_mesh) else True
-
         self.feature_cache_hook.mark_step_begin(cond_flag)
 
         img_shapes = [(1, latents.shape[2] // 2, latents.shape[3] // 2)]
@@ -703,8 +690,6 @@ class QwenImageDiT(BaseModel):
             P=2,
             Q=2,
         )
-        if self.cfgp_flag:
-            latents = cfg_parallel_unshard(self.device_mesh, [latents])[0]
         return latents
 
     @staticmethod

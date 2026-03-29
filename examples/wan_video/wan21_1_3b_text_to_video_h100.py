@@ -74,8 +74,8 @@ def get_pipeline(parallelism=1, model_root="/dev/shm/Wan2.1-T2V-1.3B/"):
         cfg_scale = PPL_CONFIG["cfg_scale"]
 
         if cfg_scale > 1:
-            pipe_config.dit_config.parallel_config.cfg_degree = 1
-            pipe_config.dit_config.parallel_config.sp_ulysses_degree = parallelism // 1
+            pipe_config.dit_config.parallel_config.cfg_degree = 2
+            pipe_config.dit_config.parallel_config.sp_ulysses_degree = parallelism // 2
         else:
             pipe_config.dit_config.parallel_config.sp_ulysses_degree = parallelism
 

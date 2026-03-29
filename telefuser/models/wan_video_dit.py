@@ -13,7 +13,6 @@ from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
 from telefuser.core.model_weight import hash_state_dict_keys
 from telefuser.distributed.device_mesh import (
-    get_cfg_rank,
     get_pp_group,
     get_pp_rank,
     get_pp_world_size,
@@ -22,8 +21,6 @@ from telefuser.distributed.device_mesh import (
     is_pipeline_last_stage,
 )
 from telefuser.distributed.parallel_shard import (
-    cfg_parallel_shard,
-    cfg_parallel_unshard,
     sequence_parallel_shard,
     sequence_parallel_unshard,
 )
@@ -567,11 +564,6 @@ class WanModel(BaseModel):
             x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
         return x
 
-    def enable_cfgp(self):
-        """Enable classifier-free guidance parallelism."""
-        logger.info("wan dit enable cfgp")
-        self.cfgp_flag = True
-
     def enable_usp(self):
         """Enable Ulysses-style sequence parallelism."""
         logger.info("wan dit enable usp")
@@ -738,12 +730,6 @@ class WanModel(BaseModel):
 
         # ========== First Stage: Embedding + First Blocks ==========
         if self.is_pp_first_stage:
-            # Handle CFG parallel if enabled
-            if self.cfgp_flag:
-                cfg_parallel_shard(
-                    self.device_mesh, [x, timestep, context, cn_latents, clip_feature, add_condition, y_camera]
-                )
-
             # Get grid size for seq_len calculation
             batch_size = x.shape[0]
             f, h, w = x.shape[2], x.shape[3] // self.patch_size[1], x.shape[4] // self.patch_size[2]
@@ -815,10 +801,6 @@ class WanModel(BaseModel):
             freqs_cos = freqs.real.contiguous()
             freqs_sin = freqs.imag.contiguous()
 
-            # Handle CFG parallel flag
-            if self.cfgp_flag:
-                cond_flag = False if get_cfg_rank(self.device_mesh) else True
-
             # Sequence parallel shard if enabled
             if self.usp_flag:
                 # Shard t_mod and t (if per-token) along seq_len dimension (dim 1)
@@ -852,10 +834,6 @@ class WanModel(BaseModel):
 
                 # Unpatchify to video format
                 x = self.unpatchify(x, (f, h, w))
-
-                # CFG parallel unshard if enabled
-                if self.cfgp_flag:
-                    x = cfg_parallel_unshard(self.device_mesh, [x])[0]
 
                 return x
 
@@ -902,10 +880,6 @@ class WanModel(BaseModel):
             if self.has_image_input and clip_feature is not None:
                 clip_embdding = self.img_emb(clip_feature)
                 context = torch.cat([clip_embdding, context], dim=1)
-
-            # Handle CFG parallel flag
-            if self.cfgp_flag:
-                cond_flag = False if get_cfg_rank(self.device_mesh) else True
 
             # Compute frequency embeddings using broadcasted grid_size
             freqs = (
@@ -954,10 +928,6 @@ class WanModel(BaseModel):
 
             # Unpatchify to video format
             x = self.unpatchify(x, (f, h, w))
-
-            # CFG parallel unshard if enabled
-            if self.cfgp_flag:
-                x = cfg_parallel_unshard(self.device_mesh, [x])[0]
 
             return x
 
@@ -1135,11 +1105,6 @@ class WanModel(BaseModel):
         freq_start_idx: int = 0,
         freq_interval: int = 1,
     ) -> torch.Tensor:
-        if self.cfgp_flag:
-            cfg_parallel_shard(
-                self.device_mesh, [x, timestep, context, cn_latents, clip_feature, add_condition, y_camera]
-            )
-
         # Get grid size before patchify for seq_len calculation
         # x shape: [B, C, T, H, W]
         batch_size = x.shape[0]
@@ -1207,9 +1172,6 @@ class WanModel(BaseModel):
         freqs_cos = freqs.real.contiguous()
         freqs_sin = freqs.imag.contiguous()
 
-        if self.cfgp_flag:
-            cond_flag = False if get_cfg_rank(self.device_mesh) else True
-
         if self.usp_flag:
             # Shard t_mod and t (if per-token) along seq_len dimension (dim 1)
             # For scalar timestep, t has seq_len=1 which broadcasts with any seq_len
@@ -1229,8 +1191,6 @@ class WanModel(BaseModel):
         if self.usp_flag:
             (x,) = sequence_parallel_unshard(self.device_mesh, (x,), seq_dims=(1,), seq_lens=(f * h * w,))
         x = self.unpatchify(x, (f, h, w))
-        if self.cfgp_flag:
-            x = cfg_parallel_unshard(self.device_mesh, [x])[0]
         return x
 
     @staticmethod

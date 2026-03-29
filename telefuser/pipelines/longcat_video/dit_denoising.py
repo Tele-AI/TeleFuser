@@ -10,8 +10,9 @@ from tqdm import tqdm
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_cfg_rank, get_cfg_world_size
 from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 from telefuser.metrics import with_metrics
 from telefuser.models.longcat_video_dit import LongCatVideoTransformer3DModel
 from telefuser.platforms import current_platform
@@ -35,7 +36,6 @@ class LongCatDitDenoisingStage(BaseStage):
         self.dit: LongCatVideoTransformer3DModel = module_manager.fetch_module("wan_video_dit")
         self.load_loras()
         self.model_names = ["dit"]
-        self.batch_cfg = False
         self.scheduler = scheduler
         self.num_timesteps = 1000
         self.num_distill_sample_steps = 50
@@ -114,7 +114,36 @@ class LongCatDitDenoisingStage(BaseStage):
                 num_cond_latents=num_cond_latents,
             )
 
-        if not self.batch_cfg:
+        # Check if CFGP is enabled
+        cfgp_enabled = get_cfg_world_size(self.dit.device_mesh) > 1
+
+        if cfgp_enabled:
+            # CFGP mode: each rank processes one branch (posi or nega)
+            cfg_rank = get_cfg_rank(self.dit.device_mesh)
+            is_posi = cfg_rank == 0
+
+            if is_posi:
+                encoder_hidden_states = prompt_embeds
+                encoder_attention_mask = prompt_attention_mask
+            else:
+                encoder_hidden_states = negative_prompt_embeds
+                encoder_attention_mask = negative_prompt_attention_mask
+
+            noise_pred = self.dit.forward(
+                hidden_states=latents,
+                timestep=timestep,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                attn_impl=attn_impl,
+                num_cond_latents=num_cond_latents,
+            )
+
+            # Unshard and compute CFG
+            noise_pred = cfg_parallel_unshard(self.dit.device_mesh, [noise_pred])[0]
+            noise_pred_posi = noise_pred[0:1]
+            noise_pred_nega = noise_pred[1:2]
+        else:
+            # Non-CFGP mode: sequential forward passes
             noise_pred_posi = self.dit.forward(
                 hidden_states=latents,
                 timestep=timestep,
@@ -131,22 +160,6 @@ class LongCatDitDenoisingStage(BaseStage):
                 attn_impl=attn_impl,
                 num_cond_latents=num_cond_latents,
             )
-        else:
-            prompt_embeds = torch.cat([prompt_embeds, negative_prompt_embeds], dim=0)
-            prompt_attention_mask = torch.cat([prompt_attention_mask, negative_prompt_attention_mask], dim=0)
-            latents = torch.cat([latents, latents], dim=0)
-            timestep = torch.cat([timestep, timestep], dim=0)
-
-            noise_pred_posi, noise_pred_nega = self.dit.forward(
-                hidden_states=latents,
-                timestep=timestep,
-                encoder_hidden_states=prompt_embeds,
-                encoder_attention_mask=prompt_attention_mask,
-                attn_impl=attn_impl,
-                num_cond_latents=num_cond_latents,
-            )
-            noise_pred_posi = noise_pred_posi.unsqueeze(0)
-            noise_pred_nega = noise_pred_nega.unsqueeze(0)
 
         if use_cfg_zero_star:
             positive_flat = noise_pred_posi.view(1, -1)
@@ -211,7 +224,7 @@ class LongCatDitDenoisingStage(BaseStage):
 
         if use_kv_cache and num_cond_latents > 0:
             cond_latents = latents[:, :, :num_cond_latents]
-            if self.dit.use_cfgp:
+            if get_cfg_world_size(self.dit.device_mesh) > 1:
                 cond_latents = torch.cat([cond_latents, cond_latents], dim=0)
             # Pass self.dit as fsdp_forward_fn so that under FSDP, the forward call goes
             # through the FSDP wrapper (triggering allgather) instead of the inner module
@@ -262,10 +275,7 @@ class LongCatDitDenoisingStage(BaseStage):
         parallel_cfg = self.model_runtime_config.parallel_config
         self.dit.device_mesh = create_device_mesh_from_config(parallel_cfg)
 
-        if parallel_cfg.cfg_degree > 1:
-            self.batch_cfg = True
-            self.dit.enable_cfgp()
-            logger.info("longcat dit enabled cfgp")
+        # Note: CFGP is handled at stage level, no need to configure on model
 
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit.enable_usp()

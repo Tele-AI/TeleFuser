@@ -12,8 +12,6 @@ from einops import rearrange, repeat
 
 from telefuser.distributed.device_mesh import get_ulysses_group
 from telefuser.distributed.parallel_shard import (
-    cfg_parallel_shard,
-    cfg_parallel_unshard,
     sequence_parallel_shard,
     sequence_parallel_unshard,
 )
@@ -761,7 +759,6 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
         self.async_offload_manager = None
         self.layer_name_list = ["blocks"]
         self.clean_cuda_cache = True
-        self.use_cfgp = False
         self.use_usp = False
         self.device_mesh = None
         self.kv_cache_dict = {}
@@ -845,10 +842,6 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
 
         gc.collect()
         current_platform.empty_cache()
-
-    def enable_cfgp(self):
-        logger.info("longcat video dit enable cfgp")
-        self.use_cfgp = True
 
     def enable_usp(self):
         logger.info("longcat video dit enable usp")
@@ -1057,16 +1050,6 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
         attn_impl: str = "sdpa",
         device_mesh: object | None = None,
     ):
-        if self.use_cfgp:
-            cfg_parallel_shard(
-                self.device_mesh,
-                [
-                    hidden_states,
-                    timestep,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                ],
-            )
         B, _, T, H, W = hidden_states.shape
         N_t = T // self.patch_size[0]
         N_h = H // self.patch_size[1]
@@ -1139,8 +1122,6 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
 
         # cast to float32 for better accuracy
         hidden_states = hidden_states.to(torch.float32)
-        if self.use_cfgp:
-            hidden_states = cfg_parallel_unshard(self.device_mesh, [hidden_states])[0]
 
         if return_kv:
             return hidden_states, kv_cache_dict_ret

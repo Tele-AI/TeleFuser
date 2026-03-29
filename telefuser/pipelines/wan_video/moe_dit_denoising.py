@@ -9,8 +9,9 @@ from tqdm import tqdm
 from telefuser.core.base_stage import BaseStage
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_cfg_rank, get_cfg_world_size
 from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 from telefuser.metrics import with_metrics
 from telefuser.ops.quantized_linear import convert_params_to_buffers
 from telefuser.platforms import current_platform
@@ -46,8 +47,6 @@ class MoeDitDenoisingStage(BaseStage):
         self.dit_low.set_attention_config(dit_low_runtime_config.attention_config)
         self.model_names = ["dit_high", "dit_low"]
         self.scheduler = scheduler
-        self.batch_cfg_dit_high = False
-        self.batch_cfg_dit_low = False
         self.dit_high_runtime_config = dit_high_runtime_config
         self.dit_low_runtime_config = dit_low_runtime_config
         self.load_loras()
@@ -124,7 +123,6 @@ class MoeDitDenoisingStage(BaseStage):
         prompt_emb_posi: torch.Tensor,
         prompt_emb_nega: torch.Tensor,
         cfg_scale: float = 1.0,
-        batch_cfg: bool = False,
     ) -> torch.Tensor:
         """Predict noise with classifier-free guidance."""
         if cfg_scale == 1.0:
@@ -134,7 +132,31 @@ class MoeDitDenoisingStage(BaseStage):
                 cond_flag=True,
                 context=prompt_emb_posi,
             )
-        if not batch_cfg:
+
+        # Check if CFGP is enabled
+        cfgp_enabled = get_cfg_world_size(dit.device_mesh) > 1
+
+        if cfgp_enabled:
+            # CFGP mode: each rank processes one branch (posi or nega)
+            cfg_rank = get_cfg_rank(dit.device_mesh)
+            is_posi = cfg_rank == 0
+
+            context = prompt_emb_posi if is_posi else prompt_emb_nega
+            cond_flag = is_posi
+
+            noise_pred = dit.forward(
+                x=latents,
+                timestep=timestep,
+                cond_flag=cond_flag,
+                context=context,
+            )
+
+            # Unshard and compute CFG
+            noise_pred = cfg_parallel_unshard(dit.device_mesh, [noise_pred])[0]
+            noise_pred_posi = noise_pred[0:1]
+            noise_pred_nega = noise_pred[1:2]
+        else:
+            # Non-CFGP mode: sequential forward passes
             noise_pred_posi = dit.forward(
                 x=latents,
                 timestep=timestep,
@@ -147,16 +169,7 @@ class MoeDitDenoisingStage(BaseStage):
                 cond_flag=False,
                 context=prompt_emb_nega,
             )
-        else:
-            # Batched CFG for efficiency
-            context = torch.cat([prompt_emb_posi, prompt_emb_nega], dim=0)
-            latents = torch.cat([latents, latents], dim=0)
-            timestep = torch.cat([timestep, timestep], dim=0)
-            noise_pred_posi, noise_pred_nega = dit.forward(
-                x=latents,
-                timestep=timestep,
-                context=context,
-            )
+
         noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
         return noise_pred
 
@@ -201,7 +214,6 @@ class MoeDitDenoisingStage(BaseStage):
             self.dit_high_onload_flag = True
         dit = self.dit_high
         cfg_scale = cfg_scale_high
-        batch_cfg = self.batch_cfg_dit_high
         for progress_id, timestep in enumerate(tqdm(self.scheduler.timesteps, desc="dit denoise")):
             # Switch to dit_low at boundary timestep
             if timestep < boundary * self.num_train_timesteps and dit is self.dit_high:
@@ -214,7 +226,6 @@ class MoeDitDenoisingStage(BaseStage):
                     self.dit_low_onload_flag = True
                 dit = self.dit_low
                 cfg_scale = cfg_scale_low
-                batch_cfg = self.batch_cfg_dit_low
                 # Set up feature cache for dit_low with init_step
                 self.setup_feature_cache(
                     self.dit_low,
@@ -235,7 +246,6 @@ class MoeDitDenoisingStage(BaseStage):
                     prompt_emb_posi=prompt_emb_posi,
                     prompt_emb_nega=prompt_emb_nega,
                     cfg_scale=cfg_scale,
-                    batch_cfg=batch_cfg,
                 )
             latents = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], latents)
         if self.dit_low_cpu_offload:
@@ -250,9 +260,7 @@ class MoeDitDenoisingStage(BaseStage):
         self.dit_high.device_mesh = create_device_mesh_from_config(parallel_cfg)
         self.dit_high.set_attention_config(self.dit_high_runtime_config.attention_config)
         print(f"dit high device mesh: {self.dit_high.device_mesh}")
-        if parallel_cfg.cfg_degree > 1:
-            self.batch_cfg_dit_high = True
-            self.dit_high.enable_cfgp()
+        # Note: CFGP is handled at stage level, no need to configure on model
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit_high.enable_usp()
         if parallel_cfg.enable_fsdp:
@@ -273,9 +281,7 @@ class MoeDitDenoisingStage(BaseStage):
         parallel_cfg = self.dit_low_runtime_config.parallel_config
         self.dit_low.device_mesh = create_device_mesh_from_config(parallel_cfg)
         self.dit_low.set_attention_config(self.dit_low_runtime_config.attention_config)
-        if parallel_cfg.cfg_degree > 1:
-            self.batch_cfg_dit_low = True
-            self.dit_low.enable_cfgp()
+        # Note: CFGP is handled at stage level, no need to configure on model
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit_low.enable_usp()
         if parallel_cfg.enable_fsdp:

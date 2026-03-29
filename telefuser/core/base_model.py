@@ -32,7 +32,6 @@ class BaseModel(torch.nn.Module):
         self.quant_type: str | torch.dtype | None = None
         self.device_mesh: device_mesh.DeviceMesh | None = None
         self.async_offload_flag: bool = False
-        self.cfgp_flag: bool = False  # Cross-Frame Gradient Propagation
         self.usp_flag: bool = False  # Unified Sparse Processing
         self.pp_flag: bool = False  # Pipeline Parallelism
         self.fsdp_flag: bool = False
@@ -137,10 +136,6 @@ class BaseModel(torch.nn.Module):
     @staticmethod
     def state_dict_converter() -> callable:
         """Get state dict converter for model format conversion."""
-        raise NotImplementedError()
-
-    def enable_cfgp(self) -> None:
-        """Enable Cross-Frame Gradient Propagation for video models."""
         raise NotImplementedError()
 
     def enable_usp(self) -> None:

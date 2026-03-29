@@ -2072,10 +2072,6 @@ class LTXVideoTransformer(BaseModel):
         # Keep a flag for downstream pipeline logic (e.g., FSDP buffer conversion).
         self.quant_type = quant_type
 
-    def enable_cfgp(self) -> None:
-        # Interface parity with other DiT models. LTX pipeline does not currently use CFG-parallel.
-        self.cfgp_flag = True
-
     def enable_usp(self) -> None:
         # Interface parity with other DiT models. LTX pipeline does not currently use sequence-parallel.
         self.usp_flag = True

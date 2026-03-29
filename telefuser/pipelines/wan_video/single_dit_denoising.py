@@ -9,8 +9,9 @@ from tqdm import tqdm
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_cfg_rank, get_cfg_world_size
 from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 from telefuser.metrics import with_metrics
 from telefuser.models.wan_video_dit import WanModel
 from telefuser.ops.quantized_linear import convert_params_to_buffers
@@ -40,7 +41,6 @@ class SingleDitDenoisingStage(BaseStage):
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.load_loras()
         self.model_names = ["dit"]
-        self.batch_cfg = False
         self.scheduler = scheduler
         if model_runtime_config.offload_config.offload_type == WeightOffloadType.SEQUENTIAL_CPU_OFFLOAD:
             if model_runtime_config.parallel_config.enable_fsdp:
@@ -104,8 +104,37 @@ class SingleDitDenoisingStage(BaseStage):
                 context=prompt_emb_posi,
                 sparse_state=sparse_state,
             )
-        if not self.batch_cfg:
-            # Separate forward passes for positive and negative
+
+        # Check if CFGP is enabled
+        cfgp_enabled = get_cfg_world_size(self.dit.device_mesh) > 1
+
+        if cfgp_enabled:
+            # CFGP mode: each rank processes one branch (posi or nega)
+            cfg_rank = get_cfg_rank(self.dit.device_mesh)
+            is_posi = cfg_rank == 0
+
+            context = prompt_emb_posi if is_posi else prompt_emb_nega
+            cond_flag = is_posi
+
+            noise_pred = forward_fn(
+                x=latents,
+                timestep=timestep,
+                cond_flag=cond_flag,
+                clip_feature=clip_feature,
+                context=context,
+                sparse_state=sparse_state,
+            )
+
+            # Handle PP case: only last stage computes final noise prediction
+            if noise_pred is None:
+                return None
+
+            # Unshard and compute CFG
+            noise_pred = cfg_parallel_unshard(self.dit.device_mesh, [noise_pred])[0]
+            noise_pred_posi = noise_pred[0:1]
+            noise_pred_nega = noise_pred[1:2]
+        else:
+            # Non-CFGP mode: sequential forward passes
             noise_pred_posi = forward_fn(
                 x=latents,
                 timestep=timestep,
@@ -122,25 +151,10 @@ class SingleDitDenoisingStage(BaseStage):
                 context=prompt_emb_nega,
                 sparse_state=sparse_state,
             )
-        else:
-            # Batched CFG for efficiency
-            context = torch.cat([prompt_emb_posi, prompt_emb_nega], dim=0)
-            if clip_feature is not None:
-                clip_feature = torch.cat([clip_feature, clip_feature], dim=0)
 
-            latents = torch.cat([latents, latents], dim=0)
-            timestep = torch.cat([timestep, timestep], dim=0)
-            noise_pred_posi, noise_pred_nega = forward_fn(
-                x=latents,
-                timestep=timestep,
-                context=context,
-                clip_feature=clip_feature,
-                sparse_state=sparse_state,
-            )
-
-        # Handle PP case: only last stage computes final noise prediction
-        if noise_pred_posi is None or noise_pred_nega is None:
-            return None
+            # Handle PP case: only last stage computes final noise prediction
+            if noise_pred_posi is None or noise_pred_nega is None:
+                return None
 
         noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
         return noise_pred
@@ -229,9 +243,7 @@ class SingleDitDenoisingStage(BaseStage):
         parallel_cfg = self.model_runtime_config.parallel_config
         self.dit.device_mesh = create_device_mesh_from_config(parallel_cfg)
         self.dit.set_attention_config(self.model_runtime_config.attention_config)
-        if parallel_cfg.cfg_degree > 1:
-            self.batch_cfg = True
-            self.dit.enable_cfgp()
+        # Note: CFGP is handled at stage level, no need to configure on model
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit.enable_usp()
         if parallel_cfg.pp_degree > 1:
