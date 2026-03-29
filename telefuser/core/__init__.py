@@ -2,7 +2,7 @@
 
 This module provides base classes for pipelines, models, and stages.
 For configuration classes, import directly from telefuser.core.config.
-For model weight utilities, import directly from telefuser.core.model_weight.
+For model weight utilities, import directly from telefuser.utils.model_weight.
 For module management, import directly from telefuser.core.module_manager.
 
 Direct imports are preferred to avoid unnecessary module loading and potential
@@ -15,7 +15,7 @@ circular dependencies. The following patterns are recommended:
     from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
 
     # Model weight utilities
-    from telefuser.core.model_weight import load_state_dict, hash_state_dict_keys
+    from telefuser.utils.model_weight import load_state_dict, hash_state_dict_keys
 
     # Module management
     from telefuser.core.module_manager import ModuleManager

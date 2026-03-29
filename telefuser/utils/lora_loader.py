@@ -7,8 +7,8 @@ import re
 import torch
 from torch import nn
 
-from telefuser.core.model_weight import load_state_dict
 from telefuser.utils.logging import logger
+from telefuser.utils.model_weight import load_state_dict
 
 # Simplified pattern definitions as tuples (up_suffix, down_suffix, mid_suffix)
 LORA_PATTERNS = {

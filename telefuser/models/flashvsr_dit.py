@@ -9,7 +9,6 @@ from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.model_weight import hash_state_dict_keys
 from telefuser.distributed.parallel_shard import (
     sequence_parallel_shard,
     sequence_parallel_unshard,
@@ -22,6 +21,7 @@ from telefuser.ops.attention.local_sparse_attn import (
 )
 from telefuser.ops.normalization import LayerNorm, RMSNorm, modulate
 from telefuser.platforms import current_platform
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:

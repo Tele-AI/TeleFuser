@@ -817,7 +817,7 @@ class ModuleOps(NamedTuple):
 class GemmaTextEncoderConfigurator:
     @classmethod
     def from_config(cls, config: dict) -> GemmaTextEncoder:  # noqa: ARG003
-        from telefuser.core.model_weight import init_weights_on_device
+        from telefuser.utils.model_weight import init_weights_on_device
 
         gemma_config = Gemma3Config.from_dict(GEMMA3_CONFIG_FOR_LTX.to_dict())
         with init_weights_on_device("meta"):

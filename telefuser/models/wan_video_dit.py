@@ -11,7 +11,6 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
-from telefuser.core.model_weight import hash_state_dict_keys
 from telefuser.distributed.device_mesh import (
     get_pp_group,
     get_pp_rank,
@@ -42,6 +41,7 @@ from telefuser.ops.attention import long_context_attention as long_attn_func
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:

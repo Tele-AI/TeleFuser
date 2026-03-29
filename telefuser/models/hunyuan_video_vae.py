@@ -532,7 +532,7 @@ class HunyuanVideoVAE(BaseModel):
         """
         import json
 
-        from telefuser.core.model_weight import load_state_dict
+        from telefuser.utils.model_weight import load_state_dict
 
         # Load config
         config_path = os.path.join(pretrained_model_name_or_path, "config.json")

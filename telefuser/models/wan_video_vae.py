@@ -8,7 +8,7 @@ from einops import rearrange, repeat
 from tqdm import tqdm
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.model_weight import hash_state_dict_keys
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 # Delay import to avoid circular import
 # from telefuser.offload import (

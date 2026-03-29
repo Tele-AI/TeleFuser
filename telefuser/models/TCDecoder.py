@@ -16,7 +16,7 @@ import torch.nn.init as init
 from einops import rearrange
 from tqdm.auto import tqdm
 
-from telefuser.core.model_weight import hash_state_dict_keys
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 DecoderResult = namedtuple("DecoderResult", ("frame", "memory"))
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))

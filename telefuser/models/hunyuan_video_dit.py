@@ -1887,7 +1887,7 @@ class HunyuanVideoDiT(BaseModel):
         """
         import os
 
-        from telefuser.core.model_weight import load_state_dict
+        from telefuser.utils.model_weight import load_state_dict
 
         # Load state dict from file or directory (try-except to avoid TOCTOU)
         if os.path.isfile(pretrained_model_name_or_path):

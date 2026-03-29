@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from telefuser.core.model_weight import init_weights_on_device
+from telefuser.utils.model_weight import init_weights_on_device
 
 
 def cast_to(
