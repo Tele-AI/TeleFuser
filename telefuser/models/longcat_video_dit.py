@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from telefuser.core.base_model import BaseModel
 from telefuser.distributed.device_mesh import get_ulysses_group
 from telefuser.distributed.parallel_shard import (
     sequence_parallel_shard,
@@ -683,7 +684,7 @@ class LongCatSingleStreamBlock(nn.Module):
             return x
 
 
-class LongCatVideoTransformer3DModel(torch.nn.Module):
+class LongCatVideoTransformer3DModel(BaseModel):
     def __init__(
         self,
         in_channels: int = 16,
@@ -752,15 +753,12 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
 
         self.lora_dict = {}
         self.active_loras = []
-        self.fsdp_flag = False
         # async swap
         self.weights_stream_mgr = None
-        self.async_swap_flag = False
         self.async_offload_manager = None
         self.layer_name_list = ["blocks"]
         self.clean_cuda_cache = True
         self.use_usp = False
-        self.device_mesh = None
         self.kv_cache_dict = {}
         self.rope_3d = RotaryPositionalEmbedding(hidden_size // num_heads)
 
@@ -1156,22 +1154,6 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
 
     def get_fsdp_module_names(self):
         return ["blocks"]
-
-    def onload_device(self, device: torch.device):
-        if self.async_swap_flag:
-            for name, module in self.named_children():
-                if name != "blocks":
-                    module.to(device)
-        else:
-            self.to(device)
-
-    def offload_device(self):
-        if self.async_swap_flag:
-            for name, module in self.named_children():
-                if name != "blocks":
-                    module.cpu()
-        else:
-            self.cpu()
 
     def compile(self, mode: str = "blocks", **kwargs) -> None:
         """Compile model for better performance with torch.compile.

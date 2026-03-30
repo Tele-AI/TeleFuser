@@ -20,6 +20,7 @@ PPL_CONFIG = dict(
     negative_prompt="色调艳丽,过曝,静态,细节模糊不清,字幕,风格,作品,画作,画面,静止,整体发灰,最差质量,低质量,JPEG压缩残留,丑陋的,残缺的,多余的手指,画得不好的手部,画得不好的脸部,畸形的,毁容的,形态畸形的肢体,手指融合,静止不动的画面,杂乱的背景,三条腿,背景人很多,倒着走",
     num_inference_steps=50,
     num_frames=93,
+    resolution="720p",
     cfg_scale=4.0,
     seed=42,
     tiled=False,
@@ -156,18 +157,19 @@ def run_with_file(
 
 @click.command()
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
-@click.option("--height", default=480, help="Video height")
-@click.option("--width", default=832, help="Video width")
 @click.option(
     "--prompt",
-    default="A small boat is bravely battling the waves, forging ahead. The vast blue sea is tumultuous, with white spray crashing against the hull, but the little boat shows no fear, steadfastly sailing towards the distant horizon. Sunlight sprinkles across the water's surface, shimmering with golden hues, adding a touch of warmth to this magnificent scene. As the camera zooms in, one can see the flag on board fluttering in the wind, symbolizing an indomitable spirit and the courage of adventure. This scene, full of power, is inspiring and uplifting, showcasing the fearlessness and perseverance when facing challenges.",
+    default="A stylish woman walking down a Tokyo street filled with warm golden sunlight and cherry blossoms floating in the wind. The camera follows her from behind as she strolls leisurely, creating a cinematic atmosphere.",
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default="720p", help="480p or 720p")
+@click.option("--aspect_ratio", default="16:9", help="Aspect ratio: 16:9, 9:16, 1:1, etc.")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
-def main(gpu_num, height, width, prompt, negative_prompt, seed):
+def main(gpu_num, prompt, negative_prompt, resolution, aspect_ratio, seed):
     """Text to video conversion using LongCat Video model"""
     pipe = get_pipeline(gpu_num)
+    width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
 
     # Run inference
     start = time.time()
@@ -178,7 +180,7 @@ def main(gpu_num, height, width, prompt, negative_prompt, seed):
 
     # Save results
     output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
-    filename = get_example_name(__file__)
+    filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
     output_path = os.path.join(output_dir, filename)
 
     save_video(video, output_path, fps=15, quality=6)

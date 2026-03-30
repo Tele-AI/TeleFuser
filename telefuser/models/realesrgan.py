@@ -334,16 +334,6 @@ class RealESRGAN(BaseModel):
         # Convert back to [N, H, W, C]
         return out.permute(0, 2, 3, 1).cpu()
 
-    def onload_device(self, device: torch.device) -> None:
-        """Load model to specified device."""
-        if self._net is not None:
-            self._net.to(device)
-
-    def offload_device(self) -> None:
-        """Offload model to CPU to free GPU memory."""
-        if self._net is not None:
-            self._net.to("cpu")
-
     @staticmethod
     def state_dict_converter():
         return RealESRGANStateDictConverter()

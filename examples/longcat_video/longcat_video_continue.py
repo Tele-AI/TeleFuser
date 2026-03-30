@@ -20,9 +20,10 @@ from telefuser.utils.video import VideoData, save_video
 PPL_CONFIG = dict(
     name="longcat_vc",
     model_root="/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video",
-    negative_prompt="Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
+    negative_prompt="色调艳丽,过曝,静态,细节模糊不清,字幕,风格,作品,画作,画面,静止,整体发灰,最差质量,低质量,JPEG压缩残留,丑陋的,残缺的,多余的手指,画得不好的手部,画得不好的脸部,畸形的,毁容的,形态畸形的肢体,手指融合,静止不动的画面,杂乱的背景,三条腿,背景人很多,倒着走",
     num_inference_steps=50,
     num_frames=93,
+    resolution="720p",
     cfg_scale=4.0,
     seed=42,
     tiled=False,
@@ -185,12 +186,12 @@ def run_with_file(
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
 @click.option(
     "--video_path",
-    default=None,
+    default=f"{os.path.dirname(__file__)}/../data/sample_video.mp4",
     help="Input video path",
 )
 @click.option(
     "--prompt",
-    default="The camera continues to follow the blooming flower, capturing its vibrant petals unfurling gracefully.",
+    default="The camera continues to follow the stylish woman as she walks through the cherry blossom-filled Tokyo street, capturing more of the warm golden sunlight and the gentle breeze carrying petals through the air.",
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
@@ -263,10 +264,6 @@ def main(gpu_num, video_path, prompt, negative_prompt, seed, benchmark):
 
     else:
         # Single video continuation
-        if video_path is None:
-            print("Error: --video_path is required when not running benchmark")
-            return
-
         input_video = VideoData(video_path)
         height, width = input_video.height, input_video.width
 
@@ -278,7 +275,8 @@ def main(gpu_num, video_path, prompt, negative_prompt, seed, benchmark):
         print(f"Video generation time: {elapsed_time:.2f} seconds")
 
         # Save results
-        filename = get_example_name(__file__)
+        output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
+        filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
         output_path = os.path.join(output_dir, filename)
 
         save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)

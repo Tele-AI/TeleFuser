@@ -159,18 +159,18 @@ def run_with_file(
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
 @click.option(
     "--image_path",
-    default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "101235-video-720_0.png"),
+    default=f"{os.path.dirname(__file__)}/../data/101235-video-720_0.png",
     help="Input image path",
 )
 @click.option(
     "--prompt",
-    default="微电影风格,展示一朵花蕾种子的迷人转变。初始状态为紧密卷曲的鲜绿色结构,内部透露出微妙的粉橙色渐变。随着花蕾逐渐展开,展现出复杂的图案和纹理。花瓣开始分离,预示着花朵即将绽放,象征着成长与重生。背景为深邃的对比色,营造出一种神秘而宁静的氛围。镜头缓慢跟随花蕾的生长过程,捕捉每一个细节变化。",
+    default="A stylish little girl gently caressing her dog while they relax in a sunny, beautiful backyard. Perfect for pet and family content, or videos aiming to showcase love, style, and the bond between kids and their pets.",
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
-@click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution")
-def main(gpu_num, image_path, prompt, negative_prompt, seed, resolution):
+@click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
+def main(gpu_num, image_path, prompt, negative_prompt, resolution, seed):
     """Image to video conversion using LongCat Video model"""
     pipe = get_pipeline(gpu_num)
     image = Image.open(image_path).convert("RGB")
@@ -184,7 +184,7 @@ def main(gpu_num, image_path, prompt, negative_prompt, seed, resolution):
 
     # Save results
     output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
-    filename = get_example_name(__file__)
+    filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
     output_path = os.path.join(output_dir, filename)
 
     save_video(video, output_path, fps=15, quality=6)

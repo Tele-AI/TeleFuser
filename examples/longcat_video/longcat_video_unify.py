@@ -14,6 +14,7 @@ from telefuser.pipelines.longcat_video import (
     LongCatVideoPipeline,
     LongCatVideoPipelineConfig,
 )
+from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import (
     VideoData,
     get_target_image_size,
@@ -24,9 +25,10 @@ from telefuser.utils.video import (
 PPL_CONFIG = dict(
     name="longcat_unify",
     model_root="/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video",
-    negative_prompt="Bright tones, overexposed, static, blurred details",
+    negative_prompt="色调艳丽,过曝,静态,细节模糊不清,字幕,风格,作品,画作,画面,静止,整体发灰,最差质量,低质量,JPEG压缩残留,丑陋的,残缺的,多余的手指,画得不好的手部,画得不好的脸部,畸形的,毁容的,形态畸形的肢体,手指融合,静止不动的画面,杂乱的背景,三条腿,背景人很多,倒着走",
     num_inference_steps=50,
     num_frames=93,
+    resolution="720p",
     cfg_scale=4.0,
     seed=42,
     tiled=False,
@@ -213,7 +215,7 @@ def run_with_file(
 @click.option("--video_length", default=5, help="Video length in seconds (5, 10, 15)")
 @click.option(
     "--resolution",
-    default="480p",
+    default="720p",
     help="Video resolution (480p, 720p)",
 )
 @click.option(
@@ -222,11 +224,40 @@ def run_with_file(
     help="Aspect ratio (16:9, 9:16, 1:1)",
 )
 @click.option(
+    "--prompt",
+    default="A stylish woman walking down a Tokyo street filled with warm golden sunlight and cherry blossoms floating in the wind. The camera follows her from behind as she strolls leisurely, creating a cinematic atmosphere.",
+    help="Positive guidance text prompt",
+)
+@click.option(
+    "--image_path",
+    default=f"{os.path.dirname(__file__)}/../data/101235-video-720_0.png",
+    help="Input image path for i2v task",
+)
+@click.option(
+    "--video_path",
+    default=f"{os.path.dirname(__file__)}/../data/sample_video.mp4",
+    help="Input video path for vc task",
+)
+@click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
+@click.option(
     "--benchmark",
     is_flag=True,
     help="Run benchmark test",
 )
-def main(task, gpu_num, video_length, resolution, aspect_ratio, benchmark):
+def main(
+    task,
+    gpu_num,
+    video_length,
+    resolution,
+    aspect_ratio,
+    prompt,
+    image_path,
+    video_path,
+    negative_prompt,
+    seed,
+    benchmark,
+):
     """Unified LongCat video generation interface"""
     pipe = get_pipeline(gpu_num)
     output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
@@ -316,11 +347,40 @@ def main(task, gpu_num, video_length, resolution, aspect_ratio, benchmark):
             save_video(final_frames, final_result_path, fps=PPL_CONFIG["target_fps"], quality=6)
             print(f"Final video saved to: {final_result_path}")
     else:
-        print("Please use --benchmark flag to run benchmark test")
-        print("For custom generation, use specific task scripts:")
-        print("  - longcat_text_to_video.py for text-to-video")
-        print("  - longcat_image_to_video.py for image-to-video")
-        print("  - longcat_video_continue.py for video continuation")
+        # Single generation based on task type
+        filename = get_example_name(__file__).replace(".py", f"_{task}_{gpu_num}gpu.mp4")
+        output_path = os.path.join(output_dir, filename)
+
+        if task == "t2v":
+            width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
+            start = time.time()
+            video = run(pipe, prompt, height, width, negative_prompt=negative_prompt, seed=seed)
+            elapsed_time = time.time() - start
+            print(f"T2V generation time: {elapsed_time:.2f} seconds")
+            save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)
+            print(f"Video saved to: {output_path}")
+
+        elif task == "i2v":
+            image = Image.open(image_path).convert("RGB")
+            width, height = get_target_image_size(image.width, image.height, resolution)
+            start = time.time()
+            video = run(pipe, prompt, height, width, first_image=image, negative_prompt=negative_prompt, seed=seed)
+            elapsed_time = time.time() - start
+            print(f"I2V generation time: {elapsed_time:.2f} seconds")
+            save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)
+            print(f"Video saved to: {output_path}")
+
+        elif task == "vc":
+            input_video = VideoData(video_path)
+            height, width = input_video.height, input_video.width
+            start = time.time()
+            video = run(
+                pipe, prompt, height, width, input_video=input_video, negative_prompt=negative_prompt, seed=seed
+            )
+            elapsed_time = time.time() - start
+            print(f"VC generation time: {elapsed_time:.2f} seconds")
+            save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)
+            print(f"Video saved to: {output_path}")
 
     del pipe
 
