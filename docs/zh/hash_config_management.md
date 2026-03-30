@@ -224,7 +224,7 @@ Usage:
 import argparse
 import json
 
-from telefuser.core.model_weight import hash_state_dict_keys
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 
 def generate_template(model_path, model_name, model_class, resource="official"):
@@ -238,7 +238,7 @@ def generate_template(model_path, model_name, model_class, resource="official"):
         sys.exit(1)
     
     # 加载所有权重
-    from telefuser.core.model_weight import load_state_dict
+    from telefuser.utils.model_weight import load_state_dict
     all_weights = {}
     for f in files:
         all_weights.update(load_state_dict(f))

@@ -515,7 +515,7 @@ python tools/viewer/weight_viewer.py /path/to/model.safetensors --export model_i
 ### 2. Check Hash Matching Process
 
 ```python
-from telefuser.core.model_weight import load_state_dict, hash_state_dict_keys
+from telefuser.utils.model_weight import load_state_dict, hash_state_dict_keys
 from telefuser.core.model_config import model_loader_configs
 
 sd = load_state_dict("/path/to/model.safetensors")
@@ -546,7 +546,7 @@ if not found:
 
 ```python
 from telefuser.models.my_custom_dit import MyCustomDiT
-from telefuser.core.model_weight import load_state_dict
+from telefuser.utils.model_weight import load_state_dict
 
 sd = load_state_dict("/path/to/model.safetensors")
 converter = MyCustomDiT.state_dict_converter()

@@ -13,7 +13,7 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
-from telefuser.core.model_weight import hash_state_dict_keys
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 
 class WeightViewer:

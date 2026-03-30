@@ -11,9 +11,9 @@ import torch.nn as nn
 from telefuser.platforms import current_platform
 from telefuser.utils.hf_utils import load_module_from_huggingface
 from telefuser.utils.logging import logger
+from telefuser.utils.model_weight import hash_state_dict_keys, init_weights_on_device, load_state_dict
 
 from .model_config import model_loader_configs
-from .model_weight import hash_state_dict_keys, init_weights_on_device, load_state_dict
 
 
 def load_model_from_single_file(
