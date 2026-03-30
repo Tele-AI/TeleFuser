@@ -4,6 +4,11 @@ Supports multiple attention implementations:
 - Dense: TORCH_SDPA, TORCH_CUDNN, FLASH_ATTN_2/3/4, SAGE_ATTN variants, SPARGE_ATTN
 - Sparse: RADIAL_ATTN, LOCAL_SPARSE_ATTN
 
+Note: Attention functions are decorated with @torch.compiler.disable because:
+1. SageAttention requires static tensor shapes for quantization scales
+2. Custom CUDA kernels (FlashAttention, etc.) are not compile-friendly
+3. Keeping attention in eager mode preserves optimal performance
+
 Example:
     >>> from telefuser.core.config import AttentionConfig, AttnImplType
     >>> config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
@@ -78,6 +83,7 @@ class SparseAttentionState:
         return "dense" if self.should_use_dense() else self.config.sparse_impl
 
 
+@torch.compiler.disable
 def attention(
     q: Tensor,
     k: Tensor,
@@ -254,6 +260,7 @@ def attention(
     return output
 
 
+@torch.compiler.disable
 def long_context_attention(
     q: Tensor,
     k: Tensor,

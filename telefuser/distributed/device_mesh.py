@@ -118,15 +118,17 @@ def _validate_parallel_config(parallel_config: ParallelConfig) -> None:
 
 
 # Process group access utilities
-def get_group(device_mesh: DeviceMesh, group_type: str) -> dist.ProcessGroup | None:
+def get_group(device_mesh: DeviceMesh | None, group_type: str) -> dist.ProcessGroup | None:
     """Get process group of specified type from DeviceMesh."""
+    if device_mesh is None:
+        return None
     try:
         return device_mesh.get_group(group_type)
     except (KeyError, RuntimeError):
         return None
 
 
-def get_ranks(device_mesh: DeviceMesh, group_type: str) -> list[int]:
+def get_ranks(device_mesh: DeviceMesh | None, group_type: str) -> list[int]:
     """Get actual rank numbers of specified process group type."""
     group = get_group(device_mesh, group_type)
     if group is not None:
@@ -134,130 +136,134 @@ def get_ranks(device_mesh: DeviceMesh, group_type: str) -> list[int]:
     return []
 
 
-def get_world_size(device_mesh: DeviceMesh, group_type: str) -> int:
+def get_world_size(device_mesh: DeviceMesh | None, group_type: str) -> int:
     """Get size of specified process group type (returns 1 if not present)."""
     group = get_group(device_mesh, group_type)
     return dist.get_world_size(group=group) if group is not None else 1
 
 
-def get_rank(device_mesh: DeviceMesh, group_type: str) -> int:
+def get_rank(device_mesh: DeviceMesh | None, group_type: str) -> int:
     """Get current process rank in specified process group (returns 0 if not present)."""
     group = get_group(device_mesh, group_type)
     return dist.get_rank(group=group) if group is not None else 0
 
 
 # Convenience accessors for specific parallelism types
-def get_dp_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_dp_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get data parallel process group."""
     return get_group(device_mesh, "dp")
 
 
-def get_dp_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_dp_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of data parallel process group."""
     return get_ranks(device_mesh, "dp")
 
 
-def get_dp_world_size(device_mesh: DeviceMesh) -> int:
+def get_dp_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of data parallel process group."""
     return get_world_size(device_mesh, "dp")
 
 
-def get_dp_rank(device_mesh: DeviceMesh) -> int:
+def get_dp_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in data parallel process group."""
     return get_rank(device_mesh, "dp")
 
 
-def get_cfg_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_cfg_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get CFG parallel process group."""
     return get_group(device_mesh, "cfg")
 
 
-def get_cfg_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_cfg_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of CFG parallel process group."""
     return get_ranks(device_mesh, "cfg")
 
 
-def get_cfg_world_size(device_mesh: DeviceMesh) -> int:
+def get_cfg_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of CFG parallel process group."""
     return get_world_size(device_mesh, "cfg")
 
 
-def get_cfg_rank(device_mesh: DeviceMesh) -> int:
+def get_cfg_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in CFG parallel process group."""
     return get_rank(device_mesh, "cfg")
 
 
-def get_ring_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_ring_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get ring attention process group."""
     return get_group(device_mesh, "ring")
 
 
-def get_ring_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_ring_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of ring attention process group."""
     return get_ranks(device_mesh, "ring")
 
 
-def get_ring_world_size(device_mesh: DeviceMesh) -> int:
+def get_ring_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of ring attention process group."""
     return get_world_size(device_mesh, "ring")
 
 
-def get_ring_rank(device_mesh: DeviceMesh) -> int:
+def get_ring_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in ring attention process group."""
     return get_rank(device_mesh, "ring")
 
 
-def get_ulysses_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_ulysses_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get ulysses attention process group."""
     return get_group(device_mesh, "ulysses")
 
 
-def get_ulysses_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_ulysses_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of ulysses attention process group."""
     return get_ranks(device_mesh, "ulysses")
 
 
-def get_ulysses_world_size(device_mesh: DeviceMesh) -> int:
+def get_ulysses_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of ulysses attention process group."""
     return get_world_size(device_mesh, "ulysses")
 
 
-def get_ulysses_rank(device_mesh: DeviceMesh) -> int:
+def get_ulysses_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in ulysses attention process group."""
     return get_rank(device_mesh, "ulysses")
 
 
-def get_tp_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_tp_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get tensor parallel process group."""
     return get_group(device_mesh, "tp")
 
 
-def get_tp_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_tp_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of tensor parallel process group."""
     return get_ranks(device_mesh, "tp")
 
 
-def get_tp_world_size(device_mesh: DeviceMesh) -> int:
+def get_tp_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of tensor parallel process group."""
     return get_world_size(device_mesh, "tp")
 
 
-def get_tp_rank(device_mesh: DeviceMesh) -> int:
+def get_tp_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in tensor parallel process group."""
     return get_rank(device_mesh, "tp")
 
 
-def get_mesh_dim_names(device_mesh: DeviceMesh) -> list[str]:
+def get_mesh_dim_names(device_mesh: DeviceMesh | None) -> list[str]:
     """Get dimension names of DeviceMesh."""
+    if device_mesh is None:
+        return []
     return list(device_mesh.mesh_dim_names) if device_mesh.mesh_dim_names else []
 
 
-def get_coordinates(device_mesh: DeviceMesh) -> dict[str, int]:
+def get_coordinates(device_mesh: DeviceMesh | None) -> dict[str, int]:
     """Get coordinates of current process in each mesh dimension.
 
     Returns:
         Dict mapping dimension names to coordinate indices
     """
+    if device_mesh is None:
+        return {}
     coords = device_mesh.get_coordinate()
     if coords is None:
         return {}
@@ -267,7 +273,7 @@ def get_coordinates(device_mesh: DeviceMesh) -> dict[str, int]:
     return {str(i): coords[i] for i in range(len(coords))}
 
 
-def get_attention_strategy(device_mesh: DeviceMesh) -> str:
+def get_attention_strategy(device_mesh: DeviceMesh | None) -> str:
     """Determine attention strategy from device mesh configuration.
 
     Returns:
@@ -276,6 +282,8 @@ def get_attention_strategy(device_mesh: DeviceMesh) -> str:
         "ring": Only Ring attention (P2P based)
         "usp": Combined Ulysses + Ring (Unified Sequence Parallelism)
     """
+    if device_mesh is None:
+        return "local"
     dim_names = device_mesh.mesh_dim_names if device_mesh.mesh_dim_names else []
 
     has_ring = "ring" in dim_names
@@ -290,46 +298,50 @@ def get_attention_strategy(device_mesh: DeviceMesh) -> str:
     return "local"
 
 
-def get_ulysses_mesh(device_mesh: DeviceMesh) -> DeviceMesh | None:
+def get_ulysses_mesh(device_mesh: DeviceMesh | None) -> DeviceMesh | None:
     """Get the ulysses sub-mesh for All-to-All communication."""
+    if device_mesh is None:
+        return None
     if "ulysses" in (device_mesh.mesh_dim_names or []):
         return device_mesh["ulysses"]
     return None
 
 
-def get_ring_mesh(device_mesh: DeviceMesh) -> DeviceMesh | None:
+def get_ring_mesh(device_mesh: DeviceMesh | None) -> DeviceMesh | None:
     """Get the ring sub-mesh for P2P communication."""
+    if device_mesh is None:
+        return None
     if "ring" in (device_mesh.mesh_dim_names or []):
         return device_mesh["ring"]
     return None
 
 
 # PP (Pipeline Parallel) accessors
-def get_pp_group(device_mesh: DeviceMesh) -> dist.ProcessGroup | None:
+def get_pp_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
     """Get pipeline parallel process group."""
     return get_group(device_mesh, "pp")
 
 
-def get_pp_ranks(device_mesh: DeviceMesh) -> list[int]:
+def get_pp_ranks(device_mesh: DeviceMesh | None) -> list[int]:
     """Get rank list of pipeline parallel process group."""
     return get_ranks(device_mesh, "pp")
 
 
-def get_pp_world_size(device_mesh: DeviceMesh) -> int:
+def get_pp_world_size(device_mesh: DeviceMesh | None) -> int:
     """Get size of pipeline parallel process group."""
     return get_world_size(device_mesh, "pp")
 
 
-def get_pp_rank(device_mesh: DeviceMesh) -> int:
+def get_pp_rank(device_mesh: DeviceMesh | None) -> int:
     """Get current rank in pipeline parallel process group."""
     return get_rank(device_mesh, "pp")
 
 
-def is_pipeline_first_stage(device_mesh: DeviceMesh) -> bool:
+def is_pipeline_first_stage(device_mesh: DeviceMesh | None) -> bool:
     """Check if current rank is the first pipeline stage."""
     return get_pp_rank(device_mesh) == 0
 
 
-def is_pipeline_last_stage(device_mesh: DeviceMesh) -> bool:
+def is_pipeline_last_stage(device_mesh: DeviceMesh | None) -> bool:
     """Check if current rank is the last pipeline stage."""
     return get_pp_rank(device_mesh) == get_pp_world_size(device_mesh) - 1
