@@ -2,6 +2,112 @@
 
 本文档介绍如何管理和维护 TeleFuser 的模型 hash 配置，包括 `weight_viewer.py` 工具的使用、配置版本控制和更新流程。
 
+## 为什么使用 Hash 识别？
+
+TeleFuser 采用 **基于 hash 的自动识别机制**，而非依赖配置文件（如 `model_index.json`）。这种设计具有以下显著优势：
+
+### 1. 无需配置文件
+
+与其他依赖 `model_index.json` 等元数据文件的框架不同，TeleFuser 可以直接从权重文件加载模型：
+
+```python
+# TeleFuser - 直接加载任意权重文件
+from telefuser.core.module_manager import ModuleManager
+
+mm = ModuleManager(torch_dtype=torch.bfloat16)
+mm.load_model("downloads/model.safetensors")  # 无需任何配置！
+
+# 支持的场景：
+# - 单个 .safetensors 文件
+# - 官方发布的原始权重（非 Diffusers 格式）
+# - 自行训练的权重
+# - 任意目录结构
+```
+
+**对比：**
+
+| 场景 | TeleFuser | 需要配置文件的框架 |
+|------|-----------|-------------------|
+| 单个 `.safetensors` 文件 | ✅ 直接支持 | ❌ 需要配置 |
+| 没有 `model_index.json` | ✅ 直接支持 | ❌ 无法加载 |
+| 官方原始权重（非 Diffusers） | ✅ 直接支持 | ⚠️ 需要转换 |
+| 自定义目录结构 | ✅ 直接支持 | ❌ 必须符合约定 |
+| 多文件分片权重 | ✅ 自动合并 | ⚠️ 需要正确命名 |
+
+### 2. 强模型校验
+
+Hash 匹配提供了强大的模型校验能力：
+
+| 校验类型 | Hash 匹配 | 字符串匹配（如 `_class_name`） |
+|----------|-----------|-------------------------------|
+| 加载错误的模型文件 | ❌ Hash 不匹配，拒绝加载 | ⚠️ 可能加载成功，运行时报错 |
+| 模型 key 被修改 | ❌ Hash 不匹配，拒绝加载 | ⚠️ 无法检测 |
+| 模型结构变化 | ❌ 拒绝（`shape=True` 时） | ⚠️ 无法检测 |
+| 加载未知模型 | ❌ 未注册，拒绝加载 | ⚠️ 可能使用兜底方案 |
+
+```python
+# Hash 相当于校验和 - 确保模型完整性
+# 同一模型不同量化版本会得到不同的 hash：
+(
+    None, "9269f8db9040a9d860eaca435be61814",  # FP16 版本
+    ["wan_video_dit"], [WanModel], "official",
+),
+(
+    None, "4cf556355bc7e9b6545b38f4930f60b1",  # FP8 版本（hash 不同！）
+    ["wan_video_dit"], [WanModel], "official",
+),
+```
+
+### 3. 精确区分模型变体
+
+同一模型类的不同权重变体可以通过 hash 精确区分：
+
+```python
+# 同一个 WanModel 类，通过 hash 区分不同权重
+# Wan2.1 T2V 1.3B
+(None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official"),
+# Wan2.2 I2V A14B
+(None, "5b013604280dd715f8457c6ed6d6a626", ["wan_video_dit"], [WanModel], "official"),
+# Wan2.2 TI2V 5B
+(None, "1f5ab7703c6fc803fdded85ff040c316", ["wan_video_dit"], [WanModel], "official"),
+```
+
+这可以防止：
+- 将 T2V 权重加载到 I2V pipeline
+- 混淆不同大小的模型
+- 使用错误的量化变体
+
+### 4. 安全与审计优势
+
+- **完整性验证**：Hash 确认权重未被篡改
+- **版本控制**：追踪正在使用的确切权重
+- **可复现性**：相同 hash = 相同模型行为保证
+- **供应链安全**：验证权重与可信来源的预期 hash 匹配
+
+### 5. 开发者友好
+
+```python
+# 开发者无需知道确切的模型类型即可加载
+mm.load_model("/downloads/unknown_model.safetensors")
+model = mm.fetch_module("wan_video_dit")  # Hash 自动识别！
+
+# 适用于任何环境：
+# - 研究：下载任意 .safetensors 即可运行
+# - 生产：加载前验证 hash
+# - CI/CD：确保测试的是正确的模型
+```
+
+### 设计权衡
+
+| 方面 | Hash 匹配 (TeleFuser) | 配置文件匹配 |
+|------|----------------------|-------------|
+| 正确性 | ✅ 强校验 | ⚠️ 弱校验 |
+| 新增模型便利性 | ⚠️ 需要注册 hash | ✅ 自动检测 |
+| 支持任意模型 | ⚠️ 必须在注册表中 | ✅ 有兜底方案 |
+| 最适合 | 生产环境、关键任务 | 原型开发、研究实验 |
+
+**总结**：TeleFuser 的 hash 识别机制优先考虑**正确性和可靠性**，适合加载错误模型可能导致严重问题的生产环境。
+
 ## 配置位置
 
 所有模型 hash 配置存储在：

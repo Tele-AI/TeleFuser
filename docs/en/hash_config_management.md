@@ -2,6 +2,112 @@
 
 This document explains how to manage and maintain TeleFuser's model hash configurations, including the use of `weight_viewer.py` tool, configuration version control, and update workflows.
 
+## Why Hash-based Recognition?
+
+TeleFuser uses a **hash-based automatic recognition mechanism** instead of relying on configuration files (like `model_index.json`). This design offers several significant advantages:
+
+### 1. No Configuration File Required
+
+Unlike other frameworks that depend on `model_index.json` or similar metadata files, TeleFuser can load models directly from weight files:
+
+```python
+# TeleFuser - Works with any single weight file
+from telefuser.core.module_manager import ModuleManager
+
+mm = ModuleManager(torch_dtype=torch.bfloat16)
+mm.load_model("downloads/model.safetensors")  # No config needed!
+
+# Works with:
+# - Single .safetensors files
+# - Official release weights (non-Diffusers format)
+# - Custom trained weights
+# - Any directory structure
+```
+
+**Comparison:**
+
+| Scenario | TeleFuser | Frameworks requiring config |
+|----------|-----------|----------------------------|
+| Single `.safetensors` file | ✅ Works directly | ❌ Requires config |
+| No `model_index.json` | ✅ Works | ❌ Cannot load |
+| Official weights (non-Diffusers) | ✅ Works | ⚠️ Needs conversion |
+| Custom directory structure | ✅ Works | ❌ Must follow convention |
+| Multi-file sharded weights | ✅ Auto-merge | ⚠️ Needs correct naming |
+
+### 2. Strong Model Validation
+
+Hash matching provides robust model validation:
+
+| Validation Type | Hash-based | String-based (e.g., `_class_name`) |
+|-----------------|------------|-----------------------------------|
+| Wrong model file loaded | ❌ Hash mismatch, rejected | ⚠️ May load, runtime error |
+| Model keys modified | ❌ Hash mismatch, rejected | ⚠️ Cannot detect |
+| Model structure changed | ❌ Rejected (with `shape=True`) | ⚠️ Cannot detect |
+| Unknown model | ❌ Not in registry | ⚠️ May use fallback |
+
+```python
+# Hash acts as a checksum - ensures model integrity
+# Even same model with different quantization gets different hash:
+(
+    None, "9269f8db9040a9d860eaca435be61814",  # FP16 version
+    ["wan_video_dit"], [WanModel], "official",
+),
+(
+    None, "4cf556355bc7e9b6545b38f4930f60b1",  # FP8 version (different hash!)
+    ["wan_video_dit"], [WanModel], "official",
+),
+```
+
+### 3. Precise Model Variant Identification
+
+Different weight variants of the same model class can be distinguished:
+
+```python
+# Same WanModel class, different weights identified by hash
+# Wan2.1 T2V 1.3B
+(None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official"),
+# Wan2.2 I2V A14B
+(None, "5b013604280dd715f8457c6ed6d6a626", ["wan_video_dit"], [WanModel], "official"),
+# Wan2.2 TI2V 5B
+(None, "1f5ab7703c6fc803fdded85ff040c316", ["wan_video_dit"], [WanModel], "official"),
+```
+
+This prevents:
+- Loading T2V weights into an I2V pipeline
+- Confusing different model sizes
+- Using wrong quantization variant
+
+### 4. Security and Audit Benefits
+
+- **Integrity verification**: Hash confirms weights haven't been tampered with
+- **Version control**: Track which exact weights are being used
+- **Reproducibility**: Same hash = same model behavior guaranteed
+- **Supply chain security**: Verify weights match expected hash from trusted source
+
+### 5. Flexibility for Developers
+
+```python
+# Developer can load models without knowing the exact model type
+mm.load_model("/downloads/mystery_model.safetensors")
+model = mm.fetch_module("wan_video_dit")  # Auto-detected by hash!
+
+# Works in any environment:
+# - Research: Download any .safetensors and run
+# - Production: Verify hash before loading
+# - CI/CD: Ensure correct model is being tested
+```
+
+### Design Trade-offs
+
+| Aspect | Hash-based (TeleFuser) | Config-based |
+|--------|------------------------|--------------|
+| Correctness | ✅ Strong validation | ⚠️ Weak validation |
+| Ease of adding new models | ⚠️ Need to register hash | ✅ Auto-detect |
+| Support for arbitrary models | ⚠️ Must be in registry | ✅ Fallback available |
+| Best for | Production, critical tasks | Prototyping, research |
+
+**Summary**: TeleFuser's hash-based recognition prioritizes **correctness and reliability** over convenience, making it suitable for production environments where loading the wrong model could cause significant issues.
+
 ## Configuration Location
 
 All model hash configurations are stored in:
