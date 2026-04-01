@@ -105,6 +105,7 @@ def run(
     prompt,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"],
 ):
     """
     Convert static images to video sequences using video generation model.
@@ -114,11 +115,12 @@ def run(
         prompt (str): Positive guidance text prompt
         negative_prompt (str, optional): Negative guidance prompt, will be merged with base negative prompt. Default is empty
         seed (int, optional): Random seed. Default is 42
+        resolution(str): Resolution such as 720p, 480p
 
     Returns:
         List[PIL.Image]: Generated video sequence
     """
-    width, height = get_target_image_size(image.size[0], image.size[1], resolution=PPL_CONFIG["resolution"])
+    width, height = get_target_image_size(image.size[0], image.size[1], resolution=resolution)
     video = pipeline(
         prompt=prompt,
         input_image=image,
@@ -173,6 +175,7 @@ def run_with_file(
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory containing model files")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 def main(
@@ -180,6 +183,7 @@ def main(
     image_path,
     prompt,
     negative_prompt,
+    resolution,
     model_root,
     seed,
 ):
@@ -195,6 +199,7 @@ def main(
         prompt,
         negative_prompt,
         seed=seed,
+        resolution=resolution,
     )
     elapsed_time = time.time() - start
 

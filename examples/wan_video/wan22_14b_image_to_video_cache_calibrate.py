@@ -46,6 +46,7 @@ PPL_CONFIG = dict(
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
+    resolution="720p",
     cfg_scale_high=3.5,
     cfg_scale_low=3.5,
     sigma_shift=5.0,
@@ -128,7 +129,7 @@ def run_calibration(
     image: Image.Image,
     negative_prompt: str = "",
     seed: int = 42,
-    resolution: str = "720p",
+    resolution: str = PPL_CONFIG["resolution"],
     model_name: str = "Wan2.2-I2V-A14B",
     output_path: str | None = None,
 ):
@@ -202,7 +203,7 @@ def run_calibration(
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
 @click.option("--seed", default=42, help="Random seed")
-@click.option("--resolution", default="720p", help="Resolution")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option(
     "--model_root",
     default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",

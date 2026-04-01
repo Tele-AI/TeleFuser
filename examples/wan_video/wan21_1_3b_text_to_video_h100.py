@@ -19,6 +19,7 @@ PPL_CONFIG = dict(
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=29,
+    resolution="480p",
     cfg_scale=1.0,
     tiled=True,
     target_fps=16,  # Interpolated to 30fps
@@ -90,7 +91,7 @@ def run(
     prompt,
     negative_prompt="",
     seed=42,
-    resolution="480p",
+    resolution=PPL_CONFIG["resolution"],
     aspect_ratio="16:9",
 ):
     """
@@ -165,7 +166,7 @@ def run_with_file(
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
 @click.option("--seed", default=42, help="Random seed")
-@click.option("--resolution", default="480p", help="Resolution")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio")
 @click.option("--model_root", default="/dev/shm/Wan2.1-T2V-1.3B/", help="Root directory of the model files")
 def main(

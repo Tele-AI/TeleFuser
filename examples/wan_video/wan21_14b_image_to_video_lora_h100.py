@@ -173,6 +173,7 @@ def run_with_file(
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 def main(
@@ -180,6 +181,7 @@ def main(
     image_path,
     prompt,
     negative_prompt,
+    resolution,
     seed,
     model_root,
 ):
@@ -189,7 +191,7 @@ def main(
 
     # Run inference
     start = time.time()
-    video = run(pipe, image, prompt, negative_prompt, seed)
+    video = run(pipe, image, prompt, negative_prompt, seed, resolution)
     elapsed_time = time.time() - start
 
     print(f"Video generation time: {elapsed_time:.2f} seconds")

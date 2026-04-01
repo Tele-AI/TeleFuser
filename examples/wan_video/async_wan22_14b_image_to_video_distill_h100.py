@@ -188,6 +188,7 @@ async def run_with_file(pipe, req_id, seed, prompt, image, ppl_config=None):
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 def main(
@@ -195,6 +196,7 @@ def main(
     image_path,
     prompt,
     negative_prompt,
+    resolution,
     seed,
     model_root,
 ):
@@ -203,6 +205,7 @@ def main(
     ppl_config = PPL_CONFIG.copy()
     ppl_config["model_root"] = model_root
     ppl_config["seed"] = seed
+    ppl_config["resolution"] = resolution
 
     asyncio.run(async_main(gpu_num, image_path, prompt, negative_prompt, ppl_config))
 

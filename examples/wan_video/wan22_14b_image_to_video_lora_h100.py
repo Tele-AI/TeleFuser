@@ -118,6 +118,7 @@ def run(
     prompt,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"]
 ):
     """
     Convert static images to video sequences using video generation model.
@@ -131,7 +132,7 @@ def run(
     Returns:
         List[PIL.Image]: Generated video sequence
     """
-    width, height = get_target_image_size(image.size[0], image.size[1], resolution=PPL_CONFIG["resolution"])
+    width, height = get_target_image_size(image.size[0], image.size[1], resolution=resolution)
     video = pipeline(
         prompt=prompt,
         input_image=image,
@@ -156,6 +157,7 @@ def run_with_file(
     negative_prompt,
     seed,
     output_path,
+    resolution=PPL_CONFIG["resolution"],
     **kwargs,
 ):
     """Run pipeline and save to file."""
@@ -165,6 +167,7 @@ def run_with_file(
         prompt,
         negative_prompt,
         seed,
+        resolution=resolution
     )
     logger.info(f"Saving video to {output_path}")
     save_video(
@@ -186,6 +189,7 @@ def run_with_file(
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option(
     "--model_root",
     default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
@@ -196,6 +200,7 @@ def main(
     image_path,
     prompt,
     negative_prompt,
+    resolution,
     model_root,
 ):
     """Image to video conversion using Wan2.2 14B LoRA model"""
@@ -204,7 +209,7 @@ def main(
 
     # Run inference
     start = time.time()
-    video = run(pipe, image, prompt, negative_prompt)
+    video = run(pipe, image, prompt, negative_prompt, resolution=resolution)
     elapsed_time = time.time() - start
 
     print(f"Video generation time: {elapsed_time:.2f} seconds")

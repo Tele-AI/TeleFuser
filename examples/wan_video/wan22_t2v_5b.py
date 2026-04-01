@@ -116,7 +116,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
-@click.option("--resolution", default="480p", help="Output resolution: 480p or 720p")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="Output resolution: 480p or 720p")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio: 16:9, 9:16, 1:1, etc.")
 @click.option("--num_frames", default=121, help="Number of frames (should be 4n+1)")
 @click.option(

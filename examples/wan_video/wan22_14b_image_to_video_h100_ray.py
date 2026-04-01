@@ -132,6 +132,7 @@ def run(
     prompt,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"],
 ):
     """
     Convert static images to video sequences using video generation model.
@@ -141,11 +142,12 @@ def run(
         prompt (str): Positive guidance text prompt
         negative_prompt (str, optional): Negative guidance prompt, will be merged with base negative prompt. Default is empty
         seed (int, optional): Random seed. Default is 42
+        resolution(str): Resolution such as 720p, 480p
 
     Returns:
         List[PIL.Image]: Generated video sequence
     """
-    width, height = get_target_image_size(image.size[0], image.size[1], resolution=PPL_CONFIG["resolution"])
+    width, height = get_target_image_size(image.size[0], image.size[1], resolution=resolution)
     video = pipeline(
         prompt=prompt,
         input_image=image,
@@ -174,6 +176,7 @@ def run(
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 def main(
@@ -181,6 +184,7 @@ def main(
     image_path,
     prompt,
     negative_prompt,
+    resolution,
     seed,
     model_root,
 ):
@@ -188,6 +192,7 @@ def main(
     # Update PPL_CONFIG with command line parameters
     PPL_CONFIG["model_root"] = model_root
     PPL_CONFIG["seed"] = seed
+    PPL_CONFIG["resolution"] = resolution
 
     # Initialize Ray
     ray.init(num_gpus=gpu_num)
@@ -196,7 +201,7 @@ def main(
 
     # Run inference
     start_time = time.time()
-    video = run(pipe, image, prompt, negative_prompt, seed)
+    video = run(pipe, image, prompt, negative_prompt, seed, resolution)
     elapsed_time = time.time() - start_time
 
     print(f"Inference completed, time taken: {elapsed_time:.2f} seconds")
