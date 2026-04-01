@@ -31,7 +31,6 @@ from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.feature_cache import AdaTaylorCacheCalibratorHook
 from telefuser.pipelines.wan_video.wan22_video import (
     Wan22VideoPipeline,
     Wan22VideoPipelineConfig,
@@ -161,10 +160,9 @@ def run_calibration(
         output_path=output_path,
     )
 
-    shared_calibrator = pipeline.denoise_high_stage.dit.feature_cache_hook.hook.calibrator
-    pipeline.denoise_low_stage.dit.feature_cache_hook.set_hook(
-        AdaTaylorCacheCalibratorHook(calibrator=shared_calibrator)
-    )
+    # Share the same calibrator between dit_high and dit_low for dual-branch architecture
+    shared_calibrator = pipeline.denoise_high_stage.dit.feature_cache
+    pipeline.denoise_low_stage.dit._feature_cache = shared_calibrator
 
     logger.info(
         f"Starting cache calibration with {PPL_CONFIG['num_inference_steps']} steps, sigma_shift={PPL_CONFIG['sigma_shift']}"

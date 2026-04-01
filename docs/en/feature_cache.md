@@ -2,6 +2,70 @@
 
 Feature caching is a technique to accelerate diffusion model inference by caching intermediate features and reusing them across timesteps. TeleFuser implements AdaTaylorCache for video generation models.
 
+## Base Interface
+
+All feature cache implementations follow the `BaseFeatureCache` interface:
+
+```python
+class BaseFeatureCache(ABC):
+    def should_compute(self, is_cond: bool) -> bool:
+        """Check if real computation is needed. Auto-increments step counter."""
+        pass
+    
+    def update(self, output: Tensor, ori_input: Tensor, is_cond: bool):
+        """Update cache with computed result."""
+        pass
+    
+    def approximate(self, input: Tensor, is_cond: bool) -> Tensor:
+        """Get approximated output from cache."""
+        pass
+    
+    def reset():
+        """Reset all cached state."""
+        pass
+```
+
+### Usage in Model Forward
+
+```python
+# In DiT block forward:
+if self.feature_cache.should_compute(cond_flag):
+    output = self.forward_blocks(x, ...)
+    self.feature_cache.update(output, x, cond_flag)
+else:
+    output = self.feature_cache.approximate(x, cond_flag)
+```
+
+---
+
+## Factory Function
+
+Use `create_feature_cache` to create cache instances:
+
+```python
+from telefuser.feature_cache import create_feature_cache
+
+# No caching (default)
+cache = create_feature_cache("none")
+
+# AdaTaylorCache for inference acceleration
+cache = create_feature_cache(
+    "ada_taylor",
+    model_type="Wan2.1-T2V-1.3B",
+    num_inference_steps=50,
+)
+
+# Calibrator for parameter collection
+cache = create_feature_cache(
+    "calibrator",
+    num_inference_steps=50,
+    sigma_shift=8.0,
+    model_name="MyModel",
+)
+```
+
+---
+
 ## AdaTaylorCache
 
 AdaTaylorCache (Adaptive Taylor Cache) is a feature caching strategy that combines:
@@ -87,14 +151,14 @@ python examples/wan_video/wan21_1_3b_text_to_video_cache_calibrate.py \
 #### Programmatic Usage
 
 ```python
-from telefuser.feature_cache import AdaTaylorCacheCalibrator
+from telefuser.feature_cache import create_feature_cache
 
 # Create calibrator
-calibrator = AdaTaylorCacheCalibrator(
+cache = create_feature_cache(
+    "calibrator",
     num_inference_steps=50,
     sigma_shift=8.0,
     model_name="Wan2.1-T2V-1.3B",
-    output_path="./params.json"
 )
 
 # Set calibrator on the model
@@ -109,7 +173,6 @@ video = pipeline(
     prompt="A sample prompt",
     num_inference_steps=50,
     sigma_shift=8.0,
-    enable_ada_taylor_cache=False,  # Disable caching during calibration
 )
 ```
 
@@ -220,6 +283,19 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 | Qwen-Image Edit | `examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py` | Qwen-Image-Edit-Plus |
 
 **Note for Wan2.2 I2V:** Wan2.2 uses a dual-branch architecture (dit_high + dit_low). The calibration script shares a single calibrator between both branches to capture the complete denoising process in one JSON file.
+
+---
+
+## CFG Parallel (CFGP) Support
+
+AdaTaylorCache supports CFG Parallel mode where each rank processes one CFG branch (cond or uncond). Each path maintains its own step counter internally, ensuring correct synchronization across ranks.
+
+```python
+# In CFGP mode with 2 GPUs:
+# Rank 0: processes cond path, cond_state step counter increments
+# Rank 1: processes uncond path, uncond_state step counter increments
+# Both counters stay synchronized automatically
+```
 
 ---
 

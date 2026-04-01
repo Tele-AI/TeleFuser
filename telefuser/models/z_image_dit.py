@@ -520,8 +520,7 @@ class ZImageTransformer2DModel(BaseModel):
         t = t * self.t_scale
         t = self.t_embedder(t)
 
-        self.feature_cache_hook.mark_step_begin(cond_flag)
-
+        # Feature cache handling - step ID is managed internally
         (
             x,
             cap_feats,
@@ -595,12 +594,11 @@ class ZImageTransformer2DModel(BaseModel):
             unified_attn_mask[i, :seq_len] = 1
 
         ori_unified = unified
-        cached_output = self.feature_cache_hook.pre_forward(unified, cond_flag)
-        if cached_output is None:
+        if self.feature_cache.should_compute(cond_flag):
             unified = self.forward_blocks(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
-            self.feature_cache_hook.post_forward(unified, ori_unified, cond_flag)
+            self.feature_cache.update(unified, ori_unified, cond_flag)
         else:
-            unified = cached_output
+            unified = self.feature_cache.approximate(unified, cond_flag)
 
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
         unified = list(unified.unbind(dim=0))

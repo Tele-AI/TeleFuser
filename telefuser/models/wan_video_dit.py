@@ -805,16 +805,13 @@ class WanModel(BaseModel):
                 # For per-token timestep, t needs sharding to match x
                 sequence_parallel_shard(self.device_mesh, [x, t_mod, t, freqs_cos, freqs_sin], seq_dims=[1, 1, 1, 0, 0])
 
-            # Feature cache handling
-            self.feature_cache_hook.mark_step_begin(cond_flag)
+            # Feature cache handling - step ID is managed internally
             ori_x = x
-            cached_output = self.feature_cache_hook.pre_forward(x, cond_flag)
-
-            if cached_output is None:
+            if self.feature_cache.should_compute(cond_flag):
                 x = self.forward_blocks_pp(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state)
-                self.feature_cache_hook.post_forward(x, ori_x, cond_flag)
+                self.feature_cache.update(x, ori_x, cond_flag)
             else:
-                x = cached_output
+                x = self.feature_cache.approximate(x, cond_flag)
 
             # Save grid size for later use
             self._pp_grid_size = (f, h, w)
@@ -1174,15 +1171,13 @@ class WanModel(BaseModel):
             # For scalar timestep, t has seq_len=1 which broadcasts with any seq_len
             sequence_parallel_shard(self.device_mesh, [x, t_mod, t, freqs_cos, freqs_sin], seq_dims=[1, 1, 1, 0, 0])
 
-        self.feature_cache_hook.mark_step_begin(cond_flag)
+        # Feature cache handling - step ID is managed internally
         ori_x = x
-        cached_output = self.feature_cache_hook.pre_forward(x, cond_flag)
-
-        if cached_output is None:
+        if self.feature_cache.should_compute(cond_flag):
             x = self.forward_blocks(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state)
-            self.feature_cache_hook.post_forward(x, ori_x, cond_flag)
+            self.feature_cache.update(x, ori_x, cond_flag)
         else:
-            x = cached_output
+            x = self.feature_cache.approximate(x, cond_flag)
 
         x = self.head(x, t)
         if self.usp_flag:

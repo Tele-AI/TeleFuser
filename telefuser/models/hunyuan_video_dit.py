@@ -1605,8 +1605,7 @@ class HunyuanVideoDiT(BaseModel):
         if guidance is None:
             guidance = torch.tensor([6016.0], device=hidden_states.device, dtype=torch.bfloat16)
 
-        self.feature_cache_hook.mark_step_begin(cond_flag)
-
+        # Feature cache handling - step ID is managed internally
         img = hidden_states
         t = timestep
         txt = text_states
@@ -1731,8 +1730,7 @@ class HunyuanVideoDiT(BaseModel):
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
 
         ori_img = img
-        cached_output = self.feature_cache_hook.pre_forward(img, cond_flag)
-        if cached_output is None:
+        if self.feature_cache.should_compute(cond_flag):
             # Use compiled blocks if available
             if getattr(self, "_use_compiled_blocks", False):
                 img, txt = self._compiled_forward_blocks(img, txt, vec, freqs_cis)
@@ -1763,9 +1761,9 @@ class HunyuanVideoDiT(BaseModel):
                         )
 
                 img = x[:, :img_seq_len, ...]
-            self.feature_cache_hook.post_forward(img, ori_img, cond_flag)
+            self.feature_cache.update(img, ori_img, cond_flag)
         else:
-            img = cached_output
+            img = self.feature_cache.approximate(img, cond_flag)
 
         # Final Layer
         img = self.final_layer(img, vec)

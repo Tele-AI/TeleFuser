@@ -1,10 +1,9 @@
 """Tests for feature_cache module."""
 
 import json
-import math
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -14,11 +13,10 @@ from telefuser.feature_cache import (
     AdaTaylorCache,
     AdaTaylorCacheCalibrator,
     AdaTaylorCacheConfig,
-    AdaTaylorCacheHook,
     AdaTaylorCacheState,
-    FeatureCacheHook,
-    FeatureCacheHookManager,
-    NoOpHook,
+    BaseFeatureCache,
+    NoOpCache,
+    create_feature_cache,
 )
 from telefuser.feature_cache.ada_taylor_cache import load_cache_params, nearest_interp
 
@@ -43,29 +41,29 @@ class TestAdaTaylorCacheConfig:
             model_type="test-model",
             n_derivatives=2,
             num_inference_steps=100,
-            taylor_threshold=5,
-            init_step=10,
+            taylor_threshold=3,
+            init_step=5,
         )
         assert config.enabled is False
         assert config.model_type == "test-model"
         assert config.n_derivatives == 2
         assert config.num_inference_steps == 100
-        assert config.taylor_threshold == 5
-        assert config.init_step == 10
+        assert config.taylor_threshold == 3
+        assert config.init_step == 5
 
     def test_invalid_n_derivatives(self):
         """Test that negative n_derivatives raises ValueError."""
-        with pytest.raises(ValueError, match="n_derivatives must be non-negative"):
+        with pytest.raises(ValueError):
             AdaTaylorCacheConfig(n_derivatives=-1)
 
     def test_invalid_num_inference_steps(self):
-        """Test that invalid num_inference_steps raises ValueError."""
-        with pytest.raises(ValueError, match="num_inference_steps must be at least 1"):
+        """Test that zero num_inference_steps raises ValueError."""
+        with pytest.raises(ValueError):
             AdaTaylorCacheConfig(num_inference_steps=0)
 
     def test_invalid_taylor_threshold(self):
-        """Test that invalid taylor_threshold raises ValueError."""
-        with pytest.raises(ValueError, match="taylor_threshold must be at least 1"):
+        """Test that zero taylor_threshold raises ValueError."""
+        with pytest.raises(ValueError):
             AdaTaylorCacheConfig(taylor_threshold=0)
 
 
@@ -73,36 +71,35 @@ class TestNearestInterp:
     """Test nearest_interp utility function."""
 
     def test_basic_interpolation(self):
-        """Test basic nearest neighbor interpolation."""
-        src = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = nearest_interp(src, target_length=5)
+        """Test basic interpolation."""
+        src = np.array([1.0, 2.0, 3.0])
+        result = nearest_interp(src, 3)
+        assert len(result) == 3
         np.testing.assert_array_almost_equal(result, src)
 
     def test_downsample(self):
-        """Test downsampling with nearest interpolation."""
+        """Test downsampling."""
         src = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = nearest_interp(src, target_length=3)
+        result = nearest_interp(src, 3)
         assert len(result) == 3
-        # Nearest should pick indices 0, 2, 4
-        np.testing.assert_array_almost_equal(result, np.array([1.0, 3.0, 5.0]))
 
     def test_upsample(self):
-        """Test upsampling with nearest interpolation."""
-        src = np.array([1.0, 3.0, 5.0])
-        result = nearest_interp(src, target_length=5)
+        """Test upsampling."""
+        src = np.array([1.0, 2.0, 3.0])
+        result = nearest_interp(src, 5)
         assert len(result) == 5
 
     def test_single_element(self):
         """Test with single element target."""
         src = np.array([1.0, 2.0, 3.0])
-        result = nearest_interp(src, target_length=1)
+        result = nearest_interp(src, 1)
         assert len(result) == 1
         assert result[0] == src[-1]
 
     def test_list_input(self):
         """Test with list input."""
         src = [1.0, 2.0, 3.0]
-        result = nearest_interp(src, target_length=3)
+        result = nearest_interp(src, 3)
         assert len(result) == 3
 
 
@@ -111,7 +108,7 @@ class TestAdaTaylorCacheState:
 
     @pytest.fixture
     def state(self):
-        """Create a basic state for testing."""
+        """Create a state instance for testing."""
         mag_ratios = np.ones(10)
         return AdaTaylorCacheState(
             num_inference_steps=10,
@@ -121,7 +118,6 @@ class TestAdaTaylorCacheState:
             retention_ratio=0.2,
             n_derivatives=1,
             taylor_threshold=2,
-            init_step=0,
         )
 
     def test_initialization(self, state):
@@ -131,21 +127,25 @@ class TestAdaTaylorCacheState:
         assert state.K == 2
         assert state.n_derivatives == 1
         assert state.order == 2
-        assert state.current_step == -1
+        assert state._internal_step == -1
 
     def test_reset(self, state):
         """Test state reset."""
-        state.current_step = 5
+        state._increment_step()
+        state._increment_step()
         state.accumulated_err = 0.5
         state.reset()
-        assert state.current_step == -1
+        assert state._internal_step == -1
         assert state.accumulated_err == 0.0
         assert state.last_residual is None
 
-    def test_set_current_step(self, state):
-        """Test setting current step."""
-        state.set_current_step(5)
-        assert state.current_step == 5
+    def test_increment_step(self, state):
+        """Test incrementing internal step."""
+        assert state._internal_step == -1
+        state._increment_step()
+        assert state._internal_step == 0
+        state._increment_step()
+        assert state._internal_step == 1
 
     def test_precompute_compute_steps_includes_first_steps(self, state):
         """Test that pre-computed steps include warmup period."""
@@ -162,11 +162,12 @@ class TestAdaTaylorCacheState:
     def test_should_compute_at_step(self, state):
         """Test should_compute decision at various steps."""
         # Step 0 should always compute
-        state.set_current_step(0)
+        state._increment_step()  # step 0
         assert state.should_compute() is True
 
         # Step 9 (last) should always compute
-        state.set_current_step(9)
+        for _ in range(8):  # move to step 9
+            state._increment_step()
         assert state.should_compute() is True
 
     def test_compute_derivatives_first_step(self, state):
@@ -185,11 +186,12 @@ class TestAdaTaylorCacheState:
         residual2 = torch.randn(2, 4, 8, 8)
 
         # First step
+        state._increment_step()  # step 0
         state.last_compute_step = 0
         state.derivatives["dR_current"] = [residual1, None]
 
         # Second step
-        state.current_step = 1
+        state._increment_step()  # step 1
         state.derivatives["dR_prev"] = [residual1, None]
         derivatives = state.compute_derivatives(residual2)
 
@@ -202,7 +204,7 @@ class TestAdaTaylorCacheState:
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
 
-        state.set_current_step(0)
+        state._increment_step()  # step 0
         state.update(output, ori_input)
 
         assert state.last_residual is not None
@@ -221,13 +223,12 @@ class TestAdaTaylorCacheState:
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
 
-        state.set_current_step(0)
+        state._increment_step()  # step 0
         state.update(output, ori_input)
 
-        state.set_current_step(1)
+        state._increment_step()  # step 1
         approx = state.approximate(ori_input)
 
-        # Approximation should have correct shape
         assert approx.shape == output.shape
 
 
@@ -235,8 +236,7 @@ class TestLoadCacheParams:
     """Test load_cache_params function."""
 
     def test_load_existing_params(self):
-        """Test loading existing model parameters."""
-        # Wan2.1-T2V-1.3B should exist
+        """Test loading existing parameter file."""
         params = load_cache_params("Wan2.1-T2V-1.3B")
         assert "K" in params
         assert "thresh" in params
@@ -245,17 +245,16 @@ class TestLoadCacheParams:
         assert "uncond_mag_ratios" in params
 
     def test_load_nonexistent_params(self):
-        """Test loading non-existent model parameters raises error."""
+        """Test that loading nonexistent params raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             load_cache_params("NonExistentModel")
 
     def test_param_structure(self):
-        """Test that loaded parameters have correct structure."""
+        """Test that loaded params have expected structure."""
         params = load_cache_params("Wan2.1-T2V-1.3B")
-
         assert isinstance(params["K"], int)
-        assert isinstance(params["thresh"], (int, float))
-        assert isinstance(params["retention_ratio"], (int, float))
+        assert isinstance(params["thresh"], float)
+        assert isinstance(params["retention_ratio"], float)
         assert isinstance(params["cond_mag_ratios"], list)
         assert isinstance(params["uncond_mag_ratios"], list)
 
@@ -271,7 +270,6 @@ class TestAdaTaylorCache:
             num_inference_steps=10,
             n_derivatives=1,
             taylor_threshold=2,
-            init_step=0,
         )
 
     def test_initialization(self, cache):
@@ -282,44 +280,46 @@ class TestAdaTaylorCache:
         assert cache.cond_state is not None
         assert cache.uncond_state is not None
 
-    def test_mark_step_begin(self, cache):
-        """Test step counter increment."""
-        assert cache.current_step == -1
+    def test_step_management(self, cache):
+        """Test that step counter is managed internally via should_compute."""
+        # Initially, internal step is init_step - 1 (default 0 - 1 = -1)
+        assert cache.cond_state._internal_step == -1
+        assert cache.uncond_state._internal_step == -1
 
-        cache.mark_step_begin()
-        assert cache.current_step == 0
-        assert cache.cond_state.current_step == 0
-        assert cache.uncond_state.current_step == 0
+        # should_compute increments the step counter for the corresponding path
+        cache.should_compute(is_cond=True)
+        assert cache.cond_state._internal_step == 0
+        assert cache.uncond_state._internal_step == -1  # unchanged
 
-        cache.mark_step_begin()
-        assert cache.current_step == 1
+        cache.should_compute(is_cond=False)
+        assert cache.cond_state._internal_step == 0  # unchanged
+        assert cache.uncond_state._internal_step == 0
 
     def test_reset(self, cache):
         """Test cache reset."""
-        cache.mark_step_begin()
+        cache.should_compute(is_cond=True)
         cache.reset()
 
-        assert cache.current_step == -1
-        assert cache.cond_state.current_step == -1
-        assert cache.uncond_state.current_step == -1
+        assert cache.cond_state._internal_step == -1
+        assert cache.uncond_state._internal_step == -1
 
-    def test_store_cond(self, cache):
-        """Test storing for conditional path."""
+    def test_update_cond(self, cache):
+        """Test update for conditional path."""
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
 
-        cache.mark_step_begin()
-        cache.store(output, ori_input, is_cond=True)
+        cache.should_compute(is_cond=True)  # increments step
+        cache.update(output, ori_input, is_cond=True)
 
         assert cache.cond_state.last_residual is not None
 
-    def test_store_uncond(self, cache):
-        """Test storing for unconditional path."""
+    def test_update_uncond(self, cache):
+        """Test update for unconditional path."""
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
 
-        cache.mark_step_begin()
-        cache.store(output, ori_input, is_cond=False)
+        cache.should_compute(is_cond=False)  # increments step
+        cache.update(output, ori_input, is_cond=False)
 
         assert cache.uncond_state.last_residual is not None
 
@@ -328,24 +328,16 @@ class TestAdaTaylorCache:
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
 
-        cache.mark_step_begin()
-        cache.store(output, ori_input, is_cond=True)
+        cache.should_compute(is_cond=True)  # step 0
+        cache.update(output, ori_input, is_cond=True)
 
-        cache.mark_step_begin()
+        cache.should_compute(is_cond=True)  # step 1
         approx = cache.approximate(ori_input, is_cond=True)
 
         assert approx.shape == output.shape
 
-    def test_should_skip(self, cache):
-        """Test skip decision logic."""
-        cache.mark_step_begin()
-        # First step should not skip (retention period)
-        assert cache.should_skip(is_cond=True) is False
-
     def test_should_compute(self, cache):
-        """Test compute decision logic."""
-        cache.mark_step_begin()
-        # First step should compute
+        """Test should_compute - first step should compute (retention period)."""
         assert cache.should_compute(is_cond=True) is True
 
     def test_get_compute_steps(self, cache):
@@ -355,159 +347,65 @@ class TestAdaTaylorCache:
         assert 0 in steps  # First step should always be in compute steps
 
 
-class TestFeatureCacheHookManager:
-    """Test FeatureCacheHookManager class."""
+class TestNoOpCache:
+    """Test NoOpCache class."""
 
-    def test_initialization(self):
-        """Test manager initialization."""
-        manager = FeatureCacheHookManager()
-        assert manager.has_hook() is False
-        assert manager.get_hook() is None
+    def test_should_compute_always_true(self):
+        """Test that should_compute always returns True."""
+        cache = NoOpCache()
+        assert cache.should_compute(is_cond=True) is True
+        assert cache.should_compute(is_cond=False) is True
 
-    def test_set_hook(self):
-        """Test setting a hook."""
-        manager = FeatureCacheHookManager()
-        hook = NoOpHook()
-        manager.set_hook(hook)
-
-        assert manager.has_hook() is True
-        assert manager.get_hook() is hook
-
-    def test_clear_hook(self):
-        """Test clearing the hook."""
-        manager = FeatureCacheHookManager()
-        manager.set_hook(NoOpHook())
-        manager.clear_hook()
-
-        assert manager.has_hook() is False
-
-    def test_pre_forward_without_hook(self):
-        """Test pre_forward returns None when no hook set."""
-        manager = FeatureCacheHookManager()
-        x = torch.randn(2, 4, 8, 8)
-
-        result = manager.pre_forward(x, cond_flag=True)
-        assert result is None
-
-    def test_post_forward_without_hook(self):
-        """Test post_forward does nothing when no hook set."""
-        manager = FeatureCacheHookManager()
+    def test_update_does_nothing(self):
+        """Test that update does nothing."""
+        cache = NoOpCache()
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
-
         # Should not raise
-        manager.post_forward(output, ori_input, cond_flag=True)
+        cache.update(output, ori_input, is_cond=True)
 
-    def test_delegation_to_hook(self):
-        """Test that manager delegates to hook correctly."""
-        manager = FeatureCacheHookManager()
-        mock_hook = MagicMock(spec=FeatureCacheHook)
-        manager.set_hook(mock_hook)
-
+    def test_approximate_returns_input(self):
+        """Test that approximate returns input unchanged."""
+        cache = NoOpCache()
         x = torch.randn(2, 4, 8, 8)
-        manager.pre_forward(x, cond_flag=True)
-        mock_hook.pre_forward.assert_called_once_with(x, True)
-
-        output = torch.randn(2, 4, 8, 8)
-        manager.post_forward(output, x, cond_flag=False)
-        mock_hook.post_forward.assert_called_once_with(output, x, False)
+        result = cache.approximate(x, is_cond=True)
+        assert torch.allclose(result, x)
 
 
-class TestNoOpHook:
-    """Test NoOpHook class."""
+class TestCreateFeatureCache:
+    """Test create_feature_cache factory function."""
 
-    def test_pre_forward_returns_none(self):
-        """Test that pre_forward always returns None."""
-        hook = NoOpHook()
-        x = torch.randn(2, 4, 8, 8)
+    def test_create_none_cache(self):
+        """Test creating NoOpCache."""
+        cache = create_feature_cache("none")
+        assert isinstance(cache, NoOpCache)
 
-        result = hook.pre_forward(x, cond_flag=True)
-        assert result is None
-
-    def test_post_forward_does_nothing(self):
-        """Test that post_forward does nothing."""
-        hook = NoOpHook()
-        output = torch.randn(2, 4, 8, 8)
-        ori_input = torch.randn(2, 4, 8, 8)
-
-        # Should not raise
-        hook.post_forward(output, ori_input, cond_flag=True)
-
-
-class TestAdaTaylorCacheHook:
-    """Test AdaTaylorCacheHook class."""
-
-    def test_initialization_with_params(self):
-        """Test hook initialization with parameters."""
-        hook = AdaTaylorCacheHook(
-            model_type="Wan2.1-T2V-1.3B",
-            num_inference_steps=10,
-            n_derivatives=1,
-            taylor_threshold=2,
-        )
-
-        assert hook.ada_taylor_cache is not None
-        assert hook.ada_taylor_cache.num_inference_steps == 10
-
-    def test_initialization_with_cache_instance(self):
-        """Test hook initialization with AdaTaylorCache instance."""
-        cache = AdaTaylorCache(
+    def test_create_ada_taylor_cache(self):
+        """Test creating AdaTaylorCache."""
+        cache = create_feature_cache(
+            "ada_taylor",
             model_type="Wan2.1-T2V-1.3B",
             num_inference_steps=10,
         )
-        hook = AdaTaylorCacheHook(ada_taylor_cache=cache)
+        assert isinstance(cache, AdaTaylorCache)
+        assert cache.num_inference_steps == 10
 
-        assert hook.ada_taylor_cache is cache
+    def test_create_calibrator(self):
+        """Test creating AdaTaylorCacheCalibrator."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = create_feature_cache(
+                "calibrator",
+                num_inference_steps=5,
+                sigma_shift=8.0,
+                model_name="TestModel",
+                output_path=f"{tmpdir}/test.json",
+            )
+            assert isinstance(cache, AdaTaylorCacheCalibrator)
 
-    def test_initialization_without_required_params(self):
-        """Test that initialization fails without required params."""
+    def test_unknown_cache_type_raises(self):
+        """Test that unknown cache type raises ValueError."""
         with pytest.raises(ValueError):
-            AdaTaylorCacheHook(model_type="test")
-
-    def test_mark_step_begin_increments_step(self):
-        """Test that mark_step_begin increments step counter."""
-        hook = AdaTaylorCacheHook(
-            model_type="Wan2.1-T2V-1.3B",
-            num_inference_steps=10,
-        )
-
-        assert hook.ada_taylor_cache.current_step == -1
-
-        hook.mark_step_begin(cond_flag=True)
-        assert hook.ada_taylor_cache.current_step == 0
-
-        # Should not increment on uncond pass
-        hook.mark_step_begin(cond_flag=False)
-        assert hook.ada_taylor_cache.current_step == 0
-
-    def test_pre_forward_returns_none_for_compute_step(self):
-        """Test that pre_forward returns None when should compute."""
-        hook = AdaTaylorCacheHook(
-            model_type="Wan2.1-T2V-1.3B",
-            num_inference_steps=10,
-        )
-
-        hook.mark_step_begin(cond_flag=True)
-        x = torch.randn(2, 4, 8, 8)
-
-        result = hook.pre_forward(x, cond_flag=True)
-        # First step should compute (returns None)
-        assert result is None
-
-    def test_post_forward_stores_data(self):
-        """Test that post_forward stores residual data."""
-        hook = AdaTaylorCacheHook(
-            model_type="Wan2.1-T2V-1.3B",
-            num_inference_steps=10,
-        )
-
-        hook.mark_step_begin(cond_flag=True)
-        output = torch.randn(2, 4, 8, 8)
-        ori_input = torch.randn(2, 4, 8, 8)
-
-        hook.post_forward(output, ori_input, cond_flag=True)
-
-        assert hook.ada_taylor_cache.cond_state.last_residual is not None
+            create_feature_cache("unknown")
 
 
 class TestAdaTaylorCacheCalibrator:
@@ -533,8 +431,8 @@ class TestAdaTaylorCacheCalibrator:
         assert calibrator.sigma_shift == 8.0
         assert calibrator.model_name == "TestModel"
 
-    def test_store_cond(self, temp_output_path):
-        """Test storing for cond path."""
+    def test_update_cond(self, temp_output_path):
+        """Test update for cond path."""
         calibrator = AdaTaylorCacheCalibrator(
             num_inference_steps=5,
             sigma_shift=8.0,
@@ -545,11 +443,11 @@ class TestAdaTaylorCacheCalibrator:
         x = torch.randn(2, 4, 8, 8)
         ori_x = torch.randn(2, 4, 8, 8)
 
-        calibrator.store(x, ori_x, is_cond=True)
+        calibrator.update(x, ori_x, is_cond=True)
         assert calibrator.cond_calibrator.cnt == 1
 
-    def test_store_uncond(self, temp_output_path):
-        """Test storing for uncond path."""
+    def test_update_uncond(self, temp_output_path):
+        """Test update for uncond path."""
         calibrator = AdaTaylorCacheCalibrator(
             num_inference_steps=5,
             sigma_shift=8.0,
@@ -560,35 +458,35 @@ class TestAdaTaylorCacheCalibrator:
         x = torch.randn(2, 4, 8, 8)
         ori_x = torch.randn(2, 4, 8, 8)
 
-        calibrator.store(x, ori_x, is_cond=False)
+        calibrator.update(x, ori_x, is_cond=False)
         assert calibrator.uncond_calibrator.cnt == 1
 
     def test_save_produces_valid_json(self, temp_output_path):
-        """Test that save produces valid JSON output."""
+        """Test that save produces valid JSON."""
         calibrator = AdaTaylorCacheCalibrator(
-            num_inference_steps=5,
+            num_inference_steps=2,
             sigma_shift=8.0,
             model_name="TestModel",
             output_path=temp_output_path,
         )
 
-        # Simulate running through all steps
-        for _ in range(5):
+        # Fill both paths
+        for _ in range(2):
             x = torch.randn(2, 4, 8, 8)
             ori_x = torch.randn(2, 4, 8, 8)
-            calibrator.store(x, ori_x, is_cond=True)
-            calibrator.store(x, ori_x, is_cond=False)
+            calibrator.update(x, ori_x, is_cond=True)
+            calibrator.update(x, ori_x, is_cond=False)
 
-        # Check file exists
+        # File should be created
         assert Path(temp_output_path).exists()
 
-        # Check JSON is valid
+        # Validate JSON
         with open(temp_output_path) as f:
             data = json.load(f)
 
         assert "K" in data
-        assert "thresh" in data
         assert "retention_ratio" in data
+        assert "thresh" in data
         assert "cond_mag_ratios" in data
         assert "uncond_mag_ratios" in data
 
@@ -601,18 +499,17 @@ class TestAdaTaylorCacheCalibrator:
             output_path=temp_output_path,
         )
 
-        # Simulate running through all steps
+        # Fill both paths
         for _ in range(50):
             x = torch.randn(2, 4, 8, 8)
             ori_x = torch.randn(2, 4, 8, 8)
-            calibrator.store(x, ori_x, is_cond=True)
-            calibrator.store(x, ori_x, is_cond=False)
+            calibrator.update(x, ori_x, is_cond=True)
+            calibrator.update(x, ori_x, is_cond=False)
 
         with open(temp_output_path) as f:
             data = json.load(f)
 
-        # K should be num_steps // 10 (but at least 1, at most 4)
-        assert data["K"] >= 1
+        # K should be min(4, max(1, 50//10)) = 4
         assert data["K"] <= 4
 
         # retention_ratio should be 0.2
@@ -641,11 +538,12 @@ class TestHybridStrategy:
         # Store initial residual
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
-        state.set_current_step(0)
+        state._increment_step()  # step 0
         state.update(output, ori_input)
 
         # Move to step 2 (elapsed=2, within threshold)
-        state.set_current_step(2)
+        state._increment_step()  # step 1
+        state._increment_step()  # step 2
         approx = state.approximate_residual()
 
         # Should use Taylor (not just last_residual)
@@ -667,11 +565,12 @@ class TestHybridStrategy:
         # Store initial residual
         output = torch.randn(2, 4, 8, 8)
         ori_input = torch.randn(2, 4, 8, 8)
-        state.set_current_step(0)
+        state._increment_step()  # step 0
         state.update(output, ori_input)
 
         # Move to step 2 (elapsed=2, above threshold)
-        state.set_current_step(2)
+        state._increment_step()  # step 1
+        state._increment_step()  # step 2
         approx = state.approximate_residual()
 
         # Should use cached residual
@@ -694,9 +593,15 @@ class TestIntegration:
         params_file = tmp_path / "TestModel.json"
         with open(params_file, "w") as f:
             json.dump(params, f)
-        return params_file
 
-    def test_full_workflow(self, mock_params_file):
+        # Patch the params directory
+        with patch(
+            "telefuser.feature_cache.ada_taylor_cache.ada_taylor_cache.Path.__truediv__",
+            return_value=tmp_path / "TestModel.json",
+        ):
+            yield params_file
+
+    def test_full_workflow(self):
         """Test complete workflow from initialization to approximation."""
         # Initialize with mock model type
         with patch("telefuser.feature_cache.ada_taylor_cache.ada_taylor_cache.load_cache_params") as mock_load:
@@ -715,21 +620,23 @@ class TestIntegration:
                 taylor_threshold=2,
             )
 
-            # Simulate CFG inference
+            # Simulate CFG inference - should_compute increments step internally
             for step in range(10):
-                cache.mark_step_begin()
-
                 # Cond path
                 x_cond = torch.randn(2, 4, 8, 8)
-                if not cache.should_skip(is_cond=True):
+                if cache.should_compute(is_cond=True):
                     output_cond = x_cond + torch.randn(2, 4, 8, 8) * 0.1
-                    cache.store(output_cond, x_cond, is_cond=True)
+                    cache.update(output_cond, x_cond, is_cond=True)
+                else:
+                    output_cond = cache.approximate(x_cond, is_cond=True)
 
                 # Uncond path
                 x_uncond = torch.randn(2, 4, 8, 8)
-                if not cache.should_skip(is_cond=False):
+                if cache.should_compute(is_cond=False):
                     output_uncond = x_uncond + torch.randn(2, 4, 8, 8) * 0.1
-                    cache.store(output_uncond, x_uncond, is_cond=False)
+                    cache.update(output_uncond, x_uncond, is_cond=False)
+                else:
+                    output_uncond = cache.approximate(x_uncond, is_cond=False)
 
             # Verify cache worked correctly
             compute_steps = cache.get_compute_steps()

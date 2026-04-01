@@ -137,7 +137,7 @@ class BaseStage(ABC):
         """Set up feature caching for a model.
 
         Args:
-            model: The model to set up caching for (must have feature_cache_hook).
+            model: The model to set up caching for (must have set_ada_taylor_cache method).
             cache_config: Feature cache configuration.
             num_inference_steps: Total number of inference steps.
             init_step: Initial step for caching (used when switching models mid-generation).
@@ -150,5 +150,5 @@ class BaseStage(ABC):
                 taylor_threshold=cache_config.taylor_threshold,
                 init_step=init_step,
             )
-        elif hasattr(model, "feature_cache_hook") and not model.feature_cache_hook.has_hook():
+        elif hasattr(model, "_feature_cache") and model._feature_cache is None:
             model.reset_feature_cache()

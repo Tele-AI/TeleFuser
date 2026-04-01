@@ -2,6 +2,70 @@
 
 特征缓存是一种通过缓存中间特征并在时间步之间重用它们来加速扩散模型推理的技术。TeleFuser 为视频生成模型实现了 AdaTaylorCache。
 
+## 基础接口
+
+所有特征缓存实现都遵循 `BaseFeatureCache` 接口：
+
+```python
+class BaseFeatureCache(ABC):
+    def should_compute(self, is_cond: bool) -> bool:
+        """检查是否需要真实计算。自动增加步数计数器。"""
+        pass
+    
+    def update(self, output: Tensor, ori_input: Tensor, is_cond: bool):
+        """使用计算结果更新缓存。"""
+        pass
+    
+    def approximate(self, input: Tensor, is_cond: bool) -> Tensor:
+        """从缓存获取近似输出。"""
+        pass
+    
+    def reset():
+        """重置所有缓存状态。"""
+        pass
+```
+
+### 在模型 Forward 中的使用
+
+```python
+# 在 DiT block forward 中：
+if self.feature_cache.should_compute(cond_flag):
+    output = self.forward_blocks(x, ...)
+    self.feature_cache.update(output, x, cond_flag)
+else:
+    output = self.feature_cache.approximate(x, cond_flag)
+```
+
+---
+
+## 工厂函数
+
+使用 `create_feature_cache` 创建缓存实例：
+
+```python
+from telefuser.feature_cache import create_feature_cache
+
+# 无缓存（默认）
+cache = create_feature_cache("none")
+
+# AdaTaylorCache 用于推理加速
+cache = create_feature_cache(
+    "ada_taylor",
+    model_type="Wan2.1-T2V-1.3B",
+    num_inference_steps=50,
+)
+
+# 校准器用于参数收集
+cache = create_feature_cache(
+    "calibrator",
+    num_inference_steps=50,
+    sigma_shift=8.0,
+    model_name="MyModel",
+)
+```
+
+---
+
 ## AdaTaylorCache
 
 AdaTaylorCache（自适应泰勒缓存）是一种特征缓存策略，结合了：
@@ -87,14 +151,14 @@ python examples/wan_video/wan21_1_3b_text_to_video_cache_calibrate.py \
 #### 编程方式使用
 
 ```python
-from telefuser.feature_cache import AdaTaylorCacheCalibrator
+from telefuser.feature_cache import create_feature_cache
 
 # 创建校准器
-calibrator = AdaTaylorCacheCalibrator(
+cache = create_feature_cache(
+    "calibrator",
     num_inference_steps=50,
     sigma_shift=8.0,
     model_name="Wan2.1-T2V-1.3B",
-    output_path="./params.json"
 )
 
 # 在模型上设置校准器
@@ -109,7 +173,6 @@ video = pipeline(
     prompt="一个示例提示词",
     num_inference_steps=50,
     sigma_shift=8.0,
-    enable_ada_taylor_cache=False,  # 校准时禁用缓存
 )
 ```
 
@@ -220,6 +283,19 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 | Qwen-Image Edit | `examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py` | Qwen-Image-Edit-Plus |
 
 **Wan2.2 I2V 注意事项：** Wan2.2 使用双分支架构（dit_high + dit_low）。校准脚本在两个分支之间共享一个校准器，以便在单个 JSON 文件中捕获完整的去噪过程。
+
+---
+
+## CFG 并行（CFGP）支持
+
+AdaTaylorCache 支持 CFG 并行模式，每个 rank 处理一个 CFG 分支（cond 或 uncond）。每个路径在内部维护自己的步数计数器，确保 rank 之间正确同步。
+
+```python
+# 在使用 2 GPU 的 CFGP 模式下：
+# Rank 0：处理 cond 路径，cond_state 步数计数器增加
+# Rank 1：处理 uncond 路径，uncond_state 步数计数器增加
+# 两个计数器自动保持同步
+```
 
 ---
 

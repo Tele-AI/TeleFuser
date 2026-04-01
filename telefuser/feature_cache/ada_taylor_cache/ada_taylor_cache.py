@@ -10,6 +10,8 @@ so we switch to residual reuse for better stability.
 When n_derivatives=0, AdaTaylorCache reduces to simple residual caching (no Taylor expansion).
 """
 
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -19,9 +21,10 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from telefuser.utils.logging import logger
+
+from ..base import BaseFeatureCache
 
 
 def _get_safe_model_name(model_name: str) -> str:
@@ -149,9 +152,10 @@ class AdaTaylorCacheState:
         # Pre-compute compute steps at initialization (stored as set for O(1) lookup)
         self._compute_steps_set = self._precompute_compute_steps_set()
 
-        # State tracking
-        self.current_step = -1
-        self.last_compute_step = -1
+        # Internal step tracking - each path manages its own step counter
+        # Incremented on each pre_forward call, independent of external mark_step_begin
+        self._internal_step = init_step - 1  # Will be incremented to init_step on first call
+        self.last_compute_step = init_step - 1
 
         # Derivative storage
         self.derivatives: Dict[str, List[Optional[torch.Tensor]]] = {
@@ -214,16 +218,24 @@ class AdaTaylorCacheState:
             "dR_current": [None] * self.order,
         }
         self.last_residual = None
-        self.current_step = -1
-        self.last_compute_step = -1
+        self._internal_step = self.init_step - 1
+        self.last_compute_step = self.init_step - 1
 
-    def set_current_step(self, step: int):
-        """Set the current step number. Called by AdaTaylorCache.
+    def _increment_step(self) -> int:
+        """Increment internal step counter and return the new step.
 
-        Args:
-            step: The current diffusion step number.
+        Called at the beginning of each pre_forward to mark a new diffusion step.
+
+        Returns:
+            The new internal step number.
         """
-        self.current_step = step
+        self._internal_step += 1
+        return self._internal_step
+
+    @property
+    def current_step(self) -> int:
+        """Get the current internal step number."""
+        return self._internal_step
 
     def should_compute(self) -> bool:
         """Determine if real computation is needed for this step.
@@ -235,7 +247,7 @@ class AdaTaylorCacheState:
             True if real computation is needed, False if can skip and use approximation.
         """
         # O(1) lookup using pre-computed set
-        return self.current_step in self._compute_steps_set
+        return self._internal_step in self._compute_steps_set
 
     @property
     def compute_steps(self) -> set:
@@ -249,7 +261,7 @@ class AdaTaylorCacheState:
     def compute_derivatives(self, residual: torch.Tensor) -> List[Optional[torch.Tensor]]:
         """Compute derivatives of residual using finite differences.
 
-        Uses window (current_step - last_compute_step) as the difference interval,
+        Uses window (_internal_step - last_compute_step) as the difference interval,
         consistent with TaylorSeer approach.
 
         Args:
@@ -262,7 +274,7 @@ class AdaTaylorCacheState:
         dR_current[0] = residual
 
         # Use window as the difference interval
-        window = self.current_step - self.last_compute_step
+        window = self._internal_step - self.last_compute_step
         if window <= 0:
             window = 1
 
@@ -274,7 +286,7 @@ class AdaTaylorCacheState:
 
         # Compute higher-order derivatives using finite differences
         for i in range(self.n_derivatives):
-            if self.derivatives["dR_prev"][i] is not None and dR_current[i] is not None and self.current_step > 0:
+            if self.derivatives["dR_prev"][i] is not None and dR_current[i] is not None and self._internal_step > 0:
                 dR_current[i + 1] = dR_current[i] - self.derivatives["dR_prev"][i]
                 dR_current[i + 1] = dR_current[i + 1] / window
             else:
@@ -301,7 +313,7 @@ class AdaTaylorCacheState:
         # Store previous derivatives and compute new ones
         self.derivatives["dR_prev"] = self.derivatives["dR_current"]
         self.derivatives["dR_current"] = self.compute_derivatives(residual)
-        self.last_compute_step = self.current_step
+        self.last_compute_step = self._internal_step
 
     def approximate_residual(self) -> Optional[torch.Tensor]:
         """Approximate residual using hybrid strategy.
@@ -312,7 +324,7 @@ class AdaTaylorCacheState:
         Returns:
             Approximated residual tensor, or None if no derivatives available.
         """
-        elapsed = self.current_step - self.last_compute_step
+        elapsed = self._internal_step - self.last_compute_step
 
         # Check if we should use Taylor or fallback to residual reuse
         if elapsed > self.taylor_threshold:
@@ -355,8 +367,8 @@ class AdaTaylorCacheState:
         return current_input + residual_approx
 
 
-class AdaTaylorCache:
-    """Adaptive Taylor Cache Manager with hybrid strategy.
+class AdaTaylorCache(BaseFeatureCache):
+    """Adaptive Taylor Cache with hybrid strategy.
 
     Manages AdaTaylorCache states for both conditional (cond) and unconditional (uncond)
     paths in classifier-free guidance (CFG) diffusion models.
@@ -390,9 +402,6 @@ class AdaTaylorCache:
         self.init_step = init_step
         self.model_type = model_type
 
-        # Unified step counter - shared between cond and uncond
-        self._current_step = -1
-
         # Interpolate mag_ratios if needed
         cond_mag_ratios = params["cond_mag_ratios"]
         uncond_mag_ratios = params["uncond_mag_ratios"]
@@ -401,7 +410,7 @@ class AdaTaylorCache:
         if len(uncond_mag_ratios) != num_inference_steps:
             uncond_mag_ratios = nearest_interp(uncond_mag_ratios, target_length=num_inference_steps)
 
-        # Initialize cond and uncond states
+        # Initialize cond and uncond states - each manages its own step counter
         self.cond_state = AdaTaylorCacheState(
             num_inference_steps=num_inference_steps,
             thresh=params["thresh"],
@@ -429,35 +438,29 @@ class AdaTaylorCache:
             f"taylor_threshold={taylor_threshold}, thresh={params['thresh']}, K={params['K']}"
         )
 
-    def mark_step_begin(self):
-        """Mark the beginning of a new diffusion step.
-
-        This should be called ONCE per diffusion step, at the beginning,
-        before the cond forward pass. It increments the unified step counter
-        and syncs both cond and uncond states.
-
-        This is typically called by AdaTaylorCacheHook.mark_step_begin().
-        """
-        self._current_step += 1
-        # Sync both states with the unified step counter
-        self.cond_state.set_current_step(self._current_step)
-        self.uncond_state.set_current_step(self._current_step)
-
-    def reset(self):
+    def reset(self) -> None:
         """Reset all states."""
-        self._current_step = -1
         self.cond_state.reset()
         self.uncond_state.reset()
 
-    @property
-    def current_step(self) -> int:
-        """Get the current diffusion step number."""
-        return self._current_step
+    def should_compute(self, is_cond: bool) -> bool:
+        """Check if real computation is needed for this step.
 
-    # ==================== Unified Path Methods ====================
+        This method automatically increments the internal step counter
+        for the corresponding path before checking.
 
-    def store(self, output: torch.Tensor, ori_input: torch.Tensor, is_cond: bool):
-        """Update state with newly computed output and original input.
+        Args:
+            is_cond: True for conditional path, False for unconditional path
+
+        Returns:
+            True if real computation is needed, False if can use approximation
+        """
+        state = self.cond_state if is_cond else self.uncond_state
+        state._increment_step()
+        return state.should_compute()
+
+    def update(self, output: torch.Tensor, ori_input: torch.Tensor, is_cond: bool) -> None:
+        """Update cache with newly computed output and original input.
 
         Stores the residual (output - input) and computes its derivatives
         for Taylor series approximation.
@@ -470,44 +473,18 @@ class AdaTaylorCache:
         state = self.cond_state if is_cond else self.uncond_state
         state.update(output, ori_input)
 
-    def approximate(self, current_input: torch.Tensor, is_cond: bool) -> torch.Tensor:
+    def approximate(self, input: torch.Tensor, is_cond: bool) -> torch.Tensor:
         """Get approximated output using hybrid strategy.
 
         Args:
-            current_input: Current input tensor to DiT block.
+            input: Current input tensor to DiT block.
             is_cond: True for conditional path, False for unconditional path.
 
         Returns:
             Approximated output tensor.
         """
         state = self.cond_state if is_cond else self.uncond_state
-        return state.approximate(current_input)
-
-    def should_skip(self, is_cond: bool) -> bool:
-        """Check if computation should be skipped.
-
-        Args:
-            is_cond: True for conditional path, False for unconditional path.
-
-        Returns:
-            True if should skip and use approximation, False if should compute.
-        """
-        state = self.cond_state if is_cond else self.uncond_state
-        return not state.should_compute()
-
-    def should_compute(self, is_cond: bool) -> bool:
-        """Check if real computation is needed.
-
-        Args:
-            is_cond: True for conditional path, False for unconditional path.
-
-        Returns:
-            True if real computation is needed, False if can skip.
-        """
-        state = self.cond_state if is_cond else self.uncond_state
-        return state.should_compute()
-
-    # ==================== Info Methods ====================
+        return state.approximate(input)
 
     def get_compute_steps(self) -> List[int]:
         """Get list of steps where real computation will occur (for debugging).
@@ -553,9 +530,8 @@ class _AdaTaylorCacheCalibratorState:
         return self.cnt >= self.num_steps
 
 
-class AdaTaylorCacheCalibrator:
-    """
-    Calibrator for generating AdaTaylorCache parameters.
+class AdaTaylorCacheCalibrator(BaseFeatureCache):
+    """Calibrator for generating AdaTaylorCache parameters.
 
     This calibrator runs the pipeline once and collects norm_ratio data
     for both cond and uncond paths, then outputs a JSON file with parameters.
@@ -567,8 +543,8 @@ class AdaTaylorCacheCalibrator:
             model_name="Wan2.1-T2V-1.3B",
             output_path="path/to/params.json"
         )
-        # During inference, call cond_store/uncond_store after each block forward
-        # After all steps, call save() to generate the JSON file
+        # During inference, call update() after each block forward
+        # After all steps, calibration file is auto-saved
     """
 
     def __init__(
@@ -578,19 +554,7 @@ class AdaTaylorCacheCalibrator:
         model_name: str,
         output_path: str | None = None,
     ):
-        """
-        Initialize AdaTaylorCacheCalibrator.
-
-        Args:
-            num_inference_steps: Number of inference steps
-            sigma_shift: Sigma shift value used in the scheduler
-            model_name: Model name for the output file (e.g., "Wan2.1-T2V-1.3B")
-            output_path: Output path for the JSON file. If None, uses default params directory.
-        """
-        print(
-            f"Init AdaTaylorCacheCalibrator: num_steps={num_inference_steps}, \
-            sigma_shift={sigma_shift}, model={model_name}"
-        )
+        print(f"Init AdaTaylorCacheCalibrator: num_steps={num_inference_steps}, sigma_shift={sigma_shift}, model={model_name}")
         self.num_inference_steps = num_inference_steps
         self.sigma_shift = sigma_shift
         self.model_name = model_name
@@ -608,14 +572,18 @@ class AdaTaylorCacheCalibrator:
 
         self._finished = False
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset all calibrator states."""
         self.cond_calibrator.reset()
         self.uncond_calibrator.reset()
         self._finished = False
 
-    def store(self, x: torch.Tensor, ori_x: torch.Tensor, is_cond: bool) -> None:
-        """Store residual for cond or uncond path.
+    def should_compute(self, is_cond: bool) -> bool:
+        """Always returns True - calibrator needs to compute all steps."""
+        return True
+
+    def update(self, x: torch.Tensor, ori_x: torch.Tensor, is_cond: bool) -> None:
+        """Store residual for calibration.
 
         Args:
             x: Output tensor from DiT block.
@@ -625,6 +593,10 @@ class AdaTaylorCacheCalibrator:
         calibrator = self.cond_calibrator if is_cond else self.uncond_calibrator
         calibrator.store(x, ori_x)
         self._check_and_save()
+
+    def approximate(self, input: torch.Tensor, is_cond: bool) -> torch.Tensor:
+        """Calibrator always computes, so this returns input unchanged."""
+        return input
 
     def _check_and_save(self):
         """Check if calibration is finished and save results."""

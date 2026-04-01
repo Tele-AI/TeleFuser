@@ -624,8 +624,7 @@ class QwenImageDiT(BaseModel):
         edit_latents: torch.Tensor | None = None,
         cond_flag: bool = True,
     ) -> torch.Tensor:
-        self.feature_cache_hook.mark_step_begin(cond_flag)
-
+        # Feature cache handling - step ID is managed internally
         img_shapes = [(1, latents.shape[2] // 2, latents.shape[3] // 2)]
         txt_seq_lens = prompt_emb_mask.sum(dim=1).tolist()
         if prompt_emb_mask.dtype != torch.bool:
@@ -669,12 +668,11 @@ class QwenImageDiT(BaseModel):
         image_rotary_emb = (img_freqs, txt_freqs)
 
         ori_image = image
-        cached_output = self.feature_cache_hook.pre_forward(image, cond_flag)
-        if cached_output is None:
+        if self.feature_cache.should_compute(cond_flag):
             image = self.forward_blocks(image, text, conditioning, image_rotary_emb, attention_mask)
-            self.feature_cache_hook.post_forward(image, ori_image, cond_flag)
+            self.feature_cache.update(image, ori_image, cond_flag)
         else:
-            image = cached_output
+            image = self.feature_cache.approximate(image, cond_flag)
 
         image = self.norm_out(image, conditioning)
         image = self.proj_out(image)

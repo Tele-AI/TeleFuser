@@ -12,12 +12,7 @@ from telefuser.utils.logging import logger
 from .config import AttentionConfig, AttnImplType, OffloadConfig
 
 if TYPE_CHECKING:
-    from telefuser.feature_cache import (
-        AdaTaylorCacheCalibratorHook,
-        AdaTaylorCacheHook,
-        FeatureCacheHookManager,
-        ResidualAnalyzerHook,
-    )
+    from telefuser.feature_cache import BaseFeatureCache
 
 
 class BaseModel(torch.nn.Module):
@@ -40,17 +35,17 @@ class BaseModel(torch.nn.Module):
         self.layer_name_list: list[str] = []
         # Whether to use pinned CPU memory for faster H2D transfer
         self._use_pinned_memory: bool = True
-        # Feature cache hook manager (lazy initialization)
-        self._feature_cache_hook: FeatureCacheHookManager | None = None
+        # Feature cache (lazy initialization)
+        self._feature_cache: BaseFeatureCache | None = None
 
     @property
-    def feature_cache_hook(self) -> FeatureCacheHookManager:
-        """Get or create the feature cache hook manager."""
-        if self._feature_cache_hook is None:
-            from telefuser.feature_cache import FeatureCacheHookManager
+    def feature_cache(self) -> BaseFeatureCache:
+        """Get or create the feature cache (defaults to NoOpCache)."""
+        if self._feature_cache is None:
+            from telefuser.feature_cache import NoOpCache
 
-            self._feature_cache_hook = FeatureCacheHookManager()
-        return self._feature_cache_hook
+            self._feature_cache = NoOpCache()
+        return self._feature_cache
 
     def onload_device(self, device: torch.device, non_blocking: bool | None = None) -> None:
         """Load model to specified device.
@@ -173,16 +168,15 @@ class BaseModel(torch.nn.Module):
             taylor_threshold: Threshold for switching to residual reuse (default: 2).
             init_step: Initial step number (default: 0).
         """
-        from telefuser.feature_cache import AdaTaylorCacheHook
+        from telefuser.feature_cache import create_feature_cache
 
-        self.feature_cache_hook.set_hook(
-            AdaTaylorCacheHook(
-                model_type=model_type,
-                num_inference_steps=num_inference_steps,
-                n_derivatives=n_derivatives,
-                taylor_threshold=taylor_threshold,
-                init_step=init_step,
-            )
+        self._feature_cache = create_feature_cache(
+            "ada_taylor",
+            model_type=model_type,
+            num_inference_steps=num_inference_steps,
+            n_derivatives=n_derivatives,
+            taylor_threshold=taylor_threshold,
+            init_step=init_step,
         )
         logger.info(f"AdaTaylorCache enabled: model_type={model_type}, num_steps={num_inference_steps}")
 
@@ -201,29 +195,30 @@ class BaseModel(torch.nn.Module):
             model_name: Model name for the output file.
             output_path: Output path for the JSON file.
         """
-        from telefuser.feature_cache import AdaTaylorCacheCalibratorHook
+        from telefuser.feature_cache import create_feature_cache
 
-        self.feature_cache_hook.set_hook(
-            AdaTaylorCacheCalibratorHook(
-                num_inference_steps=num_inference_steps,
-                sigma_shift=sigma_shift,
-                model_name=model_name,
-                output_path=output_path,
-            )
+        self._feature_cache = create_feature_cache(
+            "calibrator",
+            num_inference_steps=num_inference_steps,
+            sigma_shift=sigma_shift,
+            model_name=model_name,
+            output_path=output_path,
         )
         logger.info(f"AdaTaylorCache calibrator enabled for {model_name}")
 
     def set_residual_analyzer(self, analyzer) -> None:
-        """Set up residual analyzer for Taylor approximation error analysis."""
-        from telefuser.feature_cache import ResidualAnalyzerHook
+        """Set up residual analyzer for Taylor approximation error analysis.
 
-        self.feature_cache_hook.set_hook(ResidualAnalyzerHook(analyzer))
+        Note: analyzer must implement BaseFeatureCache interface.
+        """
+        self._feature_cache = analyzer
         logger.info("Residual analyzer enabled")
 
     def reset_feature_cache(self) -> None:
-        """Reset feature cache hook."""
-        if self._feature_cache_hook is not None:
-            self._feature_cache_hook.clear_hook()
+        """Reset feature cache to NoOpCache."""
+        from telefuser.feature_cache import NoOpCache
+
+        self._feature_cache = NoOpCache()
 
     def mark_compile_static(self) -> None:
         """Mark module runtime states as static for torch.compile compatibility.
