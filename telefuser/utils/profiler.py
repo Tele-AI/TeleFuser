@@ -1,111 +1,185 @@
-"""Profiling utilities for performance monitoring."""
-
-from __future__ import annotations
-
 import asyncio
 import os
 import time
 from functools import wraps
 from pathlib import Path
-from types import TracebackType
-from typing import Any, Callable
 
 import torch
 
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
+_DEVICE_ACTIVITY_MAP = {
+    "cuda": torch.profiler.ProfilerActivity.CUDA,
+    "xpu": torch.profiler.ProfilerActivity.XPU,
+    "npu": torch.profiler.ProfilerActivity.PrivateUse1,
+}
+
+
+def _get_rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def _should_enable_profiler(name: str) -> bool:
+    enabled_names = os.getenv("ENABLE_PROFILER_NAMES", "").split(",")
+    return name in {n.strip() for n in enabled_names if n.strip()}
+
+
+def _create_profiler() -> torch.profiler.profile:
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    device_activity = _DEVICE_ACTIVITY_MAP.get(current_platform.device_type)
+    if device_activity is not None:
+        activities.append(device_activity)
+    return torch.profiler.profile(
+        activities=activities,
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    )
+
+
+def _log_profiler_summary(profiler: torch.profiler.profile, name: str, rank_info: str) -> None:
+    if not hasattr(profiler, "key_averages"):
+        return
+    try:
+        summary = profiler.key_averages()
+        logger.info(f"{rank_info}Profiler summary for '{name}': Total operations: {len(summary)}")
+
+        top_ops = sorted(
+            summary,
+            key=lambda x: getattr(x, "cpu_time_total", 0) + getattr(x, "cuda_time_total", 0),
+            reverse=True,
+        )[:10]
+        for i, op in enumerate(top_ops):
+            cpu_time_ms = getattr(op, "cpu_time_total", getattr(op, "cpu_time", 0)) / 1000
+            cuda_time_ms = getattr(op, "cuda_time_total", getattr(op, "cuda_time", 0)) / 1000
+            cuda_str = f"{cuda_time_ms:.2f} ms" if cuda_time_ms > 0 else "N/A"
+            logger.info(f"{rank_info}  {i + 1}. {op.key}: CPU={cpu_time_ms:.2f} ms, CUDA={cuda_str}")
+    except Exception as e:
+        logger.warning(f"{rank_info}Failed to generate profiler summary: {e}")
+
+
+# Global counter per profiler name for unique output filenames
+_profiler_run_counts: dict[str, int] = {}
+
 
 class _ProfilingContext:
-    """Context manager for profiling function execution."""
+    """Profiling context manager and decorator.
 
-    def __init__(self, name: str) -> None:
+    When used as a decorator, each function invocation creates fresh profiling state,
+    avoiding shared-state bugs in concurrent or repeated calls.
+    """
+
+    def __init__(self, name: str, *, reset_peak_memory: bool = True):
         self.name = name
-        self.rank = 0
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            self.rank = torch.distributed.get_rank()
-        self.rank_info = f"Rank {self.rank} - "
-
-        # PyTorch Profiler configuration
-        self.enable_profiler = self._should_enable_profiler()
-        self.profiler: torch.profiler.profile | None = None
-        self.profiler_output_dir = Path(os.getenv("PROFILER_OUTPUT_DIR", "./profiler_output"))
-        self.profiler_run_count = 0
-
-    def _should_enable_profiler(self) -> bool:
-        """Determine whether to enable profiler based on environment variables."""
-        enabled_names = os.getenv("ENABLE_PROFILER_NAMES", "").split(",")
-        enabled_names = {name.strip() for name in enabled_names if name.strip()}
-        return self.name in enabled_names
+        self.reset_peak_memory = reset_peak_memory
+        self._rank = _get_rank()
+        self._rank_info = f"Rank {self._rank} - "
+        self._enable_profiler = _should_enable_profiler(name)
+        self._profiler_output_dir = Path(os.getenv("PROFILER_OUTPUT_DIR", "./profiler_output"))
+        # Per-invocation state
+        self._profiler: torch.profiler.profile | None = None
+        self._start_time: float = 0.0
 
     def _get_profiler_output_path(self) -> Path:
-        """Generate profiler output file path."""
-        self.profiler_run_count += 1
-        filename = f"{self.name}_rank{self.rank}_run{self.profiler_run_count}.json"
-        return self.profiler_output_dir / filename
+        count = _profiler_run_counts.get(self.name, 0) + 1
+        _profiler_run_counts[self.name] = count
+        return self._profiler_output_dir / f"{self.name}_rank{self._rank}_run{count}.json"
 
-    def __enter__(self) -> _ProfilingContext: ...
+    def _start(self) -> None:
+        current_platform.synchronize()
+        if self.reset_peak_memory:
+            current_platform.reset_peak_memory_stats()
+        self._start_time = time.perf_counter()
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None: ...
+        if self._enable_profiler:
+            logger.info(f"{self._rank_info}Starting PyTorch profiler for '{self.name}'")
+            self._profiler = _create_profiler()
+            self._profiler.start()
 
-    async def __aenter__(self) -> _ProfilingContext: ...
+    def _stop(self) -> None:
+        current_platform.synchronize()
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None: ...
+        if self._enable_profiler and self._profiler:
+            self._profiler.stop()
+            self._profiler_output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = self._get_profiler_output_path()
+            self._profiler.export_chrome_trace(str(output_path))
+            logger.info(f"{self._rank_info}PyTorch profiler trace saved to: {output_path}")
+            _log_profiler_summary(self._profiler, self.name, self._rank_info)
+            self._profiler = None
 
-    def __call__(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        peak_memory = current_platform.max_memory_allocated() / (1024**3)
+        elapsed = time.perf_counter() - self._start_time
+        logger.info(f"{self._rank_info}Function '{self.name}' Peak Memory: {peak_memory:.2f} GB")
+        logger.info(f"[Profile] {self.name} cost {elapsed:.6f} seconds")
+
+    def __enter__(self):
+        self._start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop()
+        return False
+
+    async def __aenter__(self):
+        self._start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._stop()
+        return False
+
+    def __call__(self, func):
+        name = self.name
+        reset_peak_memory = self.reset_peak_memory
+
         if asyncio.iscoroutinefunction(func):
 
             @wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                async with self:
+            async def async_wrapper(*args, **kwargs):
+                async with _ProfilingContext(name, reset_peak_memory=reset_peak_memory):
                     return await func(*args, **kwargs)
 
             return async_wrapper
         else:
 
             @wraps(func)
-            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with self:
+            def sync_wrapper(*args, **kwargs):
+                with _ProfilingContext(name, reset_peak_memory=reset_peak_memory):
                     return func(*args, **kwargs)
 
             return sync_wrapper
 
 
 class _NullContext:
-    """No-op context manager for when profiling is disabled."""
+    """No-op context manager / decorator for disabled profiling."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args, **kwargs):
         pass
 
-    def __enter__(self) -> _NullContext:
+    def __enter__(self):
         return self
 
-    def __exit__(self, *args: Any) -> bool:
+    def __exit__(self, *args):
         return False
 
-    async def __aenter__(self) -> _NullContext:
+    async def __aenter__(self):
         return self
 
-    async def __aexit__(self, *args: Any) -> bool:
+    async def __aexit__(self, *args):
         return False
 
-    def __call__(self, func: Callable[..., Any]) -> Callable[..., Any]:
+    def __call__(self, func):
         return func
 
 
+# Public API — backward compatible
 ProfilingContext = _ProfilingContext
-ENABLE_PROFILING_DEBUG = os.getenv("ENABLE_PROFILING_DEBUG", "false").lower() == "true"
-ProfilingContext4Debug = _ProfilingContext if ENABLE_PROFILING_DEBUG else _NullContext
+_DEBUG = os.getenv("TELEFUSER_PROFILE_DEBUG", "false").lower() == "true"
+ProfilingContext4Debug = _ProfilingContext if _DEBUG else _NullContext
 
 
 def enable_profiler_for_names(names: str) -> None:
