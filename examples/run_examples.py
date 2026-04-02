@@ -83,8 +83,8 @@ def _generate_log_filename(script: str, gpu_count: int, timestamp: str) -> str:
 
 
 def _get_date_dir(output_root: str) -> str:
-    """Get date-based output directory for today."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    """Get date-based output directory with minute precision."""
+    date_str = datetime.now().strftime("%Y-%m-%d_%H%M")
     return os.path.join(output_root, date_str)
 
 
@@ -442,11 +442,19 @@ class PipelineScheduler:
                 result.note += " [baseline updated]"
 
         # Performance/memory threshold checks
-        if result.status == "PASS" and job.ppl_cfg.max_elapsed_seconds and result.elapsed_seconds > job.ppl_cfg.max_elapsed_seconds:
+        if (
+            result.status == "PASS"
+            and job.ppl_cfg.max_elapsed_seconds
+            and result.elapsed_seconds > job.ppl_cfg.max_elapsed_seconds
+        ):
             result.status = "FAIL"
             result.note += f" [PERF: {result.elapsed_seconds:.1f}s > {job.ppl_cfg.max_elapsed_seconds:.1f}s]"
 
-        if result.status == "PASS" and job.ppl_cfg.max_gpu_memory_mb and result.peak_gpu_memory_mb > job.ppl_cfg.max_gpu_memory_mb:
+        if (
+            result.status == "PASS"
+            and job.ppl_cfg.max_gpu_memory_mb
+            and result.peak_gpu_memory_mb > job.ppl_cfg.max_gpu_memory_mb
+        ):
             result.status = "FAIL"
             result.note += f" [MEM: {result.peak_gpu_memory_mb:.0f}MB > {job.ppl_cfg.max_gpu_memory_mb:.0f}MB]"
 
@@ -494,8 +502,7 @@ class PipelineScheduler:
             List of (pipeline_key, gpu_ids, elapsed_seconds).
         """
         return [
-            (job.pipeline_key, job.gpu_ids, round(time.time() - job.start_time, 1))
-            for job in self.running.values()
+            (job.pipeline_key, job.gpu_ids, round(time.time() - job.start_time, 1)) for job in self.running.values()
         ]
 
 
@@ -858,7 +865,7 @@ def _emit_result(data: dict) -> None:
     print(f"{_RESULT_MARKER}{json.dumps(data)}", flush=True)
 
 
-def _run_single(pipeline_key: str, config_path: str | None) -> None:
+def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | None) -> None:
     """Subprocess entry point: load, run, save one pipeline."""
     cfg = load_config(config_path)
     ppl_cfg = cfg.pipelines.get(pipeline_key)
@@ -869,9 +876,13 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
     examples_root = os.path.join(_PROJECT_ROOT, "examples")
     script_path = os.path.join(examples_root, ppl_cfg.script)
 
-    output_root = cfg.output_root
-    if not os.path.isabs(output_root):
-        output_root = os.path.join(_PROJECT_ROOT, output_root)
+    # Use provided output_dir or fall back to config
+    if output_dir:
+        output_root = output_dir
+    else:
+        output_root = cfg.output_root
+        if not os.path.isabs(output_root):
+            output_root = os.path.join(_PROJECT_ROOT, output_root)
 
     # New directory structure: date-based output directory
     date_dir = _get_date_dir(output_root)
@@ -1065,6 +1076,70 @@ def compute_image_diff(baseline_path: str, current_path: str) -> float | None:
     if img_a.shape != img_b.shape:
         return None
     return float(np.mean(np.abs(img_a - img_b)))
+
+
+# =============================================================================
+# Resume Support
+# =============================================================================
+
+
+def _check_output_exists(output_root: str, script: str, gpu_count: int, output_type: str) -> bool:
+    """Check if output file already exists in the output directory.
+
+    Searches in date-based subdirectories and immediate children.
+    """
+    example_dir, example_name = _parse_script_path(script)
+    ext = "mp4" if output_type == "video" else "png"
+    pattern = f"{example_dir}__{example_name}_{gpu_count}gpu_"
+
+    if not os.path.isdir(output_root):
+        return False
+
+    # Check immediate children (flat structure)
+    for f in os.listdir(output_root):
+        if f.startswith(pattern) and f.endswith(f".{ext}"):
+            return True
+
+    # Check subdirectories (date-based structure like 2026-04-02_1530/)
+    for entry in os.listdir(output_root):
+        entry_path = os.path.join(output_root, entry)
+        if os.path.isdir(entry_path) and not entry.startswith(("baseline", "logs", "temp")):
+            for f in os.listdir(entry_path):
+                if f.startswith(pattern) and f.endswith(f".{ext}"):
+                    return True
+
+    return False
+
+
+def _get_completed_pipelines(output_root: str, pipelines: dict[str, PipelineConfig]) -> set[str]:
+    """Get set of pipeline names that already have output files.
+
+    Args:
+        output_root: Output directory to check.
+        pipelines: Dict of pipeline name to config.
+
+    Returns:
+        Set of pipeline names with existing output files.
+    """
+    completed = set()
+    for name, cfg in pipelines.items():
+        if _check_output_exists(output_root, cfg.script, cfg.gpu_count, cfg.output_type):
+            completed.add(name)
+    return completed
+
+
+def _load_existing_results(output_root: str) -> dict:
+    """Load existing results dict from report file if it exists."""
+    report_path = os.path.join(output_root, "example_report.json")
+    if not os.path.exists(report_path):
+        return {}
+
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        return report.get("results", {})
+    except (json.JSONDecodeError, KeyError):
+        return {}
 
 
 # =============================================================================
@@ -1318,6 +1393,8 @@ def run_pipeline(
     ]
     if config_path:
         cmd.extend(["--config", config_path])
+    # Pass output directory to subprocess (for resume mode)
+    cmd.extend(["--output-dir", output_root])
 
     start = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1506,8 +1583,14 @@ def _get_last_n_lines_from_log(log_path: str | None, n: int = 50) -> str:
         return ""
 
 
-def save_report_json(output_root: str, results: list[Result]) -> str:
-    """Save results to JSON report with enhanced failure details."""
+def save_report_json(output_root: str, results: list[Result], existing_results: dict | None = None) -> str:
+    """Save results to JSON report with enhanced failure details.
+
+    Args:
+        output_root: Output directory for the report.
+        results: List of Result objects from current run.
+        existing_results: Optional dict of existing results to merge (for resume mode).
+    """
     os.makedirs(output_root, exist_ok=True)
     report_path = os.path.join(output_root, "example_report.json")
 
@@ -1521,35 +1604,43 @@ def save_report_json(output_root: str, results: list[Result]) -> str:
     except Exception:
         pass
 
-    counts = {"pass": 0, "fail": 0, "skip": 0, "error": 0, "timeout": 0}
+    # Merge with existing results if provided (for resume mode)
+    all_results_dict = {}
+    if existing_results:
+        all_results_dict.update(existing_results)
     for r in results:
-        key = r.status.lower()
+        all_results_dict[r.name] = asdict(r)
+
+    # Build counts from all results
+    counts = {"pass": 0, "fail": 0, "skip": 0, "error": 0, "timeout": 0}
+    for data in all_results_dict.values():
+        key = data.get("status", "error").lower()
         counts[key] = counts.get(key, 0) + 1
 
     # Build failed details list
     failed_details = []
     failed_commands = []
-    for r in results:
-        if r.status not in ("PASS", "SKIP"):
+    for data in all_results_dict.values():
+        if data.get("status") not in ("PASS", "SKIP"):
             detail = {
-                "name": r.name,
-                "status": r.status,
-                "error_category": r.error_category,
-                "error_message": r.error_message[:500] if r.error_message else "",
-                "reproduce_command": r.reproduce_command,
-                "log_path": r.log_path,
-                "last_50_lines_log": _get_last_n_lines_from_log(r.log_path, 50),
-                "analysis_hint": _generate_analysis_hint(r.error_category, r.error_message),
+                "name": data.get("name", ""),
+                "status": data.get("status", ""),
+                "error_category": data.get("error_category", ""),
+                "error_message": (data.get("error_message", "") or "")[:500],
+                "reproduce_command": data.get("reproduce_command", ""),
+                "log_path": data.get("log_path"),
+                "last_50_lines_log": _get_last_n_lines_from_log(data.get("log_path"), 50),
+                "analysis_hint": _generate_analysis_hint(data.get("error_category", ""), data.get("error_message", "")),
             }
             failed_details.append(detail)
-            if r.reproduce_command:
-                failed_commands.append(r.reproduce_command)
+            if data.get("reproduce_command"):
+                failed_commands.append(data["reproduce_command"])
 
     report = {
         "generated_at": datetime.now().isoformat(),
         "environment": env_info,
-        "summary": {"total": len(results), **counts},
-        "results": {r.name: asdict(r) for r in results},
+        "summary": {"total": len(all_results_dict), **counts},
+        "results": all_results_dict,
         "failed_details": failed_details,
         "reproduce_all_failed": " && ".join(failed_commands) if failed_commands else "",
     }
@@ -1573,23 +1664,31 @@ def main() -> None:
     parser.add_argument("--update-baseline", action="store_true", help="Update baseline outputs after successful runs")
     parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument(
+        "-r",
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume from existing output directory. Skips pipelines with PASS status in the report.",
+    )
+    parser.add_argument(
         "--gpus",
         type=str,
         default=None,
         help="Available GPU devices for parallel execution (e.g., '0,1,2,3'). "
-             "When specified, enables parallel scheduling across these GPUs. "
-             "Default: use all visible GPUs (sequential execution).",
+        "When specified, enables parallel scheduling across these GPUs. "
+        "Default: use all visible GPUs (sequential execution).",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show real-time log output from each pipeline")
 
     # Internal: subprocess self-invocation
     parser.add_argument("--run-single", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--output-dir", type=str, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
     # Subprocess mode: run a single pipeline and exit
     if args.run_single:
-        _run_single(args.run_single, args.config)
+        _run_single(args.run_single, args.config, args.output_dir)
         return
 
     # Load config
@@ -1620,9 +1719,32 @@ def main() -> None:
         print("No pipelines to run.")
         return
 
-    output_root = cfg.output_root
-    if not os.path.isabs(output_root):
-        output_root = os.path.join(_PROJECT_ROOT, output_root)
+    # Determine output directory
+    if args.resume:
+        output_root = os.path.abspath(args.resume)
+        if not os.path.isdir(output_root):
+            print(f"Error: Resume directory does not exist: {output_root}")
+            sys.exit(1)
+    else:
+        output_root = cfg.output_root
+        if not os.path.isabs(output_root):
+            output_root = os.path.join(_PROJECT_ROOT, output_root)
+
+    # Load completed pipelines for resume (check output file existence)
+    completed_pipelines = set()
+    if args.resume:
+        completed_pipelines = _get_completed_pipelines(output_root, to_run)
+        if completed_pipelines:
+            print(f"Resuming from: {output_root}")
+            print(f"Skipping {len(completed_pipelines)} pipelines with existing output: {sorted(completed_pipelines)}")
+            print("-" * 60)
+
+            # Filter out completed pipelines
+            to_run = {k: v for k, v in to_run.items() if k not in completed_pipelines}
+
+            if not to_run:
+                print("All pipelines already have output files. Nothing to run.")
+                return
 
     # Determine GPU pool
     gpu_ids: list[int] = []
@@ -1718,8 +1840,13 @@ def main() -> None:
                 print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
 
     # Report
+    # Load existing results for resume mode
+    existing_results = {}
+    if args.resume:
+        existing_results = _load_existing_results(output_root)
+
     print_results_table(results)
-    report_path = save_report_json(output_root, results)
+    report_path = save_report_json(output_root, results, existing_results)
     print(f"\nJSON report: {report_path}")
 
     fail_count = sum(1 for r in results if r.status in ("FAIL", "ERROR", "TIMEOUT"))
