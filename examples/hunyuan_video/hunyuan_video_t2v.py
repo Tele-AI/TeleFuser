@@ -213,7 +213,7 @@ def run(
 @click.option("--seed", default=42, help="Random seed")
 @click.option("--resolution", default="720p", help="Target resolution (ignored if --enable_sr)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio")
-@click.option("--model_root", default="/root/models/HunyuanVideo-1.5", help="Model checkpoint root")
+@click.option("--model_root", default="/nvfile-heatstorage/model_zoo/HunyuanVideo-1.5", help="Model checkpoint root")
 @click.option("--enable_byt5", is_flag=True, help="Enable ByT5 for glyph text rendering")
 @click.option("--enable_sr", is_flag=True, help="Enable Super-Resolution (480p -> 720p)")
 def main(

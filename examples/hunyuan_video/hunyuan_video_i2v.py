@@ -169,7 +169,7 @@ def run_with_file(
 )
 @click.option("--negative_prompt", default="", help="Negative prompt")
 @click.option("--seed", default=42, help="Random seed")
-@click.option("--model_root", default="/root/models/HunyuanVideo-1.5", help="Model checkpoint root")
+@click.option("--model_root", default="/nvfile-heatstorage/model_zoo/HunyuanVideo-1.5", help="Model checkpoint root")
 @click.option("--resolution", default="480p", help="480p or 720p")
 def main(gpu_num, image_path, prompt, negative_prompt, seed, model_root, resolution):
     """HunyuanVideo Image-to-Video generation."""
