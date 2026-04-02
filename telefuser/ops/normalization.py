@@ -49,6 +49,8 @@ class RMSNorm(CustomOp):
         eps: Epsilon for numerical stability.
         elementwise_affine: Whether to use learnable weights.
         bias: Whether to use learnable bias.
+        device: Device for parameters.
+        dtype: Data type for parameters.
     """
 
     def __init__(
@@ -57,15 +59,17 @@ class RMSNorm(CustomOp):
         eps: float = 1e-5,
         elementwise_affine: bool = True,
         bias: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.eps = eps
         self.elementwise_affine = elementwise_affine
 
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim))
+            self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
             if bias:
-                self.bias = nn.Parameter(torch.zeros(dim))
+                self.bias = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
             else:
                 self.register_parameter("bias", None)
         else:
@@ -120,16 +124,26 @@ class LayerNorm(CustomOp):
         eps: Epsilon for numerical stability.
         elementwise_affine: Whether to use learnable weights and bias.
         bias: Whether to use bias.
+        device: Device for parameters.
+        dtype: Data type for parameters.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True, bias: bool = True):
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim))
+            self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
             if bias:
-                self.bias = nn.Parameter(torch.zeros(dim))
+                self.bias = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
             else:
                 self.register_parameter("bias", None)
         else:
