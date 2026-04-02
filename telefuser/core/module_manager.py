@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 from typing import Any
 
@@ -181,7 +182,7 @@ class ModuleManager:
         """Load model from file path with automatic type detection.
 
         Args:
-            file_path: Path to model checkpoint file(s)
+            file_path: Path to model checkpoint file(s). Supports wildcards (e.g., "model_*.safetensors")
             device: Target device (default: self.device)
             torch_dtype: Target dtype (default: self.torch_dtype)
             low_cpu_mem_usage: Keep weights in CPU memory until moved to device
@@ -189,6 +190,15 @@ class ModuleManager:
         """
         device = device or self.device
         torch_dtype = torch_dtype or self.torch_dtype
+
+        # Expand wildcards if present
+        if isinstance(file_path, str) and ("*" in file_path or "?" in file_path):
+            expanded_paths = sorted(glob.glob(file_path))
+            if not expanded_paths:
+                logger.warning(f"No files matched pattern: {file_path}")
+                return
+            logger.info(f"Wildcard pattern '{file_path}' expanded to: {expanded_paths}")
+            file_path = expanded_paths
 
         # Merge state dicts if multiple files provided
         if isinstance(file_path, list):
