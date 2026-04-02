@@ -30,6 +30,7 @@ Options:
   --all                  Run all enabled pipelines
   --update-baseline      Update baseline outputs after successful runs
   --config PATH          Path to config YAML (default: regression_config.yaml)
+  -v, --verbose          Show real-time log output from each pipeline
 ```
 
 ## File Structure

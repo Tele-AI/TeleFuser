@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -727,8 +728,88 @@ def _parse_runner_output(stdout: str) -> dict:
     return {}
 
 
+def _run_subprocess_with_tee(
+    cmd: list[str],
+    timeout: float,
+    cwd: str,
+    env: dict,
+    verbose: bool,
+    log_path: str,
+) -> tuple[int, str, str]:
+    """Run subprocess with optional real-time output tee to terminal and log file.
+
+    Returns:
+        (return_code, stdout_text, stderr_text)
+    """
+    if verbose:
+        # Real-time tee mode: output to terminal AND capture for log file
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def read_stream(stream, output_list, stream_name):
+            for line in iter(stream.readline, ""):
+                if stream_name == "stdout":
+                    print(line, end="", flush=True)
+                else:
+                    print(f"[stderr] {line}", end="", flush=True)
+                output_list.append(line)
+            stream.close()
+
+        t_out = threading.Thread(target=read_stream, args=(proc.stdout, stdout_lines, "stdout"))
+        t_err = threading.Thread(target=read_stream, args=(proc.stderr, stderr_lines, "stderr"))
+        t_out.start()
+        t_err.start()
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+        stdout_text = "".join(stdout_lines)
+        stderr_text = "".join(stderr_lines)
+        return_code = proc.returncode
+    else:
+        # Capture mode: silent execution, output saved to log file
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+            )
+            return_code = proc.returncode
+            stdout_text = proc.stdout or ""
+            stderr_text = proc.stderr or ""
+        except subprocess.TimeoutExpired as e:
+            return_code = -1
+            stdout_text = e.stdout or ""
+            stderr_text = e.stderr or ""
+
+    return return_code, stdout_text, stderr_text
+
+
 def run_pipeline(
-    pipeline_key: str, ppl_cfg: PipelineConfig, output_root: str, config_path: str | None, update_baseline: bool
+    pipeline_key: str,
+    ppl_cfg: PipelineConfig,
+    output_root: str,
+    config_path: str | None,
+    update_baseline: bool,
+    verbose: bool = False,
 ) -> Result:
     """Run a single pipeline in a subprocess and evaluate results."""
     gpu_count = ppl_cfg.gpu_count
@@ -758,29 +839,37 @@ def run_pipeline(
 
     start = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=ppl_cfg.timeout_seconds,
-            cwd=_PROJECT_ROOT,
-            env=env,
-        )
-        elapsed = time.time() - start
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start
+
+    # Prepare log file path (needed for tee mode)
+    logs_dir = os.path.join(output_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_filename = _generate_log_filename(ppl_cfg.script, gpu_count, timestamp)
+    log_path = os.path.join(logs_dir, log_filename)
+
+    return_code, stdout_text, stderr_text = _run_subprocess_with_tee(
+        cmd=cmd,
+        timeout=ppl_cfg.timeout_seconds,
+        cwd=_PROJECT_ROOT,
+        env=env,
+        verbose=verbose,
+        log_path=log_path,
+    )
+    elapsed = time.time() - start
+
+    # Handle timeout
+    if return_code == -1:
         return Result(
             name=pipeline_key,
             status="TIMEOUT",
             elapsed_seconds=round(elapsed, 2),
             script=ppl_cfg.script,
             reproduce_command=reproduce_cmd,
+            log_path=log_path,
             note=f"Timeout after {ppl_cfg.timeout_seconds}s",
         )
 
     # Parse result
-    data = _parse_runner_output(proc.stdout)
+    data = _parse_runner_output(stdout_text)
     status = data.get("status", "ERROR")
     error_msg = data.get("error", "")
     error_cat = data.get("error_category", "")
@@ -788,25 +877,21 @@ def run_pipeline(
     script = data.get("script", ppl_cfg.script)
 
     # OOM detection fallback
-    if not error_cat and proc.stderr and _is_oom(proc.stderr):
+    if not error_cat and stderr_text and _is_oom(stderr_text):
         error_cat = "OOM_ERROR"
 
-    if not data and proc.returncode != 0:
-        error_msg = f"Process exited with code {proc.returncode}"
+    if not data and return_code != 0:
+        error_msg = f"Process exited with code {return_code}"
 
     # Save log with new naming convention
-    logs_dir = os.path.join(output_root, "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    log_filename = _generate_log_filename(ppl_cfg.script, gpu_count, timestamp)
-    log_path = os.path.join(logs_dir, log_filename)
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"=== Pipeline: {pipeline_key} ===\n")
         f.write(f"=== Timestamp: {timestamp} ===\n")
         f.write(f"=== Command: {reproduce_cmd} ===\n\n")
         f.write("=== STDOUT ===\n")
-        f.write(proc.stdout or "(empty)\n")
+        f.write(stdout_text or "(empty)\n")
         f.write("\n=== STDERR ===\n")
-        f.write(proc.stderr or "(empty)\n")
+        f.write(stderr_text or "(empty)\n")
 
     result = Result(
         name=pipeline_key,
@@ -1005,6 +1090,7 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Run all enabled pipelines")
     parser.add_argument("--update-baseline", action="store_true", help="Update baseline outputs after successful runs")
     parser.add_argument("--config", type=str, help="Path to config YAML")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show real-time log output from each pipeline")
 
     # Internal: subprocess self-invocation
     parser.add_argument("--run-single", type=str, help=argparse.SUPPRESS)
@@ -1057,10 +1143,13 @@ def main() -> None:
         elapsed_total = time.time() - run_start
         print(f"\n[{idx}/{total}] ({elapsed_total:.0f}s) Running: {name} ...")
 
-        result = run_pipeline(name, ppl_cfg, output_root, args.config, args.update_baseline)
+        result = run_pipeline(
+            name, ppl_cfg, output_root, args.config, args.update_baseline, verbose=args.verbose
+        )
         results.append(result)
 
-        print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
+        if not args.verbose:
+            print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
 
     # Report
     print_results_table(results)
