@@ -247,8 +247,9 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
     params = list(inspect.signature(func).parameters.keys())
     kwargs: dict = {"pipeline": pipeline}
 
-    if "prompt" in params:
-        kwargs["prompt"] = config.get("prompt") or "A beautiful sunset over the ocean with gentle waves."
+    # Only pass prompt if configured in YAML, otherwise use example script's default
+    if "prompt" in params and config.get("prompt"):
+        kwargs["prompt"] = config["prompt"]
 
     if "seed" in params:
         kwargs["seed"] = config.get("seed", 42)

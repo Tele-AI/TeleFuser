@@ -103,6 +103,7 @@ TeleFuser follows a strict layered architecture for operations:
 | Ops | [docs/en/ops.md](docs/en/ops.md) | [docs/zh/ops.md](docs/zh/ops.md) |
 | Parallel | [docs/en/parallel.md](docs/en/parallel.md) | [docs/zh/parallel.md](docs/zh/parallel.md) |
 | Service | [docs/en/service.md](docs/en/service.md) | [docs/zh/service.md](docs/zh/service.md) |
+| Testing | [docs/en/testing.md](docs/en/testing.md) | [docs/zh/testing.md](docs/zh/testing.md) |
 
 ## Key Configuration Classes
 

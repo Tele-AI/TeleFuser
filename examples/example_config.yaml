@@ -31,6 +31,7 @@ pipelines:
     output_type: video
     model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
     ppl_config_overrides:
+      resolution: "480p"
       vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
 
   wan21_1_3b_t2v_radial:
@@ -38,6 +39,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
+    ppl_config_overrides:
+      resolution: "480p"
 
   # ============================================================
   # wan_video — Image to Video
@@ -49,7 +52,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   wan21_14b_i2v_lora:
     script: wan_video/wan21_14b_image_to_video_lora_h100.py
@@ -57,7 +61,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v:
     script: wan_video/wan22_14b_image_to_video_h100.py
@@ -65,7 +70,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_distill:
     script: wan_video/wan22_14b_image_to_video_distill_h100.py
@@ -73,7 +79,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_lora:
     script: wan_video/wan22_14b_image_to_video_lora_h100.py
@@ -81,7 +88,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_mix:
     script: wan_video/wan22_14b_image_to_video_mix_h100.py
@@ -89,7 +97,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   # ============================================================
   # hunyuan_video
@@ -102,6 +111,8 @@ pipelines:
     model_root: /nvfile-heatstorage/model_zoo/HunyuanVideo-1.5
     timeout_seconds: 3600
     max_gpu_memory_mb: 49152
+    ppl_config_overrides:
+      resolution: "480p"
 
   hunyuan_i2v:
     script: hunyuan_video/hunyuan_video_i2v.py
@@ -111,6 +122,8 @@ pipelines:
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
     max_gpu_memory_mb: 55296
+    ppl_config_overrides:
+      resolution: "480p"
 
   # ============================================================
   # qwen_image
@@ -126,7 +139,7 @@ pipelines:
     gpu_count: 1
     output_type: image
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      attn_impl: TORCH_SDPA
 
   qwen_image_edit:
     script: qwen_image/qwen_image_edit_plus_h100.py
@@ -164,7 +177,8 @@ pipelines:
     output_type: video
     timeout_seconds: 3600
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   longcat_i2v:
     script: longcat_video/longcat_image_to_video.py
@@ -173,7 +187,8 @@ pipelines:
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   longcat_video_continue:
     script: longcat_video/longcat_video_continue.py
@@ -182,7 +197,8 @@ pipelines:
     input_video_path: examples/data/dag.mp4
     timeout_seconds: 3600
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   longcat_video_unify:
     script: longcat_video/longcat_video_unify.py
@@ -191,7 +207,8 @@ pipelines:
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
 
   longcat_t2v_refine:
     script: longcat_video/longcat_text_to_video_refine.py
@@ -199,4 +216,5 @@ pipelines:
     output_type: video
     timeout_seconds: 7200
     ppl_config_overrides:
-      attn_impl: FLASH_ATTN_2
+      resolution: "480p"
+      attn_impl: TORCH_SDPA
