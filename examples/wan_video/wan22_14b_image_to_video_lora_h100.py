@@ -112,14 +112,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     return pipe
 
 
-def run(
-    pipeline,
-    image,
-    prompt,
-    negative_prompt="",
-    seed=PPL_CONFIG["seed"],
-    resolution=PPL_CONFIG["resolution"]
-):
+def run(pipeline, image, prompt, negative_prompt="", seed=PPL_CONFIG["seed"], resolution=PPL_CONFIG["resolution"]):
     """
     Convert static images to video sequences using video generation model.
     Args:
@@ -161,14 +154,7 @@ def run_with_file(
     **kwargs,
 ):
     """Run pipeline and save to file."""
-    video = run(
-        pipeline,
-        image,
-        prompt,
-        negative_prompt,
-        seed,
-        resolution=resolution
-    )
+    video = run(pipeline, image, prompt, negative_prompt, seed, resolution=resolution)
     logger.info(f"Saving video to {output_path}")
     save_video(
         video,

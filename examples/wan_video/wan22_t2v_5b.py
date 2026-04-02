@@ -67,7 +67,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 
     # DiT
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in  ppl_config["dit_path"]],
+        [os.path.join(model_root, filename) for filename in ppl_config["dit_path"]],
         torch_dtype=torch.bfloat16,
     )
 

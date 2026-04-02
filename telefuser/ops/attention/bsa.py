@@ -34,8 +34,15 @@ except ImportError:
 
 # ── Block reorder (from official LongCat) ────────────────────────────────
 
+
 def _rearrange_THW_to_3d_block(
-    x: torch.Tensor, Nt: int, Nh: int, Nw: int, t: int, h: int, w: int,
+    x: torch.Tensor,
+    Nt: int,
+    Nh: int,
+    Nw: int,
+    t: int,
+    h: int,
+    w: int,
 ) -> torch.Tensor:
     """Reorder from spatial (T,H,W) layout to 3D-block layout.
 
@@ -49,7 +56,13 @@ def _rearrange_THW_to_3d_block(
 
 
 def _rearrange_3d_block_to_THW(
-    x: torch.Tensor, Nt: int, Nh: int, Nw: int, t: int, h: int, w: int,
+    x: torch.Tensor,
+    Nt: int,
+    Nh: int,
+    Nw: int,
+    t: int,
+    h: int,
+    w: int,
 ) -> torch.Tensor:
     """Reorder from 3D-block layout back to spatial (T,H,W) layout.
 
@@ -144,11 +157,22 @@ def _bsa_core(
         cu_seqlens_k = _get_cu_seqlens(seqlen, q.device)
         head_mask = _get_head_mask_type(num_heads, q.device)
         x = _block_sparse_attn_func(
-            q_flat, k_flat, v_flat,
-            cu_seqlens_q, cu_seqlens_k, head_mask,
-            None, bool_mask, seqlen, seqlen,
-            0.0, deterministic=False, softmax_scale=None,
-            is_causal=False, exact_streaming=False, return_attn_probs=False,
+            q_flat,
+            k_flat,
+            v_flat,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            head_mask,
+            None,
+            bool_mask,
+            seqlen,
+            seqlen,
+            0.0,
+            deterministic=False,
+            softmax_scale=None,
+            is_causal=False,
+            exact_streaming=False,
+            return_attn_probs=False,
         ).unsqueeze(0)
         x = rearrange(x, "b s h d -> b h s d")
         return x
@@ -167,6 +191,7 @@ def _bsa_core(
 
 
 # ── Public API ───────────────────────────────────────────────────────────
+
 
 def flash_attn_bsa_3d(
     q: torch.Tensor,

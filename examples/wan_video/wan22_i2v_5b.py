@@ -67,7 +67,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 
     # DiT
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in  ppl_config["dit_path"]],
+        [os.path.join(model_root, filename) for filename in ppl_config["dit_path"]],
         torch_dtype=torch.bfloat16,
     )
 
@@ -110,7 +110,9 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 
 @click.command()
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
-@click.option("--image_path", default=f"{os.path.dirname(__file__)}/../data/101235-video-720_0.png", help="Input image path")
+@click.option(
+    "--image_path", default=f"{os.path.dirname(__file__)}/../data/101235-video-720_0.png", help="Input image path"
+)
 @click.option(
     "--prompt",
     default="A stylish little girl gently caressing her dog while they relax in a sunny, beautiful backyard. Perfect for pet and family content, or videos aiming to showcase love, style, and the bond between kids and their pets.",

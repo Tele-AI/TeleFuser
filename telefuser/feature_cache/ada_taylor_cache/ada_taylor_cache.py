@@ -554,7 +554,10 @@ class AdaTaylorCacheCalibrator(BaseFeatureCache):
         model_name: str,
         output_path: str | None = None,
     ):
-        print(f"Init AdaTaylorCacheCalibrator: num_steps={num_inference_steps}, sigma_shift={sigma_shift}, model={model_name}")
+        print(
+            f"Init AdaTaylorCacheCalibrator: num_steps={num_inference_steps}, "
+            f"sigma_shift={sigma_shift}, model={model_name}"
+        )
         self.num_inference_steps = num_inference_steps
         self.sigma_shift = sigma_shift
         self.model_name = model_name

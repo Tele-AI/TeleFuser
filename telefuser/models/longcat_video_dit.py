@@ -240,7 +240,9 @@ class Attention(nn.Module):
                 k_bhsd = rearrange(k, "b s n d -> b n s d")
                 v_bhsd = rearrange(v, "b s n d -> b n s d")
                 x = _flash_attn_bsa_3d(
-                    q_bhsd, k_bhsd, v_bhsd,
+                    q_bhsd,
+                    k_bhsd,
+                    v_bhsd,
                     latent_shape_q=shape,
                     latent_shape_k=shape,
                     **self.bsa_params,
