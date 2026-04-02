@@ -90,12 +90,39 @@ pipelines:
 
 ```
 examples/regression_test/regression_outputs/
-  regression_report.json            # JSON report with metrics + environment
-  <pipeline_slug>/
-    latest.log                      # Subprocess stdout/stderr
-    baseline/output.mp4             # Baseline output
-    <timestamp>/output.mp4          # Timestamped run output
+  2026-04-02/                                  # Date-based output directory
+    wan_video__wan21_1_3b_t2v_1gpu_480x832.mp4
+    qwen_image__qwen_t2i_1gpu_1024x1024.png
+    ...
+  baseline/                                    # Baseline outputs (independent)
+    wan_video__wan21_1_3b_t2v_1gpu_480x832.mp4
+    ...
+  logs/                                        # Log files (timestamped)
+    20260402_120000_wan_video__wan21_1_3b_t2v_1gpu.log
+    20260402_130000_qwen_image__qwen_t2i_1gpu.log
+    ...
+  regression_report.json                       # JSON report with metrics + environment
 ```
+
+### Output Naming Convention
+
+**Output files:**
+```
+{example_dir}__{example_name}_{gpu_count}gpu_{resolution}.{ext}
+```
+Example: `wan_video__wan21_1_3b_text_to_video_h100_1gpu_480x832.mp4`
+
+**Log files:**
+```
+{timestamp}_{example_dir}__{example_name}_{gpu_count}gpu.log
+```
+Example: `20260402_120000_wan_video__wan21_1_3b_text_to_video_h100_1gpu.log`
+
+### Report Enhancement
+
+The `regression_report.json` now includes:
+- **failed_details**: List of failed cases with error message, log path, reproduce command, and analysis hint
+- **reproduce_all_failed**: Single command to reproduce all failed cases
 
 ## Features
 
@@ -105,4 +132,5 @@ examples/regression_test/regression_outputs/
 - **Regression metrics**: PSNR + SSIM for video, pixel diff for image
 - **GPU memory tracking**: Peak VRAM usage per pipeline
 - **Output validation**: NaN/Inf detection
-- **Error classification**: MODEL_LOAD_ERROR, INFERENCE_ERROR, OUTPUT_ERROR, OOM_ERROR
+- **Error classification**: MODEL_LOAD_ERROR, INFERENCE_ERROR, OUTPUT_ERROR, OOM_ERROR, TIMEOUT
+- **Enhanced reporting**: Failed cases include reproduce commands and analysis hints

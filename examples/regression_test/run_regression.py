@@ -18,6 +18,7 @@ import importlib.util
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +43,49 @@ _RESULT_MARKER = "###RESULT###"
 def _pipeline_slug(pipeline_key: str) -> str:
     """Convert pipeline key to filesystem-safe slug."""
     return pipeline_key.replace("/", "__")
+
+
+def _parse_script_path(script: str) -> tuple[str, str]:
+    """Parse script path into (example_dir, example_name).
+
+    Args:
+        script: Relative path from examples/, e.g. "wan_video/wan21_1_3b_text_to_video_h100.py"
+
+    Returns:
+        (example_dir, example_name), e.g. ("wan_video", "wan21_1_3b_text_to_video_h100")
+    """
+    parts = script.replace("/", "__").replace(".py", "").split("__")
+    if len(parts) >= 2:
+        return parts[0], "__".join(parts[1:])
+    return "unknown", parts[0] if parts else "unknown"
+
+
+def _generate_output_filename(
+    script: str, gpu_count: int, resolution: str | None, output_type: str
+) -> str:
+    """Generate standardized output filename.
+
+    Format: {example_dir}__{example_name}_{gpu_count}gpu_{resolution}.{ext}
+    """
+    example_dir, example_name = _parse_script_path(script)
+    res = resolution or "unknown"
+    ext = "mp4" if output_type == "video" else "png"
+    return f"{example_dir}__{example_name}_{gpu_count}gpu_{res}.{ext}"
+
+
+def _generate_log_filename(script: str, gpu_count: int, timestamp: str) -> str:
+    """Generate standardized log filename.
+
+    Format: {timestamp}_{example_dir}__{example_name}_{gpu_count}gpu.log
+    """
+    example_dir, example_name = _parse_script_path(script)
+    return f"{timestamp}_{example_dir}__{example_name}_{gpu_count}gpu.log"
+
+
+def _get_date_dir(output_root: str) -> str:
+    """Get date-based output directory for today."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    return os.path.join(output_root, date_str)
 
 
 def _is_oom(exc_or_text: Exception | str) -> bool:
@@ -276,7 +320,11 @@ def _call_run_flashvsr_chunked(func: callable, kwargs: dict) -> object:
 
 
 def _save_output(
-    output: object, output_dir: str, output_type: str, fps: int = 15
+    output: object,
+    output_dir: str,
+    output_type: str,
+    fps: int = 15,
+    filename: str | None = None,
 ) -> tuple[str | None, int | None, str | None]:
     """Save pipeline output to file. Returns (path, num_frames, resolution)."""
     from PIL import Image
@@ -286,13 +334,17 @@ def _save_output(
     if output is None:
         return None, None, None
 
+    # Use custom filename or default
+    default_name = f"output.{('mp4' if output_type == 'video' else 'png')}"
+    output_filename = filename or default_name
+
     if output_type == "video":
         if isinstance(output, (list, tuple)) and len(output) > 0:
             # Unpack tuple from longcat pipelines: (frames, latents)
             frames = output
             if isinstance(output, tuple):
                 frames = output[0] if isinstance(output[0], list) else output
-            output_path = os.path.join(output_dir, "output.mp4")
+            output_path = os.path.join(output_dir, output_filename)
             from telefuser.utils.video import save_video
 
             save_video(frames, output_path, fps=fps, quality=6)
@@ -301,7 +353,7 @@ def _save_output(
             return output_path, len(frames), resolution
 
     if output_type == "image":
-        output_path = os.path.join(output_dir, "output.png")
+        output_path = os.path.join(output_dir, output_filename)
         if isinstance(output, list) and len(output) > 0 and isinstance(output[0], Image.Image):
             output[0].save(output_path)
             return output_path, 1, f"{output[0].width}x{output[0].height}"
@@ -356,9 +408,10 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
     output_root = cfg.output_root
     if not os.path.isabs(output_root):
         output_root = os.path.join(_PROJECT_ROOT, output_root)
-    slug = _pipeline_slug(pipeline_key)
+
+    # New directory structure: date-based output directory
+    date_dir = _get_date_dir(output_root)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(output_root, slug, timestamp)
 
     runner_config = {
         "gpu_count": ppl_cfg.gpu_count,
@@ -368,6 +421,7 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
         "input_image_path": ppl_cfg.input_image_path,
         "input_video_path": ppl_cfg.input_video_path,
         "ppl_config_overrides": ppl_cfg.ppl_config_overrides,
+        "script": ppl_cfg.script,  # Pass script for filename generation
     }
     # Merge ppl_config_overrides into runner_config for height/width access
     runner_config.update(ppl_cfg.ppl_config_overrides)
@@ -433,8 +487,10 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
         num_steps = sum(num_steps)
     output_fps = ppl_config.get("target_fps", 15)
 
+    # First save to temp location to get resolution
+    temp_dir = os.path.join(output_root, "temp", timestamp)
     try:
-        output_path, num_frames, resolution = _save_output(output, output_dir, ppl_cfg.output_type, fps=output_fps)
+        temp_path, num_frames, resolution = _save_output(output, temp_dir, ppl_cfg.output_type, fps=output_fps)
     except Exception as e:
         tb = traceback.format_exc()
         _emit_result(
@@ -450,6 +506,25 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
         gc.collect()
         sys.exit(1)
 
+    # Move to final location with correct filename
+    final_filename = _generate_output_filename(
+        ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type
+    )
+    final_dir = date_dir
+    os.makedirs(final_dir, exist_ok=True)
+    final_path = os.path.join(final_dir, final_filename)
+
+    if temp_path and os.path.exists(temp_path):
+        shutil.move(temp_path, final_path)
+        # Clean up temp directory
+        try:
+            os.rmdir(temp_dir)
+            parent_temp = os.path.dirname(temp_dir)
+            if not os.listdir(parent_temp):
+                os.rmdir(parent_temp)
+        except OSError:
+            pass  # Directory not empty or other error
+
     elapsed = time.time() - start
     status = "PASS"
     error_msg = ""
@@ -462,13 +537,14 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
     _emit_result(
         {
             "status": status,
-            "output_path": output_path,
+            "output_path": final_path,
             "error": error_msg,
             "elapsed": round(elapsed, 2),
             "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
             "num_frames": num_frames,
             "resolution": resolution,
             "num_steps": num_steps,
+            "script": ppl_cfg.script,
         }
     )
 
@@ -529,35 +605,46 @@ def compute_image_diff(baseline_path: str, current_path: str) -> float | None:
 # =============================================================================
 
 
-def _baseline_dir(output_root: str, pipeline_key: str) -> str:
-    slug = _pipeline_slug(pipeline_key)
-    return os.path.join(output_root, slug, "baseline")
+def _baseline_dir(output_root: str) -> str:
+    """Get baseline directory (independent of pipeline)."""
+    return os.path.join(output_root, "baseline")
 
 
-def _get_baseline_path(output_root: str, pipeline_key: str) -> str | None:
-    bdir = _baseline_dir(output_root, pipeline_key)
-    if not os.path.isdir(bdir):
+def _find_baseline_file(baseline_dir: str, script: str, gpu_count: int, output_type: str) -> str | None:
+    """Find existing baseline file with any resolution."""
+    example_dir, example_name = _parse_script_path(script)
+    ext = "mp4" if output_type == "video" else "png"
+    pattern = f"{example_dir}__{example_name}_{gpu_count}gpu_"
+    if not os.path.isdir(baseline_dir):
         return None
-    for ext in ("mp4", "png"):
-        p = os.path.join(bdir, f"output.{ext}")
-        if os.path.exists(p):
-            return p
+    for f in os.listdir(baseline_dir):
+        if f.startswith(pattern) and f.endswith(f".{ext}"):
+            return os.path.join(baseline_dir, f)
     return None
 
 
-def _update_baseline(output_root: str, pipeline_key: str, current_path: str) -> str:
-    import shutil
+def _get_baseline_path(output_root: str, script: str, gpu_count: int, output_type: str) -> str | None:
+    """Get baseline file path."""
+    bdir = _baseline_dir(output_root)
+    return _find_baseline_file(bdir, script, gpu_count, output_type)
 
-    bdir = _baseline_dir(output_root, pipeline_key)
+
+def _update_baseline(output_root: str, current_path: str) -> str:
+    """Copy current output to baseline directory."""
+    bdir = _baseline_dir(output_root)
     os.makedirs(bdir, exist_ok=True)
     dst = os.path.join(bdir, os.path.basename(current_path))
+    # Remove old baseline if exists (different resolution)
+    if os.path.exists(dst):
+        os.remove(dst)
     shutil.copy2(current_path, dst)
     return dst
 
 
 def compare_against_baseline(
     output_root: str,
-    pipeline_key: str,
+    script: str,
+    gpu_count: int,
     current_path: str | None,
     output_type: str,
     psnr_min: float,
@@ -565,11 +652,11 @@ def compare_against_baseline(
     pixel_diff_max: float,
 ) -> dict:
     """Compare current output against baseline. Returns dict with passed, metrics, message."""
-    baseline_path = _get_baseline_path(output_root, pipeline_key)
+    baseline_path = _get_baseline_path(output_root, script, gpu_count, output_type)
 
     if baseline_path is None:
         if current_path and os.path.exists(current_path):
-            saved = _update_baseline(output_root, pipeline_key, current_path)
+            saved = _update_baseline(output_root, current_path)
             return {"passed": True, "baseline_exists": False, "metrics": {}, "message": f"Saved as baseline: {saved}"}
         return {"passed": True, "baseline_exists": False, "metrics": {}, "message": "No baseline (first run)"}
 
@@ -623,6 +710,9 @@ class Result:
     error_message: str = ""
     note: str = ""
     regression_metrics: dict = field(default_factory=dict)
+    script: str = ""  # Script path for filename generation
+    reproduce_command: str = ""  # Command to reproduce this test
+    log_path: str | None = None  # Path to log file
 
 
 def _parse_runner_output(stdout: str) -> dict:
@@ -643,6 +733,11 @@ def run_pipeline(
     """Run a single pipeline in a subprocess and evaluate results."""
     gpu_count = ppl_cfg.gpu_count
 
+    # Generate reproduce command
+    reproduce_cmd = f"python examples/regression_test/run_regression.py --pipeline {pipeline_key}"
+    if config_path:
+        reproduce_cmd += f" --config {config_path}"
+
     # Assign GPUs
     env = os.environ.copy()
     existing_pypath = env.get("PYTHONPATH", "")
@@ -662,6 +757,7 @@ def run_pipeline(
         cmd.extend(["--config", config_path])
 
     start = time.time()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
         proc = subprocess.run(
             cmd,
@@ -678,6 +774,8 @@ def run_pipeline(
             name=pipeline_key,
             status="TIMEOUT",
             elapsed_seconds=round(elapsed, 2),
+            script=ppl_cfg.script,
+            reproduce_command=reproduce_cmd,
             note=f"Timeout after {ppl_cfg.timeout_seconds}s",
         )
 
@@ -687,6 +785,7 @@ def run_pipeline(
     error_msg = data.get("error", "")
     error_cat = data.get("error_category", "")
     peak_mem = data.get("peak_gpu_memory_mb", 0.0)
+    script = data.get("script", ppl_cfg.script)
 
     # OOM detection fallback
     if not error_cat and proc.stderr and _is_oom(proc.stderr):
@@ -694,6 +793,20 @@ def run_pipeline(
 
     if not data and proc.returncode != 0:
         error_msg = f"Process exited with code {proc.returncode}"
+
+    # Save log with new naming convention
+    logs_dir = os.path.join(output_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_filename = _generate_log_filename(ppl_cfg.script, gpu_count, timestamp)
+    log_path = os.path.join(logs_dir, log_filename)
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(f"=== Pipeline: {pipeline_key} ===\n")
+        f.write(f"=== Timestamp: {timestamp} ===\n")
+        f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+        f.write("=== STDOUT ===\n")
+        f.write(proc.stdout or "(empty)\n")
+        f.write("\n=== STDERR ===\n")
+        f.write(proc.stderr or "(empty)\n")
 
     result = Result(
         name=pipeline_key,
@@ -705,24 +818,18 @@ def run_pipeline(
         num_steps=data.get("num_steps"),
         error_category=error_cat,
         error_message=error_msg,
+        script=script,
+        reproduce_command=reproduce_cmd,
+        log_path=log_path,
     )
-
-    # Save log
-    slug = _pipeline_slug(pipeline_key)
-    log_dir = os.path.join(output_root, slug)
-    os.makedirs(log_dir, exist_ok=True)
-    with open(os.path.join(log_dir, "latest.log"), "w", encoding="utf-8") as f:
-        f.write("=== STDOUT ===\n")
-        f.write(proc.stdout or "(empty)\n")
-        f.write("\n=== STDERR ===\n")
-        f.write(proc.stderr or "(empty)\n")
 
     # Compare against baseline
     if status == "PASS":
         output_path = data.get("output_path")
         cmp = compare_against_baseline(
             output_root,
-            pipeline_key,
+            ppl_cfg.script,
+            gpu_count,
             output_path,
             ppl_cfg.output_type,
             ppl_cfg.psnr_min,
@@ -735,7 +842,7 @@ def run_pipeline(
             result.status = "FAIL"
 
         if update_baseline and output_path and os.path.exists(output_path):
-            _update_baseline(output_root, pipeline_key, output_path)
+            _update_baseline(output_root, output_path)
             result.note += " [baseline updated]"
 
     # Performance/memory threshold checks
@@ -807,8 +914,33 @@ def print_results_table(results: list[Result]) -> None:
     print("=" * 130)
 
 
+def _generate_analysis_hint(error_category: str, error_message: str) -> str:
+    """Generate analysis hint based on error category."""
+    hints = {
+        "MODEL_LOAD_ERROR": "模型加载失败，检查 model_root 路径和模型文件完整性",
+        "INFERENCE_ERROR": "推理过程出错，查看 log_path 中的 traceback 定位具体模块",
+        "OUTPUT_ERROR": "输出保存失败，检查输出目录权限和磁盘空间",
+        "OOM_ERROR": "GPU内存不足，考虑减少 batch_size 或使用 lower resolution",
+        "TIMEOUT": "执行超时，考虑增加 timeout_seconds 或检查是否有死循环",
+        "FAIL": "输出质量不达标，检查 PSNR/SSIM 值和 baseline 对比",
+    }
+    return hints.get(error_category, "请查看 log_path 中的详细日志进行排查")
+
+
+def _get_last_n_lines_from_log(log_path: str | None, n: int = 50) -> str:
+    """Get last N lines from log file."""
+    if log_path is None or not os.path.exists(log_path):
+        return ""
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return "".join(lines[-n:])
+    except Exception:
+        return ""
+
+
 def save_report_json(output_root: str, results: list[Result]) -> str:
-    """Save results to JSON report."""
+    """Save results to JSON report with enhanced failure details."""
     os.makedirs(output_root, exist_ok=True)
     report_path = os.path.join(output_root, "regression_report.json")
 
@@ -827,11 +959,32 @@ def save_report_json(output_root: str, results: list[Result]) -> str:
         key = r.status.lower()
         counts[key] = counts.get(key, 0) + 1
 
+    # Build failed details list
+    failed_details = []
+    failed_commands = []
+    for r in results:
+        if r.status not in ("PASS", "SKIP"):
+            detail = {
+                "name": r.name,
+                "status": r.status,
+                "error_category": r.error_category,
+                "error_message": r.error_message[:500] if r.error_message else "",
+                "reproduce_command": r.reproduce_command,
+                "log_path": r.log_path,
+                "last_50_lines_log": _get_last_n_lines_from_log(r.log_path, 50),
+                "analysis_hint": _generate_analysis_hint(r.error_category, r.error_message),
+            }
+            failed_details.append(detail)
+            if r.reproduce_command:
+                failed_commands.append(r.reproduce_command)
+
     report = {
         "generated_at": datetime.now().isoformat(),
         "environment": env_info,
         "summary": {"total": len(results), **counts},
         "results": {r.name: asdict(r) for r in results},
+        "failed_details": failed_details,
+        "reproduce_all_failed": " && ".join(failed_commands) if failed_commands else "",
     }
 
     with open(report_path, "w", encoding="utf-8") as f:
