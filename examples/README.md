@@ -1,4 +1,4 @@
-# TeleFuser Pipeline Regression Test
+# TeleFuser Example Runner
 
 Runs configured pipelines in isolated subprocesses, compares outputs against
 baselines (PSNR/SSIM for video, pixel diff for image), and prints a results table.
@@ -7,44 +7,44 @@ baselines (PSNR/SSIM for video, pixel diff for image), and prints a results tabl
 
 ```bash
 # List configured pipelines
-python examples/regression_test/run_regression.py --list
+python examples/run_examples.py --list
 
 # Run a specific pipeline
-python examples/regression_test/run_regression.py --pipeline wan21_1_3b_t2v
+python examples/run_examples.py --pipeline wan21_1_3b_t2v
 
 # Run all enabled pipelines
-python examples/regression_test/run_regression.py --all
+python examples/run_examples.py --all
 
 # Update baselines after successful runs
-python examples/regression_test/run_regression.py --all --update-baseline
+python examples/run_examples.py --all --update-baseline
 ```
 
 ## CLI Reference
 
 ```
-python examples/regression_test/run_regression.py [OPTIONS]
+python examples/run_examples.py [OPTIONS]
 
 Options:
   --list                 List configured pipelines and exit
   --pipeline NAME        Run a specific pipeline by name
   --all                  Run all enabled pipelines
   --update-baseline      Update baseline outputs after successful runs
-  --config PATH          Path to config YAML (default: regression_config.yaml)
+  --config PATH          Path to config YAML (default: example_config.yaml)
   -v, --verbose          Show real-time log output from each pipeline
 ```
 
 ## File Structure
 
 ```
-examples/regression_test/
-  run_regression.py        # Single script: config, execution, metrics, reporting
-  regression_config.yaml   # Pipeline registry + configuration
+examples/
+  run_examples.py          # Single script: config, execution, metrics, reporting
+  example_config.yaml      # Pipeline registry + configuration
   README.md                # This file
 ```
 
 ## Configuration
 
-Edit `regression_config.yaml` to manage pipelines:
+Edit `example_config.yaml` to manage pipelines:
 
 ```yaml
 defaults:
@@ -54,7 +54,7 @@ defaults:
   ssim_min: 0.85
   pixel_diff_max: 0.02
 
-output_root: examples/regression_test/regression_outputs
+output_root: work_dirs/example_outputs
 
 pipelines:
   wan21_1_3b_t2v:
@@ -90,7 +90,7 @@ pipelines:
 ## Output
 
 ```
-examples/regression_test/regression_outputs/
+work_dirs/example_outputs/
   2026-04-02/                                  # Date-based output directory
     wan_video__wan21_1_3b_t2v_1gpu_480x832.mp4
     qwen_image__qwen_t2i_1gpu_1024x1024.png
@@ -102,7 +102,7 @@ examples/regression_test/regression_outputs/
     20260402_120000_wan_video__wan21_1_3b_t2v_1gpu.log
     20260402_130000_qwen_image__qwen_t2i_1gpu.log
     ...
-  regression_report.json                       # JSON report with metrics + environment
+  example_report.json                          # JSON report with metrics + environment
 ```
 
 ### Output Naming Convention
@@ -121,13 +121,13 @@ Example: `20260402_120000_wan_video__wan21_1_3b_text_to_video_h100_1gpu.log`
 
 ### Report Enhancement
 
-The `regression_report.json` now includes:
+The `example_report.json` now includes:
 - **failed_details**: List of failed cases with error message, log path, reproduce command, and analysis hint
 - **reproduce_all_failed**: Single command to reproduce all failed cases
 
 ## Features
 
-- **Explicit registry**: `regression_config.yaml` lists all pipelines — no auto-discovery
+- **Explicit registry**: `example_config.yaml` lists all pipelines — no auto-discovery
 - **Subprocess isolation**: Each pipeline runs in its own process with pinned `CUDA_VISIBLE_DEVICES`
 - **Baseline management**: First run auto-saves as baseline; `--update-baseline` refreshes
 - **Regression metrics**: PSNR + SSIM for video, pixel diff for image

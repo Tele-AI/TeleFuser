@@ -1,13 +1,13 @@
-"""TeleFuser pipeline regression test.
+"""TeleFuser example runner.
 
 Runs configured pipelines in isolated subprocesses, compares outputs against
 baselines (PSNR/SSIM for video, pixel diff for image), and prints a results table.
 
 Usage:
-    python examples/regression_test/run_regression.py --list
-    python examples/regression_test/run_regression.py --pipeline wan21_1_3b_t2v
-    python examples/regression_test/run_regression.py --all
-    python examples/regression_test/run_regression.py --all --update-baseline
+    python examples/run_examples.py --list
+    python examples/run_examples.py --pipeline wan21_1_3b_t2v
+    python examples/run_examples.py --all
+    python examples/run_examples.py --all --update-baseline
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-_CONFIG_PATH = Path(__file__).resolve().parent / "regression_config.yaml"
+_CONFIG_PATH = Path(__file__).resolve().parent / "example_config.yaml"
 _RESULT_MARKER = "###RESULT###"
 
 
@@ -126,14 +126,14 @@ class PipelineConfig:
 
 @dataclass
 class Config:
-    """Top-level regression config."""
+    """Top-level example config."""
 
-    output_root: str = "examples/regression_test/regression_outputs"
+    output_root: str = "work_dirs/example_outputs"
     pipelines: dict[str, PipelineConfig] = field(default_factory=dict)
 
 
 def load_config(config_path: str | None = None) -> Config:
-    """Load regression config from YAML."""
+    """Load example config from YAML."""
     path = Path(config_path) if config_path else _CONFIG_PATH
     if not path.exists():
         return Config()
@@ -142,7 +142,7 @@ def load_config(config_path: str | None = None) -> Config:
         raw = yaml.safe_load(f) or {}
 
     defaults = raw.get("defaults", {})
-    output_root = raw.get("output_root", "examples/regression_test/regression_outputs")
+    output_root = raw.get("output_root", "work_dirs/example_outputs")
 
     pipelines: dict[str, PipelineConfig] = {}
     valid_fields = {f.name for f in PipelineConfig.__dataclass_fields__.values()}
@@ -815,7 +815,7 @@ def run_pipeline(
     gpu_count = ppl_cfg.gpu_count
 
     # Generate reproduce command
-    reproduce_cmd = f"python examples/regression_test/run_regression.py --pipeline {pipeline_key}"
+    reproduce_cmd = f"python examples/run_examples.py --pipeline {pipeline_key}"
     if config_path:
         reproduce_cmd += f" --config {config_path}"
 
@@ -1027,7 +1027,7 @@ def _get_last_n_lines_from_log(log_path: str | None, n: int = 50) -> str:
 def save_report_json(output_root: str, results: list[Result]) -> str:
     """Save results to JSON report with enhanced failure details."""
     os.makedirs(output_root, exist_ok=True)
-    report_path = os.path.join(output_root, "regression_report.json")
+    report_path = os.path.join(output_root, "example_report.json")
 
     env_info = {}
     try:

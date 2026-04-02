@@ -1,14 +1,14 @@
-# TeleFuser Pipeline Regression Test Configuration
+# TeleFuser Example Runner Configuration
 # =================================================
 #
 # Each pipeline entry explicitly lists the script to run and its parameters.
 # No auto-discovery -- this file IS the test registry.
 #
 # Usage:
-#   python examples/regression_test/run_regression.py --list
-#   python examples/regression_test/run_regression.py --pipeline wan21_1_3b_t2v
-#   python examples/regression_test/run_regression.py --all
-#   python examples/regression_test/run_regression.py --all --update-baseline
+#   python examples/run_examples.py --list
+#   python examples/run_examples.py --pipeline wan21_1_3b_t2v
+#   python examples/run_examples.py --all
+#   python examples/run_examples.py --all --update-baseline
 
 defaults:
   seed: 42
@@ -17,7 +17,7 @@ defaults:
   ssim_min: 0.85
   pixel_diff_max: 0.02
 
-output_root: examples/regression_test/regression_outputs
+output_root: work_dirs/example_outputs
 
 pipelines:
 
