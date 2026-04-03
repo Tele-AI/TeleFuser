@@ -93,6 +93,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
         pipe_config.dit_low_config.parallel_config.enable_fsdp = True
         pipe_config.enable_denoising_parallel = True
         pipe_config.enable_vae_parallel = False
+        pipe_config.vae_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
         pipe_config.vae_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.vae_config.parallel_config.dp_degree = parallelism
     pipe.init(module_manager, pipe_config)
