@@ -26,6 +26,21 @@ class BasePipeline(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+
+        # Wrap init method to print config after initialization
+        if "init" in cls.__dict__:
+            original_init = cls.__dict__["init"]
+
+            @wraps(original_init)
+            def wrapped_init(self, *args, **kwargs):
+                result = original_init(self, *args, **kwargs)
+                if hasattr(self, "config"):
+                    self._print_config_banner()
+                return result
+
+            cls.init = wrapped_init
+
+        # Wrap __call__ method to print parameters and reset timing registry
         if "__call__" in cls.__dict__:
             original_call = cls.__dict__["__call__"]
 
@@ -34,9 +49,180 @@ class BasePipeline(ABC):
                 from telefuser.utils.profiler import reset_timing_registry
 
                 reset_timing_registry()
+                self._print_call_banner(args, kwargs)
                 return original_call(self, *args, **kwargs)
 
             cls.__call__ = wrapped_call
+
+    # ANSI color codes for banner formatting
+    _ANSI_CYAN = "\033[36m"
+    _ANSI_GREEN = "\033[32m"
+    _ANSI_YELLOW = "\033[33m"
+    _ANSI_BLUE = "\033[34m"
+    _ANSI_DIM = "\033[2m"
+    _ANSI_BOLD = "\033[1m"
+    _ANSI_RESET = "\033[0m"
+
+    def _get_config_defaults(self, config: Any) -> dict[str, Any]:
+        """Get default values for config fields.
+
+        Args:
+            config: Config object (typically a dataclass)
+
+        Returns:
+            Dict mapping field names to their default values
+        """
+        defaults = {}
+        if hasattr(config, "__dataclass_fields__"):
+            from dataclasses import MISSING, fields
+
+            for field in fields(config):
+                if field.default is not MISSING:
+                    defaults[field.name] = field.default
+                elif field.default_factory is not MISSING:
+                    defaults[field.name] = field.default_factory()
+                else:
+                    # No default value - treat as always changed
+                    defaults[field.name] = None
+        return defaults
+
+    def _print_config_banner(self) -> None:
+        """Print pipeline config initialization banner with formatted output."""
+        SEP = f"{self._ANSI_DIM}─{'─' * 50}─{self._ANSI_RESET}"
+
+        lines = [
+            SEP,
+            f"{self._ANSI_BOLD}{self._ANSI_CYAN}Pipeline Config{self._ANSI_RESET}  {self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
+        ]
+
+        # Format config fields, only showing values that differ from defaults
+        config = self.config
+        defaults = self._get_config_defaults(config)
+
+        if hasattr(config, "__dataclass_fields__"):
+            # Dataclass config - format each field
+            from dataclasses import asdict
+
+            config_dict = asdict(config)
+            changed_count = 0
+            for key, value in config_dict.items():
+                default_value = defaults.get(key)
+                is_changed = default_value is None or value != default_value
+                if is_changed:
+                    changed_count += 1
+                    formatted_value = self._format_config_value(value)
+                    lines.append(f"  {self._ANSI_DIM}{key}:{self._ANSI_RESET} {formatted_value}")
+
+            if changed_count == 0:
+                lines.append(f"  {self._ANSI_DIM}(all defaults){self._ANSI_RESET}")
+        else:
+            # Non-dataclass config - try to format as dict
+            try:
+                config_dict = dict(config) if hasattr(config, "items") else {}
+                for key, value in config_dict.items():
+                    formatted_value = self._format_config_value(value)
+                    lines.append(f"  {self._ANSI_DIM}{key}:{self._ANSI_RESET} {formatted_value}")
+            except Exception:
+                lines.append(f"  {config}")
+
+        lines.append(SEP)
+
+        # Print to stderr for visibility (like logging.py)
+        import sys
+
+        print("\n".join(lines), file=sys.stderr)
+
+    def _format_config_value(self, value: Any) -> str:
+        """Format a config value for display.
+
+        Args:
+            value: Config value to format
+
+        Returns:
+            Formatted string representation
+        """
+        if isinstance(value, str):
+            return f"{self._ANSI_GREEN}{value}{self._ANSI_RESET}"
+        elif isinstance(value, bool):
+            color = self._ANSI_GREEN if value else self._ANSI_YELLOW
+            return f"{color}{value}{self._ANSI_RESET}"
+        elif isinstance(value, (int, float)):
+            return f"{self._ANSI_BLUE}{value}{self._ANSI_RESET}"
+        elif isinstance(value, dict):
+            # Nested dict - show key count
+            return f"{self._ANSI_DIM}dict({len(value)} items){self._ANSI_RESET}"
+        elif isinstance(value, list):
+            return f"{self._ANSI_DIM}list({len(value)} items){self._ANSI_RESET}"
+        elif hasattr(value, "__class__"):
+            return f"{self._ANSI_DIM}{value.__class__.__name__}{self._ANSI_RESET}"
+        return str(value)
+
+    def _print_call_banner(self, args: tuple, kwargs: dict) -> None:
+        """Print pipeline __call__ parameters banner with formatted output."""
+        SEP = f"{self._ANSI_DIM}─{'─' * 50}─{self._ANSI_RESET}"
+
+        lines = [
+            SEP,
+            f"{self._ANSI_BOLD}{self._ANSI_YELLOW}Pipeline Call{self._ANSI_RESET}  {self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
+        ]
+
+        # Format kwargs (primary parameters for pipeline calls)
+        if kwargs:
+            for key, value in kwargs.items():
+                formatted_value = self._format_call_value(value)
+                lines.append(f"  {self._ANSI_DIM}{key}:{self._ANSI_RESET} {formatted_value}")
+
+        # Format positional args (if any)
+        if args:
+            display_args = args[1:] if args and getattr(args[0], "__class__", None) else args
+            if display_args:
+                lines.append(f"  {self._ANSI_DIM}args:{self._ANSI_RESET} {self._format_call_value(display_args)}")
+
+        if not kwargs and not args:
+            lines.append(f"  {self._ANSI_DIM}(no parameters){self._ANSI_RESET}")
+
+        lines.append(SEP)
+
+        import sys
+
+        print("\n".join(lines), file=sys.stderr)
+
+    def _format_call_value(self, value: Any) -> str:
+        """Format a __call__ parameter value for display.
+
+        Args:
+            value: Parameter value to format
+
+        Returns:
+            Formatted string representation
+        """
+        if isinstance(value, str):
+            # Truncate long strings
+            if len(value) > 80:
+                return f"{self._ANSI_GREEN}{value[:80]}...{self._ANSI_RESET} {self._ANSI_DIM}({len(value)} chars){self._ANSI_RESET}"
+            return f"{self._ANSI_GREEN}{value}{self._ANSI_RESET}"
+        elif isinstance(value, bool):
+            color = self._ANSI_GREEN if value else self._ANSI_YELLOW
+            return f"{color}{value}{self._ANSI_RESET}"
+        elif isinstance(value, (int, float)):
+            return f"{self._ANSI_BLUE}{value}{self._ANSI_RESET}"
+        elif isinstance(value, torch.Tensor):
+            return f"{self._ANSI_CYAN}Tensor{self._ANSI_RESET}({self._ANSI_DIM}shape={list(value.shape)}, dtype={value.dtype}{self._ANSI_RESET})"
+        elif isinstance(value, Image.Image):
+            return f"{self._ANSI_CYAN}PIL.Image{self._ANSI_RESET}({self._ANSI_DIM}size={value.size}{self._ANSI_RESET})"
+        elif isinstance(value, list):
+            if len(value) > 5:
+                return f"{self._ANSI_DIM}list({len(value)} items){self._ANSI_RESET}"
+            formatted_items = [self._format_call_value(v) for v in value]
+            return f"[{', '.join(formatted_items)}]"
+        elif isinstance(value, tuple):
+            if len(value) > 5:
+                return f"{self._ANSI_DIM}tuple({len(value)} items){self._ANSI_RESET}"
+            formatted_items = [self._format_call_value(v) for v in value]
+            return f"({', '.join(formatted_items)})"
+        elif value is None:
+            return f"{self._ANSI_DIM}None{self._ANSI_RESET}"
+        return str(value)
 
     def __init__(self, device: str | torch.device, torch_dtype: torch.dtype) -> None:
         self.device = device

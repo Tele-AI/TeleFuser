@@ -19,6 +19,7 @@ import importlib.util
 import inspect
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -82,10 +83,107 @@ def _generate_log_filename(script: str, gpu_count: int, timestamp: str) -> str:
     return f"{timestamp}_{example_dir}__{example_name}_{gpu_count}gpu.log"
 
 
+# Cached git and system info (computed once per script run)
+_git_info_cache: tuple[str, str] | None = None
+_system_info_cache: dict[str, str] | None = None
+
+
+def _get_git_info() -> tuple[str, str]:
+    """Get current git branch name and short commit hash (first 5 chars).
+
+    Result is cached to avoid repeated subprocess calls.
+
+    Returns:
+        (branch_name, short_hash) - falls back to ("unknown", "unknown") if not in git repo.
+    """
+    global _git_info_cache
+    if _git_info_cache is not None:
+        return _git_info_cache
+
+    try:
+        # Get branch name
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            timeout=5,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
+
+        # Get short commit hash (first 5 chars)
+        hash_result = subprocess.run(
+            ["git", "rev-parse", "--short=5", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            timeout=5,
+        )
+        short_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else "unknown"
+
+        _git_info_cache = (branch, short_hash)
+        return _git_info_cache
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        _git_info_cache = ("unknown", "unknown")
+        return _git_info_cache
+
+
+def _get_system_info() -> dict[str, str]:
+    """Get system environment information.
+
+    Result is cached to avoid repeated computation.
+
+    Returns:
+        Dict with python_version, pytorch_version, cuda_version, system_info, gpu_info.
+    """
+    global _system_info_cache
+    if _system_info_cache is not None:
+        return _system_info_cache
+
+    info = {}
+
+    # Python version
+    info["python_version"] = platform.python_version()
+
+    # System info
+    info["system"] = f"{platform.system()} {platform.release()}"
+    info["architecture"] = platform.machine()
+
+    # PyTorch and CUDA info
+    try:
+        info["pytorch_version"] = torch.__version__
+        info["cuda_version"] = torch.version.cuda or "N/A"
+        info["cudnn_version"] = torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else "N/A"
+
+        # GPU info
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_names = [torch.cuda.get_device_name(i) for i in range(gpu_count)]
+            info["gpu_count"] = str(gpu_count)
+            info["gpu_devices"] = ", ".join(gpu_names)
+        else:
+            info["gpu_count"] = "0"
+            info["gpu_devices"] = "N/A"
+    except Exception:
+        info["pytorch_version"] = "N/A"
+        info["cuda_version"] = "N/A"
+        info["cudnn_version"] = "N/A"
+        info["gpu_count"] = "0"
+        info["gpu_devices"] = "N/A"
+
+    _system_info_cache = info
+    return info
+
+
 def _get_date_dir(output_root: str) -> str:
-    """Get date-based output directory with minute precision."""
+    """Get date-based output directory with git info and minute precision.
+
+    Format: {branch}_{short_hash}_{YYYY-MM-DD_HHMM}
+    """
+    branch, short_hash = _get_git_info()
     date_str = datetime.now().strftime("%Y-%m-%d_%H%M")
-    return os.path.join(output_root, date_str)
+    dir_name = f"{branch}_{short_hash}_{date_str}"
+    return os.path.join(output_root, dir_name)
 
 
 def _resolve_output_root(output_root: str) -> str:
@@ -404,12 +502,25 @@ class PipelineScheduler:
 
         # Save log
         reproduce_cmd = self._build_reproduce_cmd(job.pipeline_key)
+        branch, short_hash = _get_git_info()
+        sys_info = _get_system_info()
 
         with open(job.log_path, "w", encoding="utf-8") as f:
             f.write(f"=== Pipeline: {job.pipeline_key} ===\n")
+            f.write(f"=== Branch: {branch} ===\n")
+            f.write(f"=== Commit: {short_hash} ===\n")
             f.write(f"=== Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')} ===\n")
             f.write(f"=== GPUs: {','.join(str(id) for id in job.gpu_ids)} ===\n")
-            f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+            f.write(f"=== Command: {reproduce_cmd} ===\n")
+            f.write(f"=== System Info ===\n")
+            f.write(f"  Python: {sys_info['python_version']}\n")
+            f.write(f"  PyTorch: {sys_info['pytorch_version']}\n")
+            f.write(f"  CUDA: {sys_info['cuda_version']}\n")
+            f.write(f"  cuDNN: {sys_info['cudnn_version']}\n")
+            f.write(f"  System: {sys_info['system']}\n")
+            f.write(f"  Arch: {sys_info['architecture']}\n")
+            f.write(f"  GPU Count: {sys_info['gpu_count']}\n")
+            f.write(f"  GPU Devices: {sys_info['gpu_devices']}\n\n")
             f.write("=== STDOUT ===\n")
             f.write(stdout_text or "(empty)\n")
             f.write("\n=== STDERR ===\n")
@@ -482,13 +593,26 @@ class PipelineScheduler:
         stdout_text, stderr_text = job.process.communicate()
 
         reproduce_cmd = self._build_reproduce_cmd(job.pipeline_key)
+        branch, short_hash = _get_git_info()
+        sys_info = _get_system_info()
 
         # Save log
         with open(job.log_path, "w", encoding="utf-8") as f:
             f.write(f"=== Pipeline: {job.pipeline_key} ===\n")
+            f.write(f"=== Branch: {branch} ===\n")
+            f.write(f"=== Commit: {short_hash} ===\n")
             f.write(f"=== Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')} ===\n")
             f.write(f"=== GPUs: {','.join(str(id) for id in job.gpu_ids)} ===\n")
-            f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+            f.write(f"=== Command: {reproduce_cmd} ===\n")
+            f.write(f"=== System Info ===\n")
+            f.write(f"  Python: {sys_info['python_version']}\n")
+            f.write(f"  PyTorch: {sys_info['pytorch_version']}\n")
+            f.write(f"  CUDA: {sys_info['cuda_version']}\n")
+            f.write(f"  cuDNN: {sys_info['cudnn_version']}\n")
+            f.write(f"  System: {sys_info['system']}\n")
+            f.write(f"  Arch: {sys_info['architecture']}\n")
+            f.write(f"  GPU Count: {sys_info['gpu_count']}\n")
+            f.write(f"  GPU Devices: {sys_info['gpu_devices']}\n\n")
             f.write("=== TIMEOUT ===\n")
             f.write(f"Timeout after {job.ppl_cfg.timeout_seconds}s\n\n")
             f.write("=== STDOUT ===\n")
@@ -1456,10 +1580,26 @@ def run_pipeline(
         error_msg = f"Process exited with code {return_code}"
 
     # Save log with new naming convention
+    branch, short_hash = _get_git_info()
+    sys_info = _get_system_info()
+    gpu_ids_str = ",".join(str(id) for id in (gpu_ids or []))
+
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"=== Pipeline: {pipeline_key} ===\n")
+        f.write(f"=== Branch: {branch} ===\n")
+        f.write(f"=== Commit: {short_hash} ===\n")
         f.write(f"=== Timestamp: {timestamp} ===\n")
-        f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+        f.write(f"=== GPUs: {gpu_ids_str} ===\n")
+        f.write(f"=== Command: {reproduce_cmd} ===\n")
+        f.write(f"=== System Info ===\n")
+        f.write(f"  Python: {sys_info['python_version']}\n")
+        f.write(f"  PyTorch: {sys_info['pytorch_version']}\n")
+        f.write(f"  CUDA: {sys_info['cuda_version']}\n")
+        f.write(f"  cuDNN: {sys_info['cudnn_version']}\n")
+        f.write(f"  System: {sys_info['system']}\n")
+        f.write(f"  Arch: {sys_info['architecture']}\n")
+        f.write(f"  GPU Count: {sys_info['gpu_count']}\n")
+        f.write(f"  GPU Devices: {sys_info['gpu_devices']}\n\n")
         f.write("=== STDOUT ===\n")
         f.write(stdout_text or "(empty)\n")
         f.write("\n=== STDERR ===\n")

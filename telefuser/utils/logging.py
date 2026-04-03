@@ -33,6 +33,7 @@ import functools
 import inspect
 import json
 import os
+import platform
 import socket
 import sys
 import time
@@ -304,6 +305,48 @@ def _create_filter(config: LogConfig) -> Callable[[Record], bool]:
 _SEP_WIDTH = 50
 
 
+def _get_startup_info() -> dict[str, Any]:
+    """Get system startup information for logging initialization.
+
+    Returns:
+        Dict with Python, PyTorch, CUDA, and system info.
+    """
+    info: dict[str, Any] = {}
+
+    # Python version
+    info["Python"] = platform.python_version()
+
+    # System info
+    info["System"] = f"{platform.system()} {platform.release()}"
+    info["Arch"] = platform.machine()
+
+    # PyTorch and CUDA info (lazy import to avoid issues if torch not installed)
+    try:
+        import torch
+
+        info["PyTorch"] = torch.__version__
+        info["CUDA"] = torch.version.cuda or "N/A"
+
+        if torch.cuda.is_available():
+            info["GPU"] = torch.cuda.get_device_name(0)
+            info["GPU_Count"] = torch.cuda.device_count()
+        else:
+            info["GPU"] = "N/A"
+            info["GPU_Count"] = 0
+    except ImportError:
+        info["PyTorch"] = "not installed"
+        info["CUDA"] = "N/A"
+        info["GPU"] = "N/A"
+        info["GPU_Count"] = 0
+    except Exception:
+        info["PyTorch"] = "error"
+        info["CUDA"] = "N/A"
+        info["GPU"] = "N/A"
+        info["GPU_Count"] = 0
+
+    return info
+
+
 def _print_log_config(config: LogConfig, startup_info: dict[str, Any]) -> None:
     """Print logging configuration on startup with minimalist style."""
     # ANSI color codes
@@ -333,9 +376,17 @@ def _print_log_config(config: LogConfig, startup_info: dict[str, Any]) -> None:
         f"  {DIM}PID:{RESET} {_get_process_id()}  {DIM}Rank:{RESET} {_get_rank()}  {DIM}Async:{RESET} {config.enqueue}"
     )
 
+    # System info section
     if startup_info:
-        info_parts = [f"{DIM}{k}:{RESET} {v}" for k, v in startup_info.items()]
-        lines.append(f"  {'  '.join(info_parts)}")
+        sys_info_keys = ["Python", "PyTorch", "CUDA", "System", "Arch", "GPU", "GPU_Count"]
+        sys_parts = []
+        for k in sys_info_keys:
+            if k in startup_info:
+                sys_parts.append(f"{DIM}{k}:{RESET} {startup_info[k]}")
+        if sys_parts:
+            lines.append(f"  {'  '.join(sys_parts[:3])}")
+            if len(sys_parts) > 3:
+                lines.append(f"  {'  '.join(sys_parts[3:])}")
 
     lines.append(SEP)
 
@@ -476,8 +527,11 @@ def configure_logging(config: LogConfig | None = None, startup_info: dict[str, A
         except Exception as e:
             print(f"Warning: Failed to initialize syslog handler: {e}", file=sys.stderr)
 
-    # Print configuration on startup
-    _print_log_config(config, startup_info or {})
+    # Print configuration on startup with system info
+    auto_startup_info = _get_startup_info()
+    if startup_info:
+        auto_startup_info.update(startup_info)
+    _print_log_config(config, auto_startup_info)
 
 
 class LoggingContext:
