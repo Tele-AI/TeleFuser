@@ -230,8 +230,17 @@ class GPUPool:
             gpu_ids: List of GPU device IDs available for scheduling.
         """
         self.available = sorted(gpu_ids)
+        self.total = len(gpu_ids)  # Total GPUs in pool (unchanged)
         self.allocated: dict[int, list[int]] = {}  # job_id -> list of GPU IDs
         self._next_job_id = 0
+
+    def total_count(self) -> int:
+        """Get total GPU count in the pool.
+
+        Returns:
+            Total number of GPUs (regardless of current availability).
+        """
+        return self.total
 
     def allocate(self, gpu_count: int) -> tuple[int, list[int]] | None:
         """Allocate GPUs for a new job.
@@ -330,9 +339,25 @@ class PipelineScheduler:
         self.update_baseline = update_baseline
         self.verbose = verbose
 
+        # Filter pipelines that require more GPUs than available in pool
+        total_gpus = gpu_pool.total_count()
+        skipped_pipelines: list[tuple[str, int]] = []  # (name, required_gpu_count)
+        valid_pipelines: dict[str, PipelineConfig] = {}
+
+        for name, ppl_cfg in pipelines.items():
+            if ppl_cfg.gpu_count > total_gpus:
+                skipped_pipelines.append((name, ppl_cfg.gpu_count))
+            else:
+                valid_pipelines[name] = ppl_cfg
+
+        # Log skipped pipelines
+        if skipped_pipelines:
+            for name, required in skipped_pipelines:
+                print(f"  [SKIP] {name}: requires {required} GPUs, but pool has {total_gpus}")
+
         # Sort pipelines by gpu_count descending for greedy scheduling
         sorted_pipelines = sorted(
-            pipelines.items(),
+            valid_pipelines.items(),
             key=lambda x: x[1].gpu_count,
             reverse=True,
         )
@@ -1975,10 +2000,20 @@ def main() -> None:
         results = scheduler.results
     else:
         # Sequential execution mode (original behavior)
-        print(f"\nSequential execution ({len(gpu_ids)} GPU available)")
+        total_gpus = len(gpu_ids) if gpu_ids else 0
+        print(f"\nSequential execution ({total_gpus} GPU available)")
         print("-" * 60)
 
-        for idx, (name, ppl_cfg) in enumerate(to_run.items(), 1):
+        # Filter pipelines that require more GPUs than available
+        filtered_to_run: dict[str, PipelineConfig] = {}
+        for name, ppl_cfg in to_run.items():
+            if ppl_cfg.gpu_count > total_gpus:
+                print(f"  [SKIP] {name}: requires {ppl_cfg.gpu_count} GPUs, but only {total_gpus} available")
+            else:
+                filtered_to_run[name] = ppl_cfg
+
+        total = len(filtered_to_run)
+        for idx, (name, ppl_cfg) in enumerate(filtered_to_run.items(), 1):
             elapsed_total = time.time() - run_start
             print(f"\n[{idx}/{total}] ({elapsed_total:.0f}s) Running: {name} ...")
 

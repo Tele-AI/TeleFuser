@@ -33,6 +33,14 @@ pipelines:
     resolution: "480p"
     ppl_config_overrides:
       vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
+  wan21_1_3b_t2v_cfgp:
+    script: wan_video/wan21_1_3b_text_to_video_h100.py
+    gpu_count: 2
+    output_type: video
+    model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
+    resolution: "480p"
+    ppl_config_overrides:
+      vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
   # ============================================================
   # wan_video — Image to Video
   # ============================================================
@@ -64,6 +72,14 @@ pipelines:
     ppl_config_overrides:
       attn_impl: TORCH_SDPA
 
+  wan22_14b_i2v_distill_sp:
+    script: wan_video/wan22_14b_image_to_video_distill_h100.py
+    gpu_count: 2
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
+    ppl_config_overrides:
+      attn_impl: TORCH_SDPA
   wan22_14b_i2v_distill:
     script: wan_video/wan22_14b_image_to_video_distill_h100.py
     gpu_count: 1
