@@ -92,7 +92,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
         pipe_config.dit_high_config.parallel_config.enable_fsdp = True
         pipe_config.dit_low_config.parallel_config.enable_fsdp = True
         pipe_config.enable_denoising_parallel = True
-        pipe_config.enable_vae_parallel = True
+        pipe_config.enable_vae_parallel = False
         pipe_config.vae_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.vae_config.parallel_config.dp_degree = parallelism
     pipe.init(module_manager, pipe_config)
@@ -192,6 +192,14 @@ def main(
     image = Image.open(image_path).convert("RGB")
 
     # Run inference
+    video = run(
+        pipe,
+        image,
+        prompt,
+        negative_prompt,
+        seed=seed,
+        resolution=resolution,
+    )
     start = time.time()
     video = run(
         pipe,

@@ -33,14 +33,6 @@ pipelines:
     resolution: "480p"
     ppl_config_overrides:
       vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
-
-  wan21_1_3b_t2v_radial:
-    script: wan_video/wan21_1_3b_text_to_video_radial.py
-    gpu_count: 1
-    output_type: video
-    model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
-    resolution: "480p"
-
   # ============================================================
   # wan_video — Image to Video
   # ============================================================
