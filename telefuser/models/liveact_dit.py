@@ -295,7 +295,6 @@ class WanSelfAttention(nn.Module):
         kv_cache: dict = {},
         start_idx: int | None = None,
         end_idx: int | None = None,
-        update_cache: bool = False,
     ) -> tuple[torch.Tensor, None]:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
@@ -309,48 +308,67 @@ class WanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
         k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
 
-        frame_seqlen = math.prod(grid_sizes[0][1:]).item()
-        current_start_frame = start_idx // frame_seqlen
+        tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
+        current_start_frame = start_idx // tokens_per_frame
 
-        if update_cache:
-            if kv_cache["mean_memory"]:
-                k_compress, v_compress = self.kv_mean, self.kv_mean
-            else:
-                k_compress, v_compress = self.k_compress, self.v_compress
-            k_cache[:, 2 * frame_seqlen : 3 * frame_seqlen].copy_(
-                k_compress(k_cache[:, 2 * frame_seqlen : 7 * frame_seqlen])
-            )
-            v_cache[:, 2 * frame_seqlen : 3 * frame_seqlen].copy_(
-                v_compress(v_cache[:, 2 * frame_seqlen : 7 * frame_seqlen])
-            )
-            k_cache[:, 3 * frame_seqlen : 4 * frame_seqlen].copy_(
-                k_compress(k_cache[:, 7 * frame_seqlen : 12 * frame_seqlen])
-            )
-            v_cache[:, 3 * frame_seqlen : 4 * frame_seqlen].copy_(
-                v_compress(v_cache[:, 7 * frame_seqlen : 12 * frame_seqlen])
-            )
-
-            k_cache[:, 4 * frame_seqlen : 6 * frame_seqlen].copy_(k_cache[:, 12 * frame_seqlen : 14 * frame_seqlen])
-            v_cache[:, 4 * frame_seqlen : 6 * frame_seqlen].copy_(v_cache[:, 12 * frame_seqlen : 14 * frame_seqlen])
+        # KV cache now stores only 6 frames (compressed history)
+        # For attention, we need to form full KV:
+        # - iteration=0: 6 frames (first generation)
+        # - iteration>=1: 6 frames history + 8 frames current = 14 frames
 
         if start_idx != 0:
-            k_cache[:, 6 * frame_seqlen :] = k
-            v_cache[:, 6 * frame_seqlen :] = v
+            # Subsequent iterations: concat history cache + current k/v
+            # History cache: [0:6] frames, Current: 8 frames
+            k_full = torch.cat([k_cache, k], dim=1)  # [1, 14*tpf, H, D]
+            v_full = torch.cat([v_cache, v], dim=1)
         else:
-            k_cache[:, : 6 * frame_seqlen] = k
-            v_cache[:, : 6 * frame_seqlen] = v
+            # First iteration: 6 frames, write to cache
+            k_cache[:, : 6 * tokens_per_frame] = k
+            v_cache[:, : 6 * tokens_per_frame] = v
+            k_full = k_cache
+            v_full = v_cache
 
         roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
-        roped_key = causal_rope_apply(k_cache, grid_sizes, freqs, start_frame=0).type_as(v)
+        roped_key = causal_rope_apply(k_full, grid_sizes, freqs, start_frame=0).type_as(v)
 
         # Use TeleFuser's attention function with BSND layout
         x = attn_func(
             roped_query,
             roped_key[:, :end_idx, ...],
-            v_cache[:, :end_idx, ...],
+            v_full[:, :end_idx, ...],
             attention_config=self.attention_config,
             input_layout="BSND",
         ).type_as(x)
+
+        # Update cache after attention (for subsequent iterations)
+        if start_idx != 0:
+            if kv_cache["mean_memory"]:
+                k_compress, v_compress = self.kv_mean, self.kv_mean
+            else:
+                k_compress, v_compress = self.k_compress, self.v_compress
+
+            # Compress 14 frames → 6 frames
+            # [2:7] → [2:3] (5 frames → 1 frame)
+            k_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = k_compress(
+                k_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
+            )
+            v_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = v_compress(
+                v_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
+            )
+            # [7:12] → [3:4] (5 frames → 1 frame)
+            k_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = k_compress(
+                k_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
+            )
+            v_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = v_compress(
+                v_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
+            )
+            # [12:14] → [4:6] (2 frames → 2 frames, direct copy)
+            k_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = k_full[
+                :, 12 * tokens_per_frame : 14 * tokens_per_frame
+            ]
+            v_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = v_full[
+                :, 12 * tokens_per_frame : 14 * tokens_per_frame
+            ]
 
         self._store_kv_cache(kv_cache, k_cache, v_cache)
 
@@ -487,7 +505,6 @@ class WanAttentionBlock(nn.Module):
         kv_cache: dict = {},
         start_idx: int | None = None,
         end_idx: int | None = None,
-        update_cache: bool = False,
         cross_kv_cache: dict = {},
         audio_embedding: torch.Tensor | None = None,
         ref_target_masks: torch.Tensor | None = None,
@@ -511,7 +528,6 @@ class WanAttentionBlock(nn.Module):
             kv_cache=kv_cache,
             start_idx=start_idx,
             end_idx=end_idx,
-            update_cache=update_cache,
         )
         x = x + y * e[2]
 
@@ -522,8 +538,8 @@ class WanAttentionBlock(nn.Module):
 
         # cross attn of audio
         if not skip_audio:
-            frame_seqlen = math.prod(grid_sizes[0][1:]).item()
-            start_f = start_idx // frame_seqlen
+            tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
+            start_f = start_idx // tokens_per_frame
             x_a = self.audio_cross_attn(
                 self.norm_x(x),
                 encoder_hidden_states=audio_embedding,
@@ -531,7 +547,7 @@ class WanAttentionBlock(nn.Module):
                 start_f=start_f,
             )
             if start_f == 0:
-                x_a[:, :frame_seqlen] = 0
+                x_a[:, :tokens_per_frame] = 0
             x = x + x_a
 
         y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))
@@ -803,7 +819,6 @@ class LiveActDiT(BaseModel):
         start_idx: int | None = None,
         end_idx: int | None = None,
         cross_kv_cache: dict = {},
-        update_cache: bool = True,
         skip_audio: bool = False,
     ) -> torch.Tensor:
         assert clip_fea is not None and y is not None
@@ -882,7 +897,6 @@ class LiveActDiT(BaseModel):
             human_num=human_num,
             start_idx=start_idx,
             end_idx=end_idx,
-            update_cache=update_cache,
             skip_audio=skip_audio,
         )
 

@@ -97,7 +97,7 @@ class LiveActDenoisingStage(BaseStage):
         self.kv_cache_config = kv_cache_config or KVCacheConfig()
 
         self._timestep_tensors: list[torch.Tensor] | None = None
-        self._kv_cache_frame_len: int | None = None
+        self._kv_cache_tokens_per_frame: int | None = None
         self._kv_cache_null_audio: dict | None = None
 
     def set_kv_cache_config(self, config: KVCacheConfig) -> None:
@@ -115,7 +115,7 @@ class LiveActDenoisingStage(BaseStage):
 
     def init_kv_cache(
         self,
-        frame_len: int,
+        tokens_per_frame: int,
         num_timesteps: int = 3,
         device: str | torch.device = "cuda",
         dtype: torch.dtype = torch.bfloat16,
@@ -124,7 +124,7 @@ class LiveActDenoisingStage(BaseStage):
         """Initialize KV cache for streaming generation.
 
         Args:
-            frame_len: Number of tokens per frame (H/patch * W/patch)
+            tokens_per_frame: Number of tokens per frame (H/patch * W/patch)
             num_timesteps: Number of denoising timesteps
             device: Device for KV cache
             dtype: Data type for KV cache
@@ -139,9 +139,11 @@ class LiveActDenoisingStage(BaseStage):
         kv_cache_dtype = torch.float8_e4m3fn if self.kv_cache_config.fp8_kv_cache else dtype
         kv_cache_device = "cpu" if self.kv_cache_config.offload_cache else device
 
-        # Total KV cache tokens: 6 + 8 = 14 frames worth
-        # First iteration: 6 frames, subsequent: 8 frames
-        kv_cache_tokens = frame_len * 14
+        # Total KV cache tokens: 6 frames (compressed history summary)
+        # - [0:2]: Fixed reference frames from first iteration
+        # - [2:4]: Compressed frames from history (5 frames → 1 frame each)
+        # - [4:6]: Latest 2 frames from previous iteration
+        kv_cache_tokens = tokens_per_frame * 6
         kv_scale_shape = (1, kv_cache_tokens, self.num_heads, 1)
 
         kv_cache = {}
@@ -180,7 +182,7 @@ class LiveActDenoisingStage(BaseStage):
     def clear_kv_cache(self) -> None:
         """Clear KV cache and related state."""
         self.kv_cache = {}
-        self._kv_cache_frame_len = None
+        self._kv_cache_tokens_per_frame = None
         self._kv_cache_null_audio = None
 
     def predict_noise(
@@ -195,7 +197,6 @@ class LiveActDenoisingStage(BaseStage):
         kv_cache: dict,
         start_idx: int,
         end_idx: int,
-        update_cache: bool = False,
         skip_audio: bool = False,
     ) -> torch.Tensor:
         """Predict noise with audio cross-attention.
@@ -211,7 +212,6 @@ class LiveActDenoisingStage(BaseStage):
             kv_cache: KV cache dictionary
             start_idx: Start index for KV cache
             end_idx: End index for KV cache
-            update_cache: Whether to update KV cache
             skip_audio: Whether to skip audio cross-attention
 
         Returns:
@@ -228,7 +228,6 @@ class LiveActDenoisingStage(BaseStage):
             kv_cache=kv_cache,
             start_idx=start_idx,
             end_idx=end_idx,
-            update_cache=update_cache,
             skip_audio=skip_audio,
         )[0]
 
@@ -245,7 +244,6 @@ class LiveActDenoisingStage(BaseStage):
         kv_cache_null_audio: dict | None,
         start_idx: int,
         end_idx: int,
-        update_cache: bool,
         audio_cfg: float = 1.0,
         step_idx: int = 0,
     ) -> torch.Tensor:
@@ -263,7 +261,6 @@ class LiveActDenoisingStage(BaseStage):
             kv_cache_null_audio: KV cache for null audio (CFG)
             start_idx: Start index for KV cache
             end_idx: End index for KV cache
-            update_cache: Whether to update KV cache
             audio_cfg: Audio CFG scale
             step_idx: Current step index
 
@@ -283,7 +280,6 @@ class LiveActDenoisingStage(BaseStage):
             kv_cache,
             start_idx,
             end_idx,
-            update_cache=update_cache,
             skip_audio=skip_audio,
         )
 
@@ -302,7 +298,6 @@ class LiveActDenoisingStage(BaseStage):
                 kv_cache_null_audio,
                 start_idx,
                 end_idx,
-                update_cache=update_cache,
                 skip_audio=False,
             )
             # Apply CFG
@@ -327,7 +322,6 @@ class LiveActDenoisingStage(BaseStage):
         audio_cfg: float = 1.0,
         num_inference_steps: int = 3,
         seed: int | None = None,
-        iteration: int = 0,  # Outer iteration for update_cache logic
     ) -> torch.Tensor:
         """Run denoising with audio cross-attention and KV cache.
 
@@ -343,7 +337,6 @@ class LiveActDenoisingStage(BaseStage):
             audio_cfg: Audio CFG scale
             num_inference_steps: Number of denoising steps
             seed: Random seed
-            iteration: Outer iteration index (for update_cache: True if iteration > 1)
 
         Returns:
             Denoised latent
@@ -355,21 +348,21 @@ class LiveActDenoisingStage(BaseStage):
 
         vae_stride = (4, 8, 8)
         patch_size = (1, 2, 2)
-        frame_len = (height // (patch_size[1] * vae_stride[1])) * (width // (patch_size[2] * vae_stride[2]))
+        tokens_per_frame = (height // (patch_size[1] * vae_stride[1])) * (width // (patch_size[2] * vae_stride[2]))
 
-        if self._kv_cache_frame_len != frame_len:
+        if self._kv_cache_tokens_per_frame != tokens_per_frame:
             self.init_kv_cache(
-                frame_len,
+                tokens_per_frame,
                 num_timesteps=num_inference_steps,
                 device=self.device,
                 dtype=self.torch_dtype,
             )
-            self._kv_cache_frame_len = frame_len
+            self._kv_cache_tokens_per_frame = tokens_per_frame
 
         kv_cache_null_audio = None
         if audio_cfg > 1.0 and self._kv_cache_null_audio is None:
             self._kv_cache_null_audio = self.init_kv_cache(
-                frame_len,
+                tokens_per_frame,
                 num_timesteps=num_inference_steps,
                 device=self.device,
                 dtype=self.torch_dtype,
@@ -383,15 +376,13 @@ class LiveActDenoisingStage(BaseStage):
 
         y_slice = y[:, :, sum(blksz_lst[:f]) : sum(blksz_lst[: f + 1]), ...]
 
-        update_cache = iteration > 1
-
         timestep_tensors = self._get_timestep_tensors()
 
         for i in tqdm(range(len(TIMESTEPS) - 1), desc="liveact denoise"):
             timestep = timestep_tensors[i]
 
-            start_idx = sum(blksz_lst[:f]) * frame_len
-            end_idx = sum(blksz_lst[: f + 1]) * frame_len
+            start_idx = sum(blksz_lst[:f]) * tokens_per_frame
+            end_idx = sum(blksz_lst[: f + 1]) * tokens_per_frame
 
             with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
                 noise_pred = self.predict_noise_with_audio_cfg(
@@ -406,7 +397,6 @@ class LiveActDenoisingStage(BaseStage):
                     kv_cache_null_audio=kv_cache_null_audio[i] if kv_cache_null_audio else None,
                     start_idx=start_idx,
                     end_idx=end_idx,
-                    update_cache=update_cache,  # Based on outer iteration
                     audio_cfg=audio_cfg,
                     step_idx=i,
                 )

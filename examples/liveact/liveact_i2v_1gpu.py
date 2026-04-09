@@ -156,7 +156,7 @@ def main(
         filename = get_example_name(__file__)
         output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
         output = os.path.join(output_dir, filename)
-    save_video(frames, output, fps=fps, audio_path=audio)
+    save_video(frames, output, fps=fps, audio_path=audio, quality=6)
     print(f"Video saved to: {output}")
 
 

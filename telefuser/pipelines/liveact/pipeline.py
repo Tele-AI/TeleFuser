@@ -300,7 +300,6 @@ class LiveActPipeline(BasePipeline):
                 width=width,
                 audio_cfg=audio_cfg,
                 num_inference_steps=num_inference_steps,
-                iteration=iteration,
             )
 
             if f == 0:
