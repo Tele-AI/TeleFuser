@@ -11,6 +11,7 @@ from ..models.TCDecoder import TAEHV
 from ..models.flashvsr_dit import FlashVSRModel
 from ..models.flux2_dit import Flux2DiT
 from ..models.hunyuan_video_dit import HunyuanVideoDiT
+from ..models.liveact_dit import LiveActDiT
 from ..models.longcat_video_dit import LongCatVideoTransformer3DModel
 from ..models.ltx_dit import LTXVideoTransformer
 from ..models.ltx_gemma_text_encoder import GemmaTextEncoder, LTXEmbeddingsProcessor
@@ -104,4 +105,6 @@ model_loader_configs = [
         [LongCatVideoTransformer3DModel],
         "official",
     ),
+    # LiveAct DiT (Audio-conditioned I2V)
+    (None, "99c7bbedc6dd6c4824799e4f999fee0a", ["liveact_dit"], [LiveActDiT], "official"),
 ]
