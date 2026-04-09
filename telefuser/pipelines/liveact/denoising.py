@@ -4,20 +4,25 @@ Handles the diffusion denoising process with:
 - Audio cross-attention for talking head generation
 - KV cache management for streaming generation
 - Memory compression for efficient long video generation
+- Ulysses Sequence Parallel support
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
 from tqdm import tqdm
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_world_size
+from telefuser.distributed.fsdp import shard_model
 from telefuser.metrics import with_metrics
+from telefuser.platforms import current_platform
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
@@ -101,6 +106,37 @@ class LiveActDenoisingStage(BaseStage):
         self._kv_cache_tokens_per_frame: int | None = None
         self._kv_cache_null_audio: dict | None = None
 
+    def parallel_models(self) -> None:
+        """Configure parallel processing for the DiT model.
+
+        This method is called by ParallelWorker to set up:
+        - Device mesh for distributed communication
+        - Ulysses Sequence Parallel (USP) for attention
+        - FSDP for model sharding
+        """
+        parallel_cfg = self.model_runtime_config.parallel_config
+        self.dit.device_mesh = create_device_mesh_from_config(parallel_cfg)
+        self.dit.set_attention_config(self.model_runtime_config.attention_config)
+
+        # Enable Ulysses Sequence Parallel
+        if parallel_cfg.sp_ulysses_degree > 1:
+            self.dit.enable_usp(self.dit.device_mesh)
+
+        # Enable FSDP
+        if parallel_cfg.enable_fsdp:
+            logger.info(f"enable fsdp for {self.name}")
+            shard_fn = partial(shard_model, wrap_module_names=self.dit.get_fsdp_module_names())
+            self.dit = shard_fn(module=self.dit, device_id=self.device)
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                self.dit.cpu()
+                current_platform.empty_cache()
+
+        # Handle torch.compile for distributed mode
+        if self.model_runtime_config.compile_config.enabled:
+            apply_compile_config(self.model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
+            self.dit.compile()
+
     def set_kv_cache_config(self, config: KVCacheConfig) -> None:
         """Set KV cache configuration."""
         self.kv_cache_config = config
@@ -140,12 +176,15 @@ class LiveActDenoisingStage(BaseStage):
         kv_cache_dtype = torch.float8_e4m3fn if self.kv_cache_config.fp8_kv_cache else dtype
         kv_cache_device = "cpu" if self.kv_cache_config.offload_cache else device
 
+        # Get SP size for KV cache shape
+        sp_size = get_ulysses_world_size(self.dit.device_mesh) or 1
+        local_heads = self.num_heads // sp_size
+
         # Total KV cache tokens: 6 frames (compressed history summary)
-        # - [0:2]: Fixed reference frames from first iteration
-        # - [2:4]: Compressed frames from history (5 frames → 1 frame each)
-        # - [4:6]: Latest 2 frames from previous iteration
+        # KV cache shape: [1, seq, H/N, D] - full sequence, local heads
+        # This matches the layout after ulysses_scatter_heads in SP mode
         kv_cache_tokens = tokens_per_frame * 6
-        kv_scale_shape = (1, kv_cache_tokens, self.num_heads, 1)
+        kv_scale_shape = (1, kv_cache_tokens, local_heads, 1)
 
         kv_cache = {}
         for t_idx in range(num_timesteps):
@@ -153,12 +192,12 @@ class LiveActDenoisingStage(BaseStage):
             for layer_id in range(self.num_layers):
                 kv_cache[t_idx][layer_id] = {
                     "k": torch.zeros(
-                        [1, kv_cache_tokens, self.num_heads, self.head_dim],
+                        [1, kv_cache_tokens, local_heads, self.head_dim],
                         dtype=kv_cache_dtype,
                         device=kv_cache_device,
                     ),
                     "v": torch.zeros(
-                        [1, kv_cache_tokens, self.num_heads, self.head_dim],
+                        [1, kv_cache_tokens, local_heads, self.head_dim],
                         dtype=kv_cache_dtype,
                         device=kv_cache_device,
                     ),

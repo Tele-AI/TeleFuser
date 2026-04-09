@@ -7,6 +7,7 @@ Only modifications:
 - Add type annotations
 - Remove diffusers dependency
 - Add StateDictConverter
+- Add Ulysses Sequence Parallel support
 """
 
 from __future__ import annotations
@@ -19,9 +20,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention as attn_func
 from telefuser.utils.logging import logger
 
@@ -167,7 +170,7 @@ class SingleStreamAttention(nn.Module):
 
 
 class WanSelfAttention(nn.Module):
-    """Self-attention with KV cache and memory compression."""
+    """Self-attention with KV cache, memory compression, and Ulysses SP support."""
 
     attention_config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
 
@@ -198,6 +201,11 @@ class WanSelfAttention(nn.Module):
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False)
         self.memory_proj_v = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False)
 
+        # SP (Ulysses Sequence Parallel) support
+        self.sp_flag = False
+        self.device_mesh = None
+        self.ulysses_group = None
+
     def post_init(self, device):
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False).to(
             device, dtype=torch.bfloat16
@@ -222,7 +230,7 @@ class WanSelfAttention(nn.Module):
         assert N % n_frame == 0
         T = N // n_frame
         v = v.view(B, N, H * C).transpose(1, 2)
-        v = self.memory_proj_k(v)
+        v = self.memory_proj_v(v)
         v = v.view(B, H, C, T).permute(0, 3, 1, 2)
         return v
 
@@ -296,6 +304,126 @@ class WanSelfAttention(nn.Module):
         start_idx: int | None = None,
         end_idx: int | None = None,
     ) -> tuple[torch.Tensor, None]:
+        if self.sp_flag:
+            return self.async_sp_forward(x, seq_lens, grid_sizes, freqs, kv_cache, start_idx, end_idx)
+        return self.default_forward(x, seq_lens, grid_sizes, freqs, kv_cache, start_idx, end_idx)
+
+    def async_sp_forward(
+        self,
+        x: torch.Tensor,
+        seq_lens: torch.Tensor | None,
+        grid_sizes: torch.Tensor,
+        freqs: torch.Tensor,
+        kv_cache: dict = {},
+        start_idx: int | None = None,
+        end_idx: int | None = None,
+    ) -> tuple[torch.Tensor, None]:
+        """Ulysses SP forward: scatter heads -> attention -> gather heads.
+
+        Key insight: KV cache stores [1, seq, H/N, D] (full sequence, local heads)
+        """
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+
+        # QKV projection: [B, S/N, H, D]
+        q = self.norm_q(self.q(x)).view(b, s, n, d)
+        k = self.norm_k(self.k(x)).view(b, s, n, d)
+        v = self.v(x).view(b, s, n, d)
+
+        # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
+        q = ulysses_scatter_heads(q, self.ulysses_group)()
+        k = ulysses_scatter_heads(k, self.ulysses_group)()
+        v = ulysses_scatter_heads(v, self.ulysses_group)()
+
+        # Load KV cache: [1, cache_len, H/N, D]
+        k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
+
+        tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
+        current_start_frame = start_idx // tokens_per_frame
+
+        # Update KV cache (full sequence, local heads)
+        if start_idx != 0:
+            k_full = torch.cat([k_cache, k], dim=1)
+            v_full = torch.cat([v_cache, v], dim=1)
+        else:
+            k_cache[:, : 6 * tokens_per_frame] = k
+            v_cache[:, : 6 * tokens_per_frame] = v
+            k_full = k_cache
+            v_full = v_cache
+
+        # RoPE apply
+        roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+        roped_key = causal_rope_apply(k_full, grid_sizes, freqs, start_frame=0).type_as(v)
+
+        # Attention
+        x = attn_func(
+            roped_query,
+            roped_key[:, :end_idx, ...],
+            v_full[:, :end_idx, ...],
+            attention_config=self.attention_config,
+            input_layout="BSND",
+        ).type_as(x)
+
+        # Update cache (compression)
+        if start_idx != 0:
+            self._compress_kv_cache(k_full, v_full, k_cache, v_cache, tokens_per_frame, kv_cache)
+
+        self._store_kv_cache(kv_cache, k_cache, v_cache)
+
+        # Ulysses gather heads: [B, S, H/N, D] -> [B, S/N, H, D]
+        x = ulysses_gather_heads(x, self.ulysses_group, num_heads=self.num_heads)()
+
+        # Output projection
+        x = x.flatten(2)
+        x = self.o(x)
+        return x, None
+
+    def _compress_kv_cache(
+        self,
+        k_full: torch.Tensor,
+        v_full: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        tokens_per_frame: int,
+        kv_cache: dict,
+    ) -> None:
+        """Compress KV cache from 14 frames to 6 frames."""
+        if kv_cache["mean_memory"]:
+            k_compress, v_compress = self.kv_mean, self.kv_mean
+        else:
+            k_compress, v_compress = self.k_compress, self.v_compress
+
+        # [2:7] -> [2:3] (5 frames -> 1 frame)
+        k_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = k_compress(
+            k_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
+        )
+        v_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = v_compress(
+            v_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
+        )
+        # [7:12] -> [3:4] (5 frames -> 1 frame)
+        k_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = k_compress(
+            k_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
+        )
+        v_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = v_compress(
+            v_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
+        )
+        # [12:14] -> [4:6] (2 frames -> 2 frames, direct copy)
+        k_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = k_full[
+            :, 12 * tokens_per_frame : 14 * tokens_per_frame
+        ]
+        v_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = v_full[
+            :, 12 * tokens_per_frame : 14 * tokens_per_frame
+        ]
+
+    def default_forward(
+        self,
+        x: torch.Tensor,
+        seq_lens: torch.Tensor | None,
+        grid_sizes: torch.Tensor,
+        freqs: torch.Tensor,
+        kv_cache: dict = {},
+        start_idx: int | None = None,
+        end_idx: int | None = None,
+    ) -> tuple[torch.Tensor, None]:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         # query, key, value function
@@ -342,33 +470,7 @@ class WanSelfAttention(nn.Module):
 
         # Update cache after attention (for subsequent iterations)
         if start_idx != 0:
-            if kv_cache["mean_memory"]:
-                k_compress, v_compress = self.kv_mean, self.kv_mean
-            else:
-                k_compress, v_compress = self.k_compress, self.v_compress
-
-            # Compress 14 frames → 6 frames
-            # [2:7] → [2:3] (5 frames → 1 frame)
-            k_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = k_compress(
-                k_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
-            )
-            v_cache[:, 2 * tokens_per_frame : 3 * tokens_per_frame] = v_compress(
-                v_full[:, 2 * tokens_per_frame : 7 * tokens_per_frame]
-            )
-            # [7:12] → [3:4] (5 frames → 1 frame)
-            k_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = k_compress(
-                k_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
-            )
-            v_cache[:, 3 * tokens_per_frame : 4 * tokens_per_frame] = v_compress(
-                v_full[:, 7 * tokens_per_frame : 12 * tokens_per_frame]
-            )
-            # [12:14] → [4:6] (2 frames → 2 frames, direct copy)
-            k_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = k_full[
-                :, 12 * tokens_per_frame : 14 * tokens_per_frame
-            ]
-            v_cache[:, 4 * tokens_per_frame : 6 * tokens_per_frame] = v_full[
-                :, 12 * tokens_per_frame : 14 * tokens_per_frame
-            ]
+            self._compress_kv_cache(k_full, v_full, k_cache, v_cache, tokens_per_frame, kv_cache)
 
         self._store_kv_cache(kv_cache, k_cache, v_cache)
 
@@ -953,6 +1055,34 @@ class LiveActDiT(BaseModel):
         WanSelfAttention.attention_config = attention_config
         WanI2VCrossAttention.attention_config = attention_config
         SingleStreamAttention.attention_config = attention_config
+
+    def enable_usp(self, device_mesh: DeviceMesh | None = None) -> None:
+        """Enable Ulysses sequence parallelism.
+
+        Args:
+            device_mesh: Device mesh for distributed communication.
+        """
+        from telefuser.distributed import get_ulysses_group, get_ulysses_world_size
+
+        logger.info("LiveAct DiT enable USP (Ulysses Sequence Parallel)")
+        self.device_mesh = device_mesh
+        sp_size = get_ulysses_world_size(device_mesh) or 1
+
+        if sp_size > 1:
+            if self.num_heads % sp_size != 0:
+                raise ValueError(f"num_heads {self.num_heads} must be divisible by sp_size {sp_size}")
+
+            # Cache SP values for efficiency
+            ulysses_group = get_ulysses_group(device_mesh)
+
+            for block in self.blocks:
+                block.self_attn.sp_flag = True
+                block.self_attn.device_mesh = device_mesh
+                block.self_attn.ulysses_group = ulysses_group
+
+    def get_fsdp_module_names(self) -> list[str]:
+        """Get module names for FSDP sharding."""
+        return ["blocks"]
 
     @staticmethod
     def state_dict_converter():

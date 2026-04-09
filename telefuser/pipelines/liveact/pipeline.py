@@ -68,6 +68,9 @@ class LiveActPipelineConfig:
     offload_cache: bool = False
     mean_memory: bool = False
 
+    # Parallel processing
+    enable_denoising_parallel: bool = False
+
     # Feature flags
     enable_metrics: bool = False
 
@@ -147,6 +150,12 @@ class LiveActPipeline(BasePipeline):
                 mean_memory=config.mean_memory,
             ),
         )
+
+        # Wrap with ParallelWorker for distributed inference
+        if config.enable_denoising_parallel:
+            from telefuser.worker.parallel_worker import ParallelWorker
+
+            self.denoise_stage = ParallelWorker(self.denoise_stage)
 
         if config.enable_metrics:
             self.enable_metrics()

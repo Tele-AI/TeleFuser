@@ -1,16 +1,23 @@
-"""LiveAct Example: Audio-conditioned Image-to-Video Generation.
+"""LiveAct Example: Audio-conditioned Image-to-Video Generation with SP Parallelism.
 
 This example demonstrates how to use the LiveAct pipeline for generating
-talking head videos from an input image and audio.
+talking head videos from an input image and audio with Ulysses Sequence Parallel.
 
 Usage:
-    python examples/liveact/liveact_i2v_1gpu.py \
-        --ckpt_dir path/to/checkpoints \
-        --wav2vec_dir path/to/wav2vec2 \
-        --image path/to/image.jpg \
-        --audio path/to/audio.wav \
-        --prompt "A person talking naturally" \
-        --output output.mp4
+    # Single GPU
+    python examples/liveact/liveact_i2v_sp.py --gpu_num 1 \
+        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
+        --image path/to/image.jpg --audio path/to/audio.wav
+
+    # Multi-GPU SP (2 GPUs)
+    python examples/liveact/liveact_i2v_sp.py --gpu_num 2 \
+        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
+        --image path/to/image.jpg --audio path/to/audio.wav
+
+    # Multi-GPU SP (4 GPUs)
+    python examples/liveact/liveact_i2v_sp.py --gpu_num 4 \
+        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
+        --image path/to/image.jpg --audio path/to/audio.wav
 """
 
 import os
@@ -40,10 +47,11 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(ckpt_dir: str, wav2vec_dir: str):
-    """Load LiveAct pipeline.
+def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
+    """Load LiveAct pipeline with optional SP parallelism.
 
     Args:
+        gpu_num: Number of GPUs for parallel inference (1, 2, or 4)
         ckpt_dir: Path to model checkpoints (LiveAct weights)
         wav2vec_dir: Path to wav2vec2 weights
 
@@ -80,6 +88,13 @@ def get_pipeline(ckpt_dir: str, wav2vec_dir: str):
     config.dit_config.attention_config = PPL_CONFIG["attention_config"]
     config.dit_config.quant_config = PPL_CONFIG["quant_config"]
     config.dit_config.compile_config = PPL_CONFIG["compile_config"]
+
+    # Configure SP parallelism for multi-GPU
+    if gpu_num > 1:
+        config.dit_config.parallel_config.sp_ulysses_degree = gpu_num
+        config.dit_config.parallel_config.device_ids = list(range(gpu_num))
+        config.enable_denoising_parallel = True
+        print(f"Enabled Ulysses Sequence Parallel with {gpu_num} GPUs")
 
     pipeline.init(mm, config)
     return pipeline
@@ -124,6 +139,7 @@ def run(
 
 
 @click.command()
+@click.option("--gpu_num", default=1, help="Number of GPUs to use (1, 2, or 4), default is 1")
 @click.option("--ckpt_dir", required=True, help="Path to LiveAct checkpoints")
 @click.option("--wav2vec_dir", required=True, help="Path to wav2vec2 weights")
 @click.option("--image", required=True, help="Path to input image")
@@ -132,8 +148,9 @@ def run(
 @click.option("--height", default=PPL_CONFIG["height"], help="Video height")
 @click.option("--width", default=PPL_CONFIG["width"], help="Video width")
 @click.option("--fps", default=PPL_CONFIG["fps"], help="Video fps")
-@click.option("--output", default=None, help="Output video path (default: liveact_i2v_1gpu.mp4)")
+@click.option("--output", default=None, help="Output video path (default: liveact_i2v_sp_{gpu_num}gpu.mp4)")
 def main(
+    gpu_num: int,
     ckpt_dir: str,
     wav2vec_dir: str,
     image: str,
@@ -144,8 +161,8 @@ def main(
     fps: int,
     output: str | None,
 ):
-    """LiveAct: Generate talking head video from image and audio."""
-    pipeline = get_pipeline(ckpt_dir, wav2vec_dir)
+    """LiveAct: Generate talking head video from image and audio with SP parallelism."""
+    pipeline = get_pipeline(gpu_num, ckpt_dir, wav2vec_dir)
 
     start = time.time()
     frames = run(pipeline, image, audio, prompt, height, width, fps)
@@ -153,7 +170,7 @@ def main(
     print(f"Video generation time: {elapsed:.2f} seconds")
 
     if output is None:
-        filename = get_example_name(__file__)
+        filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
         output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
         output = os.path.join(output_dir, filename)
     save_video(frames, output, fps=fps, audio_path=audio, quality=6)
