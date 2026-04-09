@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List
 
 import torch
+import torchvision.transforms as transforms
 from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
@@ -64,7 +65,7 @@ class LiveActPipelineConfig:
 
     # KV cache parameters
     fp8_kv_cache: bool = False
-    offload_cache: bool = True
+    offload_cache: bool = False
     mean_memory: bool = False
 
     # Feature flags
@@ -91,13 +92,11 @@ class LiveActPipeline(BasePipeline):
 
     def __init__(self, device: str | torch.device, torch_dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__(device=device, torch_dtype=torch_dtype)
-        self.height_division_factor = 32  # VAE 16x * DiT patch 2x = 32
-        self.width_division_factor = 32
-        self.base_fps = 24
+        self.height_division_factor = 16
+        self.width_division_factor = 16
 
     def preprocess_image(self, image: Image.Image, height: int, width: int) -> torch.Tensor:
         """Preprocess image with center crop to maintain aspect ratio."""
-        import torchvision.transforms as transforms
 
         transform = transforms.Compose(
             [
@@ -155,16 +154,12 @@ class LiveActPipeline(BasePipeline):
     def prepare_vae_latent(
         self,
         input_image: torch.Tensor,
-        height: int,
-        width: int,
         num_frames: int,
     ) -> torch.Tensor:
         """Prepare VAE latent with mask for I2V.
 
         Args:
             input_image: Preprocessed image tensor [1, C, H, W]
-            height: Video height
-            width: Video width
             num_frames: Number of frames
 
         Returns:
@@ -190,7 +185,6 @@ class LiveActPipeline(BasePipeline):
         audio_path: str | None = None,
         audio: torch.Tensor | None = None,
         audio_sr: int = 16000,
-        negative_prompt: str = "",
         seed: int | None = None,
         height: int = 480,
         width: int = 832,
@@ -206,7 +200,6 @@ class LiveActPipeline(BasePipeline):
             audio_path: Path to audio file
             audio: Audio tensor (alternative to audio_path)
             audio_sr: Sample rate of audio tensor
-            negative_prompt: Negative prompt (not used in LiveAct)
             seed: Random seed
             height: Video height
             width: Video width
@@ -253,9 +246,15 @@ class LiveActPipeline(BasePipeline):
             self.device, self.torch_dtype
         )
 
+        # Calculate tokens per frame for DiT
+        tokens_per_frame = (height // (PATCH_SIZE[1] * VAE_STRIDE[1])) * (width // (PATCH_SIZE[2] * VAE_STRIDE[2]))
+
         gen_video_list = []
         pre_latent = None
         total_start_time = None
+
+        if seed is not None:
+            torch.manual_seed(seed)
 
         for iteration in range(iter_total_num):
             iter_start_time = time.time()
@@ -280,26 +279,21 @@ class LiveActPipeline(BasePipeline):
                     audio_end_idx=audio_end_idx,
                 )
 
-            y_cut = y[:, :, : num_frames // 4 + 1, ...]
-
             f = iteration if iteration <= 1 else 1
             latent_shape = (LATENT_CHANNELS, blksz_lst[f], height // VAE_STRIDE[1], width // VAE_STRIDE[2])
             latent = torch.randn(latent_shape, dtype=self.torch_dtype, device=self.device)
-
-            if seed is not None:
-                torch.manual_seed(seed + iteration)
 
             latent = self.denoise_stage.process(
                 latent=latent,
                 context=prompt_emb,
                 clip_fea=clip_fea,
                 audio_embedding=audio_emb_for_dit,
-                y=y_cut,
+                y=y,
                 ref_target_masks=ref_target_masks,
-                height=height,
-                width=width,
+                tokens_per_frame=tokens_per_frame,
                 audio_cfg=audio_cfg,
                 num_inference_steps=num_inference_steps,
+                seed=seed,
             )
 
             if f == 0:

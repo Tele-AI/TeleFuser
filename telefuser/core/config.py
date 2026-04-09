@@ -238,6 +238,7 @@ class CompileConfig:
     Attributes:
         enabled: Whether to enable torch.compile
         mode: Compilation mode - "blocks" (recommended), "full", or "blocks_pp"
+        backend: Backend to use - "inductor" (default), "eager", etc.
         fullgraph: Require full graph compilation (more restrictive but faster)
         dynamic: Support dynamic shapes (None = auto-detect)
         recompile_limit: Max recompilations before caching (default: 1024)
@@ -250,6 +251,7 @@ class CompileConfig:
 
     enabled: bool = False
     mode: str = "blocks"  # "blocks", "full", "blocks_pp"
+    backend: str = "inductor"
     fullgraph: bool = False
     dynamic: bool | None = None  # None = auto, True/False = explicit
     recompile_limit: int = 1024
@@ -265,7 +267,8 @@ class CompileConfig:
         Returns:
             Dictionary of kwargs for torch.compile()
         """
-        kwargs = {
+        kwargs: dict = {
+            "backend": self.backend,
             "fullgraph": self.fullgraph,
             "dynamic": self.dynamic,
         }

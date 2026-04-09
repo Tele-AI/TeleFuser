@@ -83,8 +83,9 @@ class LiveActDenoisingStage(BaseStage):
         compile_config = model_runtime_config.compile_config
         if compile_config.enabled:
             apply_compile_config(compile_config)
-            self.dit.compile()
-            logger.info("✓ torch.compile enabled for DiT")
+            compile_kwargs = compile_config.get_compile_kwargs()
+            self.dit = torch.compile(self.dit, **compile_kwargs)
+            logger.info(f"✓ torch.compile enabled for DiT with {compile_kwargs}")
 
         # Get model architecture params from dit
         self.num_layers = len(self.dit.blocks)
@@ -317,8 +318,7 @@ class LiveActDenoisingStage(BaseStage):
         audio_embedding: torch.Tensor,
         y: torch.Tensor,
         ref_target_masks: torch.Tensor | None,
-        height: int,
-        width: int,
+        tokens_per_frame: int,
         audio_cfg: float = 1.0,
         num_inference_steps: int = 3,
         seed: int | None = None,
@@ -332,8 +332,7 @@ class LiveActDenoisingStage(BaseStage):
             audio_embedding: Audio embedding
             y: VAE latent with mask [1, 17, T', H', W']
             ref_target_masks: Reference target masks
-            height: Video height
-            width: Video width
+            tokens_per_frame: Number of tokens per frame (H/patch * W/patch)
             audio_cfg: Audio CFG scale
             num_inference_steps: Number of denoising steps
             seed: Random seed
@@ -343,12 +342,11 @@ class LiveActDenoisingStage(BaseStage):
         """
         blksz_lst = [6, 8]
 
+        if seed is not None:
+            torch.manual_seed(seed)
+
         latent_blksz = latent.shape[1]
         f = 0 if latent_blksz == blksz_lst[0] else 1
-
-        vae_stride = (4, 8, 8)
-        patch_size = (1, 2, 2)
-        tokens_per_frame = (height // (patch_size[1] * vae_stride[1])) * (width // (patch_size[2] * vae_stride[2]))
 
         if self._kv_cache_tokens_per_frame != tokens_per_frame:
             self.init_kv_cache(
@@ -370,9 +368,6 @@ class LiveActDenoisingStage(BaseStage):
             kv_cache_null_audio = self._kv_cache_null_audio
         elif audio_cfg > 1.0:
             kv_cache_null_audio = self._kv_cache_null_audio
-
-        if seed is not None:
-            torch.manual_seed(seed)
 
         y_slice = y[:, :, sum(blksz_lst[:f]) : sum(blksz_lst[: f + 1]), ...]
 

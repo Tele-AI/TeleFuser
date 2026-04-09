@@ -36,7 +36,7 @@ PPL_CONFIG = dict(
     width=832,
     attention_config=AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90),
     quant_config=QuantConfig(enabled=True, quant_type=QuantType.FP8),
-    compile_config=CompileConfig(enabled=False),
+    compile_config=CompileConfig(enabled=True, dynamic=False),
 )
 
 
