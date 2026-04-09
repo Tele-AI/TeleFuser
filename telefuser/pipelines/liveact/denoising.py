@@ -64,6 +64,7 @@ class LiveActDenoisingStage(BaseStage):
     ):
         super().__init__(name, model_runtime_config)
         self.dit = module_manager.fetch_module("liveact_dit")
+        self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
 
         # Get model architecture params from dit

@@ -21,14 +21,9 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from telefuser.core.base_model import BaseModel
-
-# SageAttention support
-try:
-    from sageattention import sageattn
-
-    USE_SAGEATTN = True
-except ImportError:
-    USE_SAGEATTN = False
+from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.ops.attention import attention as attn_func
+from telefuser.utils.logging import logger
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
@@ -115,31 +110,10 @@ class WanLayerNorm(nn.LayerNorm):
         return out
 
 
-def sdpa_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    k_lens: torch.Tensor | None = None,
-    window_size: tuple = (-1, -1),
-    attn_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """SDPA attention wrapper."""
-    if k_lens is not None:
-        import warnings
-
-        warnings.warn("Padding mask is disabled when using scaled_dot_product_attention.")
-
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
-
-    out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
-    out = out.transpose(1, 2).contiguous()
-    return out
-
-
 class SingleStreamAttention(nn.Module):
     """Cross-attention for audio conditioning."""
+
+    attention_config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
 
     def __init__(
         self,
@@ -167,7 +141,6 @@ class SingleStreamAttention(nn.Module):
         encoder_hidden_states: torch.Tensor,
         shape: tuple | None = None,
         start_f: int = 0,
-        USE_SAGEATTN: bool = False,
     ) -> torch.Tensor:
         """Audio cross-attention forward."""
         encoder_hidden_states = encoder_hidden_states.squeeze(0)
@@ -176,20 +149,17 @@ class SingleStreamAttention(nn.Module):
 
         B, N, C = x.shape
         q = self.q_linear(x)
-        q = q.view(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        q = q.view(B, N, self.num_heads, self.head_dim)
 
         B_e, N_a, _ = encoder_hidden_states.shape
         encoder_kv = self.kv_linear(encoder_hidden_states)
         encoder_kv = encoder_kv.view(B_e, N_a, 2, self.num_heads, self.head_dim)
-        encoder_kv = encoder_kv[start_f : start_f + B].permute(2, 0, 3, 1, 4)
-        encoder_k, encoder_v = encoder_kv.unbind(0)
+        encoder_kv = encoder_kv[start_f : start_f + B]
+        encoder_k = encoder_kv[:, :, 0, :, :]
+        encoder_v = encoder_kv[:, :, 1, :, :]
 
-        if USE_SAGEATTN:
-            x = sageattn(q, encoder_k, encoder_v, tensor_layout="HND")
-        else:
-            x = F.scaled_dot_product_attention(q, encoder_k, encoder_v)
-
-        x = x.transpose(1, 2).reshape(B, N, C)
+        x = attn_func(q, encoder_k, encoder_v, attention_config=self.attention_config, input_layout="BSND")
+        x = x.reshape(B, N, C)
         x = self.proj(x)
         x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
 
@@ -198,6 +168,8 @@ class SingleStreamAttention(nn.Module):
 
 class WanSelfAttention(nn.Module):
     """Self-attention with KV cache and memory compression."""
+
+    attention_config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
 
     def __init__(
         self,
@@ -371,23 +343,14 @@ class WanSelfAttention(nn.Module):
         roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
         roped_key = causal_rope_apply(k_cache, grid_sizes, freqs, start_frame=0).type_as(v)
 
-        if USE_SAGEATTN:
-            x = sageattn(
-                roped_query,
-                roped_key[:, :end_idx, ...],
-                v_cache[:, :end_idx, ...],
-                tensor_layout="NHD",
-                is_causal=False,
-            ).type_as(x)
-        else:
-            x = sdpa_attention(
-                q=roped_query,
-                k=roped_key[:, :end_idx, ...],
-                v=v_cache[:, :end_idx, ...],
-                k_lens=seq_lens,
-                window_size=self.window_size,
-                attn_mask=self.attn_mask,
-            ).type_as(x)
+        # Use TeleFuser's attention function with BSND layout
+        x = attn_func(
+            roped_query,
+            roped_key[:, :end_idx, ...],
+            v_cache[:, :end_idx, ...],
+            attention_config=self.attention_config,
+            input_layout="BSND",
+        ).type_as(x)
 
         self._store_kv_cache(kv_cache, k_cache, v_cache)
 
@@ -399,6 +362,8 @@ class WanSelfAttention(nn.Module):
 
 class WanI2VCrossAttention(nn.Module):
     """Cross-attention for text and image conditioning."""
+
+    attention_config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
 
     def __init__(
         self,
@@ -446,12 +411,9 @@ class WanI2VCrossAttention(nn.Module):
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
 
-        if USE_SAGEATTN:
-            img_x = sageattn(q, k_img, v_img, tensor_layout="NHD")
-            x = sageattn(q, k, v, tensor_layout="NHD")
-        else:
-            img_x = sdpa_attention(q, k_img, v_img, k_lens=None)
-            x = sdpa_attention(q, k, v, k_lens=context_lens)
+        # Use TeleFuser's attention function with BSND layout
+        img_x = attn_func(q, k_img, v_img, attention_config=self.attention_config, input_layout="BSND")
+        x = attn_func(q, k, v, attention_config=self.attention_config, input_layout="BSND")
 
         # output
         x = x.flatten(2)
@@ -567,7 +529,6 @@ class WanAttentionBlock(nn.Module):
                 encoder_hidden_states=audio_embedding,
                 shape=grid_sizes[0],
                 start_f=start_f,
-                USE_SAGEATTN=USE_SAGEATTN,
             )
             if start_f == 0:
                 x_a[:, :frame_seqlen] = 0
@@ -971,6 +932,13 @@ class LiveActDiT(BaseModel):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+
+    def set_attention_config(self, attention_config: AttentionConfig) -> None:
+        """Set attention implementation configuration for all attention modules."""
+        logger.info(f"LiveAct DiT set attention config to {attention_config.attn_impl}")
+        WanSelfAttention.attention_config = attention_config
+        WanI2VCrossAttention.attention_config = attention_config
+        SingleStreamAttention.attention_config = attention_config
 
     @staticmethod
     def state_dict_converter():

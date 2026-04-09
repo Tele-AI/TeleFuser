@@ -15,7 +15,7 @@ import torch
 from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
-from telefuser.core.config import AttentionConfig, ModelRuntimeConfig
+from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.utils.logging import logger
 
@@ -150,7 +150,7 @@ class LiveActPipeline(BasePipeline):
         # Enable FP8 GEMM for DiT FFN layers before creating denoise stage
         if config.enable_fp8_gemm:
             try:
-                from fp8_gemm import FP8GemmOptions, enable_fp8_gemm
+                from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
 
                 dit = module_manager.fetch_module("liveact_dit")
                 if dit is not None:

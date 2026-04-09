@@ -21,16 +21,20 @@ Optimizations:
     --enable_compile: Enable torch.compile for DiT (default: True)
     --fp8_kv_cache: Use FP8 for KV cache (default: False)
     --offload_cache: Offload KV cache to CPU (default: True)
+
+Config:
+    Modify PPL_CONFIG to change attention implementation.
+    Set PPL_CONFIG["attention_config"] = AttentionConfig.dense_attention(AttnImplType.XXX).
 """
 
 import os
-import sys
 
 import click
 import torch
 from PIL import Image
 from transformers import Wav2Vec2FeatureExtractor
 
+from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.wav2vec2 import Wav2Vec2Model
 from telefuser.pipelines.liveact import LiveActPipeline, LiveActPipelineConfig
@@ -51,6 +55,7 @@ PPL_CONFIG = dict(
     num_inference_steps=3,
     audio_cfg=1.0,
     fps=24,
+    attention_config=AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA),
 )
 
 
@@ -94,7 +99,7 @@ def get_pipeline(
 
     if enable_fp8_gemm:
         try:
-            from fp8_gemm import FP8GemmOptions, enable_fp8_gemm  # noqa: F401
+            from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm  # noqa: F401
 
             fp8_gemm_available = True
             logger.info("✓ FP8 GEMM is available")
@@ -155,13 +160,17 @@ def get_pipeline(
     config.enable_fp8_gemm = enable_fp8_gemm
     config.enable_torch_compile = enable_compile
 
+    # Attention implementation (from PPL_CONFIG)
+    config.dit_config.attention_config = PPL_CONFIG["attention_config"]
+
     # Initialize pipeline
     pipeline.init(mm, config)
 
     # Print optimization summary
     logger.info("=" * 60)
     logger.info("Optimization Summary:")
-    logger.info(f"  SageAttention:  {'✓ enabled' if USE_SAGEATTN else '✗ disabled (SDPA fallback)'}")
+    logger.info(f"  Attention:      {PPL_CONFIG['attention_config'].attn_impl}")
+    logger.info(f"  SageAttention:  {'✓ available' if USE_SAGEATTN else '✗ not available'}")
     logger.info(f"  FP8 GEMM:       {'✓ enabled' if (enable_fp8_gemm and fp8_gemm_available) else '✗ disabled'}")
     logger.info(f"  torch.compile:  {'✓ enabled' if enable_compile else '✗ disabled'}")
     logger.info(f"  FP8 KV Cache:   {'✓ enabled' if fp8_kv_cache else '✗ disabled'}")
