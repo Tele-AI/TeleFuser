@@ -24,9 +24,11 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention as attn_func
 from telefuser.utils.logging import logger
+from telefuser.utils.profiler import ProfilingContext4Debug
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
@@ -138,6 +140,11 @@ class SingleStreamAttention(nn.Module):
         self.kv_linear = nn.Linear(encoder_hidden_states_dim, dim * 2, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
 
+        # SP support
+        self.sp_flag = False
+        self.sp_rank = 0
+        self.sp_size = 1
+
     def forward(
         self,
         x: torch.Tensor,
@@ -145,26 +152,71 @@ class SingleStreamAttention(nn.Module):
         shape: tuple | None = None,
         start_f: int = 0,
     ) -> torch.Tensor:
-        """Audio cross-attention forward."""
+        """Audio cross-attention forward.
+
+        In SP mode: each rank processes its corresponding frame chunk of encoder_kv.
+        encoder_kv is sliced by sp_rank: [start_f + sp_rank*B : start_f + (sp_rank+1)*B]
+        """
+        rank_info = f"[Rank {os.getenv('RANK', 0)}]" if self.sp_flag else ""
+        logger.info(
+            f"{rank_info} [AudioCrossAttn] input x.shape={x.shape}, sp_flag={self.sp_flag}, sp_rank={self.sp_rank}"
+        )
+
         encoder_hidden_states = encoder_hidden_states.squeeze(0)
-        N_t, N_h, N_w = shape
+        _, N_h, N_w = shape
+
+        # Calculate actual frames per rank from x's sequence length
+        # In SP mode, each rank only holds partial frames
+        N_t = x.size(1) // (N_h * N_w)
         x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
 
-        B, N, C = x.shape
-        q = self.q_linear(x)
-        q = q.view(B, N, self.num_heads, self.head_dim)
+        B, N, C = x.shape  # B=1, N = N_t * (N_h * N_w), B*N_t = frames per rank
+        frames_per_rank = B  # After rearrange, B represents frames_per_rank
+
+        logger.info(
+            f"{rank_info} [AudioCrossAttn] after rearrange: x.shape={x.shape}, "
+            f"N_t={N_t}, frames_per_rank={frames_per_rank}"
+        )
+        logger.info(f"{rank_info} [AudioCrossAttn] encoder_hidden_states.shape={encoder_hidden_states.shape}")
+
+        with ProfilingContext4Debug("liveact_audio_q_proj"):
+            q = self.q_linear(x)
+            q = q.view(B, N, self.num_heads, self.head_dim)
 
         B_e, N_a, _ = encoder_hidden_states.shape
-        encoder_kv = self.kv_linear(encoder_hidden_states)
-        encoder_kv = encoder_kv.view(B_e, N_a, 2, self.num_heads, self.head_dim)
-        encoder_kv = encoder_kv[start_f : start_f + B]
+        with ProfilingContext4Debug("liveact_audio_kv_proj"):
+            encoder_kv = self.kv_linear(encoder_hidden_states)
+            encoder_kv = encoder_kv.view(B_e, N_a, 2, self.num_heads, self.head_dim)
+
+        # SP mode: slice encoder_kv by sp_rank
+        # Each rank has frames_per_rank frames, slice from the corresponding position
+        if self.sp_flag:
+            kv_start = start_f + self.sp_rank * frames_per_rank
+            kv_end = start_f + (self.sp_rank + 1) * frames_per_rank
+            encoder_kv = encoder_kv[kv_start:kv_end]
+            logger.info(
+                f"{rank_info} [AudioCrossAttn] SP slice [{kv_start}:{kv_end}], encoder_kv.shape={encoder_kv.shape}"
+            )
+        else:
+            encoder_kv = encoder_kv[start_f : start_f + frames_per_rank]
+
         encoder_k = encoder_kv[:, :, 0, :, :]
         encoder_v = encoder_kv[:, :, 1, :, :]
 
-        x = attn_func(q, encoder_k, encoder_v, attention_config=self.attention_config, input_layout="BSND")
+        logger.info(
+            f"{rank_info} [AudioCrossAttn] q.shape={q.shape}, "
+            f"encoder_k.shape={encoder_k.shape}, encoder_v.shape={encoder_v.shape}"
+        )
+
+        with ProfilingContext4Debug("liveact_audio_attention"):
+            x = attn_func(q, encoder_k, encoder_v, attention_config=self.attention_config, input_layout="BSND")
         x = x.reshape(B, N, C)
-        x = self.proj(x)
+
+        with ProfilingContext4Debug("liveact_audio_output_proj"):
+            x = self.proj(x)
         x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+
+        logger.info(f"{rank_info} [AudioCrossAttn] output x.shape={x.shape}")
 
         return x
 
@@ -323,19 +375,32 @@ class WanSelfAttention(nn.Module):
         Key insight: KV cache stores [1, seq, H/N, D] (full sequence, local heads)
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        rank_info = f"[Rank {os.getenv('RANK', 0)}]"
+        logger.info(f"{rank_info} [SelfAttn SP] input x.shape={x.shape}, s={s}, n={n}, d={d}")
 
         # QKV projection: [B, S/N, H, D]
-        q = self.norm_q(self.q(x)).view(b, s, n, d)
-        k = self.norm_k(self.k(x)).view(b, s, n, d)
-        v = self.v(x).view(b, s, n, d)
+        with ProfilingContext4Debug("liveact_qkv_proj"):
+            q = self.norm_q(self.q(x)).view(b, s, n, d)
+            k = self.norm_k(self.k(x)).view(b, s, n, d)
+            v = self.v(x).view(b, s, n, d)
+
+        logger.info(f"{rank_info} [SelfAttn SP] after QKV proj: q.shape={q.shape}")
 
         # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
-        q = ulysses_scatter_heads(q, self.ulysses_group)()
-        k = ulysses_scatter_heads(k, self.ulysses_group)()
-        v = ulysses_scatter_heads(v, self.ulysses_group)()
+        # Launch all three All-to-All in parallel, then wait
+        with ProfilingContext4Debug("liveact_ulysses_scatter"):
+            q_wait = ulysses_scatter_heads(q, self.ulysses_group)
+            k_wait = ulysses_scatter_heads(k, self.ulysses_group)
+            v_wait = ulysses_scatter_heads(v, self.ulysses_group)
+            q = q_wait()
+            k = k_wait()
+            v = v_wait()
+
+        logger.info(f"{rank_info} [SelfAttn SP] after scatter: q.shape={q.shape}")
 
         # Load KV cache: [1, cache_len, H/N, D]
-        k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
+        with ProfilingContext4Debug("liveact_kv_cache_load"):
+            k_cache, v_cache = self._load_kv_cache(kv_cache, x.device, torch.bfloat16)
 
         tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
         current_start_frame = start_idx // tokens_per_frame
@@ -350,31 +415,42 @@ class WanSelfAttention(nn.Module):
             k_full = k_cache
             v_full = v_cache
 
+        logger.info(f"{rank_info} [SelfAttn SP] k_full.shape={k_full.shape}, end_idx={end_idx}")
+
         # RoPE apply
-        roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
-        roped_key = causal_rope_apply(k_full, grid_sizes, freqs, start_frame=0).type_as(v)
+        with ProfilingContext4Debug("liveact_rope"):
+            roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+            roped_key = causal_rope_apply(k_full, grid_sizes, freqs, start_frame=0).type_as(v)
 
         # Attention
-        x = attn_func(
-            roped_query,
-            roped_key[:, :end_idx, ...],
-            v_full[:, :end_idx, ...],
-            attention_config=self.attention_config,
-            input_layout="BSND",
-        ).type_as(x)
+        with ProfilingContext4Debug("liveact_attention"):
+            x = attn_func(
+                roped_query,
+                roped_key[:, :end_idx, ...],
+                v_full[:, :end_idx, ...],
+                attention_config=self.attention_config,
+                input_layout="BSND",
+            ).type_as(x)
+
+        logger.info(f"{rank_info} [SelfAttn SP] after attention: x.shape={x.shape}")
 
         # Update cache (compression)
         if start_idx != 0:
             self._compress_kv_cache(k_full, v_full, k_cache, v_cache, tokens_per_frame, kv_cache)
 
-        self._store_kv_cache(kv_cache, k_cache, v_cache)
+        with ProfilingContext4Debug("liveact_kv_cache_store"):
+            self._store_kv_cache(kv_cache, k_cache, v_cache)
 
         # Ulysses gather heads: [B, S, H/N, D] -> [B, S/N, H, D]
-        x = ulysses_gather_heads(x, self.ulysses_group, num_heads=self.num_heads)()
+        with ProfilingContext4Debug("liveact_ulysses_gather"):
+            x = ulysses_gather_heads(x, self.ulysses_group, num_heads=self.num_heads)()
+
+        logger.info(f"{rank_info} [SelfAttn SP] after gather: x.shape={x.shape}")
 
         # Output projection
-        x = x.flatten(2)
-        x = self.o(x)
+        with ProfilingContext4Debug("liveact_output_proj"):
+            x = x.flatten(2)
+            x = self.o(x)
         return x, None
 
     def _compress_kv_cache(
@@ -434,7 +510,7 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
-        k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
+        k_cache, v_cache = self._load_kv_cache(kv_cache, x.device, torch.bfloat16)
 
         tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
         current_start_frame = start_idx // tokens_per_frame
@@ -612,6 +688,7 @@ class WanAttentionBlock(nn.Module):
         ref_target_masks: torch.Tensor | None = None,
         human_num: int | None = None,
         skip_audio: bool = False,
+        block_idx: int = 0,
     ) -> torch.Tensor:
         dtype = x.dtype
 
@@ -622,37 +699,42 @@ class WanAttentionBlock(nn.Module):
             e = (self.modulation.unsqueeze(-2).to(e.device) + e)[0].chunk(6, dim=0)
 
         # self-attention
-        y, x_ref_attn_map = self.self_attn(
-            (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x),
-            seq_lens,
-            grid_sizes,
-            freqs,
-            kv_cache=kv_cache,
-            start_idx=start_idx,
-            end_idx=end_idx,
-        )
+        with ProfilingContext4Debug(f"block{block_idx}_self_attn"):
+            y, _ = self.self_attn(
+                (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x),
+                seq_lens,
+                grid_sizes,
+                freqs,
+                kv_cache=kv_cache,
+                start_idx=start_idx,
+                end_idx=end_idx,
+            )
         x = x + y * e[2]
 
         x = x.to(dtype)
 
         # cross-attention of text
-        x = x + self.cross_attn(self.norm3(x), context, context_lens, cross_kv_cache=cross_kv_cache)
+        with ProfilingContext4Debug(f"block{block_idx}_text_cross_attn"):
+            x = x + self.cross_attn(self.norm3(x), context, context_lens, cross_kv_cache=cross_kv_cache)
 
         # cross attn of audio
         if not skip_audio:
             tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
             start_f = start_idx // tokens_per_frame
-            x_a = self.audio_cross_attn(
-                self.norm_x(x),
-                encoder_hidden_states=audio_embedding,
-                shape=grid_sizes[0],
-                start_f=start_f,
-            )
-            if start_f == 0:
+            with ProfilingContext4Debug(f"block{block_idx}_audio_cross_attn"):
+                x_a = self.audio_cross_attn(
+                    self.norm_x(x),
+                    encoder_hidden_states=audio_embedding,
+                    shape=grid_sizes[0],
+                    start_f=start_f,
+                )
+            # Only zero first frame on sp_rank=0 (matches original model_memory_sp.py logic)
+            if start_f == 0 and (not self.audio_cross_attn.sp_flag or self.audio_cross_attn.sp_rank == 0):
                 x_a[:, :tokens_per_frame] = 0
             x = x + x_a
 
-        y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))
+        with ProfilingContext4Debug(f"block{block_idx}_ffn"):
+            y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))
         x = x + y * e[5]
 
         x = x.to(dtype)
@@ -891,6 +973,10 @@ class LiveActDiT(BaseModel):
             norm_output_audio=norm_output_audio,
         )
 
+        # USP (Ulysses Sequence Parallel) support
+        self.usp_flag = False
+        self.device_mesh = None
+
         # initialize weights
         if weight_init:
             self.init_weights()
@@ -925,57 +1011,78 @@ class LiveActDiT(BaseModel):
     ) -> torch.Tensor:
         assert clip_fea is not None and y is not None
 
+        rank_info = f"[Rank {os.getenv('RANK', 0)}]" if self.usp_flag else ""
+        logger.info(
+            f"{rank_info} [LiveActDiT] forward start, usp_flag={self.usp_flag}, sp_size={getattr(self, '_sp_size', 1)}"
+        )
+
         _, T, H, W = x[0].shape
         _t = T // self.patch_size[0]
         N_h = H // self.patch_size[1]
         N_w = W // self.patch_size[2]
 
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
-        x[0] = x[0].to(context[0].dtype)
+        with ProfilingContext4Debug("liveact_patch_embedding"):
+            if y is not None:
+                x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+            x[0] = x[0].to(context[0].dtype)
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
-        x = [u.flatten(2).transpose(1, 2) for u in x]
-        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
-        x = torch.cat(x)
+            # embeddings
+            x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+            grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+            x = [u.flatten(2).transpose(1, 2) for u in x]
+            seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
+            x = torch.cat(x)
+
+        logger.info(f"{rank_info} [patch_embedding] x.shape={x.shape}, grid_sizes={grid_sizes.tolist()}")
 
         # time embeddings
-        if e0 is None:
-            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
-            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
-        else:
-            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+        with ProfilingContext4Debug("liveact_time_embedding"):
+            if e0 is None:
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+                e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+            else:
+                e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+
+        logger.info(f"{rank_info} [time_embedding] e0.shape={e0.shape}")
 
         # text embedding
-        context_lens = None
-        context = self.text_embedding(
-            torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
-        )
+        with ProfilingContext4Debug("liveact_text_embedding"):
+            context_lens = None
+            context = self.text_embedding(
+                torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
+            )
 
         # clip embedding
-        if clip_fea is not None:
-            context_clip = self.img_emb(clip_fea)
-            context = torch.concat([context_clip, context], dim=1).to(x.dtype)
+        with ProfilingContext4Debug("liveact_clip_embedding"):
+            if clip_fea is not None:
+                context_clip = self.img_emb(clip_fea)
+                context = torch.concat([context_clip, context], dim=1).to(x.dtype)
 
-        audio_cond = audio.to(device=x.device, dtype=x.dtype)
-        first_frame_audio_emb_s = audio_cond[:, :1, ...]
-        latter_frame_audio_emb = audio_cond[:, 1:, ...]
-        latter_frame_audio_emb = rearrange(latter_frame_audio_emb, "b (n_t n) w s c -> b n_t n w s c", n=self.vae_scale)
-        middle_index = self.audio_window // 2
-        latter_first_frame_audio_emb = latter_frame_audio_emb[:, :, :1, : middle_index + 1, ...]
-        latter_first_frame_audio_emb = rearrange(latter_first_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
-        latter_last_frame_audio_emb = latter_frame_audio_emb[:, :, -1:, middle_index:, ...]
-        latter_last_frame_audio_emb = rearrange(latter_last_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
-        latter_middle_frame_audio_emb = latter_frame_audio_emb[:, :, 1:-1, middle_index : middle_index + 1, ...]
-        latter_middle_frame_audio_emb = rearrange(latter_middle_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
-        latter_frame_audio_emb_s = torch.concat(
-            [latter_first_frame_audio_emb, latter_middle_frame_audio_emb, latter_last_frame_audio_emb], dim=2
-        )
-        audio_embedding = self.audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
-        human_num = len(audio_embedding)
-        audio_embedding = torch.concat(audio_embedding.split(1), dim=2).to(x.dtype)
+        logger.info(f"{rank_info} [text_embedding] context.shape={context.shape}")
+
+        # audio processing
+        with ProfilingContext4Debug("liveact_audio_proj"):
+            audio_cond = audio.to(device=x.device, dtype=x.dtype)
+            first_frame_audio_emb_s = audio_cond[:, :1, ...]
+            latter_frame_audio_emb = audio_cond[:, 1:, ...]
+            latter_frame_audio_emb = rearrange(
+                latter_frame_audio_emb, "b (n_t n) w s c -> b n_t n w s c", n=self.vae_scale
+            )
+            middle_index = self.audio_window // 2
+            latter_first_frame_audio_emb = latter_frame_audio_emb[:, :, :1, : middle_index + 1, ...]
+            latter_first_frame_audio_emb = rearrange(latter_first_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
+            latter_last_frame_audio_emb = latter_frame_audio_emb[:, :, -1:, middle_index:, ...]
+            latter_last_frame_audio_emb = rearrange(latter_last_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
+            latter_middle_frame_audio_emb = latter_frame_audio_emb[:, :, 1:-1, middle_index : middle_index + 1, ...]
+            latter_middle_frame_audio_emb = rearrange(latter_middle_frame_audio_emb, "b n_t n w s c -> b n_t (n w) s c")
+            latter_frame_audio_emb_s = torch.concat(
+                [latter_first_frame_audio_emb, latter_middle_frame_audio_emb, latter_last_frame_audio_emb], dim=2
+            )
+            audio_embedding = self.audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
+            human_num = len(audio_embedding)
+            audio_embedding = torch.concat(audio_embedding.split(1), dim=2).to(x.dtype)
+
+        logger.info(f"{rank_info} [audio_proj] audio_embedding.shape={audio_embedding.shape}")
 
         # convert ref_target_masks to token_ref_target_masks
         if ref_target_masks is not None:
@@ -1002,18 +1109,51 @@ class LiveActDiT(BaseModel):
             skip_audio=skip_audio,
         )
 
+        # Sequence parallel: shard x across ranks
+        # [B, S, D] -> [B, S/N, D], each rank holds partial sequence
+        seq_len = x.size(1)
+        if self.usp_flag:
+            with ProfilingContext4Debug("liveact_sp_shard"):
+                sequence_parallel_shard(self.device_mesh, [x], seq_dims=[1])
+            logger.info(f"{rank_info} [SP shard] x.shape after shard={x.shape}")
+
+        # Transformer blocks
         for block_index, block in enumerate(self.blocks):
             if kv_cache.get(block_index) is None:
                 kv_cache[block_index] = {}
             if cross_kv_cache.get(block_index) is None:
                 cross_kv_cache[block_index] = {}
-            x = block(x, kv_cache=kv_cache[block_index], cross_kv_cache=cross_kv_cache[block_index], **kwargs)
+            # Profile each block individually
+            with ProfilingContext4Debug(f"liveact_block_{block_index}"):
+                x = block(
+                    x,
+                    kv_cache=kv_cache[block_index],
+                    cross_kv_cache=cross_kv_cache[block_index],
+                    block_idx=block_index,
+                    **kwargs,
+                )
+            # Only log shape for first and last block
+            if block_index == 0 or block_index == self.num_layers - 1:
+                logger.info(f"{rank_info} [block {block_index}] x.shape={x.shape}")
 
         # head
-        x = self.head(x, e)
+        with ProfilingContext4Debug("liveact_head"):
+            x = self.head(x, e)
+
+        logger.info(f"{rank_info} [head] x.shape={x.shape}")
+
+        # Sequence parallel: unshard x back to full sequence
+        # [B, S/N, D] -> [B, S, D]
+        if self.usp_flag:
+            with ProfilingContext4Debug("liveact_sp_unshard"):
+                (x,) = sequence_parallel_unshard(self.device_mesh, (x,), seq_dims=(1,), seq_lens=(seq_len,))
+            logger.info(f"{rank_info} [SP unshard] x.shape after unshard={x.shape}")
 
         # unpatchify
-        x = self.unpatchify(x, grid_sizes)
+        with ProfilingContext4Debug("liveact_unpatchify"):
+            x = self.unpatchify(x, grid_sizes)
+
+        logger.info(f"{rank_info} [unpatchify] output len={len(x)}, shape[0]={x[0].shape if x else 'empty'}")
 
         return torch.stack(x)
 
@@ -1062,7 +1202,7 @@ class LiveActDiT(BaseModel):
         Args:
             device_mesh: Device mesh for distributed communication.
         """
-        from telefuser.distributed import get_ulysses_group, get_ulysses_world_size
+        from telefuser.distributed import get_ulysses_group, get_ulysses_rank, get_ulysses_world_size
 
         logger.info("LiveAct DiT enable USP (Ulysses Sequence Parallel)")
         self.device_mesh = device_mesh
@@ -1072,13 +1212,41 @@ class LiveActDiT(BaseModel):
             if self.num_heads % sp_size != 0:
                 raise ValueError(f"num_heads {self.num_heads} must be divisible by sp_size {sp_size}")
 
+            # Enable USP at model level
+            self.usp_flag = True
+
             # Cache SP values for efficiency
             ulysses_group = get_ulysses_group(device_mesh)
+            sp_rank = get_ulysses_rank(device_mesh)
 
             for block in self.blocks:
                 block.self_attn.sp_flag = True
                 block.self_attn.device_mesh = device_mesh
                 block.self_attn.ulysses_group = ulysses_group
+
+                # Enable SP for audio cross-attention
+                block.audio_cross_attn.sp_flag = True
+                block.audio_cross_attn.sp_rank = sp_rank
+                block.audio_cross_attn.sp_size = sp_size
+
+                # Replace memory_proj layers for SP mode
+                # Original: Conv1d(dim, dim, 5, stride=5, groups=dim) with weight [dim, 1, 5]
+                # SP: Conv1d(dim//sp_size, dim//sp_size, 5, stride=5, groups=dim//sp_size)
+                # Each rank takes weight slice [rank*(dim//sp_size):(rank+1)*(dim//sp_size), :, :]
+                local_dim = block.self_attn.dim // sp_size
+                new_proj_k = nn.Conv1d(local_dim, local_dim, kernel_size=5, stride=5, groups=local_dim, bias=False)
+                new_proj_v = nn.Conv1d(local_dim, local_dim, kernel_size=5, stride=5, groups=local_dim, bias=False)
+
+                # Slice weights from original
+                start = sp_rank * local_dim
+                end = (sp_rank + 1) * local_dim
+                with torch.no_grad():
+                    new_proj_k.weight.copy_(block.self_attn.memory_proj_k.weight[start:end, :, :])
+                    new_proj_v.weight.copy_(block.self_attn.memory_proj_v.weight[start:end, :, :])
+
+                # Replace the layers
+                block.self_attn.memory_proj_k = new_proj_k
+                block.self_attn.memory_proj_v = new_proj_v
 
     def get_fsdp_module_names(self) -> list[str]:
         """Get module names for FSDP sharding."""

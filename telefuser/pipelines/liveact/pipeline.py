@@ -18,6 +18,7 @@ from PIL import Image
 from telefuser.core.base_pipeline import BasePipeline
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
+from telefuser.utils.func import auto_async_call
 from telefuser.utils.logging import logger
 
 from .audio_encoding import AudioEncodingStage
@@ -248,8 +249,7 @@ class LiveActPipeline(BasePipeline):
 
         logger.info(f"Audio duration: {audio_duration:.2f}s, iterations: {iter_total_num}")
 
-        num_frames = frame_num_per_iter
-        y = self.prepare_vae_latent(input_image_tensor, height, width, num_frames)
+        y = self.prepare_vae_latent(input_image_tensor, frame_num_per_iter)
 
         ref_target_masks = torch.ones(3, height // VAE_STRIDE[1], width // VAE_STRIDE[2]).to(
             self.device, self.torch_dtype
@@ -270,7 +270,7 @@ class LiveActPipeline(BasePipeline):
 
             logger.info(f"Generating segment {iteration + 1}/{iter_total_num}")
 
-            audio_start_idx, audio_end_idx = 0, num_frames
+            audio_start_idx, audio_end_idx = 0, frame_num_per_iter
             if (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0] > 0:
                 audio_start_idx += (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0]
                 audio_end_idx += (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0]
@@ -280,7 +280,7 @@ class LiveActPipeline(BasePipeline):
                     audio_start_idx=audio_start_idx,
                     audio_end_idx=audio_end_idx,
                     fps=fps,
-                    frame_num=num_frames,
+                    frame_num=frame_num_per_iter,
                 )
             else:
                 audio_emb_for_dit = self.audio_encoding_stage.process_pre_encoded_segment(
@@ -292,7 +292,8 @@ class LiveActPipeline(BasePipeline):
             latent_shape = (LATENT_CHANNELS, blksz_lst[f], height // VAE_STRIDE[1], width // VAE_STRIDE[2])
             latent = torch.randn(latent_shape, dtype=self.torch_dtype, device=self.device)
 
-            latent = self.denoise_stage.process(
+            latent_handler = auto_async_call(
+                self.denoise_stage.process,
                 latent=latent,
                 context=prompt_emb,
                 clip_fea=clip_fea,
@@ -304,6 +305,7 @@ class LiveActPipeline(BasePipeline):
                 num_inference_steps=num_inference_steps,
                 seed=seed,
             )
+            latent = latent_handler()
 
             if f == 0:
                 videos = self.vae_stage.process("decode_video", latent)[0]

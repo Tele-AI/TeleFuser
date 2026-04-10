@@ -73,24 +73,28 @@ class LiveActDenoisingStage(BaseStage):
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
 
-        # Enable FP8 GEMM for FFN layers if quant_config is set
+        # Enable FP8 GEMM and torch.compile only in single GPU mode
+        # In distributed mode, these are applied in parallel_models() after spawn
         quant_config = model_runtime_config.quant_config
-        if quant_config.enabled:
-            try:
-                from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
-
-                enable_fp8_gemm(self.dit, options=FP8GemmOptions())
-                logger.info("✓ FP8 GEMM enabled for DiT FFN layers")
-            except ImportError:
-                logger.warning("✗ FP8 GEMM not available, skipping")
-
-        # Enable torch.compile for DiT if compile_config is set
         compile_config = model_runtime_config.compile_config
-        if compile_config.enabled:
-            apply_compile_config(compile_config)
-            compile_kwargs = compile_config.get_compile_kwargs()
-            self.dit = torch.compile(self.dit, **compile_kwargs)
-            logger.info(f"✓ torch.compile enabled for DiT with {compile_kwargs}")
+        parallel_cfg = model_runtime_config.parallel_config
+
+        if parallel_cfg.world_size == 1:
+            # Single GPU: enable optimizations in __init__
+            if quant_config.enabled:
+                try:
+                    from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
+
+                    enable_fp8_gemm(self.dit, options=FP8GemmOptions())
+                    logger.info("✓ FP8 GEMM enabled for DiT FFN layers")
+                except ImportError:
+                    logger.warning("✗ FP8 GEMM not available, skipping")
+
+            if compile_config.enabled:
+                apply_compile_config(compile_config)
+                compile_kwargs = compile_config.get_compile_kwargs()
+                self.dit = torch.compile(self.dit, **compile_kwargs)
+                logger.info(f"✓ torch.compile enabled for DiT with {compile_kwargs}")
 
         # Get model architecture params from dit
         self.num_layers = len(self.dit.blocks)
@@ -131,7 +135,18 @@ class LiveActDenoisingStage(BaseStage):
                 self.dit.cpu()
                 current_platform.empty_cache()
 
-        # Handle torch.compile for distributed mode
+        # Enable FP8 GEMM for FFN layers if quant_config is set (distributed mode)
+        quant_config = self.model_runtime_config.quant_config
+        if quant_config.enabled:
+            try:
+                from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
+
+                enable_fp8_gemm(self.dit, options=FP8GemmOptions())
+                logger.info("✓ FP8 GEMM enabled for DiT FFN layers")
+            except ImportError:
+                logger.warning("✗ FP8 GEMM not available, skipping")
+
+        # Enable torch.compile for distributed mode
         if self.model_runtime_config.compile_config.enabled:
             apply_compile_config(self.model_runtime_config.compile_config)
             logger.info("enable torch.compile for dit")
