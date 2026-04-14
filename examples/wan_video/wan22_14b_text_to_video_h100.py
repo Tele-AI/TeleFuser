@@ -24,7 +24,7 @@ from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
 PPL_CONFIG = dict(
     name="wan22_A14B_t2v_h100",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-T2V-14B",
+    model_root="/storage/model_zoo/Wan2.2-T2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -38,13 +38,23 @@ PPL_CONFIG = dict(
     sample_solver="euler",
     attn_impl=AttnImplType.TORCH_SDPA,
     dit_high_path_list=[
-        "dit_high_noise_model_bfloat16_5d6fd.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+        "high_noise_model/diffusion_pytorch_model-00006-of-00006.safetensors",
     ],
     dit_low_path_list=[
-        "dit_low_noise_model_bfloat16_c55d6.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+        "low_noise_model/diffusion_pytorch_model-00006-of-00006.safetensors",
     ],
-    enable_feature_cache_dit_high=True,
-    enable_feature_cache_dit_low=True,
+    enable_feature_cache_dit_high=False,
+    enable_feature_cache_dit_low=False,
     model_type="Wan2_2-T2V-14B",
     target_fps=16,
 )

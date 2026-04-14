@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from pathlib import Path
 
 import click
 import torch
@@ -176,6 +177,14 @@ async def run_with_file(pipe, req_id, seed, prompt, image, ppl_config=None):
     logger.info(f"Video saved to: {result['uri']}")
     return result
 
+def delete_artifact(uri: str) -> None:
+    """Delete generated artifact file if it exists."""
+    artifact_path = Path(uri)
+    if not artifact_path.exists():
+        return
+
+    artifact_path.unlink()
+    logger.info(f"Deleted warmup artifact: {artifact_path}")
 
 @click.command()
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
@@ -216,17 +225,32 @@ async def async_main(gpu_num, image_path, prompt, negative_prompt, ppl_config):
     image = Image.open(image_path).convert("RGB")
 
     await pipe.astart()
+    try:
+        ts = int(time.time())
+        warmup_rid = f"demo-{ts}-warmup"
+        original_num_inference_steps = ppl_config["num_inference_steps"]
+        try:
+            ppl_config["num_inference_steps"] = 2
+            logger.info(
+                f"starting warmup request: {warmup_rid} "
+                f"(num_inference_steps={ppl_config['num_inference_steps']})"
+            )
+            warmup_result = await run(pipe, warmup_rid, ppl_config["seed"], prompt, image, ppl_config)
+            logger.info(
+                f"[{warmup_rid}] done wall_time_s={warmup_result['wall_time_s']:.3f} "
+                f"pipeline_time_ms={warmup_result['pipeline_time_ms']:.2f}"
+            )
+            delete_artifact(warmup_result["uri"])
+        finally:
+            ppl_config["num_inference_steps"] = original_num_inference_steps
 
-    ts = int(time.time())
-    rid = f"demo-{ts}-1"
-    logger.info(f"starting request: {rid}")
-
-    result = await run(pipe, rid, ppl_config["seed"], prompt, image, ppl_config)
-
-    logger.info(f"  [{rid}] {result['uri']}")
-
-    await pipe.astop()
-
+        rid = f"demo-{ts}-1"
+        logger.info(f"starting request: {rid}")
+        result = await run(pipe, rid, ppl_config["seed"], prompt, image, ppl_config)
+        logger.info(f"[{rid}] done wall_time_s={result['wall_time_s']:.3f} pipeline_time_ms={result['pipeline_time_ms']:.2f}")
+        logger.info(f"  [{rid}] {result['uri']}")
+    finally:
+        await pipe.astop()
 
 if __name__ == "__main__":
     main()

@@ -334,6 +334,7 @@ class AsyncWan22VideoPipeline(BasePipeline):
         async with self._orchestrator_lock:
             if self._orchestrator is not None:
                 await self._orchestrator.stop()
+                self._orchestrator = None
 
     async def agenerate(
         self,
