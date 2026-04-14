@@ -18,7 +18,6 @@ from telefuser.platforms import current_platform
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import apply_compile_config
 
 
 def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
@@ -83,9 +82,10 @@ class DitDenoisingStage(BaseStage):
         # Handle torch.compile for single GPU mode
         parallel_cfg = model_runtime_config.parallel_config
         if parallel_cfg.world_size == 1 and model_runtime_config.compile_config.enabled:
-            apply_compile_config(model_runtime_config.compile_config)
             logger.info("enable torch.compile for transformer")
-            self.transformer.compile()
+            self.transformer = torch.compile(
+                self.transformer, **model_runtime_config.compile_config.get_compile_kwargs()
+            )
 
     @staticmethod
     def _prepare_latent_ids(latents: torch.Tensor) -> torch.Tensor:
@@ -323,6 +323,7 @@ class DitDenoisingStage(BaseStage):
 
         # Handle torch.compile for distributed mode
         if self.model_runtime_config.compile_config.enabled:
-            apply_compile_config(self.model_runtime_config.compile_config)
             logger.info("enable torch.compile for transformer")
-            self.transformer.compile()
+            self.transformer = torch.compile(
+                self.transformer, **self.model_runtime_config.compile_config.get_compile_kwargs()
+            )

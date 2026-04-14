@@ -26,7 +26,6 @@ from telefuser.platforms import current_platform
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import apply_compile_config
 
 
 @dataclass
@@ -179,9 +178,13 @@ class LiveActDenoisingStage(BaseStage):
 
         # Enable torch.compile for distributed mode
         if self.model_runtime_config.compile_config.enabled:
-            apply_compile_config(self.model_runtime_config.compile_config)
             logger.info("enable torch.compile for dit")
-            self.dit.compile()
+            self.dit = torch.compile(
+                self.dit,
+                mode="max-autotune-no-cudagraphs",
+                backend="inductor",
+                dynamic=False,
+            )
 
     def set_kv_cache_config(self, config: KVCacheConfig) -> None:
         """Set KV cache configuration."""
@@ -274,6 +277,7 @@ class LiveActDenoisingStage(BaseStage):
         self._kv_cache_null_audio = None
 
     @with_model_offload(["dit"])
+    @ProfilingContext4Debug("denoising_process")
     @torch.inference_mode()
     def process(
         self,
@@ -300,14 +304,16 @@ class LiveActDenoisingStage(BaseStage):
         latent_blksz = latent.shape[1]
         f = 0 if latent_blksz == blksz_lst[0] else 1
 
-        if self._kv_cache_tokens_per_frame != tokens_per_frame:
-            self.init_kv_cache(
-                tokens_per_frame,
-                num_timesteps=num_inference_steps,
-                device=self.device,
-                dtype=self.torch_dtype,
-            )
-            self._kv_cache_tokens_per_frame = tokens_per_frame
+        # Profile KV cache initialization
+        with ProfilingContext4Debug("init_kv_cache_check"):
+            if self._kv_cache_tokens_per_frame != tokens_per_frame:
+                self.init_kv_cache(
+                    tokens_per_frame,
+                    num_timesteps=num_inference_steps,
+                    device=self.device,
+                    dtype=self.torch_dtype,
+                )
+                self._kv_cache_tokens_per_frame = tokens_per_frame
 
         kv_cache_null_audio = None
         if audio_cfg > 1.0 and self._kv_cache_null_audio is None:
@@ -343,14 +349,16 @@ class LiveActDenoisingStage(BaseStage):
                 "end_idx": end_idx,
             }
 
-            # Direct dit call (same as original: wan_i2v_model([latent], t=timestep, kv_cache=kv_cache[i], **arg_c)[0])
-            noise_pred = self.dit(
-                [latent],
-                t=timestep,
-                kv_cache=self.kv_cache[i],
-                skip_audio=False,
-                **arg_c,
-            )[0]
+            # Profile dit forward
+            with ProfilingContext4Debug(f"dit_forward_t{i}"):
+                # Direct dit call matching original generate.py
+                noise_pred = self.dit(
+                    [latent],
+                    t=timestep,
+                    kv_cache=self.kv_cache[i],
+                    skip_audio=False,
+                    **arg_c,
+                )[0]
 
             # Audio CFG (same as original)
             if audio_cfg > 1.0 and i in [1, 2] and kv_cache_null_audio is not None:

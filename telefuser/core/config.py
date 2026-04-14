@@ -233,47 +233,80 @@ class AttentionConfig:
 class CompileConfig:
     """Configuration for torch.compile optimization.
 
-    This class provides fine-grained control over torch.compile behavior,
+    This class maps directly to torch.compile() parameters and does NOT modify
+    global PyTorch settings. Use set_global_compile_configs() separately for
+    global-only settings like recompile_limit.
 
     Attributes:
         enabled: Whether to enable torch.compile
-        mode: Compilation mode - "blocks" (recommended), "full", or "blocks_pp"
         backend: Backend to use - "inductor" (default), "eager", etc.
         fullgraph: Require full graph compilation (more restrictive but faster)
-        dynamic: Support dynamic shapes (None = auto-detect)
-        recompile_limit: Max recompilations before caching (default: 1024)
-        max_autotune: Enable max-autotune mode for better performance
-        cuda_graphs: Enable CUDA graphs (requires static shapes)
-        compute_comm_overlap: Enable compute-communication overlap for distributed
-        descent_tuning: Enable coordinate descent tuning for Triton kernels
-        epilogue_fusion: Enable epilogue/prologue fusion optimizations
+        dynamic: Support dynamic shapes (None = auto-detect, False = static)
+        mode: Compilation mode preset - None, "default", "reduce-overhead",
+              "max-autotune", "max-autotune-no-cudagraphs"
+        coordinate_descent_tuning: Enable coordinate descent tuning for Triton kernels
+        epilogue_fusion: Fuse pointwise ops into templates (epilogue/prologue)
+        triton_cudagraphs: Enable CUDA graphs for Triton kernels
+        max_autotune: Enable max autotune for matmul/conv selection
     """
 
+    # torch.compile direct parameters (defaults match PyTorch defaults)
     enabled: bool = False
-    mode: str = "blocks"  # "blocks", "full", "blocks_pp"
     backend: str = "inductor"
     fullgraph: bool = False
-    dynamic: bool | None = None  # None = auto, True/False = explicit
-    recompile_limit: int = 1024
-    max_autotune: bool = True
-    cuda_graphs: bool = False
-    compute_comm_overlap: bool = True
-    descent_tuning: bool = False
-    epilogue_fusion: bool = False
+    dynamic: bool | None = None
 
-    def get_compile_kwargs(self) -> dict:
-        """Get torch.compile kwargs from this config.
+    # Mode preset: None (default), "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"
+    mode: str | None = None
+
+    # Custom options (passed to torch.compile options dict)
+    # These are per-model settings, NOT global settings
+    coordinate_descent_tuning: bool = False
+    epilogue_fusion: bool = True  # PyTorch default is True
+    triton_cudagraphs: bool = False
+    max_autotune: bool = False
+
+    def get_compile_params(self) -> tuple[str | None, dict | None]:
+        """Get mode and options for torch.compile().
+
+        If mode is set, use it directly. Otherwise build options dict from custom settings.
 
         Returns:
-            Dictionary of kwargs for torch.compile()
+            Tuple of (mode, options). torch.compile accepts either mode OR options, NOT both.
         """
-        kwargs: dict = {
+        # If mode is set (non-default), use it directly
+        if self.mode is not None and self.mode != "default":
+            return self.mode, None
+
+        # No mode preset: build options dict from custom settings
+        options = {}
+        if self.coordinate_descent_tuning:
+            options["coordinate_descent_tuning"] = True
+        if not self.epilogue_fusion:
+            options["epilogue_fusion"] = False
+        if self.triton_cudagraphs:
+            options["triton.cudagraphs"] = True
+        if self.max_autotune:
+            options["max_autotune"] = True
+
+        return None, options if options else None
+
+    def get_compile_kwargs(self) -> dict:
+        """Get kwargs dict for torch.compile()."""
+        mode, options = self.get_compile_params()
+
+        kwargs = {
             "backend": self.backend,
             "fullgraph": self.fullgraph,
             "dynamic": self.dynamic,
+            "disable": not self.enabled,
         }
-        if self.max_autotune:
-            kwargs["mode"] = "max-autotune-no-cudagraphs"
+
+        if mode is not None:
+            kwargs["mode"] = mode
+        if options is not None:
+            kwargs["options"] = options
+
         return kwargs
 
     def validate(self) -> None:
@@ -282,12 +315,16 @@ class CompileConfig:
         Raises:
             ValueError: If configuration is invalid
         """
-        valid_modes = {"blocks", "full", "blocks_pp"}
+        valid_modes = (None, "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
         if self.mode not in valid_modes:
             raise ValueError(f"Invalid compile mode: {self.mode}. Must be one of {valid_modes}")
 
         if self.fullgraph and self.dynamic:
             raise ValueError("fullgraph=True and dynamic=True are incompatible")
+
+        valid_backends = ("inductor", "eager", "aot_eager", "aot_nop", "nop")
+        if self.backend not in valid_backends:
+            raise ValueError(f"Invalid backend: {self.backend}. Must be one of {valid_backends}")
 
 
 class QuantType(Enum):

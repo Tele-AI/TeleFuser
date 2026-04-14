@@ -17,7 +17,6 @@ from telefuser.models.ltx_video_vae import VIDEO_SCALE_FACTORS, SpatioTemporalSc
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import apply_compile_config
 
 STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
 VIDEO_LATENT_CHANNELS = 128
@@ -570,9 +569,8 @@ class DitDenoisingStage(BaseStage):
 
         # Handle torch.compile
         if model_runtime_config.compile_config.enabled:
-            apply_compile_config(model_runtime_config.compile_config)
             logger.info("enable torch.compile for ltx dit")
-            self.dit.compile()
+            self.dit = torch.compile(self.dit, **model_runtime_config.compile_config.get_compile_kwargs())
 
     def _maybe_apply_loras(self) -> None:
         """Apply configured LoRA weights to the underlying velocity model (once).

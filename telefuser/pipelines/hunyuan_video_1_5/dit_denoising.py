@@ -14,7 +14,6 @@ from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.utils.logging import logger
-from telefuser.utils.torch_compile import apply_compile_config
 
 
 class HunyuanVideoDenoisingStage(BaseStage):
@@ -42,9 +41,8 @@ class HunyuanVideoDenoisingStage(BaseStage):
         # Handle torch.compile for single GPU mode
         parallel_cfg = model_runtime_config.parallel_config
         if parallel_cfg.world_size == 1 and model_runtime_config.compile_config.enabled:
-            apply_compile_config(model_runtime_config.compile_config)
             logger.info("enable torch.compile for dit")
-            self.dit.compile()
+            self.dit = torch.compile(self.dit, **model_runtime_config.compile_config.get_compile_kwargs())
 
     @with_model_offload(["dit"])
     @torch.inference_mode()
@@ -268,6 +266,5 @@ class HunyuanVideoDenoisingStage(BaseStage):
         """
         # Handle torch.compile for distributed mode
         if self.model_runtime_config.compile_config.enabled:
-            apply_compile_config(self.model_runtime_config.compile_config)
             logger.info("enable torch.compile for dit")
-            self.dit.compile()
+            self.dit = torch.compile(self.dit, **self.model_runtime_config.compile_config.get_compile_kwargs())

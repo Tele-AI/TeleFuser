@@ -18,7 +18,6 @@ from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import apply_compile_config
 
 
 class MoeDitDenoisingStage(BaseStage):
@@ -91,13 +90,14 @@ class MoeDitDenoisingStage(BaseStage):
         if parallel_cfg.world_size == 1 and (
             dit_high_runtime_config.compile_config.enabled or dit_low_runtime_config.compile_config.enabled
         ):
-            apply_compile_config(dit_high_runtime_config.compile_config)
             if dit_high_runtime_config.compile_config.enabled:
                 logger.info("enable torch.compile for dit_high")
-                self.dit_high.compile()
+                self.dit_high = torch.compile(
+                    self.dit_high, **dit_high_runtime_config.compile_config.get_compile_kwargs()
+                )
             if dit_low_runtime_config.compile_config.enabled:
                 logger.info("enable torch.compile for dit_low")
-                self.dit_low.compile()
+                self.dit_low = torch.compile(self.dit_low, **dit_low_runtime_config.compile_config.get_compile_kwargs())
 
     def load_loras(self):
         """Load LoRA weights into both DiT models."""
@@ -300,10 +300,13 @@ class MoeDitDenoisingStage(BaseStage):
 
         # Handle torch.compile for distributed mode
         if self.dit_high_runtime_config.compile_config.enabled or self.dit_low_runtime_config.compile_config.enabled:
-            apply_compile_config(self.dit_high_runtime_config.compile_config)
             if self.dit_high_runtime_config.compile_config.enabled:
                 logger.info("enable torch.compile for dit_high")
-                self.dit_high.compile()
+                self.dit_high = torch.compile(
+                    self.dit_high, **self.dit_high_runtime_config.compile_config.get_compile_kwargs()
+                )
             if self.dit_low_runtime_config.compile_config.enabled:
                 logger.info("enable torch.compile for dit_low")
-                self.dit_low.compile()
+                self.dit_low = torch.compile(
+                    self.dit_low, **self.dit_low_runtime_config.compile_config.get_compile_kwargs()
+                )
