@@ -91,6 +91,7 @@ TeleFuser follows a strict layered architecture for operations:
 
 | Topic | English | Chinese |
 |-------|---------|---------|
+| Adding New Example | [docs/en/adding_new_example.md](docs/en/adding_new_example.md) | [docs/zh/adding_new_example.md](docs/zh/adding_new_example.md) |
 | Adding New Model | [docs/en/adding_new_model.md](docs/en/adding_new_model.md) | [docs/zh/adding_new_model.md](docs/zh/adding_new_model.md) |
 | Adding New Stage | [docs/en/adding_new_stage.md](docs/en/adding_new_stage.md) | [docs/zh/adding_new_stage.md](docs/zh/adding_new_stage.md) |
 | Attention | [docs/en/attention.md](docs/en/attention.md) | [docs/zh/attention.md](docs/zh/attention.md) |
