@@ -72,6 +72,7 @@ def with_model_offload(model_names: list[str]) -> Callable[[F], F]:
                             else:
                                 model.cpu()
                     current_platform.empty_cache()
+                    self.onload_models_flag = False  # Reset flag after offload
 
         return cast(F, wrapper)
 

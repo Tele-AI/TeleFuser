@@ -43,8 +43,7 @@ class VAEStage(BaseStage):
         if compile_config.enabled:
             # Compile the unified decode method (used by all decode paths)
             self.vae.decode = torch.compile(self.vae.decode)
-            self.vae.encode = torch.compile(self.vae.encode)
-            logger.info("✓ torch.compile enabled for VAE encode/decode")
+            logger.info("✓ torch.compile enabled for VAE decode")
 
     @ProfilingContext4Debug("vae encode image")
     def encode_image(

@@ -11,13 +11,6 @@ from telefuser.core.base_model import BaseModel
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
 
-# Delay import to avoid circular import
-# from telefuser.offload import (
-#     AutoWrappedLinear,
-#     AutoWrappedModule,
-#     enable_sequential_cpu_offload,
-# )
-
 CACHE_T = 2
 
 
@@ -328,14 +321,56 @@ class Encoder3d(nn.Module):
             CausalConv3d(out_dim, z_dim, 3, padding=1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
+    def forward(self, x: torch.Tensor, feat_cache: list | None = None, feat_idx: list | None = None) -> torch.Tensor:
+        """Forward pass with optional feature caching for chunked encode."""
+        if feat_cache is not None and feat_idx is not None:
+            idx = feat_idx[0]
+            cache_x = x[:, :, -CACHE_T:, :, :].clone()
+            if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                cache_x = torch.cat(
+                    [
+                        feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device),
+                        cache_x,
+                    ],
+                    dim=2,
+                )
+            x = self.conv1(x, feat_cache[idx])
+            feat_cache[idx] = cache_x
+            feat_idx[0] += 1
+        else:
+            x = self.conv1(x)
+
         for layer in self.downsamples:
-            x = layer(x)
+            if check_is_instance(layer, ResidualBlock) and feat_cache is not None and feat_idx is not None:
+                x = layer(x, feat_cache, feat_idx)
+            elif check_is_instance(layer, Resample) and feat_cache is not None and feat_idx is not None:
+                x = layer(x, feat_cache, feat_idx)
+            else:
+                x = layer(x)
+
         for layer in self.middle:
-            x = layer(x)
+            if check_is_instance(layer, ResidualBlock) and feat_cache is not None and feat_idx is not None:
+                x = layer(x, feat_cache, feat_idx)
+            else:
+                x = layer(x)
+
         for layer in self.head:
-            x = layer(x)
+            if check_is_instance(layer, CausalConv3d) and feat_cache is not None and feat_idx is not None:
+                idx = feat_idx[0]
+                cache_x = x[:, :, -CACHE_T:, :, :].clone()
+                if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
+                    cache_x = torch.cat(
+                        [
+                            feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device),
+                            cache_x,
+                        ],
+                        dim=2,
+                    )
+                x = layer(x, feat_cache[idx])
+                feat_cache[idx] = cache_x
+                feat_idx[0] += 1
+            else:
+                x = layer(x)
         return x
 
 
@@ -416,13 +451,13 @@ class Decoder3d(nn.Module):
             x = self.conv1(x)
 
         for layer in self.middle:
-            if check_is_instance(layer, ResidualBlock) and feat_cache is not None:
+            if check_is_instance(layer, ResidualBlock) and feat_cache is not None and feat_idx is not None:
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
 
         for layer in self.upsamples:
-            if feat_cache is not None:
+            if feat_cache is not None and feat_idx is not None:
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
@@ -501,7 +536,30 @@ class VideoVAE(nn.Module):
         return x_recon, mu, log_var
 
     def encode(self, x: torch.Tensor, scale: list) -> torch.Tensor:
-        out = self.encoder(x)
+        """Encode video to latent with chunked processing for memory efficiency.
+
+        Processes video in chunks (1 frame + 4-frame segments) to avoid OOM on long videos.
+        Uses feature cache for causal convolutions across chunks.
+        """
+        conv_num = _count_conv3d(self.encoder)
+        feat_cache = [None] * conv_num
+        feat_idx = [0]
+
+        t = x.shape[2]
+        iter_ = 1 + (t - 1) // 4  # Number of chunks: first frame + rest in 4-frame chunks
+
+        for i in range(iter_):
+            feat_idx[0] = 0  # Reset index for each chunk
+            if i == 0:
+                # First chunk: single frame
+                out = self.encoder(x[:, :, :1, :, :], feat_cache=feat_cache, feat_idx=feat_idx)
+            else:
+                # Subsequent chunks: 4 frames each
+                out_ = self.encoder(
+                    x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :], feat_cache=feat_cache, feat_idx=feat_idx
+                )
+                out = torch.cat([out, out_], 2)
+
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]

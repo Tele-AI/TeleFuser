@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+from telefuser.utils.logging import logger
+
 from .interface import BasePlatform
 
 
@@ -18,6 +20,21 @@ class CudaPlatform(BasePlatform):
     dispatch_key: str = "CUDA"
     dist_backend: str = "nccl"
     full_dist_backend: str = "cuda:nccl"
+
+    @staticmethod
+    def init_cudnn_optimizations() -> None:
+        """Initialize CUDA performance optimizations.
+
+        These settings match SoulX-LiveAct's generate.py for optimal performance:
+        - CUDNN benchmark for finding fastest algorithms
+        - TF32 for matrix multiplication (Ampere+ GPUs)
+        - BF16 reduced precision reduction
+        """
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        torch.backends.cudnn.allow_tf32 = True
+        logger.debug("CUDA optimizations enabled: cudnn.benchmark, allow_tf32, bf16_reduced_precision")
 
     @staticmethod
     def empty_cache() -> None:

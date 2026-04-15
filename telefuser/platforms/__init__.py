@@ -18,21 +18,6 @@ from .rocm import RocmPlatform
 logger = logging.getLogger(__name__)
 
 
-def _init_cuda_optimizations() -> None:
-    """Initialize CUDA performance optimizations.
-
-    These settings match SoulX-LiveAct's generate.py for optimal performance:
-    - CUDNN benchmark for finding fastest algorithms
-    - TF32 for matrix multiplication (Ampere+ GPUs)
-    - BF16 reduced precision reduction
-    """
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-    torch.backends.cudnn.allow_tf32 = True
-    logger.debug("CUDA optimizations enabled: cudnn.benchmark, allow_tf32, bf16_reduced_precision")
-
-
 def _is_cuda_available() -> bool:
     """Check if NVIDIA CUDA is available (not ROCm)."""
     # ROCm uses torch.cuda but is not NVIDIA CUDA
@@ -69,7 +54,7 @@ def _resolve_current_platform() -> BasePlatform:
     # Check CUDA (NVIDIA)
     if _is_cuda_available():
         logger.debug("CUDA platform detected")
-        _init_cuda_optimizations()
+        # _init_cuda_optimizations()
         return CudaPlatform()
 
     # Check NPU
