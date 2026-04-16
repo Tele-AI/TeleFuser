@@ -1,7 +1,14 @@
 """Rotary Position Embedding (RoPE) operations.
 
 Provides optimized RoPE implementations with automatic kernel selection
-based on platform and compile state.
+based on platform.
+
+Note: apply_rotary_emb is decorated with @torch.compiler.disable because:
+1. The Triton kernel provides better performance than native PyTorch implementation
+2. Attention (which follows RoPE in typical execution flow) already uses @torch.compiler.disable
+3. Fusion opportunities with Attention are blocked anyway, so preserving Triton performance is optimal
+
+Execution flow: Linear → RMSNorm → RoPE → Attention (disabled)
 """
 
 from __future__ import annotations
@@ -94,6 +101,7 @@ def _apply_rotary_emb_native(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tens
         return (x.float() * cos.float() + x_rotated.float() * sin.float()).to(x.dtype)
 
 
+@torch.compiler.disable
 def apply_rotary_emb(
     x: torch.Tensor,
     freqs: tuple[torch.Tensor, torch.Tensor],
@@ -101,10 +109,12 @@ def apply_rotary_emb(
 ) -> torch.Tensor:
     """Apply rotary positional embeddings to input tensor.
 
-    Automatically selects the optimal implementation based on:
-    - torch.compile mode -> PyTorch native implementation
-    - Eager mode + CUDA -> Triton kernel for better performance
-    - Other platforms -> PyTorch native implementation
+    Uses Triton kernel on CUDA for optimal performance. Falls back to
+    PyTorch native implementation on other platforms.
+
+    Note: This function is disabled for torch.compile to preserve Triton
+    kernel performance, since the subsequent Attention operation also
+    uses @torch.compiler.disable and blocks fusion opportunities anyway.
 
     Args:
         x: Input tensor of shape (B, S, H, D).
@@ -118,8 +128,8 @@ def apply_rotary_emb(
     """
     cos, sin = freqs
 
-    # For CUDA in eager mode, use Triton kernel with interleaved format
-    if not torch.compiler.is_compiling() and x.device.type == "cuda":
+    # Use Triton kernel on CUDA for optimal performance
+    if x.device.type == "cuda":
         return _apply_rotary_emb_cuda(x, cos, sin)
 
     return _apply_rotary_emb_native(x, cos, sin)
