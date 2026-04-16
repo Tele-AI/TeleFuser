@@ -271,6 +271,7 @@ class LiveActDenoisingStage(BaseStage):
             # Profile dit forward
             with ProfilingContext4Debug(f"dit_forward_t{i}"):
                 # Direct dit call matching original generate.py
+                # y_slice is [1, 17, T, H, W], dit expects list of [17, T, H, W] tensors
                 noise_pred = self.dit(
                     [latent],
                     t=timestep,
@@ -279,7 +280,7 @@ class LiveActDenoisingStage(BaseStage):
                     context=context,
                     clip_fea=clip_fea,
                     audio=audio_embedding,
-                    y=y_slice,
+                    y=[y_slice.squeeze(0)],
                     start_idx=start_idx,
                     end_idx=end_idx,
                 )[0]
@@ -293,7 +294,7 @@ class LiveActDenoisingStage(BaseStage):
                     context=context,
                     clip_fea=clip_fea,
                     audio=torch.zeros_like(audio_embedding),
-                    y=y_slice,
+                    y=[y_slice.squeeze(0)],
                     start_idx=start_idx,
                     end_idx=end_idx,
                 )[0]

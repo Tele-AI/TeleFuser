@@ -20,6 +20,7 @@ from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.utils.func import auto_async_call
 from telefuser.utils.logging import logger
+from telefuser.worker.parallel_worker import ParallelWorker
 
 from .audio_encoding import AudioEncodingStage
 from .denoising import KVCacheConfig, LiveActDenoisingStage
@@ -71,6 +72,7 @@ class LiveActPipelineConfig:
 
     # Parallel processing
     enable_denoising_parallel: bool = False
+    enable_vae_parallel: bool = False
 
     # Feature flags
     enable_metrics: bool = False
@@ -154,38 +156,16 @@ class LiveActPipeline(BasePipeline):
 
         # Wrap with ParallelWorker for distributed inference
         if config.enable_denoising_parallel:
-            from telefuser.worker.parallel_worker import ParallelWorker
-
             self.denoise_stage = ParallelWorker(self.denoise_stage)
+        if config.enable_vae_parallel:
+            self.vae_stage = ParallelWorker(self.vae_stage)
 
         if config.enable_metrics:
             self.enable_metrics()
 
-    def prepare_vae_latent(
-        self,
-        input_image: torch.Tensor,
-        num_frames: int,
-    ) -> torch.Tensor:
-        """Prepare VAE latent with mask for I2V.
-
-        Args:
-            input_image: Preprocessed image tensor [1, C, H, W]
-            num_frames: Number of frames
-
-        Returns:
-            VAE latent with mask [1, 17, T, H, W]
-        """
-        # Encode image
-        y = self.vae_stage.process(
-            "encode_image",
-            input_image,
-            None,
-            num_frames,
-            tiled=False,
-            concat_mask=True,
-        )
-
-        return y
+    def prepare_vae_latent(self) -> None:
+        """Placeholder - VAE latent preparation is now inline in __call__."""
+        pass
 
     @torch.no_grad()
     def __call__(
@@ -249,7 +229,17 @@ class LiveActPipeline(BasePipeline):
 
         logger.info(f"Audio duration: {audio_duration:.2f}s, iterations: {iter_total_num}")
 
-        y = self.prepare_vae_latent(input_image_tensor, frame_num_per_iter)
+        # Encode image using auto_async_call pattern for ParallelWorker compatibility
+        y_handler = auto_async_call(
+            self.vae_stage.process,
+            "encode_image",
+            input_image_tensor,
+            None,
+            frame_num_per_iter,
+            tiled=False,
+            concat_mask=True,
+        )
+        y = y_handler()
 
         # Calculate tokens per frame for DiT
         tokens_per_frame = (height // (PATCH_SIZE[1] * VAE_STRIDE[1])) * (width // (PATCH_SIZE[2] * VAE_STRIDE[2]))
@@ -303,10 +293,12 @@ class LiveActPipeline(BasePipeline):
             latent = latent_handler()
 
             if f == 0:
-                videos = self.vae_stage.process("decode_video", latent)[0]
+                vae_decode_handler = auto_async_call(self.vae_stage.process, "decode_video", latent)
+                videos = vae_decode_handler()[0]
             else:
                 latent_to_decode = torch.concat([pre_latent[:, -3:], latent], dim=1)
-                videos = self.vae_stage.process("decode_video", latent_to_decode)[0, :, 9:]
+                vae_decode_handler = auto_async_call(self.vae_stage.process, "decode_video", latent_to_decode)
+                videos = vae_decode_handler()[0, :, 9:]
 
             pre_latent = latent
             gen_video_list.append(videos.cpu())
