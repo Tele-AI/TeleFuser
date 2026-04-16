@@ -41,7 +41,7 @@ PPL_CONFIG = dict(
     lora_configs=[
         LoraConfig(
             TF_MODEL_ZOO_PATH
-            + "/wan_cfg_step_distill/wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+            + "/Wan2.2-Distill-Loras/wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
             1.0,
         )
     ],

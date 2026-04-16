@@ -48,14 +48,14 @@ pipelines:
     ppl_config_overrides:
       attn_impl: TORCH_SDPA
 
-  #wan21_14b_i2v_lora:
-  #  script: wan_video/wan21_14b_image_to_video_lora_h100.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  input_image_path: examples/data/101235-video-720_0.png
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  wan21_14b_i2v_lora:
+    script: wan_video/wan21_14b_image_to_video_lora_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
+    ppl_config_overrides:
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v:
     script: wan_video/wan22_14b_image_to_video_h100.py
@@ -83,14 +83,14 @@ pipelines:
     ppl_config_overrides:
       attn_impl: TORCH_SDPA
 
-  #wan22_14b_i2v_lora:
-  #  script: wan_video/wan22_14b_image_to_video_lora_h100.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  input_image_path: examples/data/101235-video-720_0.png
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  wan22_14b_i2v_lora:
+    script: wan_video/wan22_14b_image_to_video_lora_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
+    ppl_config_overrides:
+      attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_mix:
     script: wan_video/wan22_14b_image_to_video_mix_h100.py

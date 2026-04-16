@@ -72,6 +72,10 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     pipe_config.dit_high_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     pipe_config.dit_low_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
+    pipe_config.dit_high_config.compile_config.enabled = True
+    pipe_config.dit_low_config.compile_config.enabled = True
+    pipe_config.vae_config.compile_config.enabled = True
+
     if parallelism > 1:
         # Configure parallel based on cfg_scale
         # For cfg_scale > 1: cfg_degree=2, sp_ulysses_degree=parallelism//2
@@ -96,10 +100,9 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
         pipe_config.dit_high_config.parallel_config.enable_fsdp = True
         pipe_config.dit_low_config.parallel_config.enable_fsdp = True
         pipe_config.enable_denoising_parallel = True
-        pipe_config.enable_vae_parallel = False
-        pipe_config.vae_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
         pipe_config.vae_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.vae_config.parallel_config.dp_degree = parallelism
+        pipe_config.enable_vae_parallel = True
     else:
         pipe_config.dit_high_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
         pipe_config.dit_high_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD

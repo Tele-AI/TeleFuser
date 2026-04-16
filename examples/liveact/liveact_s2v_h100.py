@@ -87,7 +87,10 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     if parallelism > 1:
         config.dit_config.parallel_config.sp_ulysses_degree = parallelism
         config.dit_config.parallel_config.device_ids = list(range(parallelism))
+        config.vae_config.parallel_config.sp_ulysses_degree = parallelism
+        config.vae_config.parallel_config.device_ids = list(range(parallelism))
         config.enable_denoising_parallel = True
+        config.enable_vae_parallel = True
         print(f"Enabled Ulysses Sequence Parallel with {parallelism} GPUs")
 
     pipeline.init(mm, config)
@@ -155,7 +158,7 @@ def main(
 ):
     """LiveAct: Generate talking head video from image and audio with SP parallelism."""
     pipeline = get_pipeline(gpu_num, model_root)
-    input_image = (Image.open(image_path).convert("RGB"),)
+    input_image = Image.open(image_path).convert("RGB")
     start = time.time()
     frames = run(pipeline, input_image, audio_path, prompt, height, width, fps)
     elapsed = time.time() - start
