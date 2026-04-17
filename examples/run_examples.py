@@ -2032,16 +2032,25 @@ def main() -> None:
                 print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
 
     # Report
-    # Load existing results for resume mode
-    existing_results = {}
+    # Load existing results for resume mode and merge with new results
+    all_results = results
     if args.resume:
         existing_results = _load_existing_results(output_dir)
+        if existing_results:
+            # Build merged results list for display and summary
+            existing_result_objs = []
+            for name, data in existing_results.items():
+                if name not in {r.name for r in results}:  # Don't duplicate newly run pipelines
+                    existing_result_objs.append(Result(**data))
+            all_results = existing_result_objs + results
+    else:
+        existing_results = None
 
-    print_results_table(results)
+    print_results_table(all_results)
     report_path = save_report_json(output_dir, results, existing_results)
     print(f"\nJSON report: {report_path}")
 
-    fail_count = sum(1 for r in results if r.status in ("FAIL", "ERROR", "TIMEOUT"))
+    fail_count = sum(1 for r in all_results if r.status in ("FAIL", "ERROR", "TIMEOUT"))
     if fail_count > 0:
         sys.exit(1)
 

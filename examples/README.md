@@ -17,6 +17,15 @@ python examples/run_examples.py --all
 
 # Update baselines after successful runs
 python examples/run_examples.py --all --update-baseline
+
+# Resume from previous run (skip pipelines with existing outputs)
+python examples/run_examples.py --all -r work_dirs/example_outputs/main_abc123_2026-04-17_1200
+
+# Parallel execution across 4 GPUs
+python examples/run_examples.py --all --gpus 0,1,2,3
+
+# Resume with parallel execution
+python examples/run_examples.py --all --gpus 0,1,2,3 -r work_dirs/example_outputs/main_abc123_2026-04-17_1200
 ```
 
 ## CLI Reference
@@ -30,6 +39,8 @@ Options:
   --all                  Run all enabled pipelines
   --update-baseline      Update baseline outputs after successful runs
   --config PATH          Path to config YAML (default: example_config.yaml)
+  -r, --resume DIR       Resume from existing output directory (skip completed pipelines)
+  --gpus IDS             Parallel execution with specified GPUs (e.g., '0,1,2,3')
   -v, --verbose          Show real-time log output from each pipeline
 ```
 
@@ -125,6 +136,48 @@ The `example_report.json` now includes:
 - **failed_details**: List of failed cases with error message, log path, reproduce command, and analysis hint
 - **reproduce_all_failed**: Single command to reproduce all failed cases
 
+## Resume Mode
+
+When a test run is interrupted (e.g., OOM, timeout, manual stop), use `-r/--resume` to continue:
+
+```bash
+# Resume from previous output directory
+python examples/run_examples.py --all -r work_dirs/example_outputs/main_abc123_2026-04-17_1200
+```
+
+**How it works:**
+1. Checks for existing output files matching each pipeline's naming pattern
+2. Skips pipelines that already have output files
+3. Runs only the remaining (incomplete) pipelines
+4. Merges results from completed pipelines with new results
+5. Shows complete summary table including all pipelines
+6. Saves combined report to `example_report.json`
+
+**Result aggregation:**
+- The final results table shows status for **all** configured pipelines
+- Failed pipelines from previous run are included in summary counts
+- Exit code reflects the combined status of all pipelines
+
+## Parallel Execution
+
+Use `--gpus` to run multiple pipelines concurrently:
+
+```bash
+# Run pipelines in parallel across 4 GPUs
+python examples/run_examples.py --all --gpus 0,1,2,3
+```
+
+**Scheduling strategy:**
+- Greedy allocation: pipelines sorted by GPU requirement (largest first)
+- Each pipeline gets exclusive access to its allocated GPUs
+- GPUs released back to pool when pipeline completes
+- Automatic timeout handling with graceful shutdown
+
+**Example scenario (4 GPUs):**
+- Pipeline A (4 GPUs): runs exclusively on all GPUs
+- Pipeline B (2 GPUs) + Pipeline C (2 GPUs): run concurrently after A completes
+- Pipeline D (1 GPU): fills remaining slots while B/C run
+
 ## Features
 
 - **Explicit registry**: `example_config.yaml` lists all pipelines — no auto-discovery
@@ -135,3 +188,6 @@ The `example_report.json` now includes:
 - **Output validation**: NaN/Inf detection
 - **Error classification**: MODEL_LOAD_ERROR, INFERENCE_ERROR, OUTPUT_ERROR, OOM_ERROR, TIMEOUT
 - **Enhanced reporting**: Failed cases include reproduce commands and analysis hints
+- **Resume support**: Skip completed pipelines when resuming from existing output directory
+- **Parallel execution**: Run multiple pipelines concurrently across a pool of GPUs
+- **Complete result summary**: Resume mode shows aggregated results for all pipelines (completed + new)
