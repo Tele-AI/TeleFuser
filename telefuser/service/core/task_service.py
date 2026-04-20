@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 
+from telefuser.service_types import MediaType, PipelineRunStatus, TaskStatus, TaskType
 from telefuser.utils.logging import logger
 
 from ..api.schema import TaskRequest, TaskResponse
@@ -31,7 +32,7 @@ class MediaGenerationService:
         self, message: TaskRequest, stop_event: threading.Event
     ) -> TaskResponse | None:
         """Generate media (video or image) with stop event support."""
-        task_data = message.model_dump()
+        task_data = message.model_dump(mode="json")
         if stop_event.is_set():
             logger.info(f"Task {message.task_id} cancelled before processing")
             return None
@@ -81,7 +82,7 @@ class MediaGenerationService:
         task_data = await update_audio_path("audio_path", message, task_data)
 
         # Determine media type and set appropriate output path
-        media_type = "image" if message.task in ["t2i", "i2i"] else "video"
+        media_type = MediaType.IMAGE if message.task in [TaskType.T2I, TaskType.I2I] else MediaType.VIDEO
         actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
         task_data["output_path"] = str(actual_save_path)
 
@@ -97,11 +98,11 @@ class MediaGenerationService:
                 return None
             raise RuntimeError("Task processing timeout")
 
-        if result.get("status") == "success":
+        if result.get("status") == PipelineRunStatus.SUCCESS:
             output_path = result.get("output_path") or task_data.get("output_path") or message.output_path
             return TaskResponse(
                 task_id=message.task_id,
-                task_status="completed",
+                task_status=TaskStatus.COMPLETED,
                 output_path=str(output_path),
             )
         else:

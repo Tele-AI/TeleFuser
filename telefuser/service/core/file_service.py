@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from telefuser.service_types import MediaType
 from telefuser.utils.logging import logger
 
 
@@ -249,13 +250,13 @@ class FileService:
 
         return file_path
 
-    def get_output_path(self, output_path: str, media_type: str = "video") -> Path:
+    def get_output_path(self, output_path: str, media_type: MediaType | str = MediaType.VIDEO) -> Path:
         """Get the full output path for a file."""
         path = Path(output_path)
         if path.is_absolute():
             return path
 
-        if media_type == "image":
+        if media_type == MediaType.IMAGE:
             return self.output_image_dir / output_path
         else:
             return self.output_video_dir / output_path

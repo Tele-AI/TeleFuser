@@ -21,6 +21,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from telefuser.service_types import PipelineRunStatus
 from telefuser.utils.logging import logger
 
 
@@ -28,7 +29,7 @@ from telefuser.utils.logging import logger
 class PipelineRunResult:
     """Normalized result returned by PipelineRunner."""
 
-    status: str
+    status: PipelineRunStatus
     output_path: str | None = None
     message: str = ""
     raw: Any | None = None
@@ -163,7 +164,7 @@ class PipelineRunner:
             output_root: Optional output root to export as env var (for example scripts).
         """
         if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
-            return PipelineRunResult(status="cancelled", message="Task cancelled before start")
+            return PipelineRunResult(status=PipelineRunStatus.CANCELLED, message="Task cancelled before start")
 
         await self.ensure_started()
 
@@ -191,10 +192,14 @@ class PipelineRunner:
                 output_path = str(raw)
 
             output_path = _coerce_output_path(output_path) or _coerce_output_path(task_data.get("output_path"))
-            return PipelineRunResult(status="success", output_path=output_path, message="Inference completed", raw=raw)
+            return PipelineRunResult(
+                status=PipelineRunStatus.SUCCESS, output_path=output_path, message="Inference completed", raw=raw
+            )
 
         except asyncio.TimeoutError:
-            return PipelineRunResult(status="error", output_path=None, message="Task processing timeout")
+            return PipelineRunResult(
+                status=PipelineRunStatus.ERROR, output_path=None, message="Task processing timeout"
+            )
         except Exception as e:
             logger.exception(f"Pipeline run failed: {e}")
-            return PipelineRunResult(status="error", output_path=None, message=str(e))
+            return PipelineRunResult(status=PipelineRunStatus.ERROR, output_path=None, message=str(e))

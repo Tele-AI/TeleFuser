@@ -7,21 +7,11 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from telefuser.metrics import get_service_metrics
+from telefuser.service_types import TaskStatus
 from telefuser.utils.logging import logger
-
-
-class TaskStatus(Enum):
-    """Task status enumeration."""
-
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 @dataclass
