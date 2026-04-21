@@ -960,6 +960,11 @@ class LiveActDiT(BaseModel):
         """Return RoPE frequencies (complex128)."""
         return self._freqs
 
+    @property
+    def time_embedding_dtype(self) -> torch.dtype:
+        """Return the dtype expected by the time embedding MLP."""
+        return next(self.time_embedding.parameters()).dtype
+
     def forward(
         self,
         x: list,
@@ -992,11 +997,12 @@ class LiveActDiT(BaseModel):
         x = torch.cat(x)
 
         # time embeddings
+        time_emb = sinusoidal_embedding_1d(self.freq_dim, t).to(device=t.device, dtype=self.time_embedding_dtype)
         if e0 is None:
-            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+            e = self.time_embedding(time_emb)
             e0 = self.time_projection(e).unflatten(1, (6, self.dim))
         else:
-            e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
+            e = self.time_embedding(time_emb)
 
         # text embedding
         context = self.text_embedding(
