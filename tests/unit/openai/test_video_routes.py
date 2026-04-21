@@ -4,7 +4,7 @@ Integration tests for OpenAI video routes.
 Uses real FastAPI TestClient with mocked services.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -47,12 +47,27 @@ def client(tmp_path):
 
     server = MagicMock()
     server.task_manager = task_manager
+    server.ensure_task_processor_running = AsyncMock()
+    server.get_supported_tasks.return_value = ("t2v", "i2v", "vc")
+    server.get_task_contract.side_effect = lambda task: {
+        "t2v": {
+            "required_inputs": [],
+            "media_type": "video",
+            "parameters": {
+                "target_video_length": {"default": 8},
+                "resolution": {"default": "480p"},
+            },
+        },
+        "i2v": {"required_inputs": ["first_image_path"], "media_type": "video"},
+        "vc": {"required_inputs": ["ref_video_path"], "media_type": "video"},
+    }.get(task)
     server.file_service = MagicMock()
     server.file_service.output_video_dir = tmp_path
     server.file_service.input_video_dir = tmp_path / "input"
     server.file_service.input_video_dir.mkdir(exist_ok=True)
 
     app = FastAPI()
+    app.state.task_manager = task_manager
     app.include_router(create_router(server))
 
     with TestClient(app) as client:
@@ -77,11 +92,40 @@ class TestVideoCreate:
         assert data["id"] == "vid_123"
         assert data["status"] == "queued"
 
+    def test_create_video_uses_contract_defaults_for_omitted_fields(self, client):
+        response = client.post(
+            "/v1/videos",
+            json={
+                "prompt": "a cat playing",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["seconds"] == "8"
+        task_request = client.app.state.task_manager.create_task.call_args.args[0]
+        assert task_request.target_video_length == 8
+        assert task_request.resolution == "480p"
+
     def test_create_video_validation_error(self, client):
         """Missing prompt returns 422."""
         response = client.post("/v1/videos", json={"seconds": 5})
 
         assert response.status_code == 422
+
+    def test_create_video_with_video_reference_prefers_video_conditioning(self, client):
+        response = client.post(
+            "/v1/videos",
+            json={
+                "prompt": "continue this clip",
+                "input_reference": "/tmp/reference.mp4",
+            },
+        )
+
+        assert response.status_code == 200
+        task_request = client.app.state.task_manager.create_task.call_args.args[0]
+        assert task_request.task == "vc"
+        assert task_request.ref_video_path == "/tmp/reference.mp4"
 
 
 class TestVideoRetrieve:

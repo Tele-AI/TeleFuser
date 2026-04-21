@@ -21,6 +21,12 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from telefuser.service.api.schema import TaskRequest
+from telefuser.service.api.task_contract_runtime import (
+    apply_task_contract_defaults,
+    map_contract_fields,
+    match_task_candidates,
+    validate_required_task_parameters,
+)
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
 from telefuser.utils.logging import logger
 
@@ -100,11 +106,20 @@ class ImageRoutes:
             logger.warning(f"Multiple image generation (n={request.n}) not supported, using n=1")
 
         try:
-            task_request = OpenAIRequestAdapter.to_task_request(request)
+            task_type = self._resolve_image_task(has_reference=False)
+            task_request = OpenAIRequestAdapter.to_task_request(request, task_type=task_type)
+            self.api.validate_task_supported(task_request.task)
+            contract = self.api.get_task_contract(task_request.task)
+            apply_task_contract_defaults(
+                task_request,
+                task_contract=contract,
+                explicit_fields=self._get_image_generation_explicit_fields(request),
+            )
+            validate_required_task_parameters(task_request, task_contract=contract)
             task_id = self.task_manager.create_task(task_request)
             logger.info(f"Created image generation task: {task_id}")
 
-            self._ensure_processing()
+            await self._ensure_processing()
 
             result = await self._wait_for_task_completion(task_id=task_id, timeout=self.DEFAULT_TIMEOUT)
 
@@ -184,11 +199,30 @@ class ImageRoutes:
                 negative_prompt=negative_prompt,
             )
 
-            task_request = OpenAIRequestAdapter.to_task_request(edit_request)
+            task_type = self._resolve_image_task(has_reference=True)
+            task_request = OpenAIRequestAdapter.to_task_request(edit_request, task_type=task_type)
+            self.api.validate_task_supported(task_request.task)
+            contract = self.api.get_task_contract(task_request.task)
+            apply_task_contract_defaults(
+                task_request,
+                task_contract=contract,
+                explicit_fields=self._get_image_edit_explicit_fields(
+                    prompt=prompt,
+                    image_path=image_path,
+                    image_url=image_url,
+                    mask_path=mask_path,
+                    model=model,
+                    n=n,
+                    size=size,
+                    seed=seed,
+                    negative_prompt=negative_prompt,
+                ),
+            )
+            validate_required_task_parameters(task_request, task_contract=contract)
             task_id = self.task_manager.create_task(task_request)
             logger.info(f"Created image edit task: {task_id}")
 
-            self._ensure_processing()
+            await self._ensure_processing()
 
             result = await self._wait_for_task_completion(task_id=task_id, timeout=self.DEFAULT_TIMEOUT)
 
@@ -254,10 +288,9 @@ class ImageRoutes:
 
         return FileResponse(path=str(path), media_type=media_type, filename=path.name)
 
-    def _ensure_processing(self) -> None:
-        """Ensure the task processing thread is running."""
-        if hasattr(self.api, "_ensure_processing_thread_running"):
-            self.api._ensure_processing_thread_running()
+    async def _ensure_processing(self) -> None:
+        """Ensure the task processor is running."""
+        await self.api.ensure_task_processor_running()
 
     def _get_base_url(self) -> str:
         """Get the base URL for constructing image URLs."""
@@ -319,6 +352,64 @@ class ImageRoutes:
     def _write_file_sync(self, file_path: Path, content: bytes) -> None:
         """Write file synchronously."""
         file_path.write_bytes(content)
+
+    def _resolve_image_task(self, *, has_reference: bool) -> str:
+        """Resolve the best image task supported by the current pipeline."""
+        available_inputs = {"first_image_path"} if has_reference else set()
+        candidates = match_task_candidates(
+            self.api.get_supported_tasks(),
+            get_task_contract=self.api.get_task_contract,
+            available_inputs=available_inputs,
+            media_type="image",
+        )
+        if candidates:
+            return candidates[0]
+        return "i2i" if has_reference else "t2i"
+
+    def _get_image_generation_explicit_fields(self, request: ImageGenerationsRequest) -> set[str]:
+        return map_contract_fields(
+            set(getattr(request, "model_fields_set", set())),
+            {
+                "prompt": "prompt",
+                "model": "model",
+                "n": "n",
+                "quality": "quality",
+                "size": "resolution",
+                "style": "style",
+                "seed": "seed",
+                "negative_prompt": "negative_prompt",
+            },
+        )
+
+    def _get_image_edit_explicit_fields(
+        self,
+        *,
+        prompt: str,
+        image_path: str,
+        image_url: str | None,
+        mask_path: str,
+        model: str | None,
+        n: int | None,
+        size: str | None,
+        seed: int | None,
+        negative_prompt: str | None,
+    ) -> set[str]:
+        explicit_fields = {"prompt", "first_image_path"}
+        if mask_path:
+            explicit_fields.add("mask")
+        if model is not None:
+            explicit_fields.add("model")
+        if n is not None:
+            explicit_fields.add("n")
+        if size not in (None, ""):
+            explicit_fields.add("resolution")
+        if seed is not None:
+            explicit_fields.add("seed")
+        if negative_prompt not in (None, ""):
+            explicit_fields.add("negative_prompt")
+        if image_url or image_path:
+            explicit_fields.add("first_image_path")
+        return explicit_fields
 
 
 def setup_routes(api_server: ApiServer) -> APIRouter:

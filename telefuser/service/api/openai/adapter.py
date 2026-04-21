@@ -22,6 +22,8 @@ from telefuser.service.api.openai.protocol import (
 from telefuser.service.api.schema import TaskRequest
 from telefuser.utils.logging import logger
 
+VIDEO_REFERENCE_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
 
 def create_extended_task_request(base_fields: dict[str, Any], extra_fields: dict[str, Any]) -> TaskRequest:
     """Create a TaskRequest with extra fields stored via object.__setattr__.
@@ -32,7 +34,7 @@ def create_extended_task_request(base_fields: dict[str, Any], extra_fields: dict
     task_req = TaskRequest(**base_fields)
     for key, value in extra_fields.items():
         if value is not None:
-            object.__setattr__(task_req, key, value)
+            setattr(task_req, key, value)
     return task_req
 
 
@@ -155,7 +157,6 @@ class OpenAIRequestAdapter:
         base_fields = {
             "task": task,
             "prompt": req.prompt,
-            "first_image_path": ref_path,
             "resolution": resolution,
             "target_video_length": target_video_length,
             "seed": req.seed or 42,
@@ -163,6 +164,11 @@ class OpenAIRequestAdapter:
             "aspect_ratio": aspect_ratio,
             "output_path": req.output_path or "",
         }
+
+        if task in {"vc", "vsr"}:
+            base_fields["ref_video_path"] = ref_path
+        else:
+            base_fields["first_image_path"] = ref_path
 
         extra_fields = {"model": req.model}
 
@@ -408,3 +414,10 @@ def calculate_video_duration(num_frames: int, fps: int | None = None) -> int:
     """Calculate video duration from frames and FPS."""
     fps = fps or 24
     return num_frames // fps
+
+
+def is_probable_video_reference(path_or_url: str) -> bool:
+    """Best-effort detection for whether a reference path points to a video asset."""
+    from pathlib import Path
+
+    return Path(path_or_url).suffix.lower() in VIDEO_REFERENCE_EXTENSIONS

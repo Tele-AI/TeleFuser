@@ -5,7 +5,7 @@ Uses real FastAPI TestClient with mocked services.
 Avoids testing implementation details like internal helper methods.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -42,6 +42,16 @@ def client(tmp_path):
     # Setup mock API server
     server = MagicMock()
     server.task_manager = task_manager
+    server.ensure_task_processor_running = AsyncMock()
+    server.get_supported_tasks.return_value = ("t2i", "i2i")
+    server.get_task_contract.side_effect = lambda task: {
+        "t2i": {
+            "required_inputs": [],
+            "media_type": "image",
+            "parameters": {"resolution": {"default": "768x768"}},
+        },
+        "i2i": {"required_inputs": ["first_image_path"], "media_type": "image"},
+    }.get(task)
     server.file_service = MagicMock()
     server.file_service.output_image_dir = tmp_path
     server.file_service.input_image_dir = tmp_path / "input"
@@ -49,6 +59,7 @@ def client(tmp_path):
 
     # Create app with routes
     app = FastAPI()
+    app.state.task_manager = task_manager
     app.include_router(create_router(server))
 
     with TestClient(app) as client:
@@ -85,6 +96,31 @@ class TestImageGenerations:
         )
 
         assert response.status_code == 422
+
+    def test_edit_image_prefers_reference_task(self, client):
+        response = client.post(
+            "/v1/images/edits",
+            data={
+                "prompt": "make it blue",
+                "image_url": "https://example.com/image.png",
+            },
+        )
+
+        assert response.status_code == 200
+        task_request = client.app.state.task_manager.create_task.call_args.args[0]
+        assert task_request.task == "i2i"
+
+    def test_generate_image_uses_contract_default_resolution(self, client):
+        response = client.post(
+            "/v1/images/generations",
+            json={
+                "prompt": "a cat",
+            },
+        )
+
+        assert response.status_code == 200
+        task_request = client.app.state.task_manager.create_task.call_args.args[0]
+        assert task_request.resolution == "768x768"
 
 
 class TestImageContent:

@@ -30,6 +30,7 @@ class TestApiEndpoints:
         """Create a test client with mocked services."""
         from telefuser.service.api.api_server import ApiServer
         from telefuser.service.core.task_manager import TaskManager
+        from telefuser.service.core.task_processor import AsyncTaskProcessor
 
         # Create task manager
         task_manager = TaskManager(max_queue_size=10)
@@ -51,9 +52,17 @@ class TestApiEndpoints:
         server.inference_service.server_metadata = Mock(
             return_value={
                 "pipeline_file": "/test/pipeline.py",
+                "pipeline_name": "mock_pipeline",
                 "parallelism": 1,
                 "task": "t2v",
                 "security_level": "STRICT",
+                "declared_pipeline_contract": True,
+                "contract_version": "v1",
+                "supported_tasks": ["t2v", "i2v", "t2i", "i2i"],
+                "supported_media_types": ["video", "image"],
+                "execution_mode": "serial_single_pipeline",
+                "effective_max_concurrent_tasks": 1,
+                "entrypoints": {"get_pipeline": "get_pipeline", "run_with_file": "run_with_file"},
             }
         )
 
@@ -65,13 +74,17 @@ class TestApiEndpoints:
 
         server.media_service = Mock()
         server.media_service.generate_media_with_stop_event = mock_generate
+        server.task_processor = AsyncTaskProcessor(
+            task_manager=task_manager,
+            media_service=server.media_service,
+            max_concurrent=1,
+        )
 
         # Create test client
         with TestClient(server.app) as test_client:
             yield test_client
 
-        # Cleanup: stop background thread
-        server.stop_processing.set()
+        asyncio.run(server.cleanup())
 
     def test_service_status_endpoint(self, api_client):
         """Test service status endpoint."""
@@ -91,6 +104,10 @@ class TestApiEndpoints:
         # Should include supported tasks and media types
         assert "supported_tasks" in data
         assert "supported_media_types" in data
+        assert data["declared_pipeline_contract"] is True
+        assert data["execution_mode"] == "serial_single_pipeline"
+        assert data["effective_max_concurrent_tasks"] == 1
+        assert data["service_configured_max_concurrent_tasks"] == 1
         assert "t2i" in data["supported_tasks"]
         assert "i2i" in data["supported_tasks"]
         assert "image" in data["supported_media_types"]
@@ -146,6 +163,29 @@ class TestApiEndpoints:
         assert data["task_status"] == "pending"
         assert "output_path" in data
 
+    def test_create_task_rejects_missing_contract_required_parameter(self, api_client, mock_pipeline_service):
+        """Task creation should enforce required exposed parameters from task contracts."""
+        mock_pipeline_service.server_metadata.return_value["task_contracts"] = {
+            "t2v": {
+                "media_type": "video",
+                "required_inputs": [],
+                "optional_inputs": [],
+                "parameters": {
+                    "prompt": {
+                        "required": True,
+                        "default": "",
+                        "exposed": True,
+                    }
+                },
+            }
+        }
+
+        response = api_client.post("/v1/tasks/create", json={"task": "t2v"})
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["missing_parameters"] == ["prompt"]
+
     def test_get_task_status_endpoint(self, api_client):
         """Test get task status endpoint."""
         # First create a task
@@ -160,6 +200,9 @@ class TestApiEndpoints:
         assert "task_id" in data
         assert "status" in data
         assert "output_path" in data  # Check new field name
+        assert data["task"] == "t2v"
+        assert data["media_type"] == "video"
+        assert data["prompt"] == "test"
 
     def test_cancel_task_endpoint(self, api_client):
         """Test cancel task endpoint."""
@@ -181,12 +224,70 @@ class TestApiEndpoints:
 
     def test_create_task_invalid_task_type(self, api_client):
         """Test task creation with invalid task type."""
-        task_data = {"task": "invalid_task"}
+        task_data = {"task": "Invalid Task!"}
 
         response = api_client.post("/v1/tasks/create", json=task_data)
 
         # Should fail validation
         assert response.status_code == 422
+
+    def test_create_task_unsupported_for_current_pipeline(self, api_client):
+        """Test task creation rejected when current pipeline contract does not support the task."""
+        task_data = {"task": "fl2v", "prompt": "test"}
+
+        response = api_client.post("/v1/tasks/create", json=task_data)
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "supported_tasks" in data["detail"]
+
+    def test_openai_video_i2v_rejected_when_pipeline_lacks_support(self, api_client):
+        """Test OpenAI video route rejects derived I2V requests if the pipeline contract doesn't support them."""
+        task_data = {
+            "prompt": "A beach scene",
+            "input_reference": "/tmp/input.png",
+            "size": "1024x576",
+        }
+
+        response = api_client.post("/v1/videos", json=task_data)
+
+        assert response.status_code == 200
+
+    def test_openai_video_unsupported_task_rejected(self, api_client, mock_pipeline_service):
+        """Test OpenAI video route rejects tasks unsupported by the current pipeline metadata."""
+        mock_pipeline_service.server_metadata.return_value["supported_tasks"] = ["t2v", "t2i", "i2i"]
+
+        task_data = {
+            "prompt": "A beach scene",
+            "input_reference": "/tmp/input.png",
+            "size": "1024x576",
+        }
+
+        response = api_client.post("/v1/videos", json=task_data)
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "supported_tasks" in data["detail"]
+
+    def test_list_videos_includes_created_task(self, api_client):
+        """Test video listing includes tasks created through the OpenAI video endpoint."""
+        create_response = api_client.post(
+            "/v1/videos",
+            json={
+                "prompt": "video list",
+                "size": "1024x576",
+            },
+        )
+
+        assert create_response.status_code == 200
+        created_video_id = create_response.json()["id"]
+
+        list_response = api_client.get("/v1/videos")
+
+        assert list_response.status_code == 200
+        data = list_response.json()
+        assert data["object"] == "list"
+        assert any(video["id"] == created_video_id for video in data["data"])
 
 
 class TestPipelineServiceIntegration:

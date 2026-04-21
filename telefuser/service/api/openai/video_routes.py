@@ -20,10 +20,17 @@ from typing import TYPE_CHECKING, Any, List
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
+from telefuser.service.api.task_contract_runtime import (
+    apply_task_contract_defaults,
+    map_contract_fields,
+    match_task_candidates,
+    validate_required_task_parameters,
+)
+from telefuser.service.core.pipeline_contract import is_video_task
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
 from telefuser.utils.logging import logger
 
-from .adapter import OpenAIRequestAdapter, OpenAIResponseAdapter
+from .adapter import OpenAIRequestAdapter, OpenAIResponseAdapter, is_probable_video_reference
 from .protocol import ErrorResponse, VideoGenerationsRequest, VideoListResponse, VideoResponse
 
 if TYPE_CHECKING:
@@ -57,12 +64,29 @@ def create_router(api_server: ApiServer) -> APIRouter:
                 req = VideoGenerationsRequest(**body)
             except Exception as e:
                 raise HTTPException(status_code=422, detail=str(e))
+            explicit_source_fields = set(getattr(req, "model_fields_set", set()))
         else:
             input_path = None
             if input_reference and input_reference.filename:
                 input_path = await routes._save_uploaded_file(input_reference, "input")
             elif reference_url:
                 input_path = reference_url
+
+            explicit_source_fields = {"prompt"}
+            if input_path:
+                explicit_source_fields.add("input_reference")
+            if model is not None:
+                explicit_source_fields.add("model")
+            if seconds is not None:
+                explicit_source_fields.add("seconds")
+            if size not in (None, ""):
+                explicit_source_fields.add("size")
+            if seed is not None:
+                explicit_source_fields.add("seed")
+            if negative_prompt not in (None, ""):
+                explicit_source_fields.add("negative_prompt")
+            if output_path not in (None, ""):
+                explicit_source_fields.add("output_path")
 
             req = VideoGenerationsRequest(
                 prompt=prompt or "",
@@ -75,7 +99,7 @@ def create_router(api_server: ApiServer) -> APIRouter:
                 output_path=output_path,
             )
 
-        return await routes.create_video(req)
+        return await routes.create_video(req, explicit_source_fields=explicit_source_fields)
 
     @router.get("", response_model=VideoListResponse)
     async def list_videos(
@@ -113,25 +137,41 @@ class VideoRoutes:
         self.task_manager: TaskManager | None = getattr(api_server, "task_manager", None)
         self.file_service = getattr(api_server, "file_service", None)
 
-    async def create_video(self, request: VideoGenerationsRequest) -> VideoResponse:
+    async def create_video(
+        self,
+        request: VideoGenerationsRequest,
+        explicit_source_fields: set[str] | None = None,
+    ) -> VideoResponse:
         """Handle video creation request (async - returns queued status immediately)."""
         if not self.task_manager:
             raise HTTPException(status_code=503, detail="Task manager not initialized")
 
         try:
-            task_request = OpenAIRequestAdapter.to_task_request(request)
+            task_type = self._resolve_video_task(request)
+            task_request = OpenAIRequestAdapter.to_task_request(request, task_type=task_type)
+            self.api.validate_task_supported(task_request.task)
+            contract = self.api.get_task_contract(task_request.task)
+            apply_task_contract_defaults(
+                task_request,
+                task_contract=contract,
+                explicit_fields=self._get_video_explicit_fields(
+                    task_type=task_type,
+                    source_fields=explicit_source_fields or set(getattr(request, "model_fields_set", set())),
+                ),
+            )
+            validate_required_task_parameters(task_request, task_contract=contract)
             task_id = self.task_manager.create_task(task_request)
             logger.info(f"Created video generation task: {task_id}")
 
-            self._ensure_processing()
+            await self._ensure_processing()
 
             response = OpenAIResponseAdapter.to_video_response(
                 task_id=task_id,
                 status=TaskStatus.PENDING.value,
                 prompt=request.prompt,
-                size=request.size or "1024x576",
-                seconds=request.seconds or 4,
-                model=request.model or "wan-video",
+                size=OpenAIRequestAdapter.resolution_to_size(task_request.resolution, media_type="video"),
+                seconds=task_request.target_video_length,
+                model=getattr(task_request, "model", None) or request.model or "wan-video",
                 progress=0,
             )
 
@@ -155,7 +195,7 @@ class VideoRoutes:
             video_tasks = []
             for task_id, task_data in all_tasks.items():
                 task_type = task_data.get("task", "")
-                if task_type in ["t2v", "i2v", "fl2v", "vc"]:
+                if is_video_task(task_type):
                     video_tasks.append((task_id, task_data))
 
             # Sort by start_time
@@ -298,10 +338,9 @@ class VideoRoutes:
 
         return FileResponse(path=str(path), media_type=media_type, filename=path.name)
 
-    def _ensure_processing(self) -> None:
-        """Ensure the task processing thread is running."""
-        if hasattr(self.api, "_ensure_processing_thread_running"):
-            self.api._ensure_processing_thread_running()
+    async def _ensure_processing(self) -> None:
+        """Ensure the task processor is running."""
+        await self.api.ensure_task_processor_running()
 
     async def _save_uploaded_file(self, file: UploadFile, prefix: str = "upload") -> str:
         """Save an uploaded file to disk."""
@@ -329,6 +368,47 @@ class VideoRoutes:
     def _write_file_sync(self, file_path: Path, content: bytes) -> None:
         """Write file synchronously."""
         file_path.write_bytes(content)
+
+    def _resolve_video_task(self, request: VideoGenerationsRequest) -> str:
+        """Resolve the best video task supported by the current pipeline."""
+        reference_path = request.input_reference or request.reference_url or ""
+        available_inputs: set[str] = set()
+        fallback_task = "t2v"
+        if reference_path:
+            if is_probable_video_reference(reference_path):
+                available_inputs.add("ref_video_path")
+                fallback_task = "vc"
+            else:
+                available_inputs.add("first_image_path")
+                fallback_task = "i2v"
+
+        candidates = match_task_candidates(
+            self.api.get_supported_tasks(),
+            get_task_contract=self.api.get_task_contract,
+            available_inputs=available_inputs,
+            media_type="video",
+        )
+        if candidates:
+            return candidates[0]
+        return fallback_task
+
+    def _get_video_explicit_fields(self, *, task_type: str, source_fields: set[str]) -> set[str]:
+        field_mapping = {
+            "prompt": "prompt",
+            "model": "model",
+            "seconds": "target_video_length",
+            "size": "resolution",
+            "seed": "seed",
+            "negative_prompt": "negative_prompt",
+            "output_path": "output_path",
+        }
+        explicit_fields = map_contract_fields(source_fields, field_mapping)
+        if "input_reference" in source_fields or "reference_url" in source_fields:
+            if task_type in {"vc", "vsr"}:
+                explicit_fields.add("ref_video_path")
+            else:
+                explicit_fields.add("first_image_path")
+        return explicit_fields
 
 
 def setup_routes(api_server: ApiServer) -> APIRouter:

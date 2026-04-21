@@ -13,6 +13,7 @@ from telefuser.service.api.openai.adapter import (
     calculate_num_frames,
     encode_image_to_base64,
     infer_aspect_ratio,
+    is_probable_video_reference,
 )
 from telefuser.service.api.openai.protocol import (
     ImageEditRequest,
@@ -74,6 +75,17 @@ class TestRequestAdapter:
 
         assert task_req.task == "i2v"
         assert task_req.first_image_path == "/path/to/image.png"
+
+    def test_video_to_task_video_conditioning(self):
+        """Convert explicit video-conditioned request."""
+        openai_req = VideoGenerationsRequest(
+            prompt="continue this clip",
+            input_reference="/path/to/input.mp4",
+        )
+        task_req = OpenAIRequestAdapter.to_task_request(openai_req, task_type="vc")
+
+        assert task_req.task == "vc"
+        assert task_req.ref_video_path == "/path/to/input.mp4"
 
 
 class TestSizeConversion:
@@ -138,3 +150,7 @@ class TestHelperFunctions:
 
         result = encode_image_to_base64(str(image_path))
         assert result == base64.b64encode(b"fake_image_data").decode()
+
+    def test_is_probable_video_reference(self):
+        assert is_probable_video_reference("/tmp/video.mp4") is True
+        assert is_probable_video_reference("https://example.com/frame.png") is False
