@@ -11,6 +11,7 @@ from typing import Any
 
 import torch.multiprocessing as mp
 
+from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
 from ..security.security_validator import (
@@ -40,7 +41,7 @@ class PipelineService:
         """Initialize PipelineService."""
         self.is_running = False
         self.pipeline = None
-        self.task: str | None = None
+        self.task: TaskType | None = None
         self.ppl_file: str | None = None
         self.parallelism: int | None = None
 
@@ -122,7 +123,9 @@ class PipelineService:
                 raise SecurityError(f"Validation failed with error: {e}")
             return True
 
-    def start_pipeline(self, ppl_file: str, parallelism: int, task: str, skip_validation: bool = False) -> bool:
+    def start_pipeline(
+        self, ppl_file: str, parallelism: int, task: TaskType | str, skip_validation: bool = False
+    ) -> bool:
         """Start the pipeline with security validation."""
         if self.is_running:
             logger.warning("Distributed inference service is already running")
@@ -134,7 +137,7 @@ class PipelineService:
             else:
                 logger.warning("Skipping security validation for pipeline file")
 
-            self.task = task
+            self.task = task if isinstance(task, TaskType) else TaskType(task.lower())
             self.ppl_file = ppl_file
             self.parallelism = parallelism
 
@@ -219,7 +222,7 @@ class PipelineService:
 
         return {
             "task_id": task_data.get("task_id", ""),
-            "status": result.status,
+            "status": result.status.value,
             "output_path": result.output_path or "",
             "message": result.message,
             "raw": result.raw,
@@ -230,7 +233,7 @@ class PipelineService:
         return {
             "pipeline_file": self.ppl_file,
             "parallelism": self.parallelism,
-            "task": self.task,
+            "task": self.task.value if self.task else None,
             "security_level": self.security_level.name if self.security_level else "NONE",
             "runner": "PipelineRunner",
         }
@@ -273,7 +276,7 @@ class SecurePipelineService(PipelineService):
     def __init__(self) -> None:
         super().__init__(security_level=SecurityLevel.STRICT)
 
-    def start_pipeline(self, ppl_file: str, parallelism: int, task: str, **kwargs) -> bool:
+    def start_pipeline(self, ppl_file: str, parallelism: int, task: TaskType | str, **kwargs) -> bool:
         """Start pipeline with strict validation (skip_validation not allowed)."""
         if kwargs.get("skip_validation"):
             raise SecurityError("SecurePipelineService does not allow skip_validation")

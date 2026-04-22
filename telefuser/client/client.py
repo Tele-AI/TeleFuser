@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import requests
 
+from telefuser.service_types import AspectRatio, OutputFormat, TaskType
 from telefuser.utils.logging import logger
 
 
@@ -32,7 +33,7 @@ class TAPClient:
         resolution: str = "720p",
         seed: int = 42,
         negative_prompt: str = "",
-        aspect_ratio: str = "16:9",
+        aspect_ratio: AspectRatio | str = AspectRatio.RATIO_16_9,
         video_length: int = 5,
     ) -> Dict[str, Any]:
         """Create a text-to-video generation task.
@@ -49,7 +50,7 @@ class TAPClient:
             API response containing task_id and status
         """
         payload: Dict[str, Any] = {
-            "task": "t2v",
+            "task": TaskType.T2V,
             "prompt": prompt,
             "seed": seed,
             "resolution": resolution,
@@ -83,7 +84,7 @@ class TAPClient:
             last_image = self.file_to_base64(last_image_path)
 
         payload: Dict[str, Any] = {
-            "task": "fl2v",
+            "task": TaskType.FL2V,
             "prompt": prompt,
             "first_image_path": first_image,
             "last_image_path": last_image,
@@ -115,7 +116,7 @@ class TAPClient:
             video_input = self.file_to_base64(ref_video_path)
 
         payload: Dict[str, Any] = {
-            "task": "vc",
+            "task": TaskType.VC,
             "prompt": prompt,
             "ref_video_path": video_input,
             "seed": seed,
@@ -146,7 +147,7 @@ class TAPClient:
             image_input = self.file_to_base64(first_image_path)
 
         payload: Dict[str, Any] = {
-            "task": "i2v",
+            "task": TaskType.I2V,
             "prompt": prompt,
             "first_image_path": image_input,
             "seed": seed,
@@ -164,8 +165,8 @@ class TAPClient:
         resolution: str = "1024x1024",
         seed: int = 42,
         negative_prompt: str = "",
-        aspect_ratio: str = "1:1",
-        output_format: str = "png",
+        aspect_ratio: AspectRatio | str = AspectRatio.RATIO_1_1,
+        output_format: OutputFormat | str = OutputFormat.PNG,
     ) -> Dict[str, Any]:
         """Create a text-to-image generation task.
 
@@ -181,7 +182,7 @@ class TAPClient:
             API response containing task_id and status
         """
         payload: Dict[str, Any] = {
-            "task": "t2i",
+            "task": TaskType.T2I,
             "prompt": prompt,
             "seed": seed,
             "resolution": resolution,  # Reuse field for compatibility
@@ -200,8 +201,8 @@ class TAPClient:
         resolution: str = "1024x1024",
         seed: int = 42,
         negative_prompt: str = "",
-        aspect_ratio: str = "1:1",
-        output_format: str = "png",
+        aspect_ratio: AspectRatio | str = AspectRatio.RATIO_1_1,
+        output_format: OutputFormat | str = OutputFormat.PNG,
     ) -> Dict[str, Any]:
         """Create an image-to-image generation task.
 
@@ -224,7 +225,7 @@ class TAPClient:
             image_input = self.file_to_base64(image_path)
 
         payload: Dict[str, Any] = {
-            "task": "i2i",
+            "task": TaskType.I2I,
             "prompt": prompt,
             "first_image_path": image_input,
             "seed": seed,

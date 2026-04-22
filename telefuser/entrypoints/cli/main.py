@@ -6,6 +6,7 @@ import click
 
 from telefuser.core.config import TELEFUSER_LOGO
 from telefuser.service.security.security_validator import SecurityLevel, validate_with_report
+from telefuser.service_types import TaskType
 
 
 @click.group()
@@ -21,7 +22,7 @@ def main():
     "--task",
     "-t",
     default="i2v",
-    type=click.Choice(["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"], case_sensitive=False),
+    type=click.Choice(TaskType.values(), case_sensitive=False),
     help="Task type (t2v, i2v, fl2v, vc, t2i, i2i)",
 )
 @click.option("--port", "-p", default=8000, type=int, help="Server port")
@@ -91,7 +92,7 @@ def serve(
         return
 
     # Start server
-    run_server(pipe_path, task, port, host, cache_dir, parallelism)
+    run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism)
 
 
 @main.command(name="validate")

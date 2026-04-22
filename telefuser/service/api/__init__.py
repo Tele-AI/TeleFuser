@@ -12,7 +12,17 @@ from __future__ import annotations
 
 from .api_server import ApiServer
 from .middleware import LoggingMiddleware, RateLimitMiddleware, setup_middleware
-from .schema import StopTaskResponse, TaskRequest, TaskResponse, TaskStatusMessage
+from .schema import (
+    AspectRatio,
+    OutputFormat,
+    StopTaskResponse,
+    StopTaskStatus,
+    TaskRequest,
+    TaskResponse,
+    TaskStatus,
+    TaskStatusMessage,
+    TaskType,
+)
 
 __all__ = [
     "ApiServer",
@@ -23,4 +33,9 @@ __all__ = [
     "TaskResponse",
     "StopTaskResponse",
     "TaskStatusMessage",
+    "TaskType",
+    "AspectRatio",
+    "OutputFormat",
+    "TaskStatus",
+    "StopTaskStatus",
 ]
