@@ -345,7 +345,15 @@ def get_service() -> MyBidirectionalService:
 服务端推送模式的最小浏览器客户端：
 
 ```javascript
-const pc = new RTCPeerConnection();
+// 局域网：无需 iceServers 配置（或使用默认 STUN）
+// 公网：配置 STUN + TURN 服务器
+const pc = new RTCPeerConnection({
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    // 生产环境 / NAT 穿透时添加 TURN 服务器：
+    // { urls: "turn:your-domain.com:3478", username: "user", credential: "pass" },
+  ],
+});
 pc.addTransceiver("video", { direction: "recvonly" });
 pc.addTransceiver("audio", { direction: "recvonly" });
 
@@ -456,6 +464,10 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 |------|--------|------|
 | `TELEFUSER_WEBRTC_MAX_SESSIONS` | `10` | 最大并发 WebRTC 会话数（1-100） |
 | `TELEFUSER_STREAM_WS_MAX_CONNECTIONS` | `10` | 最大并发 WebSocket 连接数（1-1000） |
+| `TELEFUSER_STUN_SERVERS` | `["stun:stun.l.google.com:19302"]` | STUN 服务器 URL 列表（JSON 数组） |
+| `TELEFUSER_TURN_SERVER` | `None` | TURN 服务器 URL（如 `turn:your-domain.com:3478`） |
+| `TELEFUSER_TURN_USERNAME` | `None` | TURN 服务器用户名 |
+| `TELEFUSER_TURN_CREDENTIAL` | `None` | TURN 服务器密码 |
 
 ### CORS
 
@@ -473,15 +485,105 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 
 ---
 
+## 公网部署
+
+当流式服务器部署在公网上（服务端和客户端不在同一网络），WebRTC 需要额外配置以实现 NAT 穿透和满足浏览器安全要求。
+
+### 1. HTTPS（必需）
+
+浏览器在非 localhost 的 HTTP 页面上禁止使用 WebRTC，必须通过 HTTPS 提供服务：
+
+```bash
+# 方案 A：Let's Encrypt 免费证书（生产环境推荐）
+certbot certonly --standalone -d your-domain.com
+
+# 方案 B：自签证书（开发/测试用）
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+
+# 启动时指定 TLS 证书
+uvicorn telefuser.service.api.app:app \
+  --host 0.0.0.0 --port 443 \
+  --ssl-keyfile key.pem --ssl-certfile cert.pem
+```
+
+### 2. STUN/TURN 服务器
+
+**STUN** 用于发现客户端的公网 IP（轻量，免费）。**TURN** 在直连失败时中继媒体流（需要带宽，建议自建）。
+
+```bash
+# 安装 coturn（常用开源 TURN 服务器）
+apt install coturn
+```
+
+最小 `/etc/turnserver.conf` 配置：
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+realm=your-domain.com
+server-name=your-domain.com
+fingerprint
+lt-cred-mech
+user=telefuser:your-secret-password
+external-ip=203.0.113.10
+min-port=49152
+max-port=65535
+```
+
+```bash
+systemctl enable coturn && systemctl start coturn
+```
+
+配置 TeleFuser 使用 TURN 服务器：
+
+```bash
+export TELEFUSER_TURN_SERVER="turn:your-domain.com:3478"
+export TELEFUSER_TURN_USERNAME="telefuser"
+export TELEFUSER_TURN_CREDENTIAL="your-secret-password"
+telefuser stream-serve pipeline.py -p 8000
+```
+
+### 3. 防火墙端口
+
+| 端口 | 协议 | 用途 |
+|------|------|------|
+| 443 | TCP | HTTPS（API + SDP 信令） |
+| 3478 | TCP+UDP | STUN/TURN |
+| 5349 | TCP | TURN over TLS |
+| 49152-65535 | UDP | TURN 中继媒体端口 |
+
+### 部署架构
+
+```
+┌─────────┐     HTTPS/443      ┌──────────────┐
+│  客户端  │◄──────────────────►│  Nginx/CDN   │
+│ （浏览器）│                    │ （TLS 终结） │
+│          │     UDP            ├──────────────┤
+│          │◄──────────────────►│  TeleFuser   │
+│          │  （WebRTC 媒体）   │  :8000       │
+│          │                    ├──────────────┤
+│          │◄──────────────────►│  coturn      │
+│          │   UDP 3478 +       │ （TURN 中继）│
+│          │   49152-65535      │              │
+└─────────┘                    └──────────────┘
+```
+
+> **局域网部署**无需配置 STUN/TURN，默认设置在同一网络内开箱即用。
+
+---
+
 ## 故障排查
 
 ### WebRTC 连接失败（ICE 错误）
 
-浏览器和服务器必须能直接互相访问（不能有对称 NAT）。本地开发不存在此问题。对于远程服务器，请确保：
+**局域网**：确保服务器绑定到 `0.0.0.0`（而非 `127.0.0.1`），且防火墙未阻止 UDP。
 
-- 服务器端口可从浏览器访问
-- 防火墙未阻止临时端口上的 UDP 流量
-- 生产环境中考虑使用 TURN 服务器进行 NAT 穿透
+**公网**：
+
+1. 确认已配置 STUN/TURN 服务器（参见[公网部署](#公网部署)）
+2. 确保 TURN 服务器端口（3478、49152-65535）已开放
+3. 测试 TURN 连通性：`turnutils_uclient -u user -w pass your-domain.com`
+4. 检查浏览器开发者工具 → `chrome://webrtc-internals` 查看 ICE 候选详情
 
 ### 浏览器没有声音
 

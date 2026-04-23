@@ -36,13 +36,33 @@ def _make_sdp_offer(include_audio: bool = True) -> dict:
     return asyncio.run(_create())
 
 
+def _make_bidirectional_sdp_offer(include_audio: bool = True) -> dict:
+    """Create an SDP offer with a DataChannel (for bidirectional mode)."""
+    from aiortc import RTCPeerConnection
+
+    async def _create():
+        pc = RTCPeerConnection()
+        pc.createDataChannel("telefuser")
+        pc.addTransceiver("video", direction="recvonly")
+        if include_audio:
+            pc.addTransceiver("audio", direction="recvonly")
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        sdp = pc.localDescription.sdp
+        sdp_type = pc.localDescription.type
+        await pc.close()
+        return {"sdp": sdp, "type": sdp_type}
+
+    return asyncio.run(_create())
+
+
 # ---------------------------------------------------------------------------
-# Tests
+# Server-push tests (unchanged)
 # ---------------------------------------------------------------------------
 
 
 class TestWebRTCOffer:
-    """Tests for POST /v1/stream/webrtc/offer."""
+    """Tests for POST /v1/stream/webrtc/offer (server-push mode)."""
 
     def test_offer_returns_sdp_answer(self, server_push_client):
         offer = _make_sdp_offer()
@@ -53,13 +73,6 @@ class TestWebRTCOffer:
         assert "sdp" in data
         assert data["type"] == "answer"
         assert "session_id" in data
-
-    def test_offer_rejects_bidirectional_mode(self, bidirectional_client):
-        offer = _make_sdp_offer()
-        body = {**offer, "task": "t2v", "prompt": "test"}
-        resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
-        assert resp.status_code == 400
-        assert "server_push" in resp.json()["detail"]
 
     def test_offer_rejects_when_service_not_running(self):
         from telefuser.service.api.api_server import ApiServer
@@ -118,3 +131,50 @@ class TestWebRTCAudio:
         assert resp.status_code == 200
         data = resp.json()
         assert "m=audio" not in data["sdp"]
+
+
+# ---------------------------------------------------------------------------
+# Bidirectional WebRTC tests
+# ---------------------------------------------------------------------------
+
+
+class TestWebRTCBidirectional:
+    """Tests for WebRTC bidirectional mode via POST /v1/stream/webrtc/offer."""
+
+    def test_offer_creates_bidirectional_session(self, bidirectional_client):
+        offer = _make_bidirectional_sdp_offer()
+        body = {**offer, "task": "s2v", "prompt": "test", "config": {"fps": 24}}
+        resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "sdp" in data
+        assert data["type"] == "answer"
+        assert "session_id" in data
+
+    def test_offer_bidirectional_without_audio(self, bidirectional_client):
+        offer = _make_bidirectional_sdp_offer(include_audio=False)
+        body = {**offer, "task": "s2v", "prompt": "no audio"}
+        resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "m=audio" not in data["sdp"]
+
+    def test_close_bidirectional_session(self, bidirectional_client):
+        offer = _make_bidirectional_sdp_offer()
+        body = {**offer, "task": "s2v", "prompt": "test"}
+        create_resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
+        session_id = create_resp.json()["session_id"]
+
+        resp = bidirectional_client.delete(f"/v1/stream/webrtc/{session_id}")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "closed"
+
+    def test_close_nonexistent_bidirectional(self, bidirectional_client):
+        resp = bidirectional_client.delete("/v1/stream/webrtc/nonexistent")
+        assert resp.status_code == 404
+
+    def test_sdp_failure_rolls_back_pipeline_session(self, bidirectional_client):
+        """Offer with invalid SDP should not leave orphaned pipeline sessions."""
+        body = {"sdp": "invalid-sdp", "type": "offer", "task": "s2v", "prompt": "test"}
+        resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
+        assert resp.status_code == 400

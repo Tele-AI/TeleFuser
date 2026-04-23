@@ -1,11 +1,11 @@
 """WebRTC media tracks — bridges async generators to aiortc.
 
 FrameGeneratorTrack: decodes ``frames_b64`` → ``av.VideoFrame`` at target fps.
+    In server-push mode it owns an async generator; in bidirectional mode frames
+    are pushed directly via ``push_frame()``.
 AudioGeneratorTrack: receives raw PCM16 bytes → ``av.AudioFrame`` at 20ms pacing.
-
-The video track owns the generator and forwards audio data (``audio_b64``) to
-the audio track via ``feed()`` — a demuxer pattern that avoids a separate
-fan-out abstraction.
+IncomingVideoRelay / IncomingAudioRelay: consume incoming client media tracks and
+    forward decoded frames as native Python objects to a callback.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import asyncio
 import base64
 import fractions
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 import av
 import cv2
@@ -109,13 +109,21 @@ class AudioGeneratorTrack(MediaStreamTrack):
 
 
 class FrameGeneratorTrack(MediaStreamTrack):
-    """Video track fed by a ``ServerPushService.serve()`` async generator."""
+    """Video track that delivers ``av.VideoFrame`` at a constant FPS.
+
+    Two modes of operation:
+
+    * **Generator mode** (server-push): pass an async generator that yields
+      chunk dicts with ``frames_b64``.  The track spawns a consumer task.
+    * **Push mode** (bidirectional): pass ``generator=None``.  The caller
+      feeds frames directly via :meth:`push_frame`.
+    """
 
     kind = "video"
 
     def __init__(
         self,
-        generator: AsyncGenerator[dict, None],
+        generator: AsyncGenerator[dict, None] | None = None,
         fps: int = 24,
         audio_track: AudioGeneratorTrack | None = None,
     ) -> None:
@@ -131,6 +139,13 @@ class FrameGeneratorTrack(MediaStreamTrack):
         self._finished = False
         self._start_time: float | None = None
         self._last_frame: av.VideoFrame | None = None
+
+    def push_frame(self, frame: av.VideoFrame) -> None:
+        """Push a decoded frame directly (used by ChunkRouter in bidirectional mode)."""
+        try:
+            self._queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            pass
 
     async def _consume_generator(self) -> None:
         try:
@@ -161,8 +176,10 @@ class FrameGeneratorTrack(MediaStreamTrack):
                 self._audio_track.signal_done()
 
     async def recv(self) -> av.VideoFrame:
-        if self._task is None:
+        if self._task is None and self._generator is not None:
             self._task = asyncio.create_task(self._consume_generator())
+
+        if self._start_time is None:
             self._start_time = time.time()
 
         target_time = self._start_time + self._frame_count * self._frame_interval
@@ -196,3 +213,76 @@ class FrameGeneratorTrack(MediaStreamTrack):
         if self._audio_track is not None:
             self._audio_track.stop()
         super().stop()
+
+
+# ---------------------------------------------------------------------------
+# Incoming media relays (client → server)
+# ---------------------------------------------------------------------------
+
+
+class IncomingVideoRelay:
+    """Consumes an incoming video track and forwards decoded frames to a callback.
+
+    Frames are passed as native numpy arrays — no JPEG/base64 re-encoding.
+    """
+
+    def __init__(
+        self,
+        track: MediaStreamTrack,
+        session_id: str,
+        on_chunk: Callable[[str, dict], None],
+    ) -> None:
+        self._track = track
+        self._session_id = session_id
+        self._on_chunk = on_chunk
+
+    async def run(self) -> None:
+        try:
+            while True:
+                frame: av.VideoFrame = await self._track.recv()
+                rgb = frame.to_ndarray(format="rgb24")
+                self._on_chunk(self._session_id, {"type": "media", "video_frames": [rgb]})
+        except MediaStreamError:
+            pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"IncomingVideoRelay error: session={self._session_id} {exc}")
+
+
+class IncomingAudioRelay:
+    """Consumes an incoming audio track and forwards raw PCM bytes to a callback.
+
+    Audio data is passed as raw bytes — no base64 re-encoding.
+    """
+
+    def __init__(
+        self,
+        track: MediaStreamTrack,
+        session_id: str,
+        on_chunk: Callable[[str, dict], None],
+    ) -> None:
+        self._track = track
+        self._session_id = session_id
+        self._on_chunk = on_chunk
+
+    async def run(self) -> None:
+        try:
+            while True:
+                frame: av.AudioFrame = await self._track.recv()
+                pcm = frame.to_ndarray().flatten().astype(np.int16).tobytes()
+                self._on_chunk(
+                    self._session_id,
+                    {
+                        "type": "media",
+                        "audio_pcm": pcm,
+                        "sample_rate": frame.sample_rate,
+                        "channels": len(frame.layout.channels),
+                    },
+                )
+        except MediaStreamError:
+            pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"IncomingAudioRelay error: session={self._session_id} {exc}")

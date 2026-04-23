@@ -30,7 +30,10 @@ class ServiceRoutes:
         status["execution_mode"] = "serial_single_pipeline"
         status["effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
         status["configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
-        status.update(self._webrtc_session_stats())
+        webrtc_stats = self._webrtc_session_stats()
+        status.update(webrtc_stats)
+        if webrtc_stats.get("webrtc_active_sessions", 0) > 0 and status.get("service_status") == "idle":
+            status["service_status"] = "active"
         return status
 
     def _webrtc_session_stats(self) -> dict:
@@ -38,11 +41,7 @@ class ServiceRoutes:
         routes = self.api._webrtc_routes
         if routes is None:
             return {}
-        mgr = routes._session_manager
-        return {
-            "webrtc_active_sessions": mgr.active_session_count,
-            "webrtc_max_sessions": mgr._max_sessions,
-        }
+        return routes._session_manager.session_stats()
 
     async def get_metadata(self) -> dict:
         """Get service metadata."""
@@ -113,7 +112,7 @@ def create_router(api_server: ApiServer) -> APIRouter:
         """Get metrics in JSON format."""
         service_metrics = get_service_metrics()
         registry = service_metrics.registry
-        return {
+        result = {
             "uptime_seconds": service_metrics.service_uptime.value,
             "tasks": {
                 "created": service_metrics.tasks_created.value,
@@ -129,6 +128,8 @@ def create_router(api_server: ApiServer) -> APIRouter:
             "metrics_count": len(registry.list_metrics()),
             "registered_stages": registry.list_stages(),
         }
+        result["webrtc"] = routes._webrtc_session_stats()
+        return result
 
     return new_router
 

@@ -178,6 +178,7 @@ async def run_with_file(pipe, req_id, seed, prompt, image, ppl_config=None):
     logger.info(f"Video saved to: {result['uri']}")
     return result
 
+
 def delete_artifact(uri: str) -> None:
     """Delete generated artifact file if it exists."""
     artifact_path = Path(uri)
@@ -186,6 +187,7 @@ def delete_artifact(uri: str) -> None:
 
     artifact_path.unlink()
     logger.info(f"Deleted warmup artifact: {artifact_path}")
+
 
 @click.command()
 @click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
@@ -233,8 +235,7 @@ async def async_main(gpu_num, image_path, prompt, negative_prompt, ppl_config):
         try:
             ppl_config["num_inference_steps"] = 2
             logger.info(
-                f"starting warmup request: {warmup_rid} "
-                f"(num_inference_steps={ppl_config['num_inference_steps']})"
+                f"starting warmup request: {warmup_rid} (num_inference_steps={ppl_config['num_inference_steps']})"
             )
             warmup_result = await run(pipe, warmup_rid, ppl_config["seed"], prompt, image, ppl_config)
             logger.info(
@@ -248,10 +249,13 @@ async def async_main(gpu_num, image_path, prompt, negative_prompt, ppl_config):
         rid = f"demo-{ts}-1"
         logger.info(f"starting request: {rid}")
         result = await run(pipe, rid, ppl_config["seed"], prompt, image, ppl_config)
-        logger.info(f"[{rid}] done wall_time_s={result['wall_time_s']:.3f} pipeline_time_ms={result['pipeline_time_ms']:.2f}")
+        logger.info(
+            f"[{rid}] done wall_time_s={result['wall_time_s']:.3f} pipeline_time_ms={result['pipeline_time_ms']:.2f}"
+        )
         logger.info(f"  [{rid}] {result['uri']}")
     finally:
         await pipe.astop()
+
 
 if __name__ == "__main__":
     main()

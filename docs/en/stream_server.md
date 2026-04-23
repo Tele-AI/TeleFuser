@@ -345,7 +345,15 @@ After creating a session, connect a WebSocket. Send JSON messages as input chunk
 Minimal browser client for server-push mode:
 
 ```javascript
-const pc = new RTCPeerConnection();
+// For LAN: no iceServers needed (or use default STUN)
+// For public network: configure STUN + TURN servers
+const pc = new RTCPeerConnection({
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    // Add TURN server for production / NAT traversal:
+    // { urls: "turn:your-domain.com:3478", username: "user", credential: "pass" },
+  ],
+});
 pc.addTransceiver("video", { direction: "recvonly" });
 pc.addTransceiver("audio", { direction: "recvonly" });
 
@@ -456,6 +464,10 @@ Opens a browser page with video player, prompt input, and connect/stop/unmute bu
 |----------|---------|-------------|
 | `TELEFUSER_WEBRTC_MAX_SESSIONS` | `10` | Maximum concurrent WebRTC sessions (1-100) |
 | `TELEFUSER_STREAM_WS_MAX_CONNECTIONS` | `10` | Maximum concurrent WebSocket connections (1-1000) |
+| `TELEFUSER_STUN_SERVERS` | `["stun:stun.l.google.com:19302"]` | STUN server URLs (JSON array) |
+| `TELEFUSER_TURN_SERVER` | `None` | TURN server URL (e.g. `turn:your-domain.com:3478`) |
+| `TELEFUSER_TURN_USERNAME` | `None` | TURN server username |
+| `TELEFUSER_TURN_CREDENTIAL` | `None` | TURN server credential |
 
 ### CORS
 
@@ -473,15 +485,105 @@ Pipeline files are validated before loading. Use `--skip-validation` only for de
 
 ---
 
+## Public Network Deployment
+
+When deploying the stream server on a public network (server and client on different networks), WebRTC requires additional configuration for NAT traversal and browser security.
+
+### 1. HTTPS (Required)
+
+Browsers block WebRTC on non-localhost HTTP pages. You must serve over HTTPS:
+
+```bash
+# Option A: Let's Encrypt (recommended for production)
+certbot certonly --standalone -d your-domain.com
+
+# Option B: Self-signed certificate (development/testing)
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+
+# Start with TLS
+uvicorn telefuser.service.api.app:app \
+  --host 0.0.0.0 --port 443 \
+  --ssl-keyfile key.pem --ssl-certfile cert.pem
+```
+
+### 2. STUN/TURN Servers
+
+**STUN** discovers the client's public IP (lightweight, free). **TURN** relays media when direct connections fail (requires bandwidth, self-host recommended).
+
+```bash
+# Install coturn (popular open-source TURN server)
+apt install coturn
+```
+
+Minimal `/etc/turnserver.conf`:
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+realm=your-domain.com
+server-name=your-domain.com
+fingerprint
+lt-cred-mech
+user=telefuser:your-secret-password
+external-ip=203.0.113.10
+min-port=49152
+max-port=65535
+```
+
+```bash
+systemctl enable coturn && systemctl start coturn
+```
+
+Configure TeleFuser to use the TURN server:
+
+```bash
+export TELEFUSER_TURN_SERVER="turn:your-domain.com:3478"
+export TELEFUSER_TURN_USERNAME="telefuser"
+export TELEFUSER_TURN_CREDENTIAL="your-secret-password"
+telefuser stream-serve pipeline.py -p 8000
+```
+
+### 3. Firewall Ports
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 443 | TCP | HTTPS (API + SDP signaling) |
+| 3478 | TCP+UDP | STUN/TURN |
+| 5349 | TCP | TURN over TLS |
+| 49152-65535 | UDP | TURN relay media ports |
+
+### Deployment Architecture
+
+```
+┌─────────┐     HTTPS/443      ┌──────────────┐
+│  Client  │◄──────────────────►│  Nginx/CDN   │
+│ (Browser)│                    │  (TLS term.) │
+│          │     UDP            ├──────────────┤
+│          │◄──────────────────►│  TeleFuser   │
+│          │   (WebRTC media)   │  :8000       │
+│          │                    ├──────────────┤
+│          │◄──────────────────►│  coturn      │
+│          │   UDP 3478 +       │  (TURN relay)│
+│          │   49152-65535      │              │
+└─────────┘                    └──────────────┘
+```
+
+> **LAN deployment** requires no STUN/TURN configuration. The default settings work out of the box when server and client are on the same network.
+
+---
+
 ## Troubleshooting
 
 ### WebRTC Connection Fails (ICE Error)
 
-The browser and server must be able to reach each other directly (no symmetric NAT). For local development this is not an issue. For remote servers, ensure:
+For **LAN**: ensure the server binds to `0.0.0.0` (not `127.0.0.1`) and no firewall blocks UDP.
 
-- The server port is accessible from the browser
-- No firewall blocks UDP traffic on ephemeral ports
-- Consider using a TURN server for NAT traversal in production
+For **public network**:
+
+1. Verify STUN/TURN servers are configured (see [Public Network Deployment](#public-network-deployment))
+2. Ensure TURN server ports (3478, 49152-65535) are open
+3. Test TURN connectivity: `turnutils_uclient -u user -w pass your-domain.com`
+4. Check browser DevTools → `chrome://webrtc-internals` for ICE candidate details
 
 ### No Audio in Browser
 

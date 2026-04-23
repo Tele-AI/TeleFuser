@@ -145,4 +145,4 @@ examples/regression_test/regression_outputs/
 INSTALL_HYS.md
 *.webp
 AGENTS.md
-_version.py
+_version.py.mcp.json

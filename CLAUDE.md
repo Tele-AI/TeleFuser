@@ -215,7 +215,13 @@ Located in `telefuser/kernel/triton/`:
 
 **After completing a coding task, ask the user:**
 
-> Code changes completed. Would you like to run `/simplify` for code review?
+> Code changes completed. Would you like to:
+> 1. Run `/simplify` for code review?
+> 2. Use GPT 5.4 for code review? (via MCP tool `review_code`)
 
-If the user agrees:
+If the user chooses `/simplify`:
 1. Run `/simplify` to review and optimize the changed code for reuse, quality, and efficiency
+
+If the user chooses GPT 5.4 review:
+1. Call the MCP tool `mcp__gpt-review__review_code` to send the diff to GPT 5.4 for review
+2. Present the review results to the user

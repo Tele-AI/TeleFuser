@@ -6,8 +6,8 @@ expose get_service() which returns an object with start/stop/serve methods.
 
 Two interaction modes are supported:
 
-* SERVER_PUSH  – single request in, continuous chunks out  (WebRTC)
-* BIDIRECTIONAL – continuous input & output                (WebSocket)
+* SERVER_PUSH   – single request in, continuous chunks out  (WebRTC media tracks)
+* BIDIRECTIONAL – continuous input & output                 (WebRTC DataChannel + media tracks)
 
 Pipeline ``serve()`` methods may contain blocking calls (GPU inference,
 ``time.sleep``, etc.). ``stream_task()`` runs them on a dedicated thread
