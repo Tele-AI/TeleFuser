@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
+from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus, TaskType
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..core.pipeline_contract import infer_media_type_for_task, validate_task_name_format
@@ -14,7 +15,7 @@ class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(default_factory=generate_task_id, description="Task ID (auto-generated)")
-    task: str = Field("t2v", description="t2v, i2v, fl2v, vc, t2i, i2i")
+    task: TaskType = Field(TaskType.T2V, description="t2v, i2v, fl2v, vc, t2i, i2i")
     prompt: str = Field("", description="Generation prompt")
     negative_prompt: str = Field("", description="Negative prompt")
     first_image_path: str = Field("", description="Base64 encoded image or URL")
@@ -26,12 +27,10 @@ class TaskRequest(BaseModel):
         "720p", description="Target resolution, e.g., 720p, 1080p, 480p for video; 1024x1024, 1024x768 for image"
     )
     seed: int = Field(42, description="Random seed")
-    aspect_ratio: Literal["16:9", "9:16", "4:3", "3:4", "1:1", "2:3", "3:2"] = Field(
-        "16:9", description="Allowed values: 16:9, 9:16, 4:3, 3:4, 1:1, 2:3, 3:2"
+    aspect_ratio: AspectRatio = Field(
+        AspectRatio.RATIO_16_9, description="Allowed values: 16:9, 9:16, 4:3, 3:4, 1:1, 2:3, 3:2"
     )
-    output_format: Literal["png", "jpg", "jpeg", "webp"] = Field(
-        "png", description="Output image format (for t2i, i2i tasks)"
-    )
+    output_format: OutputFormat = Field(OutputFormat.PNG, description="Output image format (for t2i, i2i tasks)")
 
     @field_validator("aspect_ratio")
     @classmethod
@@ -50,7 +49,7 @@ class TaskRequest(BaseModel):
         super().__init__(**data)
         if not self.output_path:
             # Set default output path based on task type
-            if infer_media_type_for_task(self.task) == "image":
+            if self.task in [TaskType.T2I, TaskType.I2I]:
                 self.output_path = f"{self.task_id}.{self.output_format}"
             else:
                 self.output_path = f"{self.task_id}.mp4"
@@ -69,12 +68,12 @@ class TaskResponse(BaseModel):
     """Response model for task creation."""
 
     task_id: str
-    task_status: str
+    task_status: TaskStatus
     output_path: str
 
 
 class StopTaskResponse(BaseModel):
     """Response model for task stop/cancel."""
 
-    stop_status: str
+    stop_status: StopTaskStatus
     reason: str

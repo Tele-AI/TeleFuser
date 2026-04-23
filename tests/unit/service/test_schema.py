@@ -7,10 +7,15 @@ from pydantic import ValidationError
 pytest.importorskip("pydantic")
 
 from telefuser.service.api.schema import (
+    AspectRatio,
+    OutputFormat,
     StopTaskResponse,
+    StopTaskStatus,
     TaskRequest,
     TaskResponse,
+    TaskStatus,
     TaskStatusMessage,
+    TaskType,
 )
 
 
@@ -21,13 +26,14 @@ class TestTaskRequest:
         """Test default field values."""
         request = TaskRequest()
 
-        assert request.task == "t2v"
+        assert request.task == TaskType.T2V
         assert request.prompt == ""
         assert request.negative_prompt == ""
         assert request.target_video_length == 5
         assert request.resolution == "720p"
         assert request.seed == 42
-        assert request.aspect_ratio == "16:9"
+        assert request.aspect_ratio == AspectRatio.RATIO_16_9
+        assert request.output_format == OutputFormat.PNG
         # output_path should be auto-generated
         assert request.output_path.endswith(".mp4")
 
@@ -43,13 +49,13 @@ class TestTaskRequest:
             aspect_ratio="9:16",
         )
 
-        assert request.task == "i2v"
+        assert request.task == TaskType.I2V
         assert request.prompt == "A beautiful scene"
         assert request.negative_prompt == "blurry"
         assert request.target_video_length == 10
         assert request.resolution == "1080p"
         assert request.seed == 123
-        assert request.aspect_ratio == "9:16"
+        assert request.aspect_ratio == AspectRatio.RATIO_9_16
 
     def test_valid_aspect_ratios(self):
         """Test valid aspect ratio values."""
@@ -57,7 +63,7 @@ class TestTaskRequest:
 
         for ratio in valid_ratios:
             request = TaskRequest(aspect_ratio=ratio)
-            assert request.aspect_ratio == ratio
+            assert request.aspect_ratio == AspectRatio(ratio)
 
     def test_invalid_aspect_ratio(self):
         """Test invalid aspect ratio raises error."""
@@ -70,7 +76,7 @@ class TestTaskRequest:
 
         for task in valid_tasks:
             request = TaskRequest(task=task)
-            assert request.task == task
+            assert request.task == TaskType(task)
 
     def test_invalid_task(self):
         """Test invalid task raises error."""
@@ -105,6 +111,28 @@ class TestTaskRequest:
 
         assert request.output_path == "custom/path/video.mp4"
 
+    def test_valid_output_formats(self):
+        """Test valid output format values."""
+        valid_formats = ["png", "jpg", "jpeg", "webp"]
+
+        for output_format in valid_formats:
+            request = TaskRequest(task="t2i", output_format=output_format)
+            assert request.output_format == OutputFormat(output_format)
+
+    def test_invalid_output_format(self):
+        """Test invalid output format raises error."""
+        with pytest.raises(ValidationError):
+            TaskRequest(output_format="bmp")
+
+    def test_json_dump_uses_string_values(self):
+        """Test enum fields serialize to API-compatible strings."""
+        request = TaskRequest(task=TaskType.T2I, aspect_ratio=AspectRatio.RATIO_1_1, output_format=OutputFormat.WEBP)
+
+        data = request.model_dump(mode="json")
+
+        assert data["task"] == "t2i"
+        assert data["aspect_ratio"] == "1:1"
+        assert data["output_format"] == "webp"
     def test_extra_contract_fields_are_preserved(self):
         """TaskRequest should preserve extra contract-managed fields for runner execution."""
         request = TaskRequest(task="t2v", num_inference_steps=8)
@@ -140,7 +168,7 @@ class TestTaskResponse:
         )
 
         assert response.task_id == "task-123"
-        assert response.task_status == "completed"
+        assert response.task_status == TaskStatus.COMPLETED
         assert response.output_path == "output.mp4"
 
     def test_all_fields_required(self):
@@ -159,7 +187,7 @@ class TestStopTaskResponse:
             reason="User requested",
         )
 
-        assert response.stop_status == "success"
+        assert response.stop_status == StopTaskStatus.SUCCESS
         assert response.reason == "User requested"
 
     def test_all_fields_required(self):

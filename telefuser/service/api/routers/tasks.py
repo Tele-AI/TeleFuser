@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
+from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus
 from telefuser.service.core.pipeline_contract import default_task_contract, validate_task_name_format
 from telefuser.utils.logging import logger
 
@@ -47,14 +48,18 @@ def create_router(api_server: ApiServer) -> APIRouter:
     async def create_task_form(
         first_image_file: UploadFile | None = File(default=None, description="First frame image file"),
         last_image_file: UploadFile | None = File(default=None, description="Last frame image file"),
-        prompt: str | None = Form(default=None, description="Generation prompt"),
+        prompt: str = Form(default="", description="Generation prompt"),
         task: str = Form(default="", description="Optional explicit task name"),
-        output_path: str | None = Form(default=None, description="Custom output path"),
-        negative_prompt: str | None = Form(default=None, description="Negative prompt"),
-        target_video_length: int | None = Form(default=None, description="Video length in seconds (for video tasks)"),
-        seed: int | None = Form(default=None, description="Random seed"),
-        aspect_ratio: str | None = Form(default=None, description="Aspect ratio (16:9, 9:16, 4:3, etc.)"),
-        output_format: str | None = Form(default=None, description="Output format (png, jpg, webp for images)"),
+        output_path: str = Form(default="", description="Custom output path"),
+        negative_prompt: str = Form(default="", description="Negative prompt"),
+        target_video_length: int = Form(default=5, description="Video length in seconds (for video tasks)"),
+        seed: int = Form(default=42, description="Random seed"),
+        aspect_ratio: AspectRatio = Form(
+            default=AspectRatio.RATIO_16_9, description="Aspect ratio (16:9, 9:16, 4:3, etc.)"
+        ),
+        output_format: OutputFormat = Form(
+            default=OutputFormat.PNG, description="Output format (png, jpg, webp for images)"
+        ),
     ) -> TaskResponse:
         """Create task with file upload support."""
         return await routes.create_task_form(
@@ -121,10 +126,8 @@ class TaskRoutes:
             )
             task_id = self.api.task_manager.create_task(message)
             message.task_id = task_id
-            await self.api.ensure_task_processor_running()
-            return TaskResponse(task_id=task_id, task_status="pending", output_path=message.output_path)
-        except HTTPException:
-            raise
+            await self.api._ensure_processing_thread_running()
+            return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
@@ -166,12 +169,14 @@ class TaskRoutes:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 logger.info(f"Task {task_id} stopped successfully.")
-                return StopTaskResponse(stop_status="success", reason="Task stopped successfully.")
+                return StopTaskResponse(stop_status=StopTaskStatus.SUCCESS, reason="Task stopped successfully.")
             else:
-                return StopTaskResponse(stop_status="do_nothing", reason="Task not found or already completed.")
+                return StopTaskResponse(
+                    stop_status=StopTaskStatus.DO_NOTHING, reason="Task not found or already completed."
+                )
         except Exception as e:
             logger.error(f"Error occurred while stopping task {task_id}: {str(e)}")
-            return StopTaskResponse(stop_status="error", reason=str(e))
+            return StopTaskResponse(stop_status=StopTaskStatus.ERROR, reason=str(e))
 
     async def create_task_form(
         self,
@@ -183,8 +188,8 @@ class TaskRoutes:
         negative_prompt: str | None = None,
         target_video_length: int | None = None,
         seed: int | None = None,
-        aspect_ratio: str | None = None,
-        output_format: str | None = None,
+        aspect_ratio: AspectRatio = AspectRatio.RATIO_16_9,
+        output_format: OutputFormat = OutputFormat.PNG,
     ) -> TaskResponse:
         """Create task with file upload support."""
         assert self.api.file_service is not None, "File service is not initialized"
@@ -261,7 +266,7 @@ class TaskRoutes:
             message.task_id = task_id
             await self.api.ensure_task_processor_running()
 
-            return TaskResponse(task_id=task_id, task_status="pending", output_path=message.output_path)
+            return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=e.errors())
         except HTTPException:

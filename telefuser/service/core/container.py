@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
 from .config import ServerConfig, server_config
@@ -71,7 +72,11 @@ class ServiceContainer:
         )
 
     def initialize_pipeline(
-        self, pipe_path: str, parallelism: int = 1, task: str = "t2v", skip_validation: bool = False
+        self,
+        pipe_path: str,
+        parallelism: int = 1,
+        task: TaskType | str = TaskType.T2V,
+        skip_validation: bool = False,
     ) -> bool:
         """Initialize the pipeline service."""
         self.pipeline_service = PipelineService(security_level=self.config.security_level)
@@ -111,7 +116,7 @@ class ServiceContainer:
         self,
         pipe_path: str,
         parallelism: int = 1,
-        task: str = "t2v",
+        task: TaskType | str = TaskType.T2V,
         cache_dir: Path | None = None,
         skip_validation: bool = False,
     ) -> bool:

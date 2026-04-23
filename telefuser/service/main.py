@@ -6,6 +6,7 @@ from pathlib import Path
 import uvicorn
 
 from telefuser.core.config import TELEFUSER_LOGO
+from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
 from .core.config import server_config
@@ -45,7 +46,7 @@ def _run(
 
 def run_server(
     pipe_path: str,
-    task: str,
+    task: TaskType | str,
     port: int,
     host: str,
     cache_dir: str = "",
