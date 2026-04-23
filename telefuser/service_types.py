@@ -25,6 +25,8 @@ class TaskType(_StringEnum):
     VC = "vc"
     T2I = "t2i"
     I2I = "i2i"
+    S2V = "s2v"
+    VSR = "vsr"
 
 
 class AspectRatio(_StringEnum):

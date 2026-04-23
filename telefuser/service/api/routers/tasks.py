@@ -126,10 +126,12 @@ class TaskRoutes:
             )
             task_id = self.api.task_manager.create_task(message)
             message.task_id = task_id
-            await self.api._ensure_processing_thread_running()
+            await self.api.ensure_task_processor_running()
             return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e))
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to create task: {e}")
             raise HTTPException(status_code=500, detail=str(e))

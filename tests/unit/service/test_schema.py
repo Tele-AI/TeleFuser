@@ -76,7 +76,7 @@ class TestTaskRequest:
 
         for task in valid_tasks:
             request = TaskRequest(task=task)
-            assert request.task == TaskType(task)
+            assert request.task == task
 
     def test_invalid_task(self):
         """Test invalid task raises error."""

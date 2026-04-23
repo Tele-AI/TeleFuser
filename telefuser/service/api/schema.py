@@ -16,7 +16,7 @@ class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(default_factory=generate_task_id, description="Task ID (auto-generated)")
-    task: TaskType = Field(TaskType.T2V, description="t2v, i2v, fl2v, vc, t2i, i2i")
+    task: str = Field("t2v", description="Task type: t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr, or custom")
     prompt: str = Field("", description="Generation prompt")
     negative_prompt: str = Field("", description="Negative prompt")
     first_image_path: str = Field("", description="Base64 encoded image or URL")
@@ -50,7 +50,7 @@ class TaskRequest(BaseModel):
         super().__init__(**data)
         if not self.output_path:
             # Set default output path based on task type
-            if self.task in [TaskType.T2I, TaskType.I2I]:
+            if self.task in ("t2i", "i2i"):
                 self.output_path = f"{self.task_id}.{self.output_format}"
             else:
                 self.output_path = f"{self.task_id}.mp4"
