@@ -122,15 +122,16 @@ class ServerConfig(BaseSettings):
     )
 
     # Stream settings
-    stream_ws_max_connections: int = Field(
-        default=10, ge=1, le=1000, description="Maximum concurrent WebSocket connections"
-    )
-
-    stream_chunk_timeout: float = Field(
-        default=30.0, ge=1.0, le=300.0, description="Timeout in seconds waiting for a stream chunk"
-    )
-
     webrtc_max_sessions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent WebRTC sessions")
+
+    # WebRTC ICE settings (for public network deployment)
+    stun_servers: list[str] = Field(
+        default_factory=lambda: ["stun:stun.l.google.com:19302"],
+        description="STUN server URLs (e.g. stun:stun.l.google.com:19302)",
+    )
+    turn_server: str | None = Field(default=None, description="TURN server URL (e.g. turn:your-domain.com:3478)")
+    turn_username: str | None = Field(default=None, description="TURN server username")
+    turn_credential: str | None = Field(default=None, description="TURN server credential")
 
     @field_validator("port")
     @classmethod

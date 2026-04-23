@@ -1,4 +1,4 @@
-"""Integration tests for stream API endpoints (WebSocket)."""
+"""Integration tests for stream API endpoints."""
 
 from __future__ import annotations
 
@@ -10,35 +10,87 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 
 
+def _make_offer() -> dict:
+    """Create a bidirectional SDP offer with a DataChannel."""
+    pytest.importorskip("aiortc")
+    from aiortc import RTCPeerConnection
+
+    async def _create():
+        pc = RTCPeerConnection()
+        pc.createDataChannel("telefuser")
+        pc.addTransceiver("video", direction="recvonly")
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        sdp = pc.localDescription.sdp
+        sdp_type = pc.localDescription.type
+        await pc.close()
+        return {"sdp": sdp, "type": sdp_type}
+
+    return asyncio.run(_create())
+
+
+def _make_server_push_offer() -> dict:
+    """Create a server-push SDP offer (no DataChannel)."""
+    pytest.importorskip("aiortc")
+    from aiortc import RTCPeerConnection
+
+    async def _create():
+        pc = RTCPeerConnection()
+        pc.addTransceiver("video", direction="recvonly")
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        sdp = pc.localDescription.sdp
+        sdp_type = pc.localDescription.type
+        await pc.close()
+        return {"sdp": sdp, "type": sdp_type}
+
+    return asyncio.run(_create())
+
+
 # ---------------------------------------------------------------------------
-# Bidirectional (session management) tests
+# Bidirectional (session management) tests — via WebRTC offer
 # ---------------------------------------------------------------------------
 
 
 class TestBidirectionalSessions:
-    """Tests for bidirectional session management endpoints."""
+    """Tests for bidirectional session management via WebRTC offer endpoint."""
 
-    def test_create_session(self, bidirectional_client):
-        body = {"task": "s2v", "config": {"fps": 24}}
-        resp = bidirectional_client.post("/v1/stream/sessions", json=body)
+    @pytest.fixture(autouse=True)
+    def _skip_without_aiortc(self):
+        pytest.importorskip("aiortc")
+
+    def test_create_bidirectional_session_via_offer(self, bidirectional_client):
+        offer = _make_offer()
+        body = {**offer, "task": "s2v", "config": {"fps": 24}}
+        resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
         assert resp.status_code == 200
         data = resp.json()
         assert "session_id" in data
-        assert data["stream_mode"] == "bidirectional"
-        assert data["status"] == "created"
+        assert data["type"] == "answer"
 
-    def test_close_session(self, bidirectional_client):
-        create_resp = bidirectional_client.post("/v1/stream/sessions", json={"task": "s2v"})
+    def test_close_bidirectional_session(self, bidirectional_client):
+        offer = _make_offer()
+        body = {**offer, "task": "s2v"}
+        create_resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
+        session_id = create_resp.json()["session_id"]
+
+        resp = bidirectional_client.delete(f"/v1/stream/webrtc/{session_id}")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "closed"
+
+    def test_close_via_stream_sessions_alias(self, bidirectional_client):
+        """DELETE /v1/stream/sessions/{id} should close both pipeline and WebRTC sessions."""
+        offer = _make_offer()
+        body = {**offer, "task": "s2v"}
+        create_resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
         session_id = create_resp.json()["session_id"]
 
         resp = bidirectional_client.delete(f"/v1/stream/sessions/{session_id}")
         assert resp.status_code == 200
         assert resp.json()["status"] == "closed"
 
-    def test_create_session_rejects_server_push_mode(self, server_push_client):
-        resp = server_push_client.post("/v1/stream/sessions", json={"task": "t2v"})
-        assert resp.status_code == 400
-        assert "server_push" in resp.json()["detail"]
+        status_resp = bidirectional_client.get(f"/v1/stream/sessions/{session_id}/status")
+        assert status_resp.json()["status"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +126,28 @@ class TestStreamServiceStatus:
         assert data["stream_mode"] == "server_push"
         assert data["runner"] == "StreamPipelineService"
 
+    def test_metrics_json_includes_webrtc_stats(self, server_push_client):
+        resp = server_push_client.get("/v1/service/metrics/json")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "webrtc" in data
+
+    def test_close_server_push_via_stream_sessions_alias(self, server_push_client):
+        """DELETE /v1/stream/sessions/{id} should close server-push WebRTC sessions."""
+        pytest.importorskip("aiortc")
+        offer = _make_server_push_offer()
+        body = {**offer, "task": "t2v", "prompt": "test"}
+        create_resp = server_push_client.post("/v1/stream/webrtc/offer", json=body)
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        resp = server_push_client.delete(f"/v1/stream/sessions/{session_id}")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "closed"
+
+        status_resp = server_push_client.get(f"/v1/stream/sessions/{session_id}/status")
+        assert status_resp.json()["status"] == "unknown"
+
 
 # ---------------------------------------------------------------------------
 # Session status tests
@@ -81,17 +155,22 @@ class TestStreamServiceStatus:
 
 
 class TestSessionStatusLookup:
-    """Session status should query stream service, not only TaskManager."""
+    """Session status should query both stream service and WebRTC session manager."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_without_aiortc(self):
+        pytest.importorskip("aiortc")
 
     def test_active_session_returns_active(self, bidirectional_client):
-        create_resp = bidirectional_client.post("/v1/stream/sessions", json={"task": "s2v"})
+        offer = _make_offer()
+        body = {**offer, "task": "s2v"}
+        create_resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
         session_id = create_resp.json()["session_id"]
 
         resp = bidirectional_client.get(f"/v1/stream/sessions/{session_id}/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "active"
-        assert data["stream_mode"] == "bidirectional"
 
     def test_unknown_session_returns_unknown(self, bidirectional_client):
         resp = bidirectional_client.get("/v1/stream/sessions/nonexistent/status")
@@ -99,35 +178,11 @@ class TestSessionStatusLookup:
         assert resp.json()["status"] == "unknown"
 
     def test_closed_session_returns_unknown(self, bidirectional_client):
-        create_resp = bidirectional_client.post("/v1/stream/sessions", json={"task": "s2v"})
+        offer = _make_offer()
+        body = {**offer, "task": "s2v"}
+        create_resp = bidirectional_client.post("/v1/stream/webrtc/offer", json=body)
         session_id = create_resp.json()["session_id"]
-        bidirectional_client.delete(f"/v1/stream/sessions/{session_id}")
+        bidirectional_client.delete(f"/v1/stream/webrtc/{session_id}")
 
         resp = bidirectional_client.get(f"/v1/stream/sessions/{session_id}/status")
         assert resp.json()["status"] == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# WebSocket mode guard tests
-# ---------------------------------------------------------------------------
-
-
-class TestWebSocketModeGuard:
-    """WebSocket endpoint should reject before accept if wrong mode."""
-
-    def test_ws_rejected_on_server_push_mode(self, server_push_client):
-        with pytest.raises(Exception):
-            with server_push_client.websocket_connect("/v1/stream/ws/demo-session"):
-                pass
-
-    def test_ws_rejected_when_stream_not_running(self):
-        from telefuser.service.api.api_server import ApiServer
-        from telefuser.service.core.task_manager import TaskManager
-
-        server = ApiServer(max_queue_size=10, task_manager=TaskManager(), enable_openai_api=False)
-        from fastapi.testclient import TestClient
-
-        with TestClient(server.app) as client:
-            with pytest.raises(Exception):
-                with client.websocket_connect("/v1/stream/ws/some-session"):
-                    pass

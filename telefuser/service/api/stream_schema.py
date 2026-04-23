@@ -2,34 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# BIDIRECTIONAL  (WebSocket: continuous input ↔ output)
-# ---------------------------------------------------------------------------
-
-
-class StreamSessionRequest(BaseModel):
-    """Body for POST /v1/stream/sessions (create session)."""
-
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    task: str = Field(description="Task type")
-    config: dict = Field(default_factory=dict, description="Session-level configuration")
-
-    model_config = {"extra": "allow"}
-
-
-class StreamSessionResponse(BaseModel):
-    session_id: str
-    stream_mode: str
-    status: str = "created"
-
-
-# ---------------------------------------------------------------------------
-# Wire messages  (used over WebSocket and internally by WebRTC)
+# Wire messages  (used over DataChannel and internally by WebRTC)
 # ---------------------------------------------------------------------------
 
 
@@ -65,6 +45,7 @@ class WebRTCOfferRequest(BaseModel):
     task: str = Field(description="Task type, e.g. t2v, i2v")
     prompt: str | None = None
     fps: int | None = Field(default=24, description="Target video FPS")
+    config: dict = Field(default_factory=dict, description="Session configuration (bidirectional mode)")
 
     model_config = {"extra": "allow"}
 
@@ -73,3 +54,23 @@ class WebRTCOfferResponse(BaseModel):
     session_id: str
     sdp: str = Field(description="SDP answer from server")
     type: str = Field(default="answer", description="SDP type")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def serialisable_chunk(chunk: dict) -> dict:
+    """Strip non-JSON-serialisable values (e.g. tensors) from a chunk dict."""
+    out: dict = {}
+    for k, v in chunk.items():
+        if isinstance(v, (str, int, float, bool, type(None), list, dict)):
+            out[k] = v
+        else:
+            try:
+                json.dumps(v)
+                out[k] = v
+            except (TypeError, ValueError):
+                out[k] = str(v)
+    return out
