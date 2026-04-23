@@ -21,8 +21,8 @@ def test_load_pipeline_contract_from_fake_pipeline() -> None:
 
     assert declared is True
     assert contract.pipeline_name == "fake_t2v_pipeline"
-    assert contract.supported_tasks == ("t2v",)
-    assert contract.supported_media_types == ("video",)
+    assert contract.supported_tasks == ("t2v", "i2v", "t2i", "i2i")
+    assert contract.supported_media_types == ("video", "image")
     assert contract.entrypoints.get_pipeline == "get_pipeline"
     assert contract.entrypoints.run_with_file == "run_with_file"
     assert contract.get_task_contract("t2v") is not None

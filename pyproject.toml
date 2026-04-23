@@ -76,6 +76,7 @@ docs = [
 
 webrtc = [
     "aiortc>=1.9.0",
+    "opencv-python-headless>=4.0",
 ]
 
 

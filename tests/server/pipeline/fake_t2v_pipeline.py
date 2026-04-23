@@ -30,8 +30,8 @@ PPL_CONFIG = dict(
 PIPELINE_MANIFEST = {
     "contract_version": "v1",
     "pipeline_name": "fake_t2v_pipeline",
-    "supported_tasks": ["t2v"],
-    "supported_media_types": ["video"],
+    "supported_tasks": ["t2v", "i2v", "t2i", "i2i"],
+    "supported_media_types": ["video", "image"],
     "execution_mode": "serial_single_pipeline",
     "effective_max_concurrent_tasks": 1,
     "entrypoints": {
@@ -43,7 +43,22 @@ PIPELINE_MANIFEST = {
             "media_type": "video",
             "required_inputs": [],
             "optional_inputs": [],
-        }
+        },
+        "i2v": {
+            "media_type": "video",
+            "required_inputs": [],
+            "optional_inputs": [],
+        },
+        "t2i": {
+            "media_type": "image",
+            "required_inputs": [],
+            "optional_inputs": [],
+        },
+        "i2i": {
+            "media_type": "image",
+            "required_inputs": [],
+            "optional_inputs": [],
+        },
     },
 }
 
@@ -240,16 +255,9 @@ def run_with_file(
     **kwargs,
 ):
     """
-    Run video generation and save to file.
+    Run generation and save to file.
 
-    Args:
-        pipeline: FakeVideoPipeline instance
-        prompt: Text prompt
-        negative_prompt: Negative prompt
-        seed: Random seed
-        resolution: Target resolution
-        output_path: Output video path
-        aspect_ratio: Aspect ratio
+    Supports both video and image output based on the file extension.
     """
     video = run(
         pipeline,
@@ -260,13 +268,20 @@ def run_with_file(
         aspect_ratio,
     )
 
-    logger.info(f"Saving target video to {output_path}")
-    save_video(
-        video,
-        output_path,
-        fps=PPL_CONFIG["target_fps"],
-        quality=6,
-    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+        video[0].save(output_path)
+        logger.info(f"Mock image saved to {output_path}")
+    else:
+        logger.info(f"Saving target video to {output_path}")
+        save_video(
+            video,
+            output_path,
+            fps=PPL_CONFIG["target_fps"],
+            quality=6,
+        )
 
 
 if __name__ == "__main__":
