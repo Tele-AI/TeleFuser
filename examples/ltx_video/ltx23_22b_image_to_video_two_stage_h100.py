@@ -37,21 +37,15 @@ PPL_CONFIG = dict(
     sample_solver="euler",
     attn_impl=AttnImplType.TORCH_SDPA,
     gemma_path_list=[
-        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors",
-        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors",
-        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors",
-        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors",
-        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors",
+        TF_MODEL_ZOO_PATH + "/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors",
+        TF_MODEL_ZOO_PATH + "/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors",
+        TF_MODEL_ZOO_PATH + "/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors",
+        TF_MODEL_ZOO_PATH + "/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors",
+        TF_MODEL_ZOO_PATH + "/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors",
     ],
     lora_configs=[
         LoraConfig(
-            os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
-            + "/modelscope/LTX-2.3/ltx-2.3-22b-distilled-lora-384.safetensors",
+            TF_MODEL_ZOO_PATH + "/LTX-2.3/ltx-2.3-22b-distilled-lora-384.safetensors",
             1.0,
         )
     ],
