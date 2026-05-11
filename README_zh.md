@@ -84,7 +84,7 @@ video = pipe(
 | `examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py` | LTX 2.3 两阶段音频视频生成 |
 | `examples/flux2_klein/flux2_klein_text_to_image_h100.py` | Flux2 Klein 文生图 |
 | `examples/liveact/liveact_s2v_h100.py` | LiveAct 语音驱动视频生成 |
-| `examples/stream_server/stream_lingbot_world_fast.py` | Lingbot-World 动作控制实时生成 ｜
+| `examples/stream_server/stream_lingbot_world_fast.py` | Lingbot-World 动作控制实时生成
 
 运行任意示例时使用 `--help` 查看可用选项：
 
