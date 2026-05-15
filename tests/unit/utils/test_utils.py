@@ -122,13 +122,11 @@ def func():
     pass
 """)
 
-        # Clear if already exists
-        if "my_test_module" in sys.modules:
-            del sys.modules["my_test_module"]
-
         import_function_from_file(str(test_file), "func")
 
-        assert "my_test_module" in sys.modules
+        # Module is registered with a path-derived unique name prefix
+        module_names = [name for name in sys.modules if "my_test_module" in name]
+        assert len(module_names) >= 1
 
 
 class TestGetExampleName:
