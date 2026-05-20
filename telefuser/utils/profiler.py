@@ -15,6 +15,10 @@ Layer 2 (ON by env var):
     - Kernel categorization
     - Chrome trace visualization
     - Enable: ENABLE_PROFILER_NAMES=stage_name1,stage_name2
+    - Optional torch.profiler flags:
+      TELEFUSER_TORCH_PROFILER_RECORD_SHAPES=true|false
+      TELEFUSER_TORCH_PROFILER_PROFILE_MEMORY=true|false
+      TELEFUSER_TORCH_PROFILER_WITH_STACK=true|false
 
 Layer 3 (External tool):
     - ncu deep kernel analysis
@@ -176,6 +180,32 @@ def _should_enable_profiler(name: str) -> bool:
     if "*" in enabled_set:
         return True
     return name in enabled_set
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var while preserving default behavior on unset/invalid values."""
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    logger.warning(f"[Profiler] Invalid boolean value for {name}={value!r}; using default {default}.")
+    return default
+
+
+def _get_torch_profiler_options() -> dict[str, bool]:
+    """Get configurable torch.profiler options.
+
+    Defaults intentionally match the historical TeleFuser profiler behavior.
+    """
+    return {
+        "record_shapes": _env_bool("TELEFUSER_TORCH_PROFILER_RECORD_SHAPES", True),
+        "profile_memory": _env_bool("TELEFUSER_TORCH_PROFILER_PROFILE_MEMORY", True),
+        "with_stack": _env_bool("TELEFUSER_TORCH_PROFILER_WITH_STACK", True),
+    }
 
 
 def _get_timing_report_path() -> str | None:
@@ -694,9 +724,7 @@ class _ProfilingContext:
 
             self._profiler = torch.profiler.profile(
                 activities=activities,
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
+                **_get_torch_profiler_options(),
             )
             self._profiler.start()
             logger.info(f"{self._rank_info} [Profiler] Started torch.profiler for '{self.name}'")
