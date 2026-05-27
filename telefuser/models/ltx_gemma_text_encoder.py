@@ -980,3 +980,9 @@ __all__ = [
     "LTXTextEncoder",
     "module_ops_from_gemma_root",
 ]
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "33917f31c4a79196171154cca39f165e", ["gemma_text_encoder"], [GemmaTextEncoder], "official")

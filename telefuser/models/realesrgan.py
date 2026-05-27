@@ -348,3 +348,9 @@ class RealESRGANStateDictConverter:
     def from_official(self, state_dict: dict) -> dict:
         # No conversion needed for standard Real-ESRGAN checkpoints
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "d93074599b84fa126cbc6fb8bf61ea6e", ["upscaler_model"], [RealESRGAN], "official")

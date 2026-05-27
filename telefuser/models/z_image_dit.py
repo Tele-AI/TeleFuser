@@ -687,3 +687,9 @@ class ZImageDitStateDictConverter:
 
     def from_diffusers(self, state_dict: dict) -> dict:
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "fc3a8a1247fe185ce116ccbe0e426c28", ["zimage_dit"], [ZImageTransformer2DModel], "diffusers")

@@ -600,3 +600,9 @@ class WanModelStateDictConverter:
         else:
             config = {}
         return state_dict, config
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "0f889085aa6209c79f284d963d6cbe95", ["flashvsr_dit"], [FlashVSRModel], "official")

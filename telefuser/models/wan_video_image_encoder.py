@@ -524,3 +524,11 @@ class WanImageEncoderStateDictConverter:
             name = "model." + name
             state_dict_[name] = param
         return state_dict_
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "5941c53e207d62f20f9025686193c40b", ["wan_video_image_encoder"], [WanImageEncoder], "official"
+)

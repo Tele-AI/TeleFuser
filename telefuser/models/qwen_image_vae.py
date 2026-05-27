@@ -635,3 +635,9 @@ class QwenImageVAEStateDictConverter:
 
     def from_official(self, state_dict: dict) -> dict:
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "ed4ea5824d55ec3107b09815e318123a", ["qwen_image_vae"], [QwenImageVAE], "official")

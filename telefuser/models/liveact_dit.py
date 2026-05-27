@@ -1205,3 +1205,9 @@ class LiveActDiTStateDictConverter:
     def from_diffusers(self, state_dict: dict) -> tuple[dict, dict]:
         """Convert from diffusers format (not supported)."""
         raise NotImplementedError("Diffusers format not supported for LiveAct DiT")
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "99c7bbedc6dd6c4824799e4f999fee0a", ["liveact_dit"], [LiveActDiT], "official")

@@ -1540,3 +1540,9 @@ class Wan22VideoVAEStateDictConverter:
         for name in state_dict:
             state_dict_["model." + name] = state_dict[name]
         return state_dict_, cfg_dict_
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "e1de6c02cdac79f8b739f4d3698cd216", ["wan_video_vae"], [Wan22VideoVAE], "official")

@@ -1118,3 +1118,9 @@ class Flux2DiTStateDictConverter:
             converted[new_key] = value
 
         return converted
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "39c6fc48f07bebecedbbaa971ff466c8", ["transformer"], [Flux2DiT], "diffusers")

@@ -71,3 +71,11 @@ class ZImageTextEncoderStateDictConverter:
 
     def from_diffusers(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "0f050f62a88876fea6eae0a18dac5a2e", ["zimage_text_encoder"], [ZImageTextEncoder], "diffusers"
+)

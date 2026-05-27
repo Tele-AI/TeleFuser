@@ -1562,3 +1562,25 @@ class WanModelStateDictConverter:
         }
         config = config_map.get(state_dict_hash, {})
         return state_dict, config
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+# Wan2.1 1.3B variants
+register_model_config(None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "aafcfd9672c3a2456dc46e1cb6e52c70", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "6bfcfb3b342cb286ce886889d519a77e", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "3ef3b1f8e1dab83d5b71fd7b617f859f", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "b3aba5f6fddb5e117640e751591db89f", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "b61c605c2adbd23124d152ed28e049ae", ["wan_video_dit"], [WanModel], "official")
+# Diffusers format
+register_model_config(None, "cb104773c6c2cb6df4f9529ad5c60d0b", ["wan_video_dit"], [WanModel], "diffusers")
+register_model_config(None, "7cf3a086b49216bded0728ce78d59687", ["wan_video_dit"], [WanModel], "diffusers")
+# Wan2.2 A14B variants
+register_model_config(None, "5b013604280dd715f8457c6ed6d6a626", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "4cf556355bc7e9b6545b38f4930f60b1", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "47dbeab5e560db3180adf51dc0232fb1", ["wan_video_dit"], [WanModel], "official")
+register_model_config(None, "9d0240d8e7650a9ec65b2b617cc9c357", ["wan_video_dit"], [WanModel], "official")
+# Wan2.2 5B TI2V
+register_model_config(None, "1f5ab7703c6fc803fdded85ff040c316", ["wan_video_dit"], [WanModel], "official")

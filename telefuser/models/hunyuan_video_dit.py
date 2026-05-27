@@ -2115,3 +2115,10 @@ class HunyuanVideoStateDictConverter:
 
         config = self._detect_config(state_dict)
         return converted, config
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "91d733b509142990a1a1bfa1516a0de0", ["hunyuan_video_dit"], [HunyuanVideoDiT], "official")
+register_model_config(None, "b2c3d4e5f678901234567890123456a7", ["hunyuan_video_dit"], [HunyuanVideoDiT], "diffusers")

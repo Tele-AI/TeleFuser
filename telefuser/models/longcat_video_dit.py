@@ -1204,3 +1204,11 @@ class LongCatVideoTransformer3DModelDictConverter:
 
     def from_official(self, state_dict: dict):
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "8b27900f680d7251ce44e2dc8ae1ffef", ["wan_video_dit"], [LongCatVideoTransformer3DModel], "official"
+)

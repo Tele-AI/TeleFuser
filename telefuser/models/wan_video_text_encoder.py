@@ -307,3 +307,11 @@ class WanTextEncoderStateDictConverter:
 
     def from_official(self, state_dict: dict) -> dict:
         return state_dict
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "9c8818c2cbea55eca56c7b447df170da", ["wan_video_text_encoder"], [WanTextEncoder], "official"
+)

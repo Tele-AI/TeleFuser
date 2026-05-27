@@ -344,3 +344,9 @@ class TAEHVStateDictConverter:
         if hash_state_dict_keys(state_dict) == "4c3523c69fb7b24cf2db147a715b277f":
             return state_dict, dict(latent_channels=16 + 768)
         return state_dict, {}
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "4c3523c69fb7b24cf2db147a715b277f", ["wan_video_decoder"], [TAEHV], "official")

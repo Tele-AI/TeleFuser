@@ -14,7 +14,7 @@ from telefuser.utils.hf_utils import load_module_from_huggingface
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys, init_weights_on_device, load_state_dict
 
-from .model_config import model_loader_configs
+from .model_registry import ModelRegistry
 
 
 def load_model_from_single_file(
@@ -88,9 +88,11 @@ def load_model_from_single_file(
 class ModelDetectorFromSingleFile:
     """Detect model type from state dict hash for automatic loading."""
 
-    def __init__(self, configs: list = model_loader_configs) -> None:
+    def __init__(self, configs: list | None = None) -> None:
         self.keys_hash_with_shape_dict: dict[str, tuple] = {}
         self.keys_hash_dict: dict[str, tuple] = {}
+        if configs is None:
+            configs = ModelRegistry.instance().get_configs()
         for metadata in configs:
             self.add_model_metadata(*metadata)
 
@@ -159,7 +161,7 @@ class ModuleManager:
         self.modules: list[nn.Module] = []
         self.module_paths: list[str] = []
         self.module_names: list[str] = []
-        self.model_detectors = [ModelDetectorFromSingleFile(model_loader_configs)]
+        self.model_detectors = [ModelDetectorFromSingleFile()]
 
     def load_models(
         self,

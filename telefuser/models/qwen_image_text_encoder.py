@@ -186,3 +186,11 @@ class QwenImageTextEncoderStateDictConverter:
                 k = k.replace("model.", "model.language_model.")
             state_dict_[k] = v
         return state_dict_
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "8004730443f55db63092006dd9f7110e", ["qwen_image_text_encoder"], [QwenImageTextEncoder], "official"
+)

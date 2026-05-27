@@ -345,3 +345,9 @@ class IFNetStateDictConverter:
             if "module." in k and "teacher" not in k and "caltime" not in k
         }
         return state_dict_
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(None, "47ac734bfc54bc2f75ff43e8e016588d", ["vfi_model"], [IFNet], "official")

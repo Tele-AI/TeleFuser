@@ -406,3 +406,11 @@ __all__ = [
     "LatentUpsamplerConfigurator",
     "upsample_video",
 ]
+
+
+# --- Model registry: hash-based detection ---
+from telefuser.core.model_registry import register_model_config
+
+register_model_config(
+    None, "aed408774d694a2452f69936c32febb5", ["ltx_spatial_upsampler"], [LTXSpatialUpsampler], "official"
+)
