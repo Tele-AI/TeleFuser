@@ -37,9 +37,8 @@ class TestRateLimitMiddleware:
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=100,
-            burst_size=10,
             window_size=60,
-            exempt_paths=[],
+            limited_paths=["/test"],
         )
         # Clear any state
         middleware._clients = {}
@@ -56,8 +55,8 @@ class TestRateLimitMiddleware:
             assert response.status_code == 200
             assert response.json() == {"status": "ok"}
 
-    def test_rate_limit_exempt_paths(self):
-        """Test that exempt paths are not rate limited."""
+    def test_rate_limit_only_applies_to_limited_paths(self):
+        """Test that paths outside the whitelist are not rate limited."""
         app = FastAPI()
 
         @app.get("/health")
@@ -68,13 +67,12 @@ class TestRateLimitMiddleware:
         def test_endpoint():
             return {"status": "ok"}
 
-        # Create middleware with exempt paths
+        # Only /test is rate limited; /health passes through untouched.
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=10,
-            burst_size=1,  # Very strict
             window_size=60,
-            exempt_paths=["/health"],
+            limited_paths=["/test"],
         )
         middleware._clients = {}
 
@@ -84,8 +82,8 @@ class TestRateLimitMiddleware:
 
         client = TestClient(app)
 
-        # Health endpoint should never be rate limited
-        for i in range(10):
+        # /health is not in limited_paths, so it should never be rate limited.
+        for i in range(20):
             response = client.get("/health")
             assert response.status_code == 200, f"Health check failed on request {i + 1}"
 
@@ -100,9 +98,8 @@ class TestRateLimitMiddleware:
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=60,
-            burst_size=10,
             window_size=60,
-            exempt_paths=[],
+            limited_paths=["/test"],
         )
         middleware._clients = {}
 
@@ -132,13 +129,11 @@ class TestRateLimitMiddleware:
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=60,
-            burst_size=10,
             window_size=60,
-            exempt_paths=[],
+            limited_paths=["/test"],
         )
 
         # Test client ID extraction
-        from starlette.datastructures import Headers
         from starlette.requests import Request
 
         scope = {
@@ -160,9 +155,8 @@ class TestRateLimitMiddleware:
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=60,
-            burst_size=10,
             window_size=60,
-            exempt_paths=[],
+            limited_paths=["/test"],
         )
 
         # Test client ID extraction without X-Forwarded-For
@@ -186,26 +180,39 @@ class TestRateLimitMiddleware:
 
         middleware = RateLimitMiddleware(
             app,
-            requests_per_minute=5,
-            burst_size=3,
+            requests_per_minute=3,
             window_size=60,
-            exempt_paths=[],
+            limited_paths=["/test"],
         )
         middleware._clients = {}
 
-        # First 3 requests should be allowed (burst size)
+        # First 3 requests should be allowed (window cap)
         assert middleware._allow_request("client1") is True
         assert middleware._allow_request("client1") is True
         assert middleware._allow_request("client1") is True
 
-        # Fourth request may be blocked depending on implementation
-        # We just verify the method works
-        result = middleware._allow_request("client1")
-        assert isinstance(result, bool)
+        # Fourth request should be rejected since cap is reached
+        assert middleware._allow_request("client1") is False
 
         # Different client should have its own counter
-        middleware._clients["client2"] = []
         assert middleware._allow_request("client2") is True
+
+    def test_rate_limit_prefix_match(self):
+        """Test that limited_paths is matched as a prefix, not an exact path."""
+        app = FastAPI()
+
+        middleware = RateLimitMiddleware(
+            app,
+            requests_per_minute=60,
+            window_size=60,
+            limited_paths=["/v1/tasks/create", "/v1/images"],
+        )
+
+        assert middleware._is_limited("/v1/tasks/create") is True
+        assert middleware._is_limited("/v1/images/generations") is True
+        assert middleware._is_limited("/v1/tasks/123/status") is False
+        assert middleware._is_limited("/v1/files/download/x.mp4") is False
+        assert middleware._is_limited("/v1/service/health") is False
 
     def test_rate_limit_error_response_structure(self):
         """Test RateLimitErrorResponse structure."""
@@ -298,16 +305,14 @@ class TestConfigIntegration:
         config = ServerConfig(
             enable_rate_limit=True,
             rate_limit_requests_per_minute=50,
-            rate_limit_burst_size=5,
             rate_limit_window_size=30,
-            rate_limit_exempt_paths=["/health", "/status"],
+            rate_limit_paths=["/v1/tasks/create"],
         )
 
         assert config.enable_rate_limit is True
         assert config.rate_limit_requests_per_minute == 50
-        assert config.rate_limit_burst_size == 5
         assert config.rate_limit_window_size == 30
-        assert "/health" in config.rate_limit_exempt_paths
+        assert "/v1/tasks/create" in config.rate_limit_paths
 
     def test_rate_limit_can_be_disabled_via_config(self):
         """Test that rate limiting can be disabled via config."""
@@ -321,19 +326,15 @@ class TestConfigIntegration:
 
         assert config.enable_rate_limit is True
         assert config.rate_limit_requests_per_minute == 60
-        assert config.rate_limit_burst_size == 10
         assert config.rate_limit_window_size == 60
-        assert "/v1/service/health" in config.rate_limit_exempt_paths
+        assert "/v1/tasks/create" in config.rate_limit_paths
+        assert "/v1/tasks/form" in config.rate_limit_paths
 
     def test_rate_limit_config_validation(self):
         """Test rate limit config validation."""
         # Invalid requests_per_minute (too low)
         with pytest.raises(ValueError):
             ServerConfig(rate_limit_requests_per_minute=5)
-
-        # Invalid burst_size (too high)
-        with pytest.raises(ValueError):
-            ServerConfig(rate_limit_burst_size=200)
 
         # Invalid window_size (too low)
         with pytest.raises(ValueError):

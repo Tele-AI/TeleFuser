@@ -69,6 +69,10 @@ class RateLimitErrorResponse:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Rate limiting middleware based on client IP with sliding window.
 
+    Operates as a whitelist: only requests whose path starts with one of
+    ``limited_paths`` are counted and gated. Everything else (status polls,
+    health checks, file downloads, stream endpoints) passes through untouched.
+
     Uses in-memory storage. For production with multiple instances,
     consider using Redis-based rate limiting with fastapi-limiter.
     """
@@ -77,24 +81,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self,
         app: ASGIApp,
         requests_per_minute: int | None = None,
-        burst_size: int | None = None,
         window_size: int | None = None,
-        exempt_paths: list[str] | None = None,
+        limited_paths: list[str] | None = None,
     ):
         super().__init__(app)
         config = server_config
         self.requests_per_minute = requests_per_minute or config.rate_limit_requests_per_minute
-        self.burst_size = burst_size or config.rate_limit_burst_size
         self.window_size = window_size or config.rate_limit_window_size
-        self.exempt_paths = exempt_paths or config.rate_limit_exempt_paths
+        self.limited_paths = tuple(limited_paths if limited_paths is not None else config.rate_limit_paths)
 
         self._clients: dict[str, list[float]] = {}
+
+    def _is_limited(self, path: str) -> bool:
+        return any(path.startswith(prefix) for prefix in self.limited_paths)
 
     async def dispatch(self, request: Request, call_next: callable) -> Response:
         """Process request with rate limiting."""
         request_id = str(uuid.uuid4())[:8]
 
-        if request.method == "OPTIONS" or request.url.path in self.exempt_paths:
+        if request.method == "OPTIONS" or not self._is_limited(request.url.path):
             response = await call_next(request)
             response.headers["X-Request-ID"] = request_id
             return response
@@ -166,9 +171,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         cutoff = now - self.window_size
         requests[:] = [r for r in requests if r > cutoff]
 
-        # Check burst limit (short term) and rate limit (long term)
-        if len(requests) >= self.burst_size:
-            return False
         if len(requests) >= self.requests_per_minute:
             return False
 
@@ -327,7 +329,6 @@ def setup_middleware(
         app.add_middleware(
             RateLimitMiddleware,
             requests_per_minute=server_config.rate_limit_requests_per_minute,
-            burst_size=server_config.rate_limit_burst_size,
             window_size=server_config.rate_limit_window_size,
-            exempt_paths=server_config.rate_limit_exempt_paths,
+            limited_paths=server_config.rate_limit_paths,
         )
