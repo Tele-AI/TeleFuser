@@ -832,9 +832,9 @@ pip install telefuser
 ### Basic Usage
 
 ```python
-from telefuser.client import TAPClient
+from telefuser.client import TFClient
 
-client = TAPClient(base_url="http://127.0.0.1:8000")
+client = TFClient(base_url="http://127.0.0.1:8000")
 
 # Create a video task
 task = client.create_t2v_task(
@@ -956,10 +956,10 @@ task = client.create_i2i_task(
 
 ```python
 # Batch processing
-from telefuser.client import TAPClient
+from telefuser.client import TFClient
 import concurrent.futures
 
-client = TAPClient(base_url="http://127.0.0.1:8000")
+client = TFClient(base_url="http://127.0.0.1:8000")
 
 prompts = ["Prompt 1", "Prompt 2", "Prompt 3"]
 

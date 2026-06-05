@@ -2,7 +2,7 @@
 Test Client for TeleFuser Server
 
 A simple client for testing the server without requiring
-the full TAPClient dependencies.
+the full TFClient dependencies.
 """
 
 import base64
