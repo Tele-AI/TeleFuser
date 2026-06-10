@@ -33,7 +33,7 @@ class ModelRegistry:
     _instance: ModelRegistry | None = None
 
     def __init__(self) -> None:
-        self._configs: list[tuple[str | None, str, list[str], list[type[nn.Module]], str]] = []
+        self._configs: list[tuple[str | None, str | None, list[str], list[type[nn.Module]], str]] = []
         self._discovered = False
 
     @classmethod
@@ -45,14 +45,14 @@ class ModelRegistry:
     def register(
         self,
         keys_hash: str | None,
-        keys_hash_with_shape: str,
+        keys_hash_with_shape: str | None,
         model_names: list[str],
         model_classes: list[type[nn.Module]],
         model_resource: str,
     ) -> None:
         self._configs.append((keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource))
 
-    def get_configs(self) -> list[tuple[str | None, str, list[str], list[type[nn.Module]], str]]:
+    def get_configs(self) -> list[tuple[str | None, str | None, list[str], list[type[nn.Module]], str]]:
         if not self._discovered:
             self.autodiscover()
         return list(self._configs)
@@ -89,7 +89,7 @@ class ModelRegistry:
 
 def register_model_config(
     keys_hash: str | None,
-    keys_hash_with_shape: str,
+    keys_hash_with_shape: str | None,
     model_names: list[str],
     model_classes: list[type[nn.Module]],
     model_resource: str,
@@ -99,5 +99,10 @@ def register_model_config(
     Called at module level in each model file. Example::
 
         register_model_config(None, "abc123...", ["my_dit"], [MyDiT], "official")
+
+    ``keys_hash_with_shape`` can be None when a model shares checkpoint hashes
+    with another registered model (e.g., WanModelWithMemory shares hashes with
+    WanModel). In that case, only ``keys_hash_dict`` (key-only hash) is populated,
+    avoiding collision in ``keys_hash_with_shape_dict``.
     """
     ModelRegistry.instance().register(keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource)
