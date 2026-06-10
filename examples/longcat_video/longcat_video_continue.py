@@ -15,7 +15,7 @@ from telefuser.pipelines.longcat_video import (
     LongCatVideoPipelineConfig,
 )
 from telefuser.utils.utils import get_example_name
-from telefuser.utils.video import VideoData, save_video
+from telefuser.utils.video import VideoData, get_target_video_size_from_ratio, save_video
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
@@ -145,13 +145,34 @@ def run(
     pipeline,
     input_video,
     prompt,
-    height,
-    width,
+    height: int | None = None,
+    width: int | None = None,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"],
+    aspect_ratio="16:9",
     return_latents=False,
     need_encode=True,
 ):
+    """Video continuation from input video.
+    Args:
+        pipeline (LongCatVideoPipeline): Preloaded video generation pipeline object
+        input_video (VideoData): Input video for continuation
+        prompt (str): Positive guidance text prompt
+        height (int | None): Video height. If None, computed from resolution/aspect_ratio.
+        width (int | None): Video width. If None, computed from resolution/aspect_ratio.
+        negative_prompt (str, optional): Negative guidance prompt. Default is empty
+        seed (int, optional): Random seed. Default is 42
+        resolution (str, optional): Target resolution. Default is PPL_CONFIG["resolution"]
+        aspect_ratio (str, optional): Aspect ratio. Default is "16:9"
+        return_latents (bool, optional): Whether to return latents. Default is False
+        need_encode (bool, optional): Whether to encode input. Default is True
+
+    Returns:
+        List[PIL.Image] | tuple: Generated video, optionally with latents
+    """
+    if height is None or width is None:
+        width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
     video, latents = pipeline(
         input_video=input_video,
         prompt=prompt,

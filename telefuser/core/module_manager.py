@@ -25,6 +25,7 @@ def load_model_from_single_file(
     torch_dtype: torch.dtype,
     device: str | torch.device,
     low_cpu_mem_usage: bool = False,
+    converter_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[nn.Module]]:
     """Load models from state dict with format conversion.
 
@@ -36,6 +37,7 @@ def load_model_from_single_file(
         torch_dtype: Target dtype for model weights
         device: Target device for model
         low_cpu_mem_usage: If True, keep weights in CPU memory until moved to device
+        converter_kwargs: Extra kwargs passed to state_dict_converter()
 
     Returns:
         Tuple of (model_names, loaded_models)
@@ -43,7 +45,7 @@ def load_model_from_single_file(
     loaded_model_names, loaded_models = [], []
     for model_name, model_class in zip(model_names, model_classes):
         logger.info(f"Loading {model_name} ({model_class.__name__})")
-        converter = model_class.state_dict_converter()
+        converter = model_class.state_dict_converter(**(converter_kwargs or {}))
 
         # Convert state dict from source format
         if model_resource == "official":
@@ -99,13 +101,14 @@ class ModelDetectorFromSingleFile:
     def add_model_metadata(
         self,
         keys_hash: str | None,
-        keys_hash_with_shape: str,
+        keys_hash_with_shape: str | None,
         model_names: list[str],
         model_classes: list[type],
         model_resource: str,
     ) -> None:
         """Register model metadata for detection by hash."""
-        self.keys_hash_with_shape_dict[keys_hash_with_shape] = (model_names, model_classes, model_resource)
+        if keys_hash_with_shape is not None:
+            self.keys_hash_with_shape_dict[keys_hash_with_shape] = (model_names, model_classes, model_resource)
         if keys_hash is not None:
             self.keys_hash_dict[keys_hash] = (model_names, model_classes, model_resource)
 
@@ -128,6 +131,7 @@ class ModelDetectorFromSingleFile:
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.float16,
         low_cpu_mem_usage: bool = False,
+        converter_kwargs: dict[str, Any] | None = None,
     ) -> tuple[list[str], list[nn.Module]]:
         """Load model from file with automatic type detection."""
         if not state_dict:
@@ -138,7 +142,8 @@ class ModelDetectorFromSingleFile:
         if keys_hash_with_shape in self.keys_hash_with_shape_dict:
             model_names, model_classes, model_resource = self.keys_hash_with_shape_dict[keys_hash_with_shape]
             return load_model_from_single_file(
-                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage
+                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage,
+                converter_kwargs,
             )
 
         # Fall back to key-only hash
@@ -146,7 +151,8 @@ class ModelDetectorFromSingleFile:
         if keys_hash in self.keys_hash_dict:
             model_names, model_classes, model_resource = self.keys_hash_dict[keys_hash]
             return load_model_from_single_file(
-                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage
+                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage,
+                converter_kwargs,
             )
 
         return [], []
@@ -180,6 +186,9 @@ class ModuleManager:
         torch_dtype: torch.dtype | None = None,
         low_cpu_mem_usage: bool = False,
         name: str | None = None,
+        model_class: type[nn.Module] | None = None,
+        model_resource: str = "official",
+        converter_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Load model from file path with automatic type detection.
 
@@ -189,6 +198,13 @@ class ModuleManager:
             torch_dtype: Target dtype (default: self.torch_dtype)
             low_cpu_mem_usage: Keep weights in CPU memory until moved to device
             name: Override model name (default: None, uses name from model_config)
+            model_class: Explicit model class to use, bypassing hash-based auto-detection.
+                Required when a model shares checkpoint hashes with another registered model.
+            model_resource: Source format when model_class is specified ("official" or "diffusers").
+                Ignored when auto-detection is used.
+            converter_kwargs: Extra kwargs passed to model_class.state_dict_converter().
+                Used to provide explicit config overrides when hash-based config detection
+                may not work (e.g., MoE distilled checkpoints).
         """
         device = device or self.device
         torch_dtype = torch_dtype or self.torch_dtype
@@ -213,6 +229,21 @@ class ModuleManager:
             state_dict = {}
 
         logger.info(f"Loading model from {file_path}")
+
+        # When model_class is explicitly provided, bypass hash detection
+        if model_class is not None:
+            model_name = name or model_class.__name__
+            model_names, models = load_model_from_single_file(
+                state_dict, [model_name], [model_class], model_resource, torch_dtype, device, low_cpu_mem_usage,
+                converter_kwargs,
+            )
+            for mn, model in zip(model_names, models):
+                self.modules.append(model)
+                self.module_paths.append(file_path)
+                self.module_names.append(mn)
+            logger.info(f"Loaded models: {model_names}")
+            return
+
         for detector in self.model_detectors:
             if detector.match(file_path, state_dict):
                 model_names, models = detector.load(file_path, state_dict, device, torch_dtype, low_cpu_mem_usage)

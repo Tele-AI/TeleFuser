@@ -95,13 +95,19 @@ class ServerConfig(BaseSettings):
         default=60, ge=10, le=10000, description="Maximum requests per minute per client"
     )
 
-    rate_limit_burst_size: int = Field(default=10, ge=1, le=100, description="Burst size for rate limiting")
-
     rate_limit_window_size: int = Field(default=60, ge=10, le=3600, description="Rate limiting window size in seconds")
 
-    rate_limit_exempt_paths: list = Field(
-        default_factory=lambda: ["/v1/service/health", "/v1/service/status"],
-        description="Paths exempt from rate limiting",
+    rate_limit_paths: list = Field(
+        default_factory=lambda: [
+            "/v1/tasks/create",
+            "/v1/tasks/form",
+            "/v1/images/generations",
+            "/v1/videos/generations",
+        ],
+        description=(
+            "Path prefixes subject to rate limiting (whitelist). "
+            "Requests whose URL path does not start with any of these are not rate limited."
+        ),
     )
 
     # Metrics settings

@@ -285,17 +285,17 @@ class TestClientSDK:
 
     def test_client_initialization(self):
         """Test that the client can be initialized."""
-        from telefuser.client import TAPClient
+        from telefuser.client import TFClient
 
-        client = TAPClient(base_url="http://localhost:8000")
+        client = TFClient(base_url="http://localhost:8000")
         assert client.base_url == "http://localhost:8000"
 
     @pytest.mark.asyncio
     async def test_client_create_task(self, running_server):
         """Test client creating a task."""
-        from telefuser.client import TAPClient
+        from telefuser.client import TFClient
 
-        client = TAPClient(base_url=running_server["base_url"])
+        client = TFClient(base_url=running_server["base_url"])
 
         # This would need the client to be async or use sync HTTP
         # For now, just test initialization

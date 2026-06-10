@@ -146,3 +146,4 @@ INSTALL_HYS.md
 *.webp
 AGENTS.md
 _version.py.mcp.json
+telefuser/_version.py

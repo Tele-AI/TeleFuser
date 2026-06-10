@@ -866,17 +866,23 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
         kwargs["seed"] = config.get("seed", 42)
 
     # Resolution (e.g., "480p", "720p")
-    if "resolution" in params:
-        kwargs["resolution"] = get_param("resolution")
+    resolution_val = get_param("resolution")
+    if resolution_val is not None and "resolution" in params:
+        kwargs["resolution"] = resolution_val
 
     # Aspect ratio
-    if "aspect_ratio" in params:
-        kwargs["aspect_ratio"] = get_param("aspect_ratio")
+    aspect_ratio_val = get_param("aspect_ratio")
+    if aspect_ratio_val is not None and "aspect_ratio" in params:
+        kwargs["aspect_ratio"] = aspect_ratio_val
 
     if "height" in params:
-        kwargs["height"] = config.get("height", 480)
+        height_val = config.get("height")
+        if height_val is not None:
+            kwargs["height"] = height_val
     if "width" in params:
-        kwargs["width"] = config.get("width", 832)
+        width_val = config.get("width")
+        if width_val is not None:
+            kwargs["width"] = width_val
 
     # Image input (for I2V pipelines)
     if "image" in params and config.get("input_image_path"):

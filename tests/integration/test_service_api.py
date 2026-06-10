@@ -363,17 +363,17 @@ class TestClientSdk:
     """Test client SDK functionality."""
 
     def test_tap_client_creation(self):
-        """Test TAPClient can be imported and created."""
-        from telefuser.client import TAPClient
+        """Test TFClient can be imported and created."""
+        from telefuser.client import TFClient
 
-        client = TAPClient(base_url="http://localhost:8000")
+        client = TFClient(base_url="http://localhost:8000")
         assert client.base_url == "http://localhost:8000"
 
     def test_tap_client_t2i_method_exists(self):
-        """Test TAPClient has T2I method."""
-        from telefuser.client import TAPClient
+        """Test TFClient has T2I method."""
+        from telefuser.client import TFClient
 
-        client = TAPClient()
+        client = TFClient()
         assert hasattr(client, "create_t2i_task")
         assert hasattr(client, "create_i2i_task")
         assert hasattr(client, "create_t2v_task")
