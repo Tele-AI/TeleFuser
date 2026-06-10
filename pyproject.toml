@@ -180,7 +180,8 @@ exclude = [
     "build",
     "dist",
     "tf-kernel",
-    "benchmarks"
+    "benchmarks",
+    "telefuser/_version.py"
 ]
 
 [tool.ruff.lint]
@@ -215,7 +216,7 @@ ignore = [
 "tests/**" = ["E501", "ANN"]     # Allow long lines and missing annotations in tests
 "telefuser/kernel/triton/**" = ["ANN"]  # Allow missing annotations in triton kernels
 [tool.ruff.lint.isort]
-known-first-party = ["lightx2v"]
+known-first-party = ["telefuser"]
 case-sensitive = true
 [tool.setuptools_scm]
 write_to = "telefuser/_version.py"

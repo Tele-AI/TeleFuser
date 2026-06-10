@@ -18,11 +18,11 @@ type / aspect-ratio / status string constants) are still exported by the
 from __future__ import annotations
 
 from .tf_client import (
+    TFClient,
     TaskCreationError,
     TaskFailedError,
     TaskTimeoutError,
     TeleFuserError,
-    TFClient,
 )
 
 __all__ = [

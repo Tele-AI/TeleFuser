@@ -142,7 +142,13 @@ class ModelDetectorFromSingleFile:
         if keys_hash_with_shape in self.keys_hash_with_shape_dict:
             model_names, model_classes, model_resource = self.keys_hash_with_shape_dict[keys_hash_with_shape]
             return load_model_from_single_file(
-                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage,
+                state_dict,
+                model_names,
+                model_classes,
+                model_resource,
+                torch_dtype,
+                device,
+                low_cpu_mem_usage,
                 converter_kwargs,
             )
 
@@ -151,7 +157,13 @@ class ModelDetectorFromSingleFile:
         if keys_hash in self.keys_hash_dict:
             model_names, model_classes, model_resource = self.keys_hash_dict[keys_hash]
             return load_model_from_single_file(
-                state_dict, model_names, model_classes, model_resource, torch_dtype, device, low_cpu_mem_usage,
+                state_dict,
+                model_names,
+                model_classes,
+                model_resource,
+                torch_dtype,
+                device,
+                low_cpu_mem_usage,
                 converter_kwargs,
             )
 
@@ -234,7 +246,13 @@ class ModuleManager:
         if model_class is not None:
             model_name = name or model_class.__name__
             model_names, models = load_model_from_single_file(
-                state_dict, [model_name], [model_class], model_resource, torch_dtype, device, low_cpu_mem_usage,
+                state_dict,
+                [model_name],
+                [model_class],
+                model_resource,
+                torch_dtype,
+                device,
+                low_cpu_mem_usage,
                 converter_kwargs,
             )
             for mn, model in zip(model_names, models):

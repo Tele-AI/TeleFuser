@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import torch
 from einops import rearrange
 from torch import nn
-from transformers import (
-    AutoTokenizer,
-    Gemma3Config,
-    Gemma3ForConditionalGeneration,
-)
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+if TYPE_CHECKING:
+    from transformers import (
+        AutoTokenizer,
+        Gemma3Config,
+        Gemma3ForConditionalGeneration,
+    )
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from telefuser.core.base_model import BaseModel
 
@@ -117,6 +119,8 @@ class LTXVGemmaTokenizer:
             tokenizer_path (str): Path to the pretrained tokenizer files or model directory.
             max_length (int, optional): Max sequence length for encoding. Defaults to 256.
         """
+        from transformers import AutoTokenizer
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path, local_files_only=True, model_max_length=max_length
         )
@@ -650,6 +654,8 @@ class GemmaTextEncoder(BaseModel):
     ):
         super().__init__()
         if model is None:
+            from transformers import Gemma3Config, Gemma3ForConditionalGeneration
+
             gemma_config = Gemma3Config.from_dict(GEMMA3_CONFIG_FOR_LTX.to_dict())
             model = Gemma3ForConditionalGeneration(gemma_config)
         self.model = model
@@ -671,6 +677,8 @@ class GemmaTextEncoder(BaseModel):
         **kwargs,
     ) -> GemmaTextEncoder:
         """Load Gemma from a HuggingFace-style root and wrap it as a TeleFuser text encoder."""
+        from transformers import Gemma3ForConditionalGeneration
+
         model = Gemma3ForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path,
             torch_dtype=torch_dtype,
@@ -817,6 +825,8 @@ class ModuleOps(NamedTuple):
 class GemmaTextEncoderConfigurator:
     @classmethod
     def from_config(cls, config: dict) -> GemmaTextEncoder:  # noqa: ARG003
+        from transformers import Gemma3Config, Gemma3ForConditionalGeneration
+
         from telefuser.utils.model_weight import init_weights_on_device
 
         gemma_config = Gemma3Config.from_dict(GEMMA3_CONFIG_FOR_LTX.to_dict())
@@ -895,6 +905,8 @@ def _create_feature_extractor(transformer_config: dict) -> torch.nn.Module:
 
 
 def create_and_populate(module: GemmaTextEncoder) -> GemmaTextEncoder:
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
     model = module.model
     v_model = model.model.vision_tower.vision_model
     l_model = model.model.language_model
@@ -960,9 +972,13 @@ class LTXEmbeddingsProcessorStateDictConverter:
         raise NotImplementedError("LTXEmbeddingsProcessor only supports the civitai-style single-file checkpoint.")
 
 
+def _match_gemma_model(module) -> bool:
+    return hasattr(module, "model") and module.model.__class__.__name__ == "Gemma3ForConditionalGeneration"
+
+
 GEMMA_MODEL_OPS = ModuleOps(
     name="GemmaModel",
-    matcher=lambda module: hasattr(module, "model") and isinstance(module.model, Gemma3ForConditionalGeneration),
+    matcher=_match_gemma_model,
     mutator=create_and_populate,
 )
 

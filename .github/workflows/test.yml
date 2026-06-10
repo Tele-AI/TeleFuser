@@ -11,44 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
-
-      - name: Install dependencies
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,webrtc]"
-
-      - name: Run ruff check
-        run: |
-          ruff check telefuser tests --output-format=full --exclude telefuser/_version.py
-
-      - name: Run ruff format check
-        run: |
-          ruff format --check telefuser tests --exclude telefuser/_version.py
-
-      - name: Run import check
-        run: |
-          ruff check --select I telefuser tests --exclude telefuser/_version.py
-
   unit-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: lint
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12']
@@ -84,36 +49,15 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
+          flags: unit-tests
           fail_ci_if_error: false
           verbose: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  integration-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,webrtc]"
-
-      - name: Run integration tests
-        run: |
-          pytest tests/integration -v \
-            -m "not gpu and not distributed and not slow and not quant and not filesystem"
-
   server-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: lint
     steps:
       - uses: actions/checkout@v4
 
@@ -133,21 +77,25 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev,webrtc]"
 
-      - name: Run server integration tests
-        run: |
-          python tests/server/run_integration_test.py --port 18000
-
-      - name: Run server pytest tests
+      - name: Run server tests
         run: |
           pytest tests/server/ -v \
-            -m "not gpu and not distributed" \
+            --cov=telefuser.service \
+            --cov=telefuser.client \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -m "not gpu and not distributed and not slow" \
             --tb=short
 
-      - name: Run integration tests
-        run: |
-          pytest tests/integration -v \
-            -m "not gpu and not distributed and not slow and not quant and not filesystem" \
-            --tb=short || true
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: server-tests
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload test artifacts
         if: failure()

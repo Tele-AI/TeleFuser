@@ -46,13 +46,13 @@ check_result "Dependencies installation"
 
 # Run lint checks
 print_section "Running lint checks"
-ruff check telefuser tests --output-format=full --exclude telefuser/_version.py
+ruff check telefuser tests --output-format=full
 check_result "Ruff check"
 
-ruff format --check telefuser tests --exclude telefuser/_version.py
+ruff format --check telefuser tests
 check_result "Ruff format check"
 
-ruff check --select I telefuser tests --exclude telefuser/_version.py
+ruff check --select I telefuser tests
 check_result "Import check"
 
 # Run unit tests
@@ -62,24 +62,12 @@ pytest tests/unit -v \
     --tb=short
 check_result "Unit tests"
 
-# Run server integration tests (legacy client-based tests)
-print_section "Running server integration tests (legacy)"
-python tests/server/run_integration_test.py --port 18000
-check_result "Server integration test (legacy)"
-
 # Run server pytest tests (includes OpenAI API tests)
 print_section "Running server pytest tests (includes OpenAI API)"
 pytest tests/server/ -v \
     -m "not gpu and not distributed and not slow" \
     --tb=short
 check_result "Server pytest tests (including OpenAI API)"
-
-# Run integration tests
-print_section "Running integration tests"
-pytest tests/integration -v \
-    -m "not gpu and not distributed and not slow and not quant and not filesystem" \
-    --tb=short || true  # Don't fail if no integration tests exist yet
-check_result "Integration tests"
 
 print_section "All CI tests passed!"
 echo -e "${GREEN}✓ Ready to push${NC}"

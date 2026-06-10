@@ -244,9 +244,7 @@ class TFClient:
             response.raise_for_status()
             return response.json()
         except requests.HTTPError as e:
-            raise TaskCreationError(
-                f"Task creation failed (HTTP {e.response.status_code}): {e.response.text}"
-            ) from e
+            raise TaskCreationError(f"Task creation failed (HTTP {e.response.status_code}): {e.response.text}") from e
         except requests.RequestException as e:
             raise TaskCreationError(f"Task creation request failed: {e}") from e
 
