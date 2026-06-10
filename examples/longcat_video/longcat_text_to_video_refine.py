@@ -129,24 +129,30 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 def run(
     pipeline: LongCatVideoPipeline,
     prompt: str,
-    height: int,
-    width: int,
+    height: int | None = None,
+    width: int | None = None,
     negative_prompt: str = "",
     seed: int = PPL_CONFIG["seed"],
+    resolution: str = "720p",
+    aspect_ratio: str = "16:9",
 ):
     """Generate video at base resolution, then refine to higher resolution.
 
     Args:
         pipeline: Preloaded LongCat video pipeline with refinement enabled.
         prompt: Text prompt.
-        height: Base generation height (e.g. 480).
-        width: Base generation width (e.g. 832).
+        height: Base generation height. If None, computed from resolution/aspect_ratio.
+        width: Base generation width. If None, computed from resolution/aspect_ratio.
         negative_prompt: Negative guidance prompt.
         seed: Random seed.
+        resolution: Target resolution (e.g. "480p", "720p"). Default is "720p".
+        aspect_ratio: Aspect ratio (e.g. "16:9"). Default is "16:9".
 
     Returns:
         List[PIL.Image]: Generated and refined video frames.
     """
+    if height is None or width is None:
+        width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
     video, _ = pipeline(
         prompt=prompt,
         negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}",

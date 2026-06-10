@@ -109,24 +109,30 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
 def run(
     pipeline,
     prompt,
-    height,
-    width,
+    height: int | None = None,
+    width: int | None = None,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"],
+    aspect_ratio="16:9",
 ):
     """
     Generate video from text prompt.
     Args:
         pipeline (LongCatVideoPipeline): Preloaded video generation pipeline object
         prompt (str): Positive guidance text prompt
-        height (int): Video height
-        width (int): Video width
+        height (int | None): Video height. If None, computed from resolution/aspect_ratio.
+        width (int | None): Video width. If None, computed from resolution/aspect_ratio.
         negative_prompt (str, optional): Negative guidance prompt, will be merged with base negative prompt. Default is empty
         seed (int, optional): Random seed. Default is 42
+        resolution (str, optional): Target resolution (e.g. "480p", "720p"). Default is PPL_CONFIG["resolution"]
+        aspect_ratio (str, optional): Aspect ratio (e.g. "16:9", "9:16"). Default is "16:9"
 
     Returns:
         List[PIL.Image]: Generated video sequence
     """
+    if height is None or width is None:
+        width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
     video, _ = pipeline(
         prompt=prompt,
         negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}",

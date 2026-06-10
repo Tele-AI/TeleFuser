@@ -129,32 +129,37 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 def run(
     pipeline,
     prompt,
-    height,
-    width,
+    height: int | None = None,
+    width: int | None = None,
     first_image=None,
     input_video=None,
     negative_prompt="",
     seed=PPL_CONFIG["seed"],
+    resolution=PPL_CONFIG["resolution"],
+    aspect_ratio="16:9",
     return_latents=False,
     need_encode=True,
 ):
-    """
-    Unified video generation interface supporting t2v, i2v, and video continuation.
+    """Unified video generation interface supporting t2v, i2v, and video continuation.
     Args:
         pipeline (LongCatVideoPipeline): Preloaded video generation pipeline object
         prompt (str): Positive guidance text prompt
-        height (int): Video height
-        width (int): Video width
+        height (int | None): Video height. If None, computed from resolution/aspect_ratio.
+        width (int | None): Video width. If None, computed from resolution/aspect_ratio.
         first_image (PIL.Image, optional): Input image for i2v mode
         input_video (VideoData, optional): Input video for continuation mode
         negative_prompt (str, optional): Negative guidance prompt. Default is empty
         seed (int, optional): Random seed. Default is 42
+        resolution (str, optional): Target resolution. Default is PPL_CONFIG["resolution"]
+        aspect_ratio (str, optional): Aspect ratio. Default is "16:9"
         return_latents (bool, optional): Whether to return latents. Default is False
         need_encode (bool, optional): Whether to encode input. Default is True
 
     Returns:
         tuple: (video frames, latents) if return_latents=True, else video frames only
     """
+    if height is None or width is None:
+        width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
     num_frames = 77 if input_video is None else 93
 
     video, latents = pipeline(
