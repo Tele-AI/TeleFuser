@@ -17,6 +17,12 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## Why TeleFuser
 
+Most open-source inference stacks are optimized for one of three cases:
+
+- one-shot image generation
+- offline video generation
+- general LLM serving
+
 Real-time world models need a different runtime profile: continuous execution, streaming output, bidirectional interaction, stateful sessions, long-context efficiency, and stable performance under concurrency. TeleFuser focuses on those runtime problems directly.
 
 The project treats a world model as more than a function that returns a single clip. It provides the infrastructure needed to run a model as a continuously updated system that can receive input, keep state, and emit frames progressively.
