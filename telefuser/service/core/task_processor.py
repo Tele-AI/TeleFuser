@@ -95,7 +95,7 @@ class AsyncTaskProcessor:
 
         while self._running and not self._stop_event.is_set():
             try:
-                task_id = self.task_manager.get_next_pending_task()
+                task_id = self.task_manager.claim_next_pending_task()
 
                 if task_id is None:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
@@ -114,21 +114,19 @@ class AsyncTaskProcessor:
         logger.info(f"{worker_name} stopped")
 
     async def _process_task(self, task_id: str) -> None:
-        """Process a single task."""
-        task_info = self.task_manager.get_task(task_id)
-        if not task_info or task_info.status != TaskStatus.PENDING:
-            return
+        """Process a single task.
 
-        logger.info(f"Processing task {task_id}")
-
-        lock_acquired = self.task_manager.acquire_processing_lock(task_id, timeout=1.0)
-        if not lock_acquired:
-            logger.error(f"Task {task_id} failed to acquire processing lock")
-            self.task_manager.fail_task(task_id, "Failed to acquire processing lock")
-            return
-
+        The task has already been atomically claimed (marked PROCESSING) by
+        claim_next_pending_task(). This method must always release the
+        processing slot when it returns.
+        """
         try:
-            task_info = self.task_manager.start_task(task_id)
+            task_info = self.task_manager.get_task(task_id)
+            if not task_info:
+                logger.warning(f"Task {task_id} disappeared before processing")
+                return
+
+            logger.info(f"Processing task {task_id}")
 
             if task_info.status == TaskStatus.CANCELLED:
                 logger.info(f"Task {task_id} was cancelled before processing started")
@@ -138,25 +136,27 @@ class AsyncTaskProcessor:
                 logger.info(f"Task {task_id} cancelled before processing")
                 return
 
-            result = await self.media_service.generate_media_with_stop_event(task_info.message, task_info.stop_event)
+            try:
+                result = await self.media_service.generate_media_with_stop_event(
+                    task_info.message, task_info.stop_event
+                )
 
-            if result:
-                self.task_manager.complete_task(task_id, result.output_path)
-                logger.info(f"Task {task_id} completed successfully")
-            else:
-                if task_info.stop_event.is_set():
-                    logger.info(f"Task {task_id} cancelled during processing")
+                if result:
+                    self.task_manager.complete_task(task_id, result.output_path)
+                    logger.info(f"Task {task_id} completed successfully")
                 else:
-                    self.task_manager.fail_task(task_id, "Generation failed")
-                    logger.error(f"Task {task_id} generation failed")
+                    if task_info.stop_event.is_set():
+                        logger.info(f"Task {task_id} cancelled during processing")
+                    else:
+                        self.task_manager.fail_task(task_id, "Generation failed")
+                        logger.error(f"Task {task_id} generation failed")
 
-        except Exception as e:
-            if task_info.stop_event.is_set():
-                logger.info(f"Task {task_id} exited after cancellation")
-                return
-            logger.exception(f"Task {task_id} processing failed")
-            self.task_manager.fail_task(task_id, str(e))
+            except Exception as e:
+                if task_info.stop_event.is_set():
+                    logger.info(f"Task {task_id} exited after cancellation")
+                    return
+                logger.exception(f"Task {task_id} processing failed")
+                self.task_manager.fail_task(task_id, str(e))
 
         finally:
-            if lock_acquired:
-                self.task_manager.release_processing_lock(task_id)
+            self.task_manager.release_processing_slot(task_id)

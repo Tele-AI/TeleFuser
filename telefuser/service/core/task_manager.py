@@ -265,12 +265,47 @@ class TaskManager:
             pass  # Lock was not held by this thread
 
     def get_next_pending_task(self) -> str | None:
-        """Get next pending task ID (FIFO order)."""
+        """Get next pending task ID (FIFO order).
+
+        Deprecated: kept for backward compatibility. This is a non-atomic read
+        (it does not mark the task PROCESSING), so concurrent callers may pick
+        the same task. Use claim_next_pending_task() instead.
+        """
         with self._lock:
             for task_id, task in self._tasks.items():
                 if task.status == TaskStatus.PENDING:
                     return task_id
         return None
+
+    def claim_next_pending_task(self) -> str | None:
+        """Atomically find the next PENDING task and mark it PROCESSING.
+
+        Single-slot semantics: returns None if a task is already being processed.
+        This replaces the non-atomic get_next_pending_task + acquire_processing_lock
+        + start_task flow, where two workers could read the same PENDING task and
+        the loser would mark it FAILED.
+        """
+        with self._lock:
+            if self._current_processing_task is not None:
+                return None
+            for task_id, task in self._tasks.items():
+                if task.status == TaskStatus.PENDING:
+                    task.status = TaskStatus.PROCESSING
+                    task.start_time = datetime.now()
+                    self._tasks.move_to_end(task_id)
+                    self._current_processing_task = task_id
+                    return task_id
+        return None
+
+    def release_processing_slot(self, task_id: str) -> None:
+        """Release the processing slot after task completion.
+
+        Companion to claim_next_pending_task(). Clears the current processing
+        task so the next PENDING task can be claimed.
+        """
+        with self._lock:
+            if self._current_processing_task == task_id:
+                self._current_processing_task = None
 
     def get_service_status(self) -> dict[str, Any]:
         """Get overall service status."""
