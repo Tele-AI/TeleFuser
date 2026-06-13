@@ -6,7 +6,7 @@
 site_name: TeleFuser
 site_description: A high-performance framework for efficient multimodal generation model inference
 site_author: TeleAI Team
-site_url: https://telefuser.github.io
+site_url: https://tele-ai.github.io/TeleFuser
 
 # Repository
 repo_name: TeleFuser
@@ -187,10 +187,10 @@ nav:
 extra:
   alternate:
     - name: English
-      link: /
+      link: /TeleFuser/
       lang: en
     - name: 中文
-      link: /zh/
+      link: /TeleFuser/zh/
       lang: zh
   analytics:
     feedback:

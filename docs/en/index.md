@@ -63,4 +63,4 @@ telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 80
 
 ---
 
-[Switch to Chinese 🇨🇳](/zh/)
+[Switch to Chinese 🇨🇳](/TeleFuser/zh/)

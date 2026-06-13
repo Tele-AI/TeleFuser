@@ -63,4 +63,4 @@ telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 80
 
 ---
 
-[切换到英文 🇬🇧](/)
+[切换到英文 🇬🇧](/TeleFuser/)
