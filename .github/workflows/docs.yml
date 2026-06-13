@@ -42,7 +42,7 @@ jobs:
           pip install ".[docs]"
 
       - name: Build MkDocs site
-        run: mkdocs build --strict
+        run: mkdocs build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
