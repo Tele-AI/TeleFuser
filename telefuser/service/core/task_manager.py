@@ -48,6 +48,7 @@ class TaskManager:
     """Manages task lifecycle from creation to completion.
 
     Thread-safe task queue with automatic cleanup of old completed tasks.
+    Supports multi-slot concurrent processing for data-parallel pipeline pools.
     """
 
     def __init__(
@@ -56,17 +57,20 @@ class TaskManager:
         cleanup_keep_count: int = 1000,
         cancel_timeout: float = 5.0,
         processing_lock_timeout: float = 1.0,
+        max_concurrent_processing: int = 1,
     ) -> None:
         self.max_queue_size = max_queue_size
         self.cleanup_keep_count = cleanup_keep_count
         self.cancel_timeout = cancel_timeout
         self.processing_lock_timeout = processing_lock_timeout
+        self._max_concurrent_processing = max(1, max_concurrent_processing)
 
         self._tasks: OrderedDict[str, TaskInfo] = OrderedDict()
         self._lock = threading.RLock()
 
         self._processing_lock = threading.Lock()
-        self._current_processing_task: str | None = None
+        self._current_processing_tasks: OrderedDict[str, bool] = OrderedDict()
+        self._zero_capacity: bool = False
 
         self.total_tasks = 0
         self.completed_tasks = 0
@@ -75,6 +79,9 @@ class TaskManager:
     def create_task(self, message: Any) -> str:
         """Create a new task with validation and metrics."""
         with self._lock:
+            if self._zero_capacity:
+                raise RuntimeError("No inference capacity: all pipeline replicas are dead")
+
             if hasattr(message, "task_id") and message.task_id in self._tasks:
                 raise RuntimeError(f"Task ID {message.task_id} already exists")
 
@@ -240,7 +247,7 @@ class TaskManager:
     def is_processing(self) -> bool:
         """Check if any task is currently processing."""
         with self._lock:
-            return self._current_processing_task is not None
+            return len(self._current_processing_tasks) > 0
 
     def acquire_processing_lock(self, task_id: str, timeout: float | None = None) -> bool:
         """Acquire exclusive processing lock for a task."""
@@ -248,16 +255,11 @@ class TaskManager:
         acquired = self._processing_lock.acquire(timeout=timeout)
         if acquired:
             with self._lock:
-                self._current_processing_task = task_id
                 logger.info(f"Task {task_id} acquired processing lock")
         return acquired
 
     def release_processing_lock(self, task_id: str) -> None:
         """Release processing lock for a task."""
-        with self._lock:
-            if self._current_processing_task == task_id:
-                self._current_processing_task = None
-
         try:
             self._processing_lock.release()
             logger.info(f"Task {task_id} released processing lock")
@@ -280,47 +282,51 @@ class TaskManager:
     def claim_next_pending_task(self) -> str | None:
         """Atomically find the next PENDING task and mark it PROCESSING.
 
-        Single-slot semantics: returns None if a task is already being processed.
-        This replaces the non-atomic get_next_pending_task + acquire_processing_lock
-        + start_task flow, where two workers could read the same PENDING task and
-        the loser would mark it FAILED.
+        Multi-slot semantics: returns None if all processing slots are full
+        or if zero capacity (all replicas dead). When zero capacity, also
+        drains any remaining pending tasks with a failure error.
         """
         with self._lock:
-            if self._current_processing_task is not None:
+            if self._zero_capacity:
+                self._fail_all_pending("No inference capacity: all pipeline replicas are dead")
+                return None
+            if len(self._current_processing_tasks) >= self._max_concurrent_processing:
                 return None
             for task_id, task in self._tasks.items():
                 if task.status == TaskStatus.PENDING:
                     task.status = TaskStatus.PROCESSING
                     task.start_time = datetime.now()
                     self._tasks.move_to_end(task_id)
-                    self._current_processing_task = task_id
+                    self._current_processing_tasks[task_id] = True
                     return task_id
         return None
 
     def release_processing_slot(self, task_id: str) -> None:
         """Release the processing slot after task completion.
 
-        Companion to claim_next_pending_task(). Clears the current processing
-        task so the next PENDING task can be claimed.
+        Companion to claim_next_pending_task(). Clears the slot so the next
+        PENDING task can be claimed.
         """
         with self._lock:
-            if self._current_processing_task == task_id:
-                self._current_processing_task = None
+            self._current_processing_tasks.pop(task_id, None)
 
     def get_service_status(self) -> dict[str, Any]:
         """Get overall service status."""
         with self._lock:
-            active_tasks = [
-                task_id
-                for task_id, task in self._tasks.items()
-                if task.status in (TaskStatus.PROCESSING, TaskStatus.STREAMING)
-            ]
-
-            pending_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.PENDING)
+            active_tasks = []
+            pending_count = 0
+            for task_id, task in self._tasks.items():
+                if task.status in (TaskStatus.PROCESSING, TaskStatus.STREAMING):
+                    active_tasks.append(task_id)
+                elif task.status == TaskStatus.PENDING:
+                    pending_count += 1
 
             return {
-                "service_status": "busy" if self._current_processing_task else "idle",
-                "current_task": self._current_processing_task,
+                "service_status": "busy" if self._current_processing_tasks else "idle",
+                "current_task": next(iter(self._current_processing_tasks), None),
+                "current_tasks": list(self._current_processing_tasks.keys()),
+                "processing_count": len(self._current_processing_tasks),
+                "max_concurrent_processing": self._max_concurrent_processing,
                 "active_tasks": active_tasks,
                 "pending_tasks": pending_count,
                 "queue_size": self.max_queue_size,
@@ -328,6 +334,37 @@ class TaskManager:
                 "completed_tasks": self.completed_tasks,
                 "failed_tasks": self.failed_tasks,
             }
+
+    def set_max_concurrent_processing(self, n: int) -> None:
+        """Dynamically adjust max concurrent processing slots.
+
+        Called by PipelinePool when a replica dies. Thread-safe.
+        When n=0, marks pool as having zero capacity and fails all pending tasks.
+        """
+        with self._lock:
+            old = self._max_concurrent_processing
+            self._max_concurrent_processing = max(0, n)
+            if self._max_concurrent_processing == 0:
+                self._zero_capacity = True
+                self._fail_all_pending("No inference capacity: all pipeline replicas are dead")
+            logger.info(f"Max concurrent processing adjusted: {old} → {self._max_concurrent_processing}")
+
+    @property
+    def max_concurrent_processing(self) -> int:
+        """Current max concurrent processing slots (may differ from initial value after replica death)."""
+        with self._lock:
+            return self._max_concurrent_processing
+
+    def _fail_all_pending(self, error: str) -> None:
+        """Fail all pending tasks. Caller must hold self._lock."""
+        for task_id, task in list(self._tasks.items()):
+            if task.status == TaskStatus.PENDING:
+                task.status = TaskStatus.FAILED
+                task.end_time = datetime.now()
+                task.error = error
+                self.failed_tasks += 1
+                get_service_metrics().record_task_failed()
+                logger.warning(f"Task {task_id} failed: {error}")
 
     def _cleanup_old_tasks(self, keep_count: int | None = None) -> None:
         """Remove old completed tasks to prevent memory growth."""

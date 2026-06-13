@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -132,6 +133,14 @@ class ServerConfig(BaseSettings):
     # Stream settings
     webrtc_max_sessions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent WebRTC sessions")
 
+    # Pipeline replication settings
+    num_replicas: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="Number of independent pipeline replicas for concurrent serving.",
+    )
+
     # WebRTC ICE settings (for public network deployment)
     stun_servers: list[str] = Field(
         default_factory=lambda: ["stun:stun.l.google.com:19302"],
@@ -175,8 +184,35 @@ class ServerConfig(BaseSettings):
 
     @property
     def effective_max_concurrent_tasks(self) -> int:
-        """Effective task concurrency for the current single-pipeline runtime."""
-        return 1
+        """Effective task concurrency — equals num_replicas (one slot per replica)."""
+        return self.num_replicas
+
+    def resolve_replica_device_ids(self, parallelism: int) -> list[list[str]]:
+        """Compute device groups for DP replicas.
+
+        Precedence: --parallelism determines HOW MANY devices to use.
+        The platform's device control env var (if set) provides the physical device mapping.
+        Device tokens are treated as opaque strings (supports UUIDs, MIG).
+        """
+        from telefuser.platforms import current_platform
+
+        env_var = current_platform.device_control_env_var
+        cvd = os.environ.get(env_var)
+        if cvd is not None and cvd.strip():
+            all_visible = [d.strip() for d in cvd.split(",") if d.strip()]
+        else:
+            all_visible = [str(i) for i in range(parallelism)]
+
+        if len(all_visible) < parallelism:
+            raise ValueError(f"--parallelism={parallelism} but only {len(all_visible)} GPUs visible ({env_var}={cvd})")
+
+        selected = all_visible[:parallelism]
+
+        if parallelism % self.num_replicas != 0:
+            raise ValueError(f"--parallelism ({parallelism}) must be divisible by --num-replicas ({self.num_replicas})")
+
+        gpus_per_replica = parallelism // self.num_replicas
+        return [selected[i * gpus_per_replica : (i + 1) * gpus_per_replica] for i in range(self.num_replicas)]
 
 
 # Global server configuration instance

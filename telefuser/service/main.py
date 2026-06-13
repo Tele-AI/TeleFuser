@@ -52,10 +52,12 @@ def run_server(
     cache_dir: str = "",
     parallelism: int = 1,
     enable_rate_limit: bool = True,
+    num_replicas: int = 1,
 ) -> None:
     """Run the TeleFuser server with dependency injection container."""
     server_config.host = host
     server_config.port = port
+    server_config.num_replicas = num_replicas
 
     container = ServiceContainer.create(
         config=server_config,

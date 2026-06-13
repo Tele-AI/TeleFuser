@@ -27,9 +27,13 @@ class ServiceRoutes:
     async def get_status(self) -> dict:
         """Get service status."""
         status = self.api.task_manager.get_service_status()
-        status["execution_mode"] = "serial_single_pipeline"
-        status["effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
+        status["effective_max_concurrent_tasks"] = self.api.task_manager.max_concurrent_processing
         status["configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
+        if hasattr(self.api.inference_service, "pool_status"):
+            status["execution_mode"] = "concurrent_pipeline_pool"
+            status["pool"] = self.api.inference_service.pool_status()
+        else:
+            status["execution_mode"] = "serial_single_pipeline"
         webrtc_stats = self._webrtc_session_stats()
         status.update(webrtc_stats)
         if webrtc_stats.get("webrtc_active_sessions", 0) > 0 and status.get("service_status") == "idle":

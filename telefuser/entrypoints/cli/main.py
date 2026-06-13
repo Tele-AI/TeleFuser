@@ -36,6 +36,13 @@ def main():
 )
 @click.option("--parallelism", "--gpu-num", "-g", type=int, default=1, help="Number of parallel workers for inference")
 @click.option(
+    "--num-replicas",
+    "-n",
+    type=int,
+    default=1,
+    help="Number of pipeline replicas. GPUs from --parallelism are evenly split across replicas.",
+)
+@click.option(
     "--security-level",
     type=click.Choice(["none", "basic", "strict", "sandbox"], case_sensitive=False),
     default="strict",
@@ -60,6 +67,7 @@ def serve(
     host: str,
     cache_dir: str,
     parallelism: int,
+    num_replicas: int,
     security_level: str,
     skip_validation: bool,
     validate_only: bool,
@@ -92,7 +100,7 @@ def serve(
         return
 
     # Start server
-    run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism)
+    run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism, num_replicas=num_replicas)
 
 
 @main.command(name="stream-serve")

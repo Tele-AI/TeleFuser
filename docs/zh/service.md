@@ -9,6 +9,7 @@
 - [支持的管线](#支持的管线)
 - [CLI 命令行工具](#cli-命令行工具)
 - [服务器配置](#服务器配置)
+- [Pipeline Pool（多副本并发推理）](#pipeline-pool多副本并发推理)
 - [Service Metadata 指南](./service_metadata.md)
 - [HTTP API 参考](#http-api-参考)
 - [客户端 SDK](#客户端-sdk)
@@ -148,6 +149,7 @@ telefuser serve /path/to/pipeline --task i2v [选项]
 | `--host` | | string | `127.0.0.1` | 服务器主机地址 |
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | 缓存目录 |
 | `--parallelism` | `-g` | int | `1` | 并行工作进程数 |
+| `--num-replicas` | `-n` | int | `1` | 独立 Pipeline 副本数量（Pipeline Pool） |
 | `--security-level` | | choice | `strict` | 安全级别: none/basic/strict/sandbox |
 | `--skip-validation` | | flag | `False` | 跳过安全验证 |
 | `--validate-only` | | flag | `False` | 仅验证不启动 |
@@ -356,6 +358,84 @@ pipeline 内部调优项这类实现细节，应该继续保留在 `PPL_CONFIG` 
 
 如果需要前端动态表单生成、任务路由策略或网关接入方式，可继续参考
 [Service Metadata 消费指南](./service_metadata.md)。
+
+---
+
+## Pipeline Pool（多副本并发推理）
+
+Pipeline Pool 通过运行多个独立的 Pipeline 副本来实现并发推理，每个副本运行在独立子进程中，拥有独占的 GPU 访问权限。这提供了真正的数据并行服务，副本间无共享状态。
+
+### 工作原理
+
+当 `--num-replicas` 设置为 N（`--parallelism` 提供总 GPU 数）时，服务器会：
+
+1. 将可用 GPU 平均分配给 N 个副本（例如 4 个 GPU + 2 个副本 → 每个副本 2 个 GPU）
+2. 在独立子进程中启动每个副本，通过 `CUDA_VISIBLE_DEVICES` 隔离
+3. 通过轮询调度将请求分发给空闲副本
+4. 当队列已满时返回 HTTP 503（可配置 `max_queue_size`）
+
+每个副本是完全独立的 Pipeline 实例 — 副本之间没有共享的 GPU 显存或模型状态。
+
+### CLI 使用方法
+
+```bash
+# 2 个副本在 2 个 GPU 上（每个副本 1 个 GPU）
+CUDA_VISIBLE_DEVICES=0,1 telefuser serve ./pipeline.py -g 2 -n 2
+
+# 4 个副本在 8 个 GPU 上（每个副本 2 个 GPU，使用张量并行）
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 telefuser serve ./pipeline.py -g 8 -n 4
+
+# 单副本（默认，与之前行为相同）
+telefuser serve ./pipeline.py -g 1
+```
+
+总 GPU 数（`-g`）必须能被副本数（`-n`）整除。
+
+### 监控
+
+当 Pipeline Pool 启用时，`GET /v1/service/status` 会返回额外的 Pool 信息：
+
+```json
+{
+  "service_status": "idle",
+  "processing_count": 0,
+  "max_concurrent_processing": 2,
+  "execution_mode": "concurrent_pipeline_pool",
+  "pool": [
+    {"id": 0, "device_ids": ["0"], "status": "idle"},
+    {"id": 1, "device_ids": ["1"], "status": "idle"}
+  ]
+}
+```
+
+`GET /v1/service/metadata` 也包含 Pool 配置：
+
+```json
+{
+  "pool": {
+    "num_replicas": 2,
+    "live_replicas": 2,
+    "replica_device_ids": [["0"], ["1"]],
+    "per_instance_execution_mode": "serial_single_pipeline"
+  }
+}
+```
+
+### 副本驱逐
+
+如果副本子进程崩溃或无响应，Pool 会自动：
+
+1. 将失效副本从轮询队列中驱逐
+2. 降低并发处理容量
+3. 使用剩余存活副本继续提供服务
+4. 如果所有副本都失效，记录 critical 级别错误
+
+### 最佳实践
+
+- **GPU 分配**：每个副本获得 `parallelism / num_replicas` 个 GPU。确保每个副本有足够的显存容纳模型。
+- **队列大小**：默认队列大小为 10。高吞吐场景下可通过 `TELEFUSER_MAX_QUEUE_SIZE` 调整。
+- **速率限制**：压力测试时，增大速率限制：`TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=10000`。
+- **故障排查**：检查 `GET /v1/service/status` → `pool` 字段，确认所有副本存活且 GPU 分配正确。
 
 ---
 

@@ -9,6 +9,7 @@ This guide covers the TeleFuser API server, CLI usage, and HTTP API reference. F
 - [CLI Usage](#cli-usage)
 - [Supported Pipelines](#supported-pipelines)
 - [Server Configuration](#server-configuration)
+- [Pipeline Pool (Multi-Replica Serving)](#pipeline-pool-multi-replica-serving)
 - [Service Metadata Guide](./service_metadata.md)
 - [HTTP API Reference](#http-api-reference)
 - [Client SDK](#client-sdk)
@@ -148,6 +149,7 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 | `--host` | | string | `127.0.0.1` | Server host address |
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | Cache directory |
 | `--parallelism` | `-g` | int | `1` | Number of parallel workers |
+| `--num-replicas` | `-n` | int | `1` | Number of independent pipeline replicas (Pipeline Pool) |
 | `--security-level` | | choice | `strict` | Security level: none/basic/strict/sandbox |
 | `--skip-validation` | | flag | `False` | Skip security validation |
 | `--validate-only` | | flag | `False` | Only validate without starting |
@@ -358,6 +360,84 @@ available for each task.
 
 For client-side form generation, task routing, and gateway integration patterns, see
 [Service Metadata Consumption Guide](./service_metadata.md).
+
+---
+
+## Pipeline Pool (Multi-Replica Serving)
+
+Pipeline Pool enables concurrent inference by running multiple independent pipeline replicas, each in its own subprocess with exclusive GPU access. This provides true data-parallel serving without shared state between replicas.
+
+### How It Works
+
+When `--num-replicas` is set to N (with `--parallelism` providing the total GPU count), the server:
+
+1. Splits the available GPUs evenly across N replicas (e.g., 4 GPUs with 2 replicas → 2 GPUs per replica)
+2. Spawns each replica in a separate subprocess with isolated `CUDA_VISIBLE_DEVICES`
+3. Routes incoming requests to idle replicas via round-robin dispatch
+4. Rejects requests with HTTP 503 when the queue is full (configurable `max_queue_size`)
+
+Each replica is a fully independent pipeline instance — there is no shared GPU memory or model state between replicas.
+
+### CLI Usage
+
+```bash
+# 2 replicas on 2 GPUs (1 GPU each)
+CUDA_VISIBLE_DEVICES=0,1 telefuser serve ./pipeline.py -g 2 -n 2
+
+# 4 replicas on 8 GPUs (2 GPUs each, with tensor parallelism)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 telefuser serve ./pipeline.py -g 8 -n 4
+
+# Single replica (default, same as before)
+telefuser serve ./pipeline.py -g 1
+```
+
+The total GPU count (`-g`) must be evenly divisible by the number of replicas (`-n`).
+
+### Monitoring
+
+When Pipeline Pool is active, `GET /v1/service/status` returns additional pool information:
+
+```json
+{
+  "service_status": "idle",
+  "processing_count": 0,
+  "max_concurrent_processing": 2,
+  "execution_mode": "concurrent_pipeline_pool",
+  "pool": [
+    {"id": 0, "device_ids": ["0"], "status": "idle"},
+    {"id": 1, "device_ids": ["1"], "status": "idle"}
+  ]
+}
+```
+
+`GET /v1/service/metadata` also includes pool configuration:
+
+```json
+{
+  "pool": {
+    "num_replicas": 2,
+    "live_replicas": 2,
+    "replica_device_ids": [["0"], ["1"]],
+    "per_instance_execution_mode": "serial_single_pipeline"
+  }
+}
+```
+
+### Replica Eviction
+
+If a replica subprocess crashes or becomes unresponsive, the pool automatically:
+
+1. Evicts the dead replica from the rotation
+2. Reduces the concurrent processing capacity
+3. Continues serving with the remaining live replicas
+4. Logs a critical error if all replicas are dead
+
+### Best Practices
+
+- **GPU sizing**: Each replica gets `parallelism / num_replicas` GPUs. Ensure each replica has enough VRAM for the model.
+- **Queue size**: The default queue size is 10. For high-throughput scenarios, adjust via `TELEFUSER_MAX_QUEUE_SIZE`.
+- **Rate limiting**: When stress-testing, increase the rate limit: `TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=10000`.
+- **Troubleshooting**: Check `GET /v1/service/status` → `pool` to verify all replicas are alive and GPU assignments are correct.
 
 ---
 

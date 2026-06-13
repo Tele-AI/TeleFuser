@@ -51,10 +51,10 @@ class ServiceContainer:
         """Create a new service container with all dependencies."""
         config = config or server_config
 
-        if config.max_concurrent_tasks != config.effective_max_concurrent_tasks:
+        if config.num_replicas == 1 and config.max_concurrent_tasks != config.effective_max_concurrent_tasks:
             logger.warning(
-                "Configured max_concurrent_tasks=%s but effective task concurrency is fixed to %s "
-                "for a single ppl instance. Use max_queue_size to control queue admission.",
+                "Configured max_concurrent_tasks=%s but a single ppl instance executes serially "
+                "(effective=%s). Use --num-replicas>1 for concurrency, or max_queue_size for admission control.",
                 config.max_concurrent_tasks,
                 config.effective_max_concurrent_tasks,
             )
@@ -64,6 +64,7 @@ class ServiceContainer:
             cleanup_keep_count=config.cleanup_keep_count,
             cancel_timeout=config.cancel_timeout,
             processing_lock_timeout=config.processing_lock_timeout,
+            max_concurrent_processing=config.num_replicas,
         )
 
         return cls(
@@ -147,14 +148,35 @@ class ServiceContainer:
         if cache_dir:
             self._cache_dir = Path(cache_dir)
 
-        self.pipeline_service = PipelineService(security_level=self.config.security_level)
-        if not self.pipeline_service.start_pipeline(
-            ppl_file=pipe_path,
-            parallelism=parallelism,
-            task=task,
-            skip_validation=skip_validation,
-        ):
-            return False
+        if self.config.num_replicas > 1:
+            replica_device_ids = self.config.resolve_replica_device_ids(parallelism)
+            parallelism_per_replica = len(replica_device_ids[0])
+
+            from .pipeline_pool import PipelinePool
+
+            pool = PipelinePool(
+                num_replicas=self.config.num_replicas,
+                replica_device_ids=replica_device_ids,
+                security_level_name=self.config.security_level.name,
+                task_manager=self.task_manager,
+            )
+            if not pool.start_all(
+                ppl_file=pipe_path,
+                parallelism_per_replica=parallelism_per_replica,
+                task=task if isinstance(task, str) else task.value,
+                skip_validation=skip_validation,
+            ):
+                return False
+            self.pipeline_service = pool  # duck-type compatible
+        else:
+            self.pipeline_service = PipelineService(security_level=self.config.security_level)
+            if not self.pipeline_service.start_pipeline(
+                ppl_file=pipe_path,
+                parallelism=parallelism,
+                task=task,
+                skip_validation=skip_validation,
+            ):
+                return False
 
         self.initialize_file_service()
         self.initialize_cache_service(pipe_path=pipe_path)
