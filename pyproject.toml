@@ -83,6 +83,7 @@ docs = [
     "mkdocs-glightbox",
     "mkdocs-git-revision-date-localized-plugin",
     "mkdocs-minify-plugin",
+    "mkdocs-static-i18n",
     "regex",
     "ruff==0.9.4",
 ]

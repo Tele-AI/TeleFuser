@@ -1,0 +1,37 @@
+/* TeleFuser Docs Custom Styles */
+
+/* Better table styling */
+.md-typeset table:not([class]) {
+  border-radius: 0.2rem;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--md-primary-fg-color--light);
+  color: var(--md-primary-fg-color--dark);
+}
+
+/* Feature card grid */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.feature-card {
+  border-radius: 0.4rem;
+  padding: 1rem;
+  background-color: var(--md-default-bg-color--light);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  text-align: center;
+}
+
+.feature-card .feature-icon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Code block tweaks */
+.md-typeset code {
+  font-size: 0.85em;
+}

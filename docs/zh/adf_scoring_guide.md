@@ -474,6 +474,6 @@ if __name__ == "__main__":
 
 ## 七、参考资料
 
-- [Agent Dev First: 面向AI代理的软件工程范式革新](./agent_dev_first.md)
-- [TeleFuser CLAUDE.md](../../CLAUDE.md)
+- Agent Dev First: 面向AI代理的软件工程范式革新
+- [TeleFuser CLAUDE.md](https://github.com/TeleFuser/TeleFuser/blob/main/CLAUDE.md)
 - [SGLang Skills Documentation](https://github.com/sgl-project/sglang)

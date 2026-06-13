@@ -1,0 +1,216 @@
+# TeleFuser Documentation Site Configuration
+# Build: mkdocs build
+# Serve: mkdocs serve
+# Deploy: mkdocs gh-deploy --force
+
+site_name: TeleFuser
+site_description: A high-performance framework for efficient multimodal generation model inference
+site_author: TeleAI Team
+site_url: https://telefuser.github.io
+
+# Repository
+repo_name: TeleFuser
+repo_url: https://github.com/TeleFuser/TeleFuser
+edit_uri: edit/main/docs/
+
+# Copyright
+copyright: Copyright &copy; 2024-2026 TeleAI Team
+
+# Theme
+theme:
+  name: material
+  language: en
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.action.view
+    - content.tabs.link
+    - toc.follow
+    - toc.integrate
+  icon:
+    repo: fontawesome/brands/github
+
+# Extensions
+markdown_extensions:
+  # Python Markdown
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+  # Python Markdown Extensions
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      dedent_subsections: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+# Plugins
+plugins:
+  - search:
+      lang:
+        - en
+        - zh
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          nav_translations:
+            Home: 首页
+            User Guides: 用户指南
+            Parallel Inference: 并行推理
+            Developer Guides: 开发者指南
+            Configuration: 配置
+            Tools: 工具
+            Service: 服务指南
+            Stream Server: 流式服务
+            Service Metadata: 服务元数据
+            Adding New Example: 新增示例
+            Model Loading: 模型加载
+            CPU Offloading: CPU卸载
+            Attention: 注意力机制
+            Feature Cache: 特征缓存
+            Latent Cache: 潜空间缓存
+            Adding New Model: 新增模型
+            Adding New Stage: 新增阶段
+            Hash Config Management: 哈希配置管理
+            torch.compile Compatibility: torch.compile兼容性
+            Testing: 测试
+            Profiler: 性能分析
+            Metrics: 监控指标
+            Logging: 日志
+            Ops: 操作算子
+            ADF Scoring Guide: ADF评分指南
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: datetime
+  - minify:
+      minify_html: true
+  - glightbox:
+      auto_caption: true
+
+# Navigation (locale-neutral paths resolved by i18n plugin)
+nav:
+  - Home: index.md
+  - User Guides:
+      - service.md
+      - stream_server.md
+      - service_metadata.md
+      - adding_new_example.md
+      - model_loading.md
+      - offload.md
+  - Configuration:
+      - configuration.md
+  - Parallel Inference:
+      - parallel.md
+      - attention.md
+      - feature_cache.md
+      - latent_cache.md
+  - Developer Guides:
+      - adding_new_model.md
+      - adding_new_stage.md
+      - hash_config_management.md
+      - torch_compile_compatibility.md
+      - adf_scoring_guide.md
+  - Tools:
+      - profiler.md
+      - metrics.md
+      - logging.md
+      - ops.md
+      - testing.md
+
+# Extra
+extra:
+  alternate:
+    - name: English
+      link: /
+      lang: en
+    - name: 中文
+      link: /zh/
+      lang: zh
+  analytics:
+    feedback:
+      title: Was this page helpful?
+      ratings:
+        - icon: material/thumb-up-outline
+          name: This page was helpful
+          data: 1
+          note: Thanks for your feedback!
+        - icon: material/thumb-down-outline
+          name: This page could be improved
+          data: 0
+          note: Thanks for your feedback! Help us improve by opening an issue.
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/TeleFuser/TeleFuser
+      name: GitHub
+
+extra_css:
+  - stylesheets/extra.css
+
+# Strict mode - warns about broken links
+strict: false

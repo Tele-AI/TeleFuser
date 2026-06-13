@@ -159,7 +159,7 @@ ModuleManager 支持以下模型文件格式：
 
 1. **模型未在预配置列表中**
    - 检查 `telefuser/core/model_config.py` 是否包含该模型的 hash
-   - 如果是新模型，需要按照[开发文档](./adding_new_model_zh.md)添加配置
+   - 如果是新模型，需要按照[开发文档](./adding_new_model.md)添加配置
 
 2. **模型文件损坏或不完整**
    - 验证文件完整性
@@ -232,6 +232,6 @@ load model /path/to/model.safetensors with state hash xxxxxxxxxx
 
 ## 相关文档
 
-- [添加新模型开发指南](./adding_new_model_zh.md)
-- [Hash 配置管理指南](./hash_config_management_zh.md)
+- [添加新模型开发指南](./adding_new_model.md)
+- [Hash 配置管理指南](./hash_config_management.md)
 - [Service 指南](./service.md)

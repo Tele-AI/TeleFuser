@@ -1,10 +1,12 @@
 # TeleFuser 服务指南
 
-本文档涵盖 TeleFuser API 服务器、CLI 命令行工具和 HTTP API 参考。
+本文档涵盖 TeleFuser API 服务器、CLI 命令行工具和 HTTP API 参考。关于 WebRTC 实时流式传输，请参阅[流式服务指南](stream_server.md)。
 
 ## 目录
 
 - [快速开始](#快速开始)
+- [服务模式](#服务模式)
+- [支持的管线](#支持的管线)
 - [CLI 命令行工具](#cli-命令行工具)
 - [服务器配置](#服务器配置)
 - [Service Metadata 指南](./service_metadata.md)
@@ -40,6 +42,11 @@ telefuser serve \
     --task t2i \
     --port 8000 \
     --parallelism 1
+
+# 实时世界模型流式推理（需要 WebRTC 支持）
+pip install -e ".[webrtc]"
+export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
 ### 3. 创建任务
@@ -54,6 +61,60 @@ curl -X POST "http://127.0.0.1:8000/v1/tasks/create" \
         "aspect_ratio": "16:9"
     }'
 ```
+
+---
+
+## 服务模式
+
+TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
+
+### `telefuser serve` — 批量请求-响应模式
+
+用于批量文本生成视频、图像生成视频、图像生成和超分辨率。
+
+- 任务 API：`/v1/tasks/*`
+- OpenAI 兼容路由：`/v1/images` 和 `/v1/videos`
+- 管线契约实现结构化参数暴露
+- 异步调度，请求隔离
+
+### `telefuser stream-serve` — 连续流式模式
+
+用于实时世界模型、交互式生成、语音驱动动画和流式媒体。
+
+- Server-push WebRTC：渐进式视频输出
+- Bidirectional WebRTC：交互式控制循环（DataChannel + RTP）
+- 有状态会话，连续 chunk 生成
+
+完整流式文档请参阅[流式服务指南](stream_server.md)。
+
+---
+
+## 支持的管线
+
+### 世界模型和实时推理
+
+| 管线 | 任务 | 说明 |
+|------|------|------|
+| `LingBot-World-Fast` | 双向世界模型流式推理 | 交互式 WebRTC 控制循环 — 参见[流式服务指南](stream_server.md) |
+| `LiveAct` | S2V（语音转视频） | 语音驱动说话人头部生成 |
+| `FlashVSR` | VSR | 流式视频超分辨率 |
+| `LongCat-Video` | T2V, I2V, VC | 长视频生成和续写 |
+
+### 视频生成
+
+| 管线 | 任务 | 说明 |
+|------|------|------|
+| `WanVideo`（Wan2.1 / Wan2.2） | T2V, I2V, FL2V | 主要视频生成系列 |
+| `HunyuanVideo` | T2V, I2V | 通过服务示例支持 |
+| `LTX Video` | I2V + Audio | 音视频统一生成 |
+
+### 图像生成
+
+| 管线 | 任务 | 说明 |
+|------|------|------|
+| `Qwen-Image` | T2I, Edit | 图像生成和编辑 |
+| `Z-Image` | T2I | 图像生成 |
+| `Flux2 Klein` | T2I | 图像生成 |
 
 ---
 

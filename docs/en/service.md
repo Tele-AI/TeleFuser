@@ -1,11 +1,13 @@
 # TeleFuser Service Guide
 
-This guide covers the TeleFuser API server, CLI usage, and HTTP API reference.
+This guide covers the TeleFuser API server, CLI usage, and HTTP API reference. For real-time streaming via WebRTC, see the [Stream Server Guide](stream_server.md).
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Serving Modes](#serving-modes)
 - [CLI Usage](#cli-usage)
+- [Supported Pipelines](#supported-pipelines)
 - [Server Configuration](#server-configuration)
 - [Service Metadata Guide](./service_metadata.md)
 - [HTTP API Reference](#http-api-reference)
@@ -40,6 +42,11 @@ telefuser serve \
     --task t2i \
     --port 8000 \
     --parallelism 1
+
+# For real-time world model streaming (requires WebRTC support)
+pip install -e ".[webrtc]"
+export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
 ### 3. Create a Task
@@ -54,6 +61,60 @@ curl -X POST "http://127.0.0.1:8000/v1/tasks/create" \
         "aspect_ratio": "16:9"
     }'
 ```
+
+---
+
+## Serving Modes
+
+TeleFuser provides two serving commands optimized for different workload types:
+
+### `telefuser serve` — Batch Request-Response Mode
+
+Use for batch text-to-video, image-to-video, image generation, and super-resolution.
+
+- Task-based API under `/v1/tasks/*`
+- OpenAI-compatible routes under `/v1/images` and `/v1/videos`
+- Pipeline contracts for structured parameter exposure
+- Async scheduling with request isolation
+
+### `telefuser stream-serve` — Continuous Streaming Mode
+
+Use for real-time world models, interactive generation, speech-driven animation, and streaming media.
+
+- Server-push WebRTC for progressive video output
+- Bidirectional WebRTC for interactive control loops (DataChannel + RTP)
+- Stateful sessions with continuous chunk generation
+
+See the [Stream Server Guide](stream_server.md) for full streaming documentation.
+
+---
+
+## Supported Pipelines
+
+### World Model and Real-Time Oriented
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop — see [Stream Server Guide](stream_server.md) |
+| `LiveAct` | S2V (speech-to-video) | Speech-driven talking head generation |
+| `FlashVSR` | VSR | Streaming video super-resolution |
+| `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation |
+
+### Video Generation
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family |
+| `HunyuanVideo` | T2V, I2V | Supported via service examples |
+| `LTX Video` | I2V + Audio | Unified audio-video generation |
+
+### Image Generation
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `Qwen-Image` | T2I, Edit | Image generation and editing |
+| `Z-Image` | T2I | Image generation |
+| `Flux2 Klein` | T2I | Image generation |
 
 ---
 

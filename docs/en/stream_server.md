@@ -534,6 +534,201 @@ Press arrow keys in the browser to see the D-pad overlay respond in real time.
 python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
 ```
 
+### LingBot-World-Fast Streaming
+
+`examples/stream_server/stream_lingbot_world_fast.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
+
+#### Model Files
+
+LingBot-World-Fast requires two sets of weights:
+
+| Environment Variable | Example | Description |
+|----------------------|---------|-------------|
+| `LINGBOT_WORLD_CHECKPOINT_DIR` | `/storage/model_zoo/Wan2.2-Distill-Models` | Base weight directory containing VAE, T5 text encoder, and tokenizer |
+| `LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR` | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT weight directory; can be an absolute path |
+
+#### Start the Server
+
+Recommended launch with two GPUs: DiT on GPU 0, text encoder and VAE on GPU 1. If GPU 1 VRAM is tight, move VAE back to CPU.
+
+```bash
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
+TELEFUSER_TURN_USERNAME=telefuser \
+TELEFUSER_TURN_CREDENTIAL=your-turn-password \
+LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
+LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
+LINGBOT_WORLD_CONTROL_TYPE=cam \
+LINGBOT_WORLD_MAX_AREA=99840 \
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+  -p 8088 --host 0.0.0.0 --skip-validation
+```
+
+Wait for the following log line before connecting the browser demo:
+
+```text
+Starting stream server on 0.0.0.0:8088
+```
+
+Verify the service is ready:
+
+```bash
+curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
+```
+
+#### Start the Browser Demo
+
+When using VS Code Remote SSH to access the server from a laptop browser, browser JavaScript runs locally. In this case, use TURN and forward the remote `3478` port to local `3478`.
+
+```bash
+python examples/stream_server/webrtc_bidirectional_demo.py \
+  --server-url http://localhost:8088 \
+  --port 8091 \
+  --image-path /tmp/lingbot_test_input.png \
+  --frame-num 81 \
+  --chunk-size 3 \
+  --fps 16 \
+  --turn-url 'turn:localhost:3478?transport=tcp' \
+  --turn-username telefuser \
+  --turn-credential your-turn-password \
+  --force-turn-relay \
+  --ice-gather-timeout-ms 30000 \
+  --control-lateral-step 0.25 \
+  --control-yaw-step-degrees 12 \
+  --no-open
+```
+
+Open in browser:
+
+```text
+http://localhost:8091
+```
+
+`--image-path` is a server-side file path, not the laptop local path. The demo enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are forwarded by the demo process to `--server-url`.
+
+#### Without TURN: View on Server Browser
+
+If the browser actually runs on the server side (e.g., Chrome in remote desktop, VNC, or noVNC), you can skip TURN. Do not set `TELEFUSER_TURN_*` and do not pass `--turn-url` to the demo.
+
+Server:
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+-u TELEFUSER_TURN_USERNAME \
+-u TELEFUSER_TURN_CREDENTIAL \
+LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
+LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
+LINGBOT_WORLD_CONTROL_TYPE=cam \
+LINGBOT_WORLD_MAX_AREA=99840 \
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+  -p 8088 --host 0.0.0.0 --skip-validation
+```
+
+Demo:
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+-u TELEFUSER_TURN_USERNAME \
+-u TELEFUSER_TURN_CREDENTIAL \
+python examples/stream_server/webrtc_bidirectional_demo.py \
+  --server-url http://127.0.0.1:8088 \
+  --port 8091 \
+  --image-path /tmp/lingbot_test_input.png \
+  --frame-num 81 \
+  --chunk-size 3 \
+  --fps 16 \
+  --control-lateral-step 0.25 \
+  --control-yaw-step-degrees 12 \
+  --no-open
+```
+
+Open on server browser:
+
+```text
+http://127.0.0.1:8091
+```
+
+#### Direction Control
+
+The demo supports keyboard arrow keys and a page D-pad:
+
+| Input | cam mode meaning |
+|-------|-----------------|
+| `↑` | Camera forward |
+| `↓` | Camera backward |
+| `←` | Turn left and strafe left |
+| `→` | Turn right and strafe right |
+
+Controls only affect chunks that have not yet started generating; chunks already denoising or decoding are not immediately changed. Therefore, it is recommended to hold a direction key early after connecting, rather than clicking near the end of the video.
+
+The following states in the DataChannel log indicate that direction control has been consumed by the server and applied to a generation chunk:
+
+```text
+"stage":"control_state"
+"stage":"applying_direction_control"
+```
+
+The demo enables `Control HUD` by default. The HUD overlay appears in the top-left corner of output chunks that received direction control, confirming the control pipeline is active. Once confirmed, you can uncheck the HUD on the page to observe pure model output.
+
+Common control strength parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--control-move-step` | `0.18` | Forward/backward displacement step size |
+| `--control-yaw-step-degrees` | `10.0` | Yaw angle per latent frame |
+| `--control-lateral-step` | `0.12` | Left/right lateral step size |
+| `--show-control-hud / --no-show-control-hud` | `true` | Whether to overlay direction HUD on controlled chunks |
+
+If left/right effects are subtle, increase `--control-lateral-step`, e.g., `0.25` or `0.3`.
+
+#### `cam` vs `act` Control Modes
+
+| Mode | Input | Description |
+|------|-------|-------------|
+| `cam` | `poses + intrinsics` | Camera trajectory control. The server converts arrow keys into camera poses, then builds a 6-channel camera control tensor. |
+| `act` | `poses + intrinsics + action` | Action control. Requires 7-channel action-control weights. |
+
+The current demo defaults to `cam`. If the model weights are camera-control weights, keep:
+
+```bash
+LINGBOT_WORLD_CONTROL_TYPE=cam
+--control-mode cam
+```
+
+Only switch to `act` when using action-control weights:
+
+```bash
+LINGBOT_WORLD_CONTROL_TYPE=act
+--control-mode act
+```
+
+#### VRAM and Resolution
+
+LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 frames approaches the 80 GB H100 VRAM limit. Start with a lower resolution to verify the pipeline:
+
+```bash
+LINGBOT_WORLD_MAX_AREA=99840  # approximately 416×240
+```
+
+Common tuning parameters:
+
+| Parameter | Effect |
+|-----------|--------|
+| `LINGBOT_WORLD_MAX_AREA` | Reduce output area, significantly lower VRAM usage |
+| `--frame-num` | Reduce total generated frames and latent chunk count |
+| `--chunk-size` | Affect the latent chunk size per generation step |
+
+The service currently allows only one LingBot active session. Before reconnecting, click **Stop** on the demo, or call:
+
+```bash
+curl -X DELETE http://127.0.0.1:8088/v1/stream/webrtc/<session_id>
+```
+
+If still experiencing OOM, check whether other processes are using the GPU:
+
+```bash
+nvidia-smi
+```
+
 ---
 
 ## Configuration

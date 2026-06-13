@@ -515,5 +515,5 @@ python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 
 ## 相关文档
 
-- [模型加载用户指南](./model_loading_zh.md)
-- [添加新模型开发指南](./adding_new_model_zh.md)
+- [模型加载用户指南](./model_loading.md)
+- [添加新模型开发指南](./adding_new_model.md)
