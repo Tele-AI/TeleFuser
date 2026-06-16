@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import torch
 
@@ -11,6 +10,25 @@ from telefuser.pipelines.lingbot_world_fast.pipeline import (
     LingBotWorldFastPipelineConfig,
 )
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+PPL_CONFIG = dict(
+    name="lingbot_world_fast_stream",
+    # LingBot-World-Fast reuses the Wan2.2 base weights (VAE + T5 text encoder + ``google/umt5-xxl``
+    # tokenizer), which ship in the shared Wan2.2-I2V-A14B directory. The DiT fast weights live in their
+    # own ``lingbot-world-fast`` directory, given as an absolute path so the pipeline keeps it standalone
+    # rather than nesting it under ``checkpoint_dir``.
+    checkpoint_dir=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
+    fast_checkpoint_subdir=TF_MODEL_ZOO_PATH + "/lingbot-world-fast",
+    control_type="cam",
+    vae_device="cuda",
+    vae_device_id=0,
+    text_device="cuda",
+    text_device_id=0,
+    dit_device="cuda",
+    max_area=480 * 832,
+    torch_dtype=torch.bfloat16,
+)
 
 
 class _LocalModuleManager:
@@ -38,41 +56,28 @@ class _LocalModuleManager:
 
 
 def get_service() -> LingBotWorldFastService:
-    checkpoint_dir = os.environ.get("LINGBOT_WORLD_CHECKPOINT_DIR", "")
-    if not checkpoint_dir:
-        raise RuntimeError("Set LINGBOT_WORLD_CHECKPOINT_DIR to the LingBot-World base checkpoint directory")
-
-    # Allow separating "base" weights (VAE + text encoder + tokenizer) from the DiT fast weights directory.
-    # If set to an absolute path, Path join keeps the absolute path (so it works as a standalone folder).
-    fast_subdir = os.environ.get("LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR", "lingbot_world_fast")
-
+    dtype = PPL_CONFIG["torch_dtype"]
     mm = _LocalModuleManager()
-    vae_device_type = os.environ.get("LINGBOT_WORLD_VAE_DEVICE", "cpu")
-    vae_device_id = int(os.environ.get("LINGBOT_WORLD_VAE_DEVICE_ID", "0"))
-    text_device_type = os.environ.get("LINGBOT_WORLD_TEXT_DEVICE", "cpu")
-    text_device_id = int(os.environ.get("LINGBOT_WORLD_TEXT_DEVICE_ID", "0"))
-    dit_device = os.environ.get("LINGBOT_WORLD_DIT_DEVICE", "cuda")
-    max_area = int(os.environ.get("LINGBOT_WORLD_MAX_AREA", str(480 * 832)))
 
-    pipeline = LingBotWorldFastPipeline(device=dit_device, torch_dtype=torch.bfloat16)
+    pipeline = LingBotWorldFastPipeline(device=PPL_CONFIG["dit_device"], torch_dtype=dtype)
     pipeline.init(
         mm,
         LingBotWorldFastPipelineConfig(
-            checkpoint_dir=checkpoint_dir,
-            fast_checkpoint_subdir=fast_subdir,
+            checkpoint_dir=PPL_CONFIG["checkpoint_dir"],
+            fast_checkpoint_subdir=PPL_CONFIG["fast_checkpoint_subdir"],
             vae_config=ModelRuntimeConfig(
-                device_type=vae_device_type,
-                device_id=vae_device_id,
-                torch_dtype=torch.bfloat16,
+                device_type=PPL_CONFIG["vae_device"],
+                device_id=PPL_CONFIG["vae_device_id"],
+                torch_dtype=dtype,
             ),
             text_encoding_config=ModelRuntimeConfig(
-                device_type=text_device_type,
-                device_id=text_device_id,
-                torch_dtype=torch.bfloat16,
+                device_type=PPL_CONFIG["text_device"],
+                device_id=PPL_CONFIG["text_device_id"],
+                torch_dtype=dtype,
             ),
-            dit_torch_dtype=torch.bfloat16,
-            control_type=os.environ.get("LINGBOT_WORLD_CONTROL_TYPE", "cam"),
-            max_area=max_area,
+            dit_torch_dtype=dtype,
+            control_type=PPL_CONFIG["control_type"],
+            max_area=PPL_CONFIG["max_area"],
         ),
     )
     return LingBotWorldFastService(pipeline)
