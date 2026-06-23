@@ -7,12 +7,13 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 import torch
 from PIL import Image, ImageDraw
 
 from telefuser.utils.logging import logger
+from telefuser.utils.profiler import ProfilingContext4Debug
 
 from .pipeline import LingBotWorldFastPipeline
 from .session import (
@@ -351,6 +352,15 @@ class LingBotWorldFastService:
             payload.update(data)
             self._put_output(state, payload)
 
+        with ProfilingContext4Debug("workloop"):
+            self._run_worker_loop(session_id, state, emit_status)
+
+    def _run_worker_loop(
+        self,
+        session_id: str,
+        state: LingBotWorldFastSessionState,
+        emit_status: Callable[..., None],
+    ) -> None:
         try:
             self._emit_preview_frame(state)
             emit_status("initializing_runtime")
