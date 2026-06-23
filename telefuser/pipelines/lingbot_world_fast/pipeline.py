@@ -20,6 +20,7 @@ from telefuser.models.wan_video_vae import WanVideoVAE
 from telefuser.schedulers.unipc import FlowUniPCMultistepScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import load_state_dict
+from telefuser.utils.profiler import ProfilingContext4Debug
 
 from .control import (
     build_action_control_chunk,
@@ -370,6 +371,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             )
         return control.control_tensor
 
+    @ProfilingContext4Debug("create_runtime")
     @torch.inference_mode()
     def create_runtime(
         self,
@@ -497,55 +499,59 @@ class LingBotWorldFastPipeline(BasePipeline):
             runtime.active = False
             return []
 
-        idx = runtime.current_chunk_index
-        latent_chunk = runtime.noise_chunks[idx]
-        condition_chunk = runtime.condition_chunks[idx]
-        control_chunk = control_override
-        if control_chunk is None and runtime.control_chunks is not None and idx < len(runtime.control_chunks):
-            control_chunk = runtime.control_chunks[idx]
+        with ProfilingContext4Debug("generate_next_chunk"):
+            idx = runtime.current_chunk_index
+            latent_chunk = runtime.noise_chunks[idx]
+            condition_chunk = runtime.condition_chunks[idx]
+            control_chunk = control_override
+            if control_chunk is None and runtime.control_chunks is not None and idx < len(runtime.control_chunks):
+                control_chunk = runtime.control_chunks[idx]
 
-        self._notify_progress(progress_callback, "denoising_chunk", index=idx)
-        current_start = idx * runtime.chunk_size * runtime.frame_tokens
-        denoised = self.denoise_stage.denoise_chunk(
-            latent_chunk=latent_chunk,
-            condition_chunk=condition_chunk,
-            prompt_emb=runtime.prompt_emb,
-            timesteps=runtime.timesteps,
-            scheduler=runtime.scheduler,
-            control_chunk=control_chunk,
-            self_kv_cache=runtime.self_kv_cache,
-            crossattn_cache=runtime.crossattn_cache,
-            current_start=current_start,
-            max_attention_size=runtime.max_attention_size,
-            generator=runtime.generator,
-        )
+            self._notify_progress(progress_callback, "denoising_chunk", index=idx)
+            current_start = idx * runtime.chunk_size * runtime.frame_tokens
+            with ProfilingContext4Debug("denoise_chunk"):
+                denoised = self.denoise_stage.denoise_chunk(
+                    latent_chunk=latent_chunk,
+                    condition_chunk=condition_chunk,
+                    prompt_emb=runtime.prompt_emb,
+                    timesteps=runtime.timesteps,
+                    scheduler=runtime.scheduler,
+                    control_chunk=control_chunk,
+                    self_kv_cache=runtime.self_kv_cache,
+                    crossattn_cache=runtime.crossattn_cache,
+                    current_start=current_start,
+                    max_attention_size=runtime.max_attention_size,
+                    generator=runtime.generator,
+                )
 
-        self._notify_progress(progress_callback, "updating_cache", index=idx)
-        self.dit(
-            x=denoised.to(dtype=self.torch_dtype),
-            timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
-            context=runtime.prompt_emb,
-            y=condition_chunk,
-            control_tensor=control_chunk,
-            kv_cache=runtime.self_kv_cache,
-            crossattn_cache=runtime.crossattn_cache,
-            current_start=current_start,
-            max_attention_size=runtime.max_attention_size,
-        )
+            self._notify_progress(progress_callback, "updating_cache", index=idx)
+            with ProfilingContext4Debug("kv_cache_update_forward"):
+                self.dit(
+                    x=denoised.to(dtype=self.torch_dtype),
+                    timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
+                    context=runtime.prompt_emb,
+                    y=condition_chunk,
+                    control_tensor=control_chunk,
+                    kv_cache=runtime.self_kv_cache,
+                    crossattn_cache=runtime.crossattn_cache,
+                    current_start=current_start,
+                    max_attention_size=runtime.max_attention_size,
+                )
 
-        self._notify_progress(progress_callback, "decoding_chunk", index=idx, device=str(self.vae_device))
-        frames = self.decode_video_cached(
-            denoised,
-            is_first_clip=(idx == 0),
-            is_last_clip=(idx == len(runtime.noise_chunks) - 1),
-        )
-        images = self.tensor2video(frames)
-        self._notify_progress(progress_callback, "chunk_decoded", index=idx, frames=len(images))
-        runtime.current_chunk_index += 1
-        runtime.emitted_frames += len(images)
-        if runtime.current_chunk_index >= len(runtime.noise_chunks):
-            runtime.active = False
-        return images
+            self._notify_progress(progress_callback, "decoding_chunk", index=idx, device=str(self.vae_device))
+            with ProfilingContext4Debug("vae_decode"):
+                frames = self.decode_video_cached(
+                    denoised,
+                    is_first_clip=(idx == 0),
+                    is_last_clip=(idx == len(runtime.noise_chunks) - 1),
+                )
+                images = self.tensor2video(frames)
+            self._notify_progress(progress_callback, "chunk_decoded", index=idx, frames=len(images))
+            runtime.current_chunk_index += 1
+            runtime.emitted_frames += len(images)
+            if runtime.current_chunk_index >= len(runtime.noise_chunks):
+                runtime.active = False
+            return images
 
     @staticmethod
     def encode_frames_to_b64(frames: list[Image.Image], quality: int = 85) -> list[str]:
