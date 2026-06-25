@@ -46,6 +46,8 @@ class LingBotWorldFastPipelineConfig:
     orig_height: int = 480
     orig_width: int = 832
     max_area: int = 480 * 832
+    local_attn_size: int = -1
+    sink_size: int = 0
 
 
 class LingBotWorldFastPipeline(BasePipeline):
@@ -104,12 +106,33 @@ class LingBotWorldFastPipeline(BasePipeline):
             str(fast_path),
             torch_dtype=config.dit_torch_dtype,
             control_type=config.control_type,
-            config={"patch_size": (1, 2, 2), "text_len": 512, "control_type": config.control_type},
+            config=self._build_dit_config(config),
         ).to(self.device)
         self.dit.eval().requires_grad_(False)
 
         self.denoise_stage = LingBotWorldFastDenoisingStage(self.dit, torch_dtype=self.torch_dtype)
         self.timesteps = LingBotWorldFastTimesteps()
+
+    @staticmethod
+    def _build_dit_config(config: LingBotWorldFastPipelineConfig) -> dict[str, object]:
+        return {
+            "patch_size": (1, 2, 2),
+            "text_len": 512,
+            "control_type": config.control_type,
+            "local_attn_size": int(config.local_attn_size),
+            "sink_size": int(config.sink_size),
+        }
+
+    @staticmethod
+    def _resolve_self_kv_size(
+        *,
+        frame_tokens: int,
+        latent_frames: int,
+        config: LingBotWorldFastPipelineConfig,
+    ) -> int:
+        if int(config.local_attn_size) > -1:
+            return int(frame_tokens) * int(config.local_attn_size)
+        return int(frame_tokens) * int(latent_frames)
 
     @torch.inference_mode()
     def encode_prompt(self, prompt: str) -> torch.Tensor:
@@ -417,7 +440,11 @@ class LingBotWorldFastPipeline(BasePipeline):
         frame_num = (lat_f - 1) * 4 + 1
         patch_area = self.dit.patch_size[1] * self.dit.patch_size[2]
         frame_tokens = (lat_h * lat_w) // patch_area
-        kv_size = frame_tokens * lat_f
+        kv_size = self._resolve_self_kv_size(
+            frame_tokens=frame_tokens,
+            latent_frames=lat_f,
+            config=self.config,
+        )
         max_seq_len = session_config.chunk_size * frame_tokens
         max_attention_size = (
             kv_size if session_config.max_attention_size is None else int(session_config.max_attention_size)
