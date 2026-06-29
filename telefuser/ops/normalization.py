@@ -160,9 +160,8 @@ class LayerNorm(CustomOp):
             return self.forward_native(x)
         if not self.elementwise_affine:
             return self.forward_native(x)
-
-        layer_norm_fn = _get_triton_kernel("layer_norm_fn")
-        return layer_norm_fn(x, self.weight, self.bias, eps=self.eps)
+        # Triton kernel in eager mode currently bring performance degradation
+        return self.forward_native(x)
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation for compile compatibility."""
