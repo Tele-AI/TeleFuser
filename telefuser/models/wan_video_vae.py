@@ -93,6 +93,7 @@ class CausalConv3d(nn.Conv3d):
             x = torch.cat([cache_x, x], dim=2)
             padding[4] -= cache_x.shape[2]
         x = F.pad(x, padding)
+        x = x.contiguous(memory_format=torch.channels_last_3d)
         return super().forward(x)
 
 
