@@ -42,7 +42,7 @@ class LingBotWorldFastRuntimeState:
     condition_chunks: list[torch.Tensor]
     control_chunks: list[torch.Tensor] | None
     timesteps: torch.Tensor
-    self_kv_cache: list[dict[str, torch.Tensor]]
+    self_kv_cache: list[dict[str, torch.Tensor | int]]
     crossattn_cache: list[dict[str, torch.Tensor | bool]]
     latent_h: int
     latent_w: int

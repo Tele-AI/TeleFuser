@@ -17,6 +17,12 @@ from telefuser.utils.model_weight import init_weights_on_device, load_state_dict
 from .wan_video_dit import apply_rotary_emb, precompute_freqs_cis_3d, sinusoidal_embedding_1d
 
 
+def _cache_index_to_int(value: int | torch.Tensor) -> int:
+    if isinstance(value, int):
+        return value
+    return int(value.item())
+
+
 class CausalSelfAttention(nn.Module):
     """Causal self-attention with rolling KV cache support."""
 
@@ -90,7 +96,7 @@ class CausalSelfAttention(nn.Module):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         grid_size: tuple[int, int, int],
-        kv_cache: dict[str, torch.Tensor],
+        kv_cache: dict[str, torch.Tensor | int],
         current_start: int,
         max_attention_size: int,
     ) -> torch.Tensor:
@@ -111,8 +117,8 @@ class CausalSelfAttention(nn.Module):
         cache_k = kv_cache["k"]
         cache_v = kv_cache["v"]
         kv_cache_size = cache_k.shape[1]
-        global_end = int(kv_cache["global_end_index"].item())
-        local_end = int(kv_cache["local_end_index"].item())
+        global_end = _cache_index_to_int(kv_cache["global_end_index"])
+        local_end = _cache_index_to_int(kv_cache["local_end_index"])
 
         if self.local_attn_size != -1 and current_end > global_end and num_new_tokens + local_end > kv_cache_size:
             evicted = num_new_tokens + local_end - kv_cache_size
@@ -141,8 +147,8 @@ class CausalSelfAttention(nn.Module):
         out = F.scaled_dot_product_attention(q, k_cache, v_cache, is_causal=False)
         out = out.permute(0, 2, 1, 3).contiguous()
 
-        kv_cache["global_end_index"].fill_(current_end)
-        kv_cache["local_end_index"].fill_(local_end)
+        kv_cache["global_end_index"] = current_end
+        kv_cache["local_end_index"] = local_end
 
         out = rearrange(out, "b s n d -> b s (n d)")
         return self.o(out)
@@ -241,7 +247,7 @@ class LingBotWorldFastBlock(nn.Module):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         grid_size: tuple[int, int, int],
-        kv_cache: dict[str, torch.Tensor],
+        kv_cache: dict[str, torch.Tensor | int],
         crossattn_cache: dict[str, torch.Tensor | bool],
         current_start: int,
         max_attention_size: int,
@@ -458,7 +464,7 @@ class LingBotWorldFastDiT(BaseModel):
         context: torch.Tensor,
         y: torch.Tensor | None = None,
         control_tensor: torch.Tensor | None = None,
-        kv_cache: list[dict[str, torch.Tensor]] | None = None,
+        kv_cache: list[dict[str, torch.Tensor | int]] | None = None,
         crossattn_cache: list[dict[str, torch.Tensor | bool]] | None = None,
         current_start: int = 0,
         max_attention_size: int = 1_000_000,

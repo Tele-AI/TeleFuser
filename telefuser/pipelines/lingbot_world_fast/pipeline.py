@@ -209,15 +209,15 @@ class LingBotWorldFastPipeline(BasePipeline):
         kv_size: int,
         dtype: torch.dtype,
         device: str | torch.device,
-    ) -> list[dict[str, torch.Tensor]]:
+    ) -> list[dict[str, torch.Tensor | int]]:
         head_dim = self.dit.dim // self.dit.num_heads
         shape = (batch_size, kv_size, self.dit.num_heads, head_dim)
         return [
             {
                 "k": torch.zeros(shape, dtype=dtype, device=device),
                 "v": torch.zeros(shape, dtype=dtype, device=device),
-                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "global_end_index": 0,
+                "local_end_index": 0,
             }
             for _ in range(self.dit.num_layers)
         ]

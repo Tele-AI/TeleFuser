@@ -52,7 +52,7 @@ class LingBotWorldFastDenoisingStage:
         timesteps: torch.Tensor,
         scheduler: FlowUniPCMultistepScheduler,
         control_chunk: torch.Tensor | None,
-        self_kv_cache: list[dict[str, torch.Tensor]],
+        self_kv_cache: list[dict[str, torch.Tensor | int]],
         crossattn_cache: list[dict[str, torch.Tensor | bool]],
         current_start: int,
         max_attention_size: int,
