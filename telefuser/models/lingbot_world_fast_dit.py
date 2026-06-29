@@ -434,6 +434,7 @@ class LingBotWorldFastDiT(BaseModel):
         return control_tokens + hidden
 
     def patchify(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
+        x = x.contiguous(memory_format=torch.channels_last_3d)
         x = self.patch_embedding(x)
         grid_size = x.shape[2:]
         return rearrange(x, "b c f h w -> b (f h w) c").contiguous(), grid_size
