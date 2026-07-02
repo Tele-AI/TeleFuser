@@ -8,8 +8,17 @@ from __future__ import annotations
 
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.parallel._utils import _validate_tp_mesh_dim
 from torch.distributed.tensor.parallel.style import ParallelStyle
+
+
+def _validate_tp_mesh_dim(device_mesh: DeviceMesh) -> None:
+    """Validate that tensor parallelism uses a one-dimensional device mesh."""
+    ndim = getattr(device_mesh, "ndim", None)
+    if ndim is None:
+        mesh = getattr(device_mesh, "mesh", None)
+        ndim = getattr(mesh, "ndim", None)
+    if ndim is not None and ndim != 1:
+        raise ValueError(f"Tensor parallelism expects a 1-D DeviceMesh, got {ndim}-D.")
 
 
 def parallelize_module(

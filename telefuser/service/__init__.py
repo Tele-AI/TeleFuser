@@ -14,12 +14,10 @@ Client code has been moved to telefuser.client (see P3.2).
 
 from __future__ import annotations
 
+from telefuser.service.api.schema import StopTaskResponse, TaskRequest, TaskResponse
+from telefuser.service.core.config import SecurityLevel, ServerConfig, server_config
+from telefuser.service.core.task_manager import TaskManager, TaskStatus
 from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskType
-
-# Re-export commonly used classes for convenience
-from .api.schema import StopTaskResponse, TaskRequest, TaskResponse
-from .core.config import SecurityLevel, ServerConfig, server_config
-from .core.task_manager import TaskManager, TaskStatus
 
 __all__ = [
     # API models

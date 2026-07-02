@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
+try:
+    import ray
+except ImportError:
+    ray = None
+
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
@@ -193,10 +198,8 @@ class EnhancedPipelineStageWrapper:
                     out = None
                     if use_ray:
                         # Ray actor/remote function: call .remote and ray.get the ObjectRef.
-                        try:
-                            import ray  # local import to keep dependency optional
-                        except Exception as e:
-                            raise RuntimeError("use_ray=True but ray is not available") from e
+                        if ray is None:
+                            raise RuntimeError("use_ray=True but ray is not available")
                         if not hasattr(call_fn, "remote"):
                             raise RuntimeError("use_ray=True but call target has no .remote")
                         out = call_fn.remote(*args, **kwargs)

@@ -9,8 +9,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import ray
 import torch
+
+try:
+    import ray
+except ImportError:
+    ray = None
 
 from telefuser.core.base_stage import BaseStage
 from telefuser.core.config import RayConfig
@@ -19,7 +23,6 @@ from telefuser.utils.logging import logger
 from telefuser.worker.parallel_worker import ParallelWorker
 
 
-@ray.remote
 class RayWorker:
     """Ray actor for distributed stage execution.
 
@@ -81,7 +84,7 @@ class RayWorker:
             del self._worker
 
 
-def create_ray_worker(stage: BaseStage, enable_parallel: bool = False) -> ray.actor.ActorHandle:
+def create_ray_worker(stage: BaseStage, enable_parallel: bool = False) -> Any:
     """Create a Ray worker actor for the given stage.
 
     Args:
@@ -91,6 +94,8 @@ def create_ray_worker(stage: BaseStage, enable_parallel: bool = False) -> ray.ac
     Returns:
         Ray actor handle
     """
+    if ray is None:
+        raise ImportError("Ray workers require installing the optional 'ray' dependency.")
     ray_config: RayConfig = stage.model_runtime_config.ray_config
     ray.init(ignore_reinit_error=True, address=ray_config.ray_address)
     resources = {
@@ -99,4 +104,4 @@ def create_ray_worker(stage: BaseStage, enable_parallel: bool = False) -> ray.ac
         "num_gpus": ray_config.gpu_config.num_gpus,
     }
     logger.info(f"init ray actor {stage.name} with {resources}")
-    return RayWorker.options(**resources).remote(stage, enable_parallel=enable_parallel)
+    return ray.remote(RayWorker).options(**resources).remote(stage, enable_parallel=enable_parallel)

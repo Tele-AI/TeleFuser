@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import importlib
+import importlib.util
 import io
 import random
 import signal
@@ -22,8 +23,6 @@ from telefuser.utils.logging import logger
 
 def import_function_from_file(file_path: str, function_name: str) -> Callable[..., Any]:
     """Import a specific function from a Python file at the specified path."""
-    import importlib.util
-
     module_name = file_path.split("/")[-1].split(".")[0]
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     module = importlib.util.module_from_spec(spec)

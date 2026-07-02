@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
 import uvicorn
 
-from telefuser.core.config import TELEFUSER_LOGO
+from telefuser._logo import TELEFUSER_LOGO
 from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
@@ -36,8 +37,6 @@ def _run(
         logger.error(f"{label.capitalize()} failed: {e}")
         sys.exit(1)
     finally:
-        import asyncio
-
         try:
             asyncio.run(container.cleanup())
         except Exception as e:

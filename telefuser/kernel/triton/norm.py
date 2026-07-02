@@ -13,7 +13,13 @@ import triton.language as tl
 def triton_autotune_configs():
     """Return autotune_configs with valid warp count for current device."""
     max_threads_per_block = 1024
-    warp_size = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+    warp_size = 32
+    if torch.cuda.is_available():
+        try:
+            warp_size = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+        except RuntimeError:
+            # Importing this module must not require an initialized CUDA driver.
+            warp_size = 32
     return [
         triton.Config({}, num_warps=warp_count)
         for warp_count in [1, 2, 4, 8, 16, 32]

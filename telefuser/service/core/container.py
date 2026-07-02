@@ -15,8 +15,11 @@ from fastapi import FastAPI
 from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
+from ..api.api_server import ApiServer
+from ..cache.cache_factory import CacheServiceFactory
 from .config import ServerConfig, server_config
 from .file_service import FileService
+from .pipeline_pool import PipelinePool
 from .pipeline_service import PipelineService
 from .stream_pipeline_service import StreamPipelineService
 from .task_manager import TaskManager
@@ -120,9 +123,6 @@ class ServiceContainer:
         if not getattr(self.config, "enable_latent_cache", False):
             return None
 
-        # Lazy import to avoid pulling cache_mem deps when disabled.
-        from ..cache.cache_factory import CacheServiceFactory
-
         try:
             self.cache_service = CacheServiceFactory.create_cache_service(
                 ppl_file=pipe_path,
@@ -151,8 +151,6 @@ class ServiceContainer:
         if self.config.num_replicas > 1:
             replica_device_ids = self.config.resolve_replica_device_ids(parallelism)
             parallelism_per_replica = len(replica_device_ids[0])
-
-            from .pipeline_pool import PipelinePool
 
             pool = PipelinePool(
                 num_replicas=self.config.num_replicas,
@@ -200,8 +198,6 @@ class ServiceContainer:
 
     def get_api_app(self, enable_rate_limit: bool = True) -> FastAPI:
         """Get FastAPI application with all services initialized."""
-        from ..api.api_server import ApiServer
-
         api_server = ApiServer(
             max_queue_size=self.config.max_queue_size,
             max_concurrent_tasks=self.config.effective_max_concurrent_tasks,

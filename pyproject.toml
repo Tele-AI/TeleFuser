@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "A framework for efficient model inference with multimodal generation models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 authors = [
     {name = "TeleAI Team"}
 ]
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -28,26 +27,44 @@ classifiers = [
 
 
 dependencies = [
-    # Core runtime dependencies (required for actual usage)
+    # Default install follows vLLM-style inference readiness: service runtime
+    # plus the core PyTorch/model/distributed stack needed by standard pipelines.
+    "aiortc>=1.9.0",
+    "click",
     "diffusers>=0.36.0",
-    "gradio==5.50",
-    "tqdm>=4.66.0",
-    "imageio[ffmpeg]>=2.37.2",
-    "transformers==4.57.3",
-    "safetensors",
     "einops",
-    "loguru",
-    "openai",
-    "fastapi",
-    "click", 
+    "fastapi[standard]>=0.115,<1.0",
     "ftfy",
-    "ray",
+    "httpx",
+    "imageio[ffmpeg]>=2.37.2",
+    "loguru",
+    "numpy",
+    "opencv-python-headless>=4.0",
+    "pillow",
+    "psutil>=7.2.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "torchvision",
+    "requests",
+    "safetensors",
+    "scipy",
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "torchvision>=0.21.0",
+    "tqdm>=4.66.0",
+    "transformers==4.57.3",
+    "triton",
+    "uvicorn>=0.30,<1.0",
 ]
 
 [project.optional-dependencies]
+
+ui = [
+    "gradio==5.50",
+]
+
+distributed = [
+    "ray",
+]
 
 # Latent cache subsystem (telefuser.cache_mem).
 # Required only when the service is started with enable_latent_cache=true
@@ -55,19 +72,22 @@ dependencies = [
 # without this extra leaves the cache layer disabled and adds zero overhead.
 cache = [
     "faiss-cpu",
-    "scipy",
     "qwen_vl_utils",
     "sentencepiece",
     "protobuf",
 ]
 
 dev = [
+    "faiss-cpu",
+    "gradio==5.50",
+    "protobuf",
+    "qwen_vl_utils",
+    "ray",
+    "sentencepiece",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pre-commit==4.0.1",
-    "psutil>=7.2.0",
-    "Pillow>=9.0.0",
     "scikit-image>=0.19.0",
     "uv"
 ]
@@ -88,15 +108,21 @@ docs = [
     "ruff==0.9.4",
 ]
 
-webrtc = [
-    "aiortc>=1.9.0",
-    "opencv-python-headless>=4.0",
+all = [
+    "faiss-cpu",
+    "gradio==5.50",
+    "protobuf",
+    "qwen_vl_utils",
+    "ray",
+    "sentencepiece",
 ]
 
 
 [project.urls]
-Homepage = "https://www.srdcloud.cn/code/49596/repoView/372413/codeFile/tree"
-Repository = "https://www.srdcloud.cn/code/49596/repoView/372413/codeFile/tree"
+Homepage = "https://github.com/Tele-AI/TeleFuser"
+Repository = "https://github.com/Tele-AI/TeleFuser"
+Documentation = "https://tele-ai.github.io/TeleFuser"
+Issues = "https://github.com/Tele-AI/TeleFuser/issues"
 
 [project.scripts]
 telefuser = "telefuser.entrypoints.cli.main:main"

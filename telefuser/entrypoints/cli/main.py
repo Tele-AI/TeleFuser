@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import click
 
-from telefuser.core.config import TELEFUSER_LOGO
-from telefuser.service.security.security_validator import SecurityLevel, validate_with_report
+from telefuser._logo import TELEFUSER_LOGO
+from telefuser.service.main import run_server, run_stream_server
+from telefuser.service.security.security_validator import (
+    PipelineSecurityValidator,
+    SecurityError,
+    SecurityLevel,
+    validate_with_report,
+)
 from telefuser.service_types import TaskType
 
 
@@ -73,11 +82,6 @@ def serve(
     validate_only: bool,
 ) -> None:
     """Start the TeleFuser API server."""
-    from pathlib import Path
-
-    from telefuser.service.main import run_server
-    from telefuser.service.security.security_validator import PipelineSecurityValidator, SecurityError
-
     # Validate pipeline file before starting server
     if not skip_validation and not validate_only:
         level = SecurityLevel[security_level.upper()]
@@ -99,7 +103,6 @@ def serve(
         click.echo(report)
         return
 
-    # Start server
     run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism, num_replicas=num_replicas)
 
 
@@ -137,9 +140,6 @@ def stream_serve(
         telefuser stream-serve examples/stream_video_replay.py
         telefuser stream-serve examples/stream_video_replay.py -p 8000 --host 0.0.0.0
     """
-    from telefuser.service.main import run_stream_server
-    from telefuser.service.security.security_validator import PipelineSecurityValidator, SecurityError
-
     if not skip_validation:
         level = SecurityLevel[security_level.upper()]
         validator = PipelineSecurityValidator(security_level=level)
@@ -174,15 +174,11 @@ def validate_pipeline(
     output_json: bool,
 ) -> None:
     """Validate a pipeline configuration file for security issues."""
-    from telefuser.service.security.security_validator import PipelineSecurityValidator, SecurityLevel
-
     security_level = SecurityLevel[level.upper()]
     validator = PipelineSecurityValidator(security_level=security_level)
     result = validator.validate_file(pipeline_file)
 
     if output_json:
-        import json
-
         output = {
             "file": pipeline_file,
             "is_safe": result.is_safe,
@@ -191,8 +187,6 @@ def validate_pipeline(
         }
         click.echo(json.dumps(output, indent=2))
     else:
-        from telefuser.service.security.security_validator import validate_with_report
-
         report = validate_with_report(pipeline_file)
         click.echo(report)
 
@@ -220,10 +214,6 @@ def scan_pipelines(
     recursive: bool,
 ) -> None:
     """Scan a directory for pipeline files and validate them."""
-    from pathlib import Path
-
-    from telefuser.service.security.security_validator import PipelineSecurityValidator, SecurityLevel
-
     security_level = SecurityLevel[level.upper()]
     validator = PipelineSecurityValidator(security_level=security_level)
 
