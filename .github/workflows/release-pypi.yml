@@ -1,6 +1,8 @@
-name: Publish to TestPyPI
+name: Publish to PyPI
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -42,13 +44,13 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish to TestPyPI
+  publish-pypi:
+    name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
-      name: testpypi
+      name: pypi
     permissions:
       contents: read
       id-token: write
@@ -60,7 +62,5 @@ jobs:
           name: python-distributions
           path: dist
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
