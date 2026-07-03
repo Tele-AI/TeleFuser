@@ -1,0 +1,12 @@
+mkdocs>=1.5.0
+mkdocs-api-autonav
+mkdocs-material
+mkdocstrings-python
+mkdocs-gen-files
+mkdocs-awesome-nav
+mkdocs-glightbox
+mkdocs-git-revision-date-localized-plugin
+mkdocs-minify-plugin
+mkdocs-static-i18n
+regex
+ruff==0.9.4

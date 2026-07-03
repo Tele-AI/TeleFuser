@@ -6,6 +6,7 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "docs/requirements.txt"
   # Allow manual trigger
   workflow_dispatch:
 
@@ -39,13 +40,16 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install ".[docs]"
+          pip install -r docs/requirements.txt
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
 
       - name: Build MkDocs site
         run: mkdocs build
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
 
@@ -59,4 +63,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
