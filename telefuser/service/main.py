@@ -8,6 +8,7 @@ import uvicorn
 from telefuser.core.config import TELEFUSER_LOGO
 from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
+from telefuser.webrtc_ice import configure_ice_host_addresses
 
 from .core.config import server_config
 from .core.container import ServiceContainer
@@ -88,6 +89,7 @@ def run_stream_server(
     Unlike run_server (request-response), this loads a stream pipeline
     that exposes get_service() and serves via WebRTC or WebSocket.
     """
+    configure_ice_host_addresses()
     server_config.host = host
     server_config.port = port
 

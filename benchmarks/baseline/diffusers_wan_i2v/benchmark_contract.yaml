@@ -1,0 +1,40 @@
+contract_version: v1
+name: diffusers_wan_i2v
+mode: batch_video
+implementation: diffusers
+model_family: wan_video
+model: Wan2.1-I2V-14B-480P-Diffusers
+supported_tasks:
+  - i2v
+transport: http
+endpoint:
+  path: /v1/videos
+  protocol: openai_video_generation
+request_encoding:
+  content_type: multipart/form-data
+  media_inputs:
+    first_image_path: input_reference
+  parameters:
+    prompt: prompt
+    negative_prompt: negative_prompt
+    seed: seed
+    size: size
+    seconds: seconds
+result_delivery:
+  polling_path: /v1/videos/{id}
+  content_path: /v1/videos/{id}/content
+workload:
+  resolution: 832x480
+  frames: 81
+  inference_steps: 40
+  fps: 16
+  guidance_scale: 5.0
+metrics:
+  - request_latency
+  - completion_latency
+  - download_latency
+  - request_throughput
+  - success_rate
+artifacts:
+  config: benchmarks/baseline/diffusers_wan_i2v/configs/video_generation_compare.yaml
+  dataset: benchmarks/telefuser_aiperf/data/video_prompts.jsonl

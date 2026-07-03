@@ -9,16 +9,20 @@ from __future__ import annotations
 
 # Cross-file registration: LTX 2.3 shared checkpoint contains 3 models
 # that live in separate files with circular import dependencies, so it
-# cannot be registered inside any one of them.
-from telefuser.core.model_registry import register_model_config
-from telefuser.models.ltx_dit import LTXVideoTransformer
-from telefuser.models.ltx_gemma_text_encoder import LTXEmbeddingsProcessor
-from telefuser.models.ltx_video_vae import LTXVideoVAE
-
-register_model_config(
-    None,
-    "f3a83ecf3995dcc4fae2d27e08ad5767",
-    ["ltx_embeddings_processor", "ltx_video_vae", "ltx_dit"],
-    [LTXEmbeddingsProcessor, LTXVideoVAE, LTXVideoTransformer],
-    "official",
-)
+# cannot be registered inside any one of them. Keep this optional so
+# stream-serving pipelines do not fail to import when LTX extras are absent.
+try:
+    from telefuser.core.model_registry import register_model_config
+    from telefuser.models.ltx_dit import LTXVideoTransformer
+    from telefuser.models.ltx_gemma_text_encoder import LTXEmbeddingsProcessor
+    from telefuser.models.ltx_video_vae import LTXVideoVAE
+except Exception:
+    pass
+else:
+    register_model_config(
+        None,
+        "f3a83ecf3995dcc4fae2d27e08ad5767",
+        ["ltx_embeddings_processor", "ltx_video_vae", "ltx_dit"],
+        [LTXEmbeddingsProcessor, LTXVideoVAE, LTXVideoTransformer],
+        "official",
+    )

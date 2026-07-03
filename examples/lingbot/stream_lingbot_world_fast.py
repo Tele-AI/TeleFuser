@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import torch
 
@@ -11,15 +12,15 @@ from telefuser.pipelines.lingbot_world_fast.pipeline import (
 )
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 
-TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+TF_MODEL_ZOO_PATH = Path(os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")).expanduser().resolve()
 PPL_CONFIG = dict(
     name="lingbot_world_fast_stream",
     # LingBot-World-Fast reuses the Wan2.2 base weights (VAE + T5 text encoder + ``google/umt5-xxl``
     # tokenizer), which ship in the shared Wan2.2-I2V-A14B directory. The DiT fast weights live in their
-    # own ``lingbot-world-fast`` directory, given as an absolute path so the pipeline keeps it standalone
+    # own ``lingbot-world-fast`` directory, passed as an absolute path so the pipeline keeps it standalone
     # rather than nesting it under ``checkpoint_dir``.
-    checkpoint_dir=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
-    fast_checkpoint_subdir=TF_MODEL_ZOO_PATH + "/lingbot-world-fast",
+    checkpoint_dir=str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B"),
+    fast_checkpoint_subdir=str(TF_MODEL_ZOO_PATH / "lingbot-world-fast"),
     control_type="cam",
     vae_device="cuda",
     vae_device_id=0,

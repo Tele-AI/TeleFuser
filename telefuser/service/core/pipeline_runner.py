@@ -47,6 +47,32 @@ def _coerce_output_path(value: Any) -> str | None:
     return str(value)
 
 
+def _first_image_path(task_data: dict[str, Any]) -> Any | None:
+    return task_data.get("first_image_path") or task_data.get("image_path")
+
+
+def _load_rgb_image(path: Any) -> Any:
+    from PIL import Image
+
+    return Image.open(path).convert("RGB")
+
+
+def _inject_media_aliases(kwargs: dict[str, Any], task_data: dict[str, Any]) -> None:
+    first_path = _first_image_path(task_data)
+    if first_path:
+        if "image" not in kwargs:
+            kwargs["image"] = _load_rgb_image(first_path)
+        kwargs.setdefault("image_path", first_path)
+
+    last_path = task_data.get("last_image_path")
+    if last_path:
+        kwargs.setdefault("last_image_path", last_path)
+
+    ref_video_path = task_data.get("ref_video_path")
+    if ref_video_path:
+        kwargs.setdefault("video_path", ref_video_path)
+
+
 def _select_kwargs(
     fn: Any,
     *,
@@ -58,17 +84,22 @@ def _select_kwargs(
     Prefer passing full task_data when **kwargs is supported; otherwise pass a compatible subset and
     apply a small set of common alias conversions for orchestrator-based scripts.
     """
+    kwargs: dict[str, Any] = {}
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
-        return dict(task_data)
+        sig = None
 
-    params = list(sig.parameters.values())
-    accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-    if accepts_var_kw:
-        return dict(task_data)
+    if sig is None:
+        kwargs.update(task_data)
+        params = []
+        accepts_var_kw = True
+    else:
+        params = list(sig.parameters.values())
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        if accepts_var_kw:
+            kwargs.update(task_data)
 
-    kwargs: dict[str, Any] = {}
     for p in params:
         if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL):
             continue
@@ -85,16 +116,17 @@ def _select_kwargs(
             continue
 
         if name in ("image", "input_image"):
-            first_path = task_data.get("first_image_path") or task_data.get("image_path")
+            first_path = _first_image_path(task_data)
             if first_path:
-                from PIL import Image
-
-                kwargs[name] = Image.open(first_path).convert("RGB")
+                kwargs[name] = _load_rgb_image(first_path)
             continue
 
         if name == "ppl_config" and module is not None and hasattr(module, "PPL_CONFIG"):
             kwargs[name] = getattr(module, "PPL_CONFIG")
             continue
+
+    if accepts_var_kw:
+        _inject_media_aliases(kwargs, task_data)
 
     return kwargs
 

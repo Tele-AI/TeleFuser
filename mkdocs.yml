@@ -122,12 +122,14 @@ plugins:
           nav_translations:
             Home: 首页
             User Guides: 用户指南
+            Benchmarks: 基准测试
             Parallel Inference: 并行推理
             Developer Guides: 开发者指南
             Configuration: 配置
             Tools: 工具
             Service: 服务指南
             Stream Server: 流式服务
+            TeleFuser and AIPerf Benchmark: TeleFuser 与 AIPerf Benchmark
             Service Metadata: 服务元数据
             Adding New Example: 新增示例
             Model Loading: 模型加载
@@ -163,6 +165,8 @@ nav:
       - adding_new_example.md
       - model_loading.md
       - offload.md
+  - Benchmarks:
+      - TeleFuser and AIPerf Benchmark: benchmark_aiperf.md
   - Configuration:
       - configuration.md
   - Parallel Inference:

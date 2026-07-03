@@ -39,6 +39,12 @@ dependencies = [
     "loguru",
     "openai",
     "fastapi",
+    # ASGI server runtime used to actually host the FastAPI app for
+    # `telefuser serve` / `stream-serve` in telefuser/service/main.py.
+    "uvicorn[standard]>=0.34.0,<1",
+    # Multipart/form-data parser required for FastAPI file upload and HTML form
+    # endpoints in service/api/routers/tasks.py and service/api/openai/*.py.
+    "python-multipart>=0.0.20",
     "click", 
     "ftfy",
     "ray",

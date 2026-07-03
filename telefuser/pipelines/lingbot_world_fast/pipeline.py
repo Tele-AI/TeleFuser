@@ -98,7 +98,11 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae.load_state_dict(vae_state_dict, strict=False)
         self.vae = self.vae.to(device=self.vae_device, dtype=self.torch_dtype).eval()
 
-        fast_path = checkpoint_root / config.fast_checkpoint_subdir
+        fast_path = Path(config.fast_checkpoint_subdir).expanduser()
+        if not fast_path.is_absolute():
+            fast_path = (checkpoint_root / fast_path).resolve()
+        else:
+            fast_path = fast_path.resolve()
         self.dit = LingBotWorldFastDiT.from_pretrained(
             str(fast_path),
             torch_dtype=config.dit_torch_dtype,

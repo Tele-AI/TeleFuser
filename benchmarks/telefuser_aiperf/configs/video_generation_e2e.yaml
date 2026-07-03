@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../../aiperf/src/aiperf/config/schema/aiperf-config.schema.json
+
+schemaVersion: "2.0"
+
+randomSeed: 42
+
+benchmark:
+  model: telefuser-video
+
+  endpoint:
+    url: ${TELEFUSER_AIPERF_URL:http://127.0.0.1:8000}
+    type: video_generation
+    timeout: 3600.0
+    downloadVideoContent: false
+    extra:
+      size: ${TELEFUSER_AIPERF_SIZE:1280x720}
+      seconds: ${TELEFUSER_AIPERF_SECONDS:4}
+      seed: ${TELEFUSER_AIPERF_SEED:1024}
+
+  tokenizer:
+    name: builtin
+
+  dataset:
+    type: file
+    path: ./benchmarks/telefuser_aiperf/data/video_prompts.jsonl
+    format: single_turn
+    sampling: sequential
+
+  warmup:
+    type: concurrency
+    concurrency: 1
+    requests: 1
+    excludeFromResults: true
+
+  profiling:
+    type: concurrency
+    concurrency: ${TELEFUSER_AIPERF_CONCURRENCY:2}
+    requests: ${TELEFUSER_AIPERF_REQUESTS:6}
+    duration: ${TELEFUSER_AIPERF_DURATION:7200}
+    gracePeriod: ${TELEFUSER_AIPERF_GRACE_PERIOD:900}
+
+  artifacts:
+    dir: ./artifacts/telefuser_aiperf/video_e2e
+    summary: [json]
+    records: [jsonl]
+    showTraceTiming: true
+    trace: true
+
+  serverMetrics:
+    enabled: ${TELEFUSER_AIPERF_SERVER_METRICS:true}
+    urls:
+      - ${TELEFUSER_AIPERF_METRICS_URL:http://127.0.0.1:8000/metrics}
+    formats: [json, csv]
