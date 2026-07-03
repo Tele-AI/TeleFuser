@@ -1,15 +1,53 @@
+<section class="tf-hero" markdown>
+
 # TeleFuser
 
-一个**高性能运行时**，用于世界模型推理和多模态生成。
+一个面向世界模型推理和多模态生成的**高性能运行时**，覆盖长时运行流水线、分布式执行和生产服务接口。
 
-## 特性
+<div class="tf-badge-row" markdown>
+<span class="tf-badge">PyTorch 2.6+</span>
+<span class="tf-badge">CUDA 12.8+</span>
+<span class="tf-badge">Triton kernels</span>
+<span class="tf-badge">FastAPI service</span>
+<span class="tf-badge">Ray distributed</span>
+</div>
 
-- 🌍 **世界模型运行时** — 连续执行、有状态会话、双向控制循环
-- 🚀 **高性能** — 优化的 Triton 内核、特征缓存和多 GPU 推理
-- 🎨 **多模态生成** — 图像/视频生成、超分辨率、语音转视频
-- 📡 **流式传输** — WebRTC 媒体轨道 + DataChannel 实时推理
-- 🔧 **灵活配置** — 注意力实现、并行策略、量化、卸载
-- 📦 **可扩展** — 轻松添加新模型、阶段和流水线
+</section>
+
+## 运行时能力
+
+<div class="feature-grid" markdown>
+<div class="feature-card" markdown>
+**世界模型运行时**
+
+连续执行、有状态会话和双向控制循环。
+</div>
+<div class="feature-card" markdown>
+**并行推理**
+
+Ulysses、Ring Attention、张量并行、流水线并行和 FSDP。
+</div>
+<div class="feature-card" markdown>
+**优化算子**
+
+编译感知 ops，支持 eager CUDA Triton 内核和 PyTorch 原生回退。
+</div>
+<div class="feature-card" markdown>
+**流式服务**
+
+FastAPI 批量服务，以及 WebRTC 媒体轨道和 DataChannel 控制。
+</div>
+<div class="feature-card" markdown>
+**特征缓存**
+
+AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
+</div>
+<div class="feature-card" markdown>
+**可扩展流水线**
+
+可复用阶段、模型配置、调度器和流水线编排。
+</div>
+</div>
 
 ## 支持的模型
 
@@ -23,7 +61,7 @@
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| WanVideo (Wan2.1/2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
+| WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
 | HunyuanVideo | T2V, I2V | 视频生成 |
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
 | FlashVSR | VSR | 视频超分辨率 |
@@ -53,12 +91,14 @@ telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088
 
 ## 文档分区
 
-- **[服务指南](service.md)** — 批量服务、任务 API 和 SDK
-- **[流式服务](stream_server.md)** — WebRTC 流式传输和双向控制
-- **[配置](configuration.md)** — 运行时和模型配置
-- **[并行推理](parallel.md)** — 分布式处理策略
-- **[新增模型](adding_new_model.md)** — 集成新模型
-- **[性能分析](profiler.md)** — 性能分析工具
+<div class="tf-link-grid">
+<a href="service/"><strong>服务指南</strong><span>批量服务、任务 API 和 SDK。</span></a>
+<a href="stream_server/"><strong>流式服务</strong><span>WebRTC 流式传输和双向控制。</span></a>
+<a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
+<a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>
+<a href="adding_new_model/"><strong>新增模型</strong><span>集成新的模型架构和阶段。</span></a>
+<a href="profiler/"><strong>性能分析</strong><span>性能分析工具。</span></a>
+</div>
 
 ---
 

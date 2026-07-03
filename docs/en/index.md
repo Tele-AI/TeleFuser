@@ -1,15 +1,54 @@
+<section class="tf-hero" markdown>
+
 # TeleFuser
 
-A **high-performance runtime** for world model inference and multimodal generation.
+A **high-performance runtime** for world model inference and multimodal generation, built for long-running
+pipelines, distributed execution, and production service interfaces.
 
-## Features
+<div class="tf-badge-row" markdown>
+<span class="tf-badge">PyTorch 2.6+</span>
+<span class="tf-badge">CUDA 12.8+</span>
+<span class="tf-badge">Triton kernels</span>
+<span class="tf-badge">FastAPI service</span>
+<span class="tf-badge">Ray distributed</span>
+</div>
 
-- 🌍 **World Model Runtime** — Continuous execution, stateful sessions, bidirectional control loops
-- 🚀 **High Performance** — Optimized Triton kernels, feature caching, and multi-GPU inference
-- 🎨 **Multimodal Generation** — Image/video generation, super-resolution, speech-to-video
-- 📡 **Streaming Transport** — WebRTC with media tracks plus DataChannel for real-time inference
-- 🔧 **Flexible Configuration** — Attention implementations, parallel strategies, quantization, offloading
-- 📦 **Extensible** — Easy to add new models, stages, and pipelines
+</section>
+
+## Runtime Capabilities
+
+<div class="feature-grid" markdown>
+<div class="feature-card" markdown>
+**World Model Runtime**
+
+Continuous execution, stateful sessions, and bidirectional control loops.
+</div>
+<div class="feature-card" markdown>
+**Parallel Inference**
+
+Ulysses, Ring Attention, tensor parallelism, pipeline parallelism, and FSDP.
+</div>
+<div class="feature-card" markdown>
+**Optimized Operators**
+
+Compile-aware ops with eager CUDA Triton kernels and PyTorch native fallbacks.
+</div>
+<div class="feature-card" markdown>
+**Streaming Service**
+
+FastAPI batch serving plus WebRTC media tracks and DataChannel control.
+</div>
+<div class="feature-card" markdown>
+**Feature Cache**
+
+AdaTaylorCache and runtime cache controls for repeated generation workloads.
+</div>
+<div class="feature-card" markdown>
+**Extensible Pipelines**
+
+Reusable stages, model configs, schedulers, and pipeline orchestration.
+</div>
+</div>
 
 ## Supported Models
 
@@ -23,7 +62,7 @@ A **high-performance runtime** for world model inference and multimodal generati
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| WanVideo (Wan2.1/2.2) | T2V, I2V, FL2V | Video generation and editing |
+| WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
 | HunyuanVideo | T2V, I2V | Video generation |
 | LTX Video | I2V + Audio | Video generation with audio |
 | FlashVSR | VSR | Video super-resolution |
@@ -53,12 +92,14 @@ telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088
 
 ## Documentation Sections
 
-- **[Service Guide](service.md)** — Batch serving, task APIs, and SDK
-- **[Stream Server](stream_server.md)** — WebRTC streaming and bidirectional control
-- **[Configuration](configuration.md)** — Runtime and model configuration
-- **[Parallel Inference](parallel.md)** — Distributed processing strategies
-- **[Adding New Model](adding_new_model.md)** — Integrate new models
-- **[Profiler](profiler.md)** — Performance analysis tools
+<div class="tf-link-grid">
+<a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
+<a href="stream_server/"><strong>Stream Server</strong><span>WebRTC streaming and bidirectional control.</span></a>
+<a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
+<a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
+<a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
+<a href="profiler/"><strong>Profiler</strong><span>Performance analysis tools.</span></a>
+</div>
 
 ---
 
