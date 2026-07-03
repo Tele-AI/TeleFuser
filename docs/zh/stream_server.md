@@ -7,8 +7,10 @@
 ## 快速开始
 
 ```bash
-# 1. 安装 WebRTC 支持
-pip install -e ".[webrtc]"
+# 1. 安装
+pip install -e .
+
+# 默认安装已包含 WebRTC 支持。
 
 # 2. 启动流式服务器
 telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088 --skip-validation
@@ -536,7 +538,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://l
 
 ### LingBot-World-Fast 流式生成
 
-`examples/stream_server/stream_lingbot_world_fast.py` 提供 LingBot-World-Fast 的双向流式服务。该服务使用 WebRTC RTP 输出生成视频，通过 DataChannel 接收 prompt 和方向控制消息。当前 demo 页面不采集浏览器摄像头和麦克风；LingBot 当前仅输出视频，没有音频输出。
+`examples/lingbot/stream_lingbot_world_fast.py` 提供 LingBot-World-Fast 的双向流式服务。该服务使用 WebRTC RTP 输出生成视频，通过 DataChannel 接收 prompt 和方向控制消息。当前 demo 页面不采集浏览器摄像头和麦克风；LingBot 当前仅输出视频，没有音频输出。
 
 #### 模型文件
 
@@ -559,7 +561,7 @@ LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
 LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
 LINGBOT_WORLD_CONTROL_TYPE=cam \
 LINGBOT_WORLD_MAX_AREA=99840 \
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
@@ -619,7 +621,7 @@ LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
 LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
 LINGBOT_WORLD_CONTROL_TYPE=cam \
 LINGBOT_WORLD_MAX_AREA=99840 \
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
 

@@ -7,8 +7,10 @@ This guide covers TeleFuser's real-time stream server, which delivers continuous
 ## Quick Start
 
 ```bash
-# 1. Install with WebRTC support
-pip install -e ".[webrtc]"
+# 1. Install
+pip install -e .
+
+# WebRTC support is included in the default install.
 
 # 2. Start the stream server
 telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088 --skip-validation
@@ -536,7 +538,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://l
 
 ### LingBot-World-Fast Streaming
 
-`examples/stream_server/stream_lingbot_world_fast.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
+`examples/lingbot/stream_lingbot_world_fast.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
 
 #### Model Files
 
@@ -559,7 +561,7 @@ LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
 LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
 LINGBOT_WORLD_CONTROL_TYPE=cam \
 LINGBOT_WORLD_MAX_AREA=99840 \
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
@@ -619,7 +621,7 @@ LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
 LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
 LINGBOT_WORLD_CONTROL_TYPE=cam \
 LINGBOT_WORLD_MAX_AREA=99840 \
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
 

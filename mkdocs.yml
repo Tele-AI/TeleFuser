@@ -144,7 +144,6 @@ plugins:
             Metrics: 监控指标
             Logging: 日志
             Ops: 操作算子
-            ADF Scoring Guide: ADF评分指南
   - git-revision-date-localized:
       enable_creation_date: true
       type: datetime
@@ -175,7 +174,6 @@ nav:
       - adding_new_stage.md
       - hash_config_management.md
       - torch_compile_compatibility.md
-      - adf_scoring_guide.md
   - Tools:
       - profiler.md
       - metrics.md

@@ -194,6 +194,7 @@ Located in `telefuser/kernel/triton/`:
 
 - Start responses with "**Developer,**" prefix
 - DO NOT use `sys.path.insert()` in test files
+- When creating commits, use a conventional-commit summary and a detailed body. The body should list the main changes and the verification commands or checks that were run. Do not use a one-line commit message for non-trivial changes.
 - Keep this file synchronized with codebase changes
 - See `CONTRIBUTING.md` for contribution guidelines
 - Update CLAUDE.md if needed (new patterns, new modules, architecture changes)

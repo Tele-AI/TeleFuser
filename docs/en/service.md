@@ -44,10 +44,9 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# For real-time world model streaming (requires WebRTC support)
-pip install -e ".[webrtc]"
+# For real-time world model streaming (WebRTC support is included in the default install)
 export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
 ### 3. Create a Task

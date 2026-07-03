@@ -44,10 +44,9 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# 实时世界模型流式推理（需要 WebRTC 支持）
-pip install -e ".[webrtc]"
+# 实时世界模型流式推理（默认安装已包含 WebRTC 支持）
 export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
 ### 3. 创建任务

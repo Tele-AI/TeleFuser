@@ -69,11 +69,7 @@ For development:
 pip install -e ".[dev]"
 ```
 
-For WebRTC streaming:
-
-```bash
-pip install -e ".[webrtc]"
-```
+WebRTC streaming support is included in the default installation through `aiortc`.
 
 ### 1. Batch Video Inference
 
@@ -102,7 +98,7 @@ TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 ```bash
 export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
 
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 \
   --skip-validation
 
@@ -197,7 +193,7 @@ telefuser/
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
-| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py) |
+| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/stream_lingbot_world_fast.py](examples/lingbot/stream_lingbot_world_fast.py) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
@@ -227,7 +223,7 @@ Key entry points:
 - [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py)
 - [examples/flashvsr/README.md](examples/flashvsr/README.md)
 - [examples/ltx_video/README.md](examples/ltx_video/README.md)
-- [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py)
+- [examples/lingbot/stream_lingbot_world_fast.py](examples/lingbot/stream_lingbot_world_fast.py)
 - [examples/stream_server/webrtc_bidirectional_demo.py](examples/stream_server/webrtc_bidirectional_demo.py)
 
 To inspect CLI options for an example:

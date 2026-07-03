@@ -69,11 +69,7 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-如果需要 WebRTC 流式服务：
-
-```bash
-pip install -e ".[webrtc]"
-```
+默认安装已通过 `aiortc` 包含 WebRTC 流式服务能力。
 
 ### 1. 批量视频推理
 
@@ -102,7 +98,7 @@ TeleFuser 当前提供了 `LingBot-World-Fast` 的双向 WebRTC Demo。
 ```bash
 export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
 
-telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 \
   --skip-validation
 
@@ -197,7 +193,7 @@ telefuser/
 
 | Pipeline | 任务 | 说明 |
 |----------|------|------|
-| `LingBot-World-Fast` | 双向世界模型流式推理 | 交互式 WebRTC 控制闭环，见 [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py) |
+| `LingBot-World-Fast` | 双向世界模型流式推理 | 交互式 WebRTC 控制闭环，见 [examples/lingbot/stream_lingbot_world_fast.py](examples/lingbot/stream_lingbot_world_fast.py) |
 | `LiveAct` | S2V | 语音驱动数字人视频生成，见 [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | 流式视频超分，见 [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |
@@ -227,7 +223,7 @@ telefuser/
 - [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py)
 - [examples/flashvsr/README.md](examples/flashvsr/README.md)
 - [examples/ltx_video/README.md](examples/ltx_video/README.md)
-- [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py)
+- [examples/lingbot/stream_lingbot_world_fast.py](examples/lingbot/stream_lingbot_world_fast.py)
 - [examples/stream_server/webrtc_bidirectional_demo.py](examples/stream_server/webrtc_bidirectional_demo.py)
 
 查看某个示例的 CLI 参数：
