@@ -51,7 +51,14 @@ class ServerConfig(BaseSettings):
     # Cache settings
     cache_dir: str = Field(default="work_dirs/server_cache", description="Cache directory path")
 
-    enable_latent_cache: bool = Field(default=False, description="Enable latent cache service")
+    enable_latent_cache: bool | None = Field(
+        default=None,
+        description="Latent cache service override; when unset, the pipeline CACHE_CONFIG value is used",
+    )
+    cache_mode: Literal["read_write", "read_only", "write_only"] | None = Field(
+        default=None,
+        description="Latent cache mode override; when unset, the pipeline CACHE_CONFIG value is used",
+    )
 
     # Security settings
     security_level: SecurityLevel = Field(default=SecurityLevel.STRICT, description="Security validation level")

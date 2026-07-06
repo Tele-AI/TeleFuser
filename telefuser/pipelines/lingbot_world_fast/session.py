@@ -28,6 +28,8 @@ class LingBotWorldFastSessionConfig:
     poses: object | None = None
     intrinsics: object | None = None
     action: object | None = None
+    # Optional CacheSeek world_kv reuse. None preserves baseline behavior.
+    world_kv_binding: object | None = None
     control_move_step: float = 0.18
     control_yaw_step_degrees: float = 10.0
     control_lateral_step: float = 0.12
@@ -58,6 +60,12 @@ class LingBotWorldFastRuntimeState:
     emitted_frames: int = 0
     active: bool = True
     generator: torch.Generator | None = None
+    # KV geometry in latent frames; -1 means full-length KV.
+    kv_local_attn_size: int = -1
+    kv_sink_size: int = 0
+    # CacheSeek world_kv binding and decode-only latents for fast-forward hits.
+    world_kv_binding: object | None = None
+    world_kv_cached_latents: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 @dataclass

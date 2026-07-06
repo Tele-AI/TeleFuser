@@ -8,7 +8,6 @@ from pathlib import Path
 import click
 
 from telefuser._logo import TELEFUSER_LOGO
-from telefuser.service.main import run_server, run_stream_server
 from telefuser.service.security.security_validator import (
     PipelineSecurityValidator,
     SecurityError,
@@ -69,6 +68,17 @@ def main():
     default=False,
     help="Only validate the pipeline file without starting the server",
 )
+@click.option(
+    "--enable-latent-cache/--disable-latent-cache",
+    default=None,
+    help="Override external CacheSeek latent cache integration; defaults to the pipeline CACHE_CONFIG value",
+)
+@click.option(
+    "--cache-mode",
+    type=click.Choice(["read_write", "read_only", "write_only"], case_sensitive=False),
+    default=None,
+    help="Latent cache mode override; defaults to the pipeline CACHE_CONFIG value",
+)
 def serve(
     pipe_path: str,
     task: str,
@@ -80,6 +90,8 @@ def serve(
     security_level: str,
     skip_validation: bool,
     validate_only: bool,
+    enable_latent_cache: bool | None,
+    cache_mode: str | None,
 ) -> None:
     """Start the TeleFuser API server."""
     # Validate pipeline file before starting server
@@ -103,7 +115,19 @@ def serve(
         click.echo(report)
         return
 
-    run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism, num_replicas=num_replicas)
+    from telefuser.service.main import run_server
+
+    run_server(
+        pipe_path=pipe_path,
+        task=TaskType(task.lower()),
+        port=port,
+        host=host,
+        cache_dir=cache_dir,
+        parallelism=parallelism,
+        num_replicas=num_replicas,
+        enable_latent_cache=enable_latent_cache,
+        cache_mode=cache_mode.lower() if cache_mode is not None else None,
+    )
 
 
 @main.command(name="stream-serve")
@@ -149,6 +173,8 @@ def stream_serve(
             click.echo(f"\n❌ Security validation failed:\n{e}", err=True)
             click.echo(f"\nTo bypass: telefuser stream-serve {pipe_path} --skip-validation", err=True)
             raise click.Abort()
+
+    from telefuser.service.main import run_stream_server
 
     run_stream_server(pipe_path, port, host, skip_validation=True)
 

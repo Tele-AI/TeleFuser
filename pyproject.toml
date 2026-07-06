@@ -66,24 +66,9 @@ distributed = [
     "ray",
 ]
 
-# Latent cache subsystem (telefuser.cache_mem).
-# Required only when the service is started with enable_latent_cache=true
-# (or when running the wan22 service example with cache_mem). Installing
-# without this extra leaves the cache layer disabled and adds zero overhead.
-cache = [
-    "faiss-cpu",
-    "qwen_vl_utils",
-    "sentencepiece",
-    "protobuf",
-]
-
 dev = [
-    "faiss-cpu",
     "gradio==5.50",
-    "protobuf",
-    "qwen_vl_utils",
     "ray",
-    "sentencepiece",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
@@ -109,12 +94,8 @@ docs = [
 ]
 
 all = [
-    "faiss-cpu",
     "gradio==5.50",
-    "protobuf",
-    "qwen_vl_utils",
     "ray",
-    "sentencepiece",
 ]
 
 

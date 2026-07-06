@@ -26,13 +26,14 @@ def _build_cache_task_request(task_data: dict) -> SimpleNamespace:
 
     Splatting ``task_data`` directly would crash because ``TaskRequest`` is
     ``extra="allow"`` and may contain keys that are not valid Python
-    identifiers. The cache layer only reads ``task_id`` / ``task`` /
-    ``prompt`` via ``getattr``, so we whitelist those.
+    identifiers. The cache layer only reads fields via ``getattr``, so we
+    whitelist the fields needed by the CacheSeek adapter.
     """
     return SimpleNamespace(
         task_id=task_data.get("task_id"),
         task=task_data.get("task"),
         prompt=task_data.get("prompt") or "",
+        seed=task_data.get("seed"),
     )
 
 
@@ -47,10 +48,12 @@ class MediaGenerationService:
         file_service: FileService,
         inference_service: PipelineService,
         cache_service: Any | None = None,
+        cache_adapter: Any | None = None,
     ) -> None:
         self.file_service = file_service
         self.inference_service = inference_service
         self.cache_service = cache_service
+        self.cache_adapter = cache_adapter
 
     async def generate_media_with_stop_event(
         self, message: TaskRequest, stop_event: threading.Event
@@ -110,18 +113,37 @@ class MediaGenerationService:
         actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
         task_data["output_path"] = str(actual_save_path)
 
-        # Cache lookup (best-effort: degrade silently on any failure)
+        # Best-effort: every step degrades silently to "no cache" on failure.
+        cache_active = self.cache_service is not None and self.cache_adapter is not None
         cache_task_request: SimpleNamespace | None = None
-        if self.cache_service is not None:
+        cache_query: Any | None = None
+        if cache_active:
             try:
                 cache_task_request = _build_cache_task_request(task_data)
-                latent_data = await self.cache_service.build_latent_data(cache_task_request, task_data)
+                cache_query = self.cache_adapter.build_query(cache_task_request)  # build_query
+            except Exception as exc:
+                logger.warning(f"[task_service] cache build_query failed, ignored: {exc}")
+                cache_query = None
+
+        lookup_result = None
+        if cache_active and cache_query is not None:
+            try:
+                lookup_result = await self.cache_service.lookup(cache_query)  # lookup
+            except Exception as exc:
+                logger.warning(f"[task_service] cache lookup failed, ignored: {exc}")
+                lookup_result = None
+
+        if cache_active and lookup_result is not None:
+            try:
+                latent_data = self.cache_adapter.apply_resume(  # apply_resume
+                    lookup_result, engine_ctx=task_data
+                )
                 if latent_data is not None:
                     task_data["latent_data"] = latent_data
             except Exception as exc:
-                logger.warning(f"[task_service] cache lookup failed, ignored: {exc}")
+                logger.warning(f"[task_service] cache apply_resume failed, ignored: {exc}")
 
-        result = await self.inference_service.run_task_with_stop_event(
+        result = await self.inference_service.run_task_with_stop_event(  # inference
             task_data,
             stop_event,
             output_root=str(self.file_service.output_dir),
@@ -134,15 +156,18 @@ class MediaGenerationService:
             raise RuntimeError("Task processing timeout")
 
         if result.get("status") == PipelineRunStatus.SUCCESS:
-            # Cache writeback (best-effort: degrade silently on any failure)
-            if self.cache_service is not None:
+            # Cache writeback (best-effort: degrade silently on any failure).
+            if cache_active and cache_query is not None:
                 try:
                     raw = result.get("raw")
                     latent_payload = raw.get("latent_payload") if isinstance(raw, dict) else None
                     if latent_payload:
                         if cache_task_request is None:
                             cache_task_request = _build_cache_task_request(task_data)
-                        await self.cache_service.save_latent_payload(cache_task_request, latent_payload)
+                        outputs = self.cache_adapter.on_response(  # on_response
+                            cache_task_request, latent_payload
+                        )
+                        await self.cache_service.save(cache_query, outputs)  # save
                 except Exception as exc:
                     logger.warning(f"[task_service] cache writeback failed, ignored: {exc}")
 

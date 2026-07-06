@@ -1,5 +1,6 @@
 """Pytest shared fixtures and configuration."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -19,22 +20,87 @@ try:
 except ImportError:
     HAS_TRITON = False
 
+TRITON_REQUIRED_TESTS = [
+    # Distributed tests require triton
+    "unit/distributed/test_device_mesh.py",
+    "unit/distributed/test_parallel_shard.py",
+    "unit/distributed/test_pp_comm.py",
+    "unit/distributed/test_ulysses_comm.py",
+    # Kernel tests require triton
+    "unit/kernel/test_rmsnorm.py",
+    "unit/kernel/test_rotary.py",
+    "unit/kernel/test_scale_shift.py",
+    # Ops tests that require triton
+    "unit/ops/test_long_context_attention.py",
+    "unit/ops/test_parallel_shard_attention.py",
+]
+
+GPU_ONLY_TESTS = [
+    # Kernel tests import CUDA-only Triton kernels during collection.
+    "unit/kernel/test_rmsnorm.py",
+    "unit/kernel/test_rotary.py",
+    "unit/kernel/test_scale_shift.py",
+    # These modules are marked entirely as GPU/multi-GPU tests.
+    "unit/ops/test_long_context_attention.py",
+    "unit/ops/test_parallel_shard_attention.py",
+    "unit/offload/test_async_offload.py",
+]
+
+collect_ignore = []
+TESTS_ROOT = Path(__file__).parent.resolve()
+
+
+def _extend_collect_ignore(paths):
+    """Add collection ignores while preserving order and avoiding duplicates."""
+    for path in paths:
+        if path not in collect_ignore:
+            collect_ignore.append(path)
+
+
+def _relative_test_path(collection_path):
+    """Return a collection path relative to tests/, or None if outside tests/."""
+    path = Path(str(collection_path)).resolve()
+    try:
+        return path.relative_to(TESTS_ROOT).as_posix()
+    except ValueError:
+        return None
+
+
 # Skip tests that require triton if it's not available
 if not HAS_TRITON:
-    collect_ignore = [
-        # Distributed tests require triton
-        "unit/distributed/test_a2a.py",
-        "unit/distributed/test_device_mesh.py",
-        "unit/distributed/test_parallel_shard.py",
-        "unit/distributed/test_pp_comm.py",
-        # Kernel tests require triton
-        "unit/kernel/test_rmsnorm.py",
-        "unit/kernel/test_rotary.py",
-        "unit/kernel/test_scale_shift.py",
-        # Ops tests that require triton
-        "unit/ops/test_long_context_attention.py",
-        "unit/ops/test_parallel_shard_attention.py",
-    ]
+    _extend_collect_ignore(TRITON_REQUIRED_TESTS)
+
+# Skip GPU-only test modules in CPU-only environments before pytest imports them.
+if not torch.cuda.is_available():
+    _extend_collect_ignore(GPU_ONLY_TESTS)
+
+
+class _IgnoredTestModule(pytest.Module):
+    """Empty collector used for explicitly requested ignored test modules."""
+
+    def collect(self):
+        return []
+
+
+def _should_ignore_test_path(collection_path):
+    relative_path = _relative_test_path(collection_path)
+    return relative_path in collect_ignore
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_ignore_collect(collection_path, config):
+    """Avoid importing GPU-only test modules when their dependencies are unavailable."""
+    if _should_ignore_test_path(collection_path):
+        return True
+    return None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makemodule(module_path, parent):
+    """Return an empty collector when an ignored module is passed explicitly."""
+    if _should_ignore_test_path(module_path):
+        return _IgnoredTestModule.from_parent(parent, path=module_path)
+    return None
 
 
 # ============================================================================

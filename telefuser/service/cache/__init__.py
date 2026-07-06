@@ -1,4 +1,10 @@
-from .cache_factory import CacheServiceFactory
-from .cache_service import CacheService
+"""Deprecated cache package namespace.
 
-__all__ = ["CacheService", "CacheServiceFactory"]
+The latent cache implementation moved to the external `cacheseek` package.
+TeleFuser service code imports CacheSeek directly and no longer supports the
+legacy `telefuser.service.cache` facade.
+"""
+
+_BACKEND = "cacheseek"
+
+__all__ = ["_BACKEND"]

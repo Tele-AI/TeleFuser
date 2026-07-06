@@ -16,7 +16,6 @@ from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
 from ..api.api_server import ApiServer
-from ..cache.cache_factory import CacheServiceFactory
 from .config import ServerConfig, server_config
 from .file_service import FileService
 from .pipeline_pool import PipelinePool
@@ -43,6 +42,7 @@ class ServiceContainer:
     stream_pipeline_service: StreamPipelineService | None = None
     media_service: MediaGenerationService | None = None
     cache_service: Any | None = None
+    cache_adapter: Any | None = None  # cacheseek.adapters.telefuser.TeleFuserCacheAdapter
     _cache_dir: Path | None = field(default=None, repr=False)
 
     @classmethod
@@ -115,25 +115,74 @@ class ServiceContainer:
             file_service=self.file_service,
             inference_service=self.pipeline_service,
             cache_service=self.cache_service,
+            cache_adapter=self.cache_adapter,
         )
         return self.media_service
 
-    def initialize_cache_service(self, pipe_path: str) -> Any | None:
-        """Initialize optional latent cache service when enabled."""
-        if not getattr(self.config, "enable_latent_cache", False):
-            return None
+    def _load_pipeline_cache_config(self, pipe_path: str) -> Any | None:
+        """Load CACHE_CONFIG for deciding whether CacheSeek should be imported."""
+        module = getattr(self.pipeline_service, "_module", None)
+        if module is not None and hasattr(module, "CACHE_CONFIG"):
+            return getattr(module, "CACHE_CONFIG")
 
         try:
-            self.cache_service = CacheServiceFactory.create_cache_service(
+            from telefuser.utils.utils import import_function_from_file
+
+            return import_function_from_file(pipe_path, "CACHE_CONFIG")
+        except AttributeError:
+            return None
+        except Exception as exc:
+            logger.warning(f"Failed to load CACHE_CONFIG for latent cache enable check, ignored: {exc}")
+            return None
+
+    @staticmethod
+    def _cache_config_enable_value(cache_config: Any | None) -> bool:
+        if isinstance(cache_config, dict):
+            return bool(cache_config.get("enable_latent_cache", False))
+        return bool(getattr(cache_config, "enable_latent_cache", False))
+
+    def _resolve_enable_latent_cache(self, pipe_path: str) -> bool:
+        override = getattr(self.config, "enable_latent_cache", None)
+        if override is not None:
+            return bool(override)
+        return self._cache_config_enable_value(self._load_pipeline_cache_config(pipe_path))
+
+    def initialize_cache_service(self, pipe_path: str) -> Any | None:
+        """Initialize optional latent cache service when enabled."""
+        enable_override = getattr(self.config, "enable_latent_cache", None)
+        if not self._resolve_enable_latent_cache(pipe_path):
+            return None
+
+        # Lazy import to avoid pulling cacheseek deps when disabled.
+        try:
+            from cacheseek.adapters.telefuser.cache_factory import CacheServiceFactory
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Latent cache is enabled, but CacheSeek is not installed. "
+                "Install CacheSeek into the TeleFuser environment first. "
+                "CacheSeek is not yet published to public PyPI; install from a checkout that contains "
+                "the TeleFuser adapter support, for example: "
+                "python -m pip install /path/to/CacheSeek. "
+                "If the matching commit or branch has been pushed to GitHub, you can also use: "
+                "python -m pip install 'cacheseek @ git+https://github.com/Tele-AI/CacheSeek.git@<commit-or-branch>'. "
+                "Once cacheseek is published to your pip package index, python -m pip install cacheseek is also valid."
+            ) from exc
+
+        try:
+            result = CacheServiceFactory.create_cache_service(
                 ppl_file=pipe_path,
-                enable_latent_cache=True,
+                enable_latent_cache=enable_override,
+                cache_mode=getattr(self.config, "cache_mode", None),
             )
         except Exception as exc:
-            logger.warning(f"CacheServiceFactory.create_cache_service failed: {exc}")
-            self.cache_service = None
+            raise RuntimeError(f"Latent cache failed to initialize via CacheSeek: {exc}") from exc
 
-        if self.cache_service is None:
-            logger.warning("enable_latent_cache=True but cache_service is None")
+        if result is None:
+            self.cache_service = None
+            self.cache_adapter = None
+            raise RuntimeError("Latent cache failed to initialize via CacheSeek: factory returned None")
+
+        self.cache_service, self.cache_adapter = result
         return self.cache_service
 
     def initialize_all(
@@ -212,6 +261,7 @@ class ServiceContainer:
                 self.file_service.cache_dir,
                 self.pipeline_service,
                 cache_service=self.cache_service,
+                cache_adapter=self.cache_adapter,  # forward adapter to api_server
             )
 
         if self.stream_pipeline_service:
@@ -252,7 +302,7 @@ class ServiceContainer:
             except Exception as exc:
                 logger.warning(f"cache service shutdown failed: {exc}")
             self.cache_service = None
-
+        self.cache_adapter = None
         self.media_service = None
 
 

@@ -272,15 +272,18 @@ class ApiServer:
         cache_dir: Path,
         inference_service: PipelineService,
         cache_service: Any | None = None,
+        cache_adapter: Any | None = None,
     ) -> None:
         """Initialize file and media services."""
         self.file_service = FileService(cache_dir)
         self.inference_service = inference_service
         self.cache_service = cache_service
+        self.cache_adapter = cache_adapter
         self.media_service = MediaGenerationService(
             self.file_service,
             inference_service,
             cache_service=cache_service,
+            cache_adapter=cache_adapter,
         )
         self.task_processor = AsyncTaskProcessor(
             task_manager=self.task_manager,
