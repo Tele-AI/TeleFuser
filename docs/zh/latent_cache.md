@@ -169,7 +169,6 @@ CacheSeek 自身的全量字段和内置默认值以 CacheSeek 文档和
 | Pipeline              | 脚本                                                              | 说明                   |
 | --------------------- | --------------------------------------------------------------- | -------------------- |
 | Wan2.2 14B T2V（启用缓存）  | `examples/wan_video/wan22_14b_text_to_video_service.py`         | 完整 latent cache 配置示例 |
-| Wan2.2 14B T2V（不启用缓存） | `examples/wan_video/wan22_14b_text_to_video_service_nocache.py` | 同样接口、关闭缓存对照组         |
 
 启动服务：
 

@@ -227,8 +227,11 @@ class ModelRuntimeConfig:
     lora_configs: list[LoraConfig] = field(default_factory=list)
     torch_dtype: torch.dtype = torch.bfloat16
     attention_config: AttentionConfig = field(default_factory=lambda: AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA))
-    compile: bool = False
+    compile_config: CompileConfig = field(default_factory=CompileConfig)
+    quant_config: QuantConfig = field(default_factory=QuantConfig)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    ray_config: RayConfig = field(default_factory=RayConfig)
+    feature_cache_config: FeatureCacheConfig = field(default_factory=FeatureCacheConfig)
 ```
 
 ### ParallelConfig

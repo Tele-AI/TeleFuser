@@ -31,7 +31,7 @@ def main():
     "-t",
     default="i2v",
     type=click.Choice(TaskType.values(), case_sensitive=False),
-    help="Task type (t2v, i2v, fl2v, vc, t2i, i2i)",
+    help="Task type (t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr)",
 )
 @click.option("--port", "-p", default=8000, type=int, help="Server port")
 @click.option("--host", default="127.0.0.1", type=str, help="Server host")

@@ -32,20 +32,21 @@ pip install telefuser
 ```bash
 # 视频生成
 telefuser serve \
-    --pipe_path ./examples/wan_video/wan21_14b_image_to_video_h100.py \
+    ./examples/wan_video/wan21_14b_image_to_video_h100.py \
     --task i2v \
     --port 8000 \
     --parallelism 1
 
 # 图像生成
 telefuser serve \
-    --pipe_path ./examples/qwen_image/qwen_image_pipeline.py \
+    /path/to/image_pipeline.py \
     --task t2i \
     --port 8000 \
     --parallelism 1
 
 # 实时世界模型流式推理（默认安装已包含 WebRTC 支持）
-export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+# 预期子目录：Wan2.2-I2V-A14B 和 lingbot-world-fast
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
@@ -75,7 +76,7 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 - 任务 API：`/v1/tasks/*`
 - OpenAI 兼容路由：`/v1/images` 和 `/v1/videos`
 - 管线契约实现结构化参数暴露
-- 异步调度，请求隔离
+- 对使用 orchestrator 的管线提供可选异步调度
 
 ### `telefuser stream-serve` — 连续流式模式
 
@@ -142,8 +143,8 @@ telefuser serve /path/to/pipeline --task i2v [选项]
 
 | 参数 | 简写 | 类型 | 默认值 | 描述 |
 |-----------|----------|------|---------|-------------|
-| `--pipe_path` | `-pp` | string | **必需** | 管道 Python 文件路径 |
-| `--task` | `-t` | choice | `i2v` | 任务类型: t2v, i2v, fl2v, vc, t2i, i2i |
+| `pipe_path` | | string | **必需** | 管道 Python 文件的 positional 路径 |
+| `--task` | `-t` | choice | `i2v` | 任务类型: t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr |
 | `--port` | `-p` | int | `8000` | 服务器端口 |
 | `--host` | | string | `127.0.0.1` | 服务器主机地址 |
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | 缓存目录 |
@@ -158,14 +159,14 @@ telefuser serve /path/to/pipeline --task i2v [选项]
 ```bash
 # 图生视频，完整参数
 telefuser serve \
-    --pipe_path ./examples/wan_video/wan21_14b_image_to_video_h100.py \
+    ./examples/wan_video/wan21_14b_image_to_video_h100.py \
     --task i2v \
     --port 8080 \
     --host 0.0.0.0 \
     --parallelism 2
 
 # 使用简写形式
-telefuser serve -pp ./pipeline.py -t i2v -p 8080 -g 2
+telefuser serve ./pipeline.py -t i2v -p 8080 -g 2
 
 # 仅验证
 telefuser serve ./pipeline.py --validate-only
@@ -954,7 +955,7 @@ server = ApiServer(enable_openai_api=False)
 或通过命令行：
 ```bash
 # 默认：OpenAI API 已启用
-telefuser serve --pipe_path ./pipeline.py --task t2v
+telefuser serve ./pipeline.py --task t2v
 ```
 
 ---

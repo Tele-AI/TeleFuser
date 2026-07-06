@@ -1,6 +1,6 @@
 """WebRTC transport for TeleFuser stream server.
 
-Optional — requires ``pip install telefuser[webrtc]`` (aiortc).
+The default TeleFuser installation includes aiortc for WebRTC support.
 """
 
 from __future__ import annotations

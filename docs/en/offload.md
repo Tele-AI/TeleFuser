@@ -42,11 +42,12 @@ Data transfer (load) overlaps with computation, hiding latency
 | `pin_cpu_memory` | bool | `True` | Use pinned memory for faster H2D transfer |
 | `offload_ratio` | float | `1.0` | Ratio of layers to offload (1.0 = all layers) |
 | `prefetch_size` | int | `1` | Number of layers to prefetch ahead |
-| `lazy_gpu_cache` | bool | `False` | Delay GPU buffer allocation until first use |
 
-### Lazy GPU Cache
+### AsyncOffloadManager Lazy GPU Cache
 
-The `lazy_gpu_cache` parameter (added in recent versions) controls whether GPU buffers are pre-allocated during initialization:
+`lazy_gpu_cache` is a lower-level `AsyncOffloadManager` constructor option,
+not an `OffloadConfig` field. It controls whether GPU buffers are
+pre-allocated during manager initialization:
 
 - **`lazy_gpu_cache=False` (default)**: GPU buffer pool is allocated during initialization
 - **`lazy_gpu_cache=True`**: GPU buffer pool is allocated on first use (saves VRAM during initialization)
@@ -237,12 +238,18 @@ Setting `pin_cpu_memory=True` (default) uses page-locked memory for faster H2D t
 If GPU OOM occurs during pipeline initialization:
 
 ```python
-# Use lazy_gpu_cache to defer buffer allocation
+# Use the most conservative pipeline offload configuration exposed by OffloadConfig
 pipe_config.dit_config.offload_config = OffloadConfig(
     offload_type=WeightOffloadType.ASYNC_CPU_OFFLOAD,
-    lazy_gpu_cache=True,  # Delay GPU buffer allocation
+    pin_cpu_memory=True,
+    offload_ratio=1.0,
+    prefetch_size=1,
 )
 ```
+
+If you need lazy GPU cache allocation specifically, wire `AsyncOffloadManager`
+directly or through a pipeline integration that passes `lazy_gpu_cache=True`;
+the current `OffloadConfig` dataclass does not expose that option.
 
 ### Slow Inference
 

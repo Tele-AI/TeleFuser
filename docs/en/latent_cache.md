@@ -178,7 +178,6 @@ refer to the CacheSeek documentation and `cacheseek/service/config.py`.
 | Pipeline                          | Script                                                            | Notes                                |
 | --------------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
 | Wan2.2 14B T2V (cache enabled)    | `examples/wan_video/wan22_14b_text_to_video_service.py`           | Full latent cache configuration example |
-| Wan2.2 14B T2V (cache disabled)   | `examples/wan_video/wan22_14b_text_to_video_service_nocache.py`   | Same interface, cache off, control group |
 
 Start the service:
 

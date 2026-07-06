@@ -31,9 +31,9 @@ The project treats a world model as more than a function that returns a single c
 
 - **World-model-oriented runtime**: Support for continuous video generation, interactive sessions, and bidirectional control loops.
 - **AI Dev First interfaces**: Pipelines can publish `PIPELINE_CONTRACT` / `PIPELINE_MANIFEST` metadata so agents and services can discover tasks, inputs, and parameters programmatically.
-- **Asynchronous pipeline scheduling**: Stage-based execution with request isolation, resource locking, and parallel stage groups.
+- **Asynchronous pipeline orchestration**: Optional stage-based execution with request state tracking, resource locks, and parallel stage groups.
 - **Streaming transport**: WebRTC-based streaming with media tracks plus DataChannel control for real-time inference.
-- **Scalable GPU runtime**: Multi-GPU execution with tensor parallelism, sequence parallelism, Ray-based deployment, and distributed worker orchestration.
+- **Scalable GPU runtime**: Multi-GPU execution with tensor parallelism, sequence parallelism, optional Ray workers, and distributed service replicas.
 - **Inference optimization stack**: Triton kernels, optimized attention backends, quantization, offload, and feature caching.
 - **Unified serving**: Local Python API, `telefuser serve` for task APIs, and `telefuser stream-serve` for continuous streaming services.
 
@@ -96,7 +96,8 @@ video = pipe(
 TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 
 ```bash
-export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+# Expected subdirectories: Wan2.2-I2V-A14B and lingbot-world-fast
 
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 \
@@ -112,7 +113,7 @@ This starts a continuous session where the client sends control messages over a 
 ### 3. Batch Service Mode
 
 ```bash
-telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --port 8000
+telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --task t2v --port 8000
 ```
 
 TeleFuser exposes:
@@ -149,7 +150,7 @@ TeleFuser is designed so pipelines are understandable not only to human develope
 
 - `PIPELINE_CONTRACT` and `PIPELINE_MANIFEST` define supported tasks, required file inputs, defaults, and user-facing parameters.
 - the service layer uses those contracts to expose machine-readable metadata
-- the same pipeline can be used locally, through REST APIs, or through streaming services
+- pipeline implementations can be wrapped for local use, REST service mode, or streaming service mode through the corresponding entrypoint conventions
 
 This is the core of the project's "AI Dev First" direction: standardize runtime behavior so orchestration systems can discover and use pipelines without reverse-engineering internal code paths.
 
@@ -158,8 +159,8 @@ This is the core of the project's "AI Dev First" direction: standardize runtime 
 TeleFuser uses a layered runtime architecture that maps cleanly to the repository structure:
 
 1. **Access layer**: FastAPI task APIs and WebRTC streaming entrypoints.
-2. **Service and scheduling layer**: request routing, task management, stream sessions, and orchestration.
-3. **Pipeline abstraction layer**: stage-based pipelines with async execution, request isolation, and resource locks.
+2. **Service layer**: request routing, task management, stream sessions, replica pools, and integration with pipeline execution.
+3. **Pipeline abstraction layer**: model-specific `BasePipeline` / `BaseStage` components, with optional orchestrator support for async stage execution, request state tracking, and resource locks.
 4. **Model and optimization layer**: model loading, attention selection, quantization, offload, LoRA, and cache integration.
 5. **Execution backend layer**: optimized ops, Triton kernels, and device-specific implementations.
 
@@ -179,8 +180,8 @@ telefuser/
 
 ## Runtime Capabilities
 
-- **Async pipeline scheduling**: run independent stages concurrently and gate shared resources with lock groups.
-- **Distributed inference**: tensor parallelism, sequence parallelism, Ray-based multi-GPU deployment, and pipeline-scale orchestration.
+- **Async pipeline orchestration**: selected pipelines can run independent stages concurrently and gate shared resources with lock groups.
+- **Distributed inference**: tensor parallelism, sequence parallelism, FSDP support, optional Ray workers for selected stages, and replica-based service scaling.
 - **Attention backends**: Torch SDPA, FlashAttention, SageAttention, sparse attention variants, and other configurable implementations.
 - **Feature caching**: `AdaTaylorCache` accelerates supported diffusion models with calibrated skip/reuse logic.
 - **Memory optimization**: CPU offload, weight reuse, and runtime-aware loading strategies for large video models.

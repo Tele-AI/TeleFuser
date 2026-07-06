@@ -105,7 +105,7 @@ telefuser stream-serve <pipeline_file> [OPTIONS]
 |------|---------|-------------|
 | `--port`, `-p` | `8088` | Server port |
 | `--host` | `0.0.0.0` | Bind address |
-| `--security-level` | `strict` | Pipeline validation level (`strict`, `standard`, `permissive`) |
+| `--security-level` | `strict` | Pipeline validation level (`none`, `basic`, `strict`, `sandbox`) |
 | `--skip-validation` | `false` | Skip pipeline file security checks |
 
 ### Examples
@@ -544,10 +544,11 @@ python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://l
 
 LingBot-World-Fast requires two sets of weights:
 
-| Environment Variable | Example | Description |
-|----------------------|---------|-------------|
-| `LINGBOT_WORLD_CHECKPOINT_DIR` | `/storage/model_zoo/Wan2.2-Distill-Models` | Base weight directory containing VAE, T5 text encoder, and tokenizer |
-| `LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR` | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT weight directory; can be an absolute path |
+| Setting | Example | Description |
+|---------|---------|-------------|
+| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Root model directory read by the example script |
+| Base model subdirectory | `/storage/model_zoo/Wan2.2-I2V-A14B` | Base Wan2.2 I2V weights containing VAE, T5 text encoder, and tokenizer |
+| Fast model subdirectory | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT weights |
 
 #### Start the Server
 
@@ -557,10 +558,7 @@ Recommended launch with two GPUs: DiT on GPU 0, text encoder and VAE on GPU 1. I
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=your-turn-password \
-LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
-LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
-LINGBOT_WORLD_CONTROL_TYPE=cam \
-LINGBOT_WORLD_MAX_AREA=99840 \
+TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
@@ -617,10 +615,7 @@ Server:
 env -u TELEFUSER_TURN_SERVER \
 -u TELEFUSER_TURN_USERNAME \
 -u TELEFUSER_TURN_CREDENTIAL \
-LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
-LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
-LINGBOT_WORLD_CONTROL_TYPE=cam \
-LINGBOT_WORLD_MAX_AREA=99840 \
+TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
@@ -692,30 +687,34 @@ If left/right effects are subtle, increase `--control-lateral-step`, e.g., `0.25
 The current demo defaults to `cam`. If the model weights are camera-control weights, keep:
 
 ```bash
-LINGBOT_WORLD_CONTROL_TYPE=cam
 --control-mode cam
 ```
 
 Only switch to `act` when using action-control weights:
 
 ```bash
-LINGBOT_WORLD_CONTROL_TYPE=act
 --control-mode act
 ```
+
+The service example currently sets `control_type="cam"` inside
+`examples/lingbot/stream_lingbot_world_fast.py`. To use action-control
+weights, edit `PPL_CONFIG["control_type"]` in that script as well as passing
+`--control-mode act` to the demo.
 
 #### VRAM and Resolution
 
 LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 frames approaches the 80 GB H100 VRAM limit. Start with a lower resolution to verify the pipeline:
 
 ```bash
-LINGBOT_WORLD_MAX_AREA=99840  # approximately 416×240
+# In examples/lingbot/stream_lingbot_world_fast.py:
+PPL_CONFIG["max_area"] = 99840  # approximately 416×240
 ```
 
 Common tuning parameters:
 
 | Parameter | Effect |
 |-----------|--------|
-| `LINGBOT_WORLD_MAX_AREA` | Reduce output area, significantly lower VRAM usage |
+| `PPL_CONFIG["max_area"]` | Reduce output area, significantly lower VRAM usage |
 | `--frame-num` | Reduce total generated frames and latent chunk count |
 | `--chunk-size` | Affect the latent chunk size per generation step |
 
@@ -755,9 +754,10 @@ Pipeline files are validated before loading. Use `--skip-validation` only for de
 
 | Level | Description |
 |-------|-------------|
-| `strict` | Full validation — no dangerous imports, no file system access |
-| `standard` | Moderate — allows common libraries |
-| `permissive` | Minimal checks |
+| `none` | Disable validation |
+| `basic` | Static AST analysis |
+| `strict` | Static AST analysis plus import restrictions |
+| `sandbox` | Full sandbox execution |
 
 ---
 

@@ -32,20 +32,21 @@ pip install telefuser
 ```bash
 # For video generation
 telefuser serve \
-    --pipe_path ./examples/wan_video/wan21_14b_image_to_video_h100.py \
+    ./examples/wan_video/wan21_14b_image_to_video_h100.py \
     --task i2v \
     --port 8000 \
     --parallelism 1
 
 # For image generation
 telefuser serve \
-    --pipe_path ./examples/qwen_image/qwen_image_pipeline.py \
+    /path/to/image_pipeline.py \
     --task t2i \
     --port 8000 \
     --parallelism 1
 
 # For real-time world model streaming (WebRTC support is included in the default install)
-export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+# Expected subdirectories: Wan2.2-I2V-A14B and lingbot-world-fast
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 
@@ -75,7 +76,7 @@ Use for batch text-to-video, image-to-video, image generation, and super-resolut
 - Task-based API under `/v1/tasks/*`
 - OpenAI-compatible routes under `/v1/images` and `/v1/videos`
 - Pipeline contracts for structured parameter exposure
-- Async scheduling with request isolation
+- Optional async scheduling for pipelines that use the orchestrator
 
 ### `telefuser stream-serve` — Continuous Streaming Mode
 
@@ -142,8 +143,8 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 
 | Parameter | Shortcut | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
-| `--pipe_path` | `-pp` | string | **Required** | Path to pipeline Python file |
-| `--task` | `-t` | choice | `i2v` | Task type: t2v, i2v, fl2v, vc, t2i, i2i |
+| `pipe_path` | | string | **Required** | Positional path to the pipeline Python file |
+| `--task` | `-t` | choice | `i2v` | Task type: t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr |
 | `--port` | `-p` | int | `8000` | Server port |
 | `--host` | | string | `127.0.0.1` | Server host address |
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | Cache directory |
@@ -158,14 +159,14 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 ```bash
 # Image-to-Video with full parameters
 telefuser serve \
-    --pipe_path ./examples/wan_video/wan21_14b_image_to_video_h100.py \
+    ./examples/wan_video/wan21_14b_image_to_video_h100.py \
     --task i2v \
     --port 8080 \
     --host 0.0.0.0 \
     --parallelism 2
 
 # Using short form
-telefuser serve -pp ./pipeline.py -t i2v -p 8080 -g 2
+telefuser serve ./pipeline.py -t i2v -p 8080 -g 2
 
 # Validate only
 telefuser serve ./pipeline.py --validate-only
@@ -956,7 +957,7 @@ server = ApiServer(enable_openai_api=False)
 Or via CLI:
 ```bash
 # Default: OpenAI API enabled
-telefuser serve --pipe_path ./pipeline.py --task t2v
+telefuser serve ./pipeline.py --task t2v
 ```
 
 ---

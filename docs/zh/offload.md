@@ -42,11 +42,11 @@ TeleFuser 支持四种卸载策略，通过 `WeightOffloadType` 配置：
 | `pin_cpu_memory` | bool | `True` | 使用固定内存加速 H2D 传输 |
 | `offload_ratio` | float | `1.0` | 要卸载的层比例（1.0 = 所有层） |
 | `prefetch_size` | int | `1` | 提前预取的层数 |
-| `lazy_gpu_cache` | bool | `False` | 延迟 GPU 缓冲区分配直到首次使用 |
 
-### 延迟 GPU 缓存
+### AsyncOffloadManager 延迟 GPU 缓存
 
-`lazy_gpu_cache` 参数控制是否在初始化时预分配 GPU 缓冲区：
+`lazy_gpu_cache` 是底层 `AsyncOffloadManager` 的构造参数，不是
+`OffloadConfig` 字段。它控制是否在 manager 初始化时预分配 GPU 缓冲区：
 
 - **`lazy_gpu_cache=False`（默认）**：在初始化期间分配 GPU 缓冲区池
 - **`lazy_gpu_cache=True`**：在首次使用时分配 GPU 缓冲区池（在初始化期间节省显存）
@@ -237,12 +237,18 @@ pipe_config.dit_config.offload_config.prefetch_size = 2
 如果管道初始化期间发生 GPU OOM：
 
 ```python
-# 使用 lazy_gpu_cache 延迟缓冲区分配
+# 使用 OffloadConfig 当前暴露的最保守管线卸载配置
 pipe_config.dit_config.offload_config = OffloadConfig(
     offload_type=WeightOffloadType.ASYNC_CPU_OFFLOAD,
-    lazy_gpu_cache=True,  # 延迟 GPU 缓冲区分配
+    pin_cpu_memory=True,
+    offload_ratio=1.0,
+    prefetch_size=1,
 )
 ```
+
+如果明确需要延迟 GPU cache 分配，需要直接使用 `AsyncOffloadManager`，
+或通过会传递 `lazy_gpu_cache=True` 的 pipeline 集成接入；当前
+`OffloadConfig` dataclass 不暴露这个选项。
 
 ### 推理速度慢
 
