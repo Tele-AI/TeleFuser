@@ -1,20 +1,13 @@
-"""Wan2.2 14B Text-to-Video service pipeline with latent cache support.
+"""Wan2.2 14B Text-to-Video service pipeline without latent cache.
 
-Service-mode counterpart of ``wan22_14b_text_to_video_h100.py``. Exposes:
+Service-mode counterpart of ``wan22_14b_text_to_video_h100.py`` without latent cache.
+Exposes:
 - ``get_pipeline`` for service startup
 - ``run_with_file`` for TeleFuser PipelineService (must return dict with ``output_path``)
 - ``CACHE_CONFIG`` for CacheServiceFactory config overrides
 
-Cross-request latent cache is wired through CacheSeek:
-1. Service layer -> ``adapter.build_query(task_request)``
-   -> ``cache_service.lookup(cache_query)``
-   -> ``adapter.apply_resume(lookup_result, engine_ctx=task_data)``
-2. ``run_with_file`` forwards ``latent_data`` to ``pipeline.__call__``
-3. Pipeline returns ``(frames, latent_payload)`` when ``latent_data`` is not None
-4. ``run_with_file`` samples a few frames and writes back ``latent_payload["embedding_video_frames"]``
-   to satisfy VideoBasedApproximateCache.save's precondition
-5. Service layer -> ``adapter.on_response(task_request, latent_payload)``
-   -> ``cache_service.save(cache_query, outputs)``
+``CACHE_CONFIG["enable_latent_cache"]`` is False here, so the CacheSeek
+lookup/resume/save lifecycle is not engaged.
 """
 
 from __future__ import annotations
@@ -34,7 +27,7 @@ from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_t2v_service",
-    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-T2V-A14B",
+    model_root="/storage/model_zoo/Wan2.2-T2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -57,24 +50,15 @@ PPL_CONFIG = dict(
 )
 
 CACHE_CONFIG = dict(
-    enable_latent_cache=True,
+    enable_latent_cache=False,
     latent_cache_dir=os.getenv("TELEFUSER_LATENT_CACHE_DIR", "./latent_cache/wan22_t2v"),
-    # Default write_only for dataset_500 (every prompt is unique, so always save).
-    # Set TELEFUSER_CACHE_MODE=read_write to also serve from cache (verifying hits).
-    # See the latent distribution dataset design notes.
-    cache_mode=os.getenv("TELEFUSER_CACHE_MODE", "write_only"),
-    # KV store: default local_file. Switch to fluxon by setting
-    #   TELEFUSER_KV_STORE_TYPE=fluxon
-    #   FLUXON_CONFIG_PATH=/path/to/external_config.yaml
-    # Fluxon adapter requires a running master + kvclient owner on this host;
-    # See the Fluxon backend integration notes for the deploy procedure.
-    kv_store_type=os.getenv("TELEFUSER_KV_STORE_TYPE", "local_file"),
-    fluxon_config_path=os.getenv("FLUXON_CONFIG_PATH", ""),
-    # Vector store: default faiss; switch to qdrant via env when a real
-    # Qdrant server is running (see the Qdrant deployment notes).
-    # TELEFUSER_VECTOR_STORE_TYPE=qdrant QDRANT_URL=http://127.0.0.1:6333
-    vector_store_type=os.getenv("TELEFUSER_VECTOR_STORE_TYPE", "faiss"),
-    qdrant_url=os.getenv("QDRANT_URL", ""),
+    # Cache is disabled for this pipeline variant; the remaining values are
+    # kept aligned with the cache-enabled sibling for easy toggling.
+    cache_mode="write_only",
+    # KV store: Fluxon is stubbed in MVP -> use local file backend.
+    kv_store_type="local_file",
+    # Vector store: Qdrant is stubbed in MVP -> use faiss backend.
+    vector_store_type="faiss",
     # Qwen3-VL-Embedding-2B hidden_size=2048. connection.py default is 512 (too small).
     # MUST match encoder output dim or FAISSVectorStore.search raises dim mismatch.
     vector_dim=2048,
@@ -133,6 +117,12 @@ def _sample_video_frames(video_frames, max_frames: int | None = None):
         return []
     indices = _sample_indices(total, max_frames)
     return [video_frames[idx] for idx in indices if 0 <= idx < total]
+
+
+# build_latent_data ppl-file hook removed (kept consistent
+# with the cache-enabled sibling file). enable_latent_cache=False here, so the
+# adapter path is never engaged anyway, but removing the dead hook keeps the
+# two ppl files structurally aligned.
 
 
 def get_pipeline(parallelism: int = 1, model_root: str | None = None):
