@@ -25,6 +25,11 @@ from telefuser.service.security.security_validator import SecurityLevel
 from telefuser.service_types import MediaType, TaskStatus
 
 
+def _openapi_paths(app: object) -> set[str]:
+    openapi = app.openapi()
+    return set(openapi.get("paths", {}))
+
+
 def test_task_status_uses_shared_service_enum() -> None:
     assert CoreTaskStatus is TaskStatus
     assert TaskStatus.STREAMING.value == "streaming"
@@ -91,26 +96,58 @@ def test_readiness_passes_when_pipeline_is_running() -> None:
     assert health["pipeline_ready"] is True
 
 
+def test_service_status_ignores_mock_pool_status_attribute() -> None:
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=False)
+    server.inference_service = Mock()
+    routes = ServiceRoutes(server)
+
+    status = asyncio.run(routes.get_status())
+
+    assert status["execution_mode"] == "serial_single_pipeline"
+    assert "pool" not in status
+
+
+def test_service_status_and_readiness_use_pipeline_pool_status_list() -> None:
+    class PoolPipeline:
+        is_running = True
+
+        def pool_status(self) -> list[dict]:
+            return [{"id": 0, "device_ids": ["0"], "status": "idle"}]
+
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=False)
+    server.inference_service = PoolPipeline()
+    routes = ServiceRoutes(server)
+
+    status = asyncio.run(routes.get_status())
+    health = asyncio.run(routes.health_check())
+    ready = asyncio.run(routes.readiness_check())
+
+    assert status["execution_mode"] == "concurrent_pipeline_pool"
+    assert status["pool"] == [{"id": 0, "device_ids": ["0"], "status": "idle"}]
+    assert health["ready"] is True
+    assert ready.status_code == 200
+
+
 def test_stream_route_profile_exposes_only_stream_service_routes() -> None:
     server = ApiServer(task_manager=TaskManager(), enable_openai_api=True, route_profile="stream")
-    paths = {route.path for route in server.app.routes}
+    paths = _openapi_paths(server.app)
 
     assert "/v1/service/health" in paths
     assert "/v1/stream/sessions/{session_id}/status" in paths
     assert "/v1/tasks/create" not in paths
     assert "/v1/tasks/form" not in paths
-    assert "/v1/files/download/{file_path:path}" not in paths
+    assert "/v1/files/download/{file_path}" not in paths
     assert "/v1/images/generations" not in paths
     assert "/v1/videos" not in paths
 
 
 def test_request_response_route_profile_excludes_stream_routes() -> None:
     server = ApiServer(task_manager=TaskManager(), enable_openai_api=False, route_profile="request_response")
-    paths = {route.path for route in server.app.routes}
+    paths = _openapi_paths(server.app)
 
     assert "/v1/service/health" in paths
     assert "/v1/tasks/create" in paths
-    assert "/v1/files/download/{file_path:path}" in paths
+    assert "/v1/files/download/{file_path}" in paths
     assert "/v1/stream/sessions/{session_id}/status" not in paths
 
 
@@ -120,12 +157,12 @@ def test_container_stream_app_uses_stream_route_profile() -> None:
     container.stream_pipeline_service.is_running = True
 
     app = container.get_api_app()
-    paths = {route.path for route in app.routes}
+    paths = _openapi_paths(app)
 
     assert "/v1/service/health" in paths
     assert "/v1/stream/sessions/{session_id}/status" in paths
     assert "/v1/tasks/create" not in paths
-    assert "/v1/files/download/{file_path:path}" not in paths
+    assert "/v1/files/download/{file_path}" not in paths
 
 
 def test_stream_session_close_logs_pipeline_close_failure(monkeypatch: pytest.MonkeyPatch) -> None:

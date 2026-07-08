@@ -54,8 +54,22 @@ def test_artifact_store_resolves_task_scoped_outputs_for_download(tmp_path: Path
     output = store.output_path("result.mp4", media_type=MediaType.VIDEO, task_id="task-123")
     output.write_bytes(b"video")
 
-    assert store.resolve_output_file("result.mp4") == output
+    assert store.resolve_output_file("tasks/task-123/outputs/videos/result.mp4") == output
     assert store.resolve_output_file(output) == output
+
+
+def test_artifact_store_does_not_resolve_bare_filenames_across_tasks(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    first = store.output_path("result.png", media_type=MediaType.IMAGE, task_id="task-a")
+    second = store.output_path("result.png", media_type=MediaType.IMAGE, task_id="task-b")
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    resolved = store.resolve_output_file("result.png")
+
+    assert resolved == tmp_path / "outputs" / "result.png"
+    assert resolved not in {first, second}
+    assert not resolved.exists()
 
 
 def test_artifact_store_round_trips_local_artifact_ids(tmp_path: Path) -> None:

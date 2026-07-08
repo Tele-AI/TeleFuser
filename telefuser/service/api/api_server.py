@@ -191,9 +191,7 @@ class ApiServer:
 
             timeout = httpx.Timeout(connect=5.0, read=5.0)
             verify = (
-                self.server_config.ssl_cert_path
-                if self.server_config.ssl_cert_path
-                else self.server_config.verify_ssl
+                self.server_config.ssl_cert_path if self.server_config.ssl_cert_path else self.server_config.verify_ssl
             )
             async with httpx.AsyncClient(verify=verify, timeout=timeout) as client:
                 response = await client.head(image_url, follow_redirects=True)

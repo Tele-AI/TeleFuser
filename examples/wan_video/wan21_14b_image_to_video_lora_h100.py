@@ -137,16 +137,20 @@ def run(
 
 
 def run_with_file(
-    pipeline,
-    image,
-    prompt,
-    negative_prompt,
-    seed,
-    output_path,
-    resolution=PPL_CONFIG["resolution"],
+    pipeline: Wan21VideoPipeline,
+    first_image_path: str,
+    prompt: str = "",
+    negative_prompt: str = "",
+    seed: int = PPL_CONFIG["seed"],
+    output_path: str = "",
+    resolution: str = PPL_CONFIG["resolution"],
     **kwargs,
 ):
-    """Run pipeline and save to file."""
+    """Run pipeline from an input image path and save to file."""
+    if not first_image_path:
+        raise ValueError("run_with_file requires first_image_path")
+
+    image = Image.open(first_image_path).convert("RGB")
     video = run(
         pipeline,
         image,

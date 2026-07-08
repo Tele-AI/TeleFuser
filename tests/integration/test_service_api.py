@@ -351,6 +351,22 @@ class TestFileUpload:
 
         assert response.status_code in [200, 422]
 
+    def test_upload_image_forwards_dynamic_form_fields(self, fs_client):
+        """Test multipart form endpoint forwards custom task parameters."""
+        response = fs_client.post(
+            "/v1/tasks/form",
+            files={"first_image_file": ("test.png", b"fake image data", "image/png")},
+            data={"task": "i2v", "prompt": "test", "resolution": "480p", "seed": "123", "cfg_scale": "5.5"},
+        )
+
+        assert response.status_code == 200
+        task_id = response.json()["task_id"]
+
+        status_response = fs_client.get(f"/v1/tasks/{task_id}/status")
+        assert status_response.status_code == 200
+        status = status_response.json()
+        assert status["resolution"] == "480p"
+
     def test_upload_without_file(self, fs_client):
         """Test upload without file via form."""
         response = fs_client.post("/v1/tasks/form", data={"prompt": "test without image"})

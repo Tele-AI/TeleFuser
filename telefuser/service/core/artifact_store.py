@@ -140,14 +140,6 @@ class ArtifactStore:
             if candidate.exists():
                 return candidate
 
-        for task_root in self.tasks_dir.glob("*"):
-            if not task_root.is_dir():
-                continue
-            for media_dir in ("videos", "images"):
-                candidate = self._resolve_under(task_root / "outputs" / media_dir, path)
-                if candidate.exists():
-                    return candidate
-
         return self._resolve_under(self.legacy_output_dir, path)
 
     def artifact_id_for_path(self, file_path: str | Path) -> str:

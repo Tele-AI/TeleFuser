@@ -112,14 +112,11 @@ class MediaGenerationService:
 
         # Determine media type and set appropriate output path
         media_type = infer_media_type_for_task(message.task)
-        try:
-            actual_save_path = self.file_service.get_output_path(
-                message.output_path,
-                media_type=media_type,
-                task_id=message.task_id,
-            )
-        except TypeError:
-            actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
+        actual_save_path = self.file_service.get_output_path(
+            message.output_path,
+            media_type=media_type,
+            task_id=message.task_id,
+        )
         task_data["output_path"] = str(actual_save_path)
 
         # Best-effort: every step degrades silently to "no cache" on failure.

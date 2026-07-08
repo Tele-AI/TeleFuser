@@ -14,7 +14,9 @@ class _FakeFileService:
         self.output_dir = root / "outputs"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_output_path(self, output_path: str, media_type):
+    def get_output_path(self, output_path: str, media_type, task_id: str | None = None):
+        if task_id is not None:
+            return self.output_dir / "tasks" / task_id / str(media_type) / output_path
         return self.output_dir / output_path
 
 

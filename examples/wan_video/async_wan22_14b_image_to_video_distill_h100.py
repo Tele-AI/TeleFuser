@@ -154,8 +154,8 @@ async def run(pipe, req_id, seed, prompt, image, ppl_config=None):
     return {"uri": saved_uri, "wall_time_s": request_elapsed, "pipeline_time_ms": total_ms, "stage_times": stage_times}
 
 
-async def run_with_file(pipe, req_id, seed, prompt, image, ppl_config=None):
-    """Run async pipeline and save to file.
+async def run_with_file(pipe, req_id, seed, prompt, first_image_path: str, ppl_config=None):
+    """Run async pipeline from an input image path and return artifact metadata.
 
     Note: The async pipeline handles file saving internally through agenerate().
     The output URI is returned in the result dict.
@@ -165,15 +165,18 @@ async def run_with_file(pipe, req_id, seed, prompt, image, ppl_config=None):
         req_id: Request ID for tracking
         seed: Random seed
         prompt: Positive guidance text prompt
-        image: Input image
+        first_image_path: Input image path
         ppl_config: Pipeline configuration
 
     Returns:
         Result dict with uri, wall_time_s, pipeline_time_ms, stage_times
     """
+    if not first_image_path:
+        raise ValueError("run_with_file requires first_image_path")
     if ppl_config is None:
         ppl_config = PPL_CONFIG
 
+    image = Image.open(first_image_path).convert("RGB")
     result = await run(pipe, req_id, seed, prompt, image, ppl_config)
     logger.info(f"Video saved to: {result['uri']}")
     return result

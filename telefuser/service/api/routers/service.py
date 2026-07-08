@@ -30,9 +30,10 @@ class ServiceRoutes:
         status = self.api.task_manager.get_service_status()
         status["effective_max_concurrent_tasks"] = self.api.task_manager.max_concurrent_processing
         status["configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
-        if hasattr(self.api.inference_service, "pool_status"):
+        pool_status = self._pipeline_pool_status()
+        if pool_status is not None:
             status["execution_mode"] = "concurrent_pipeline_pool"
-            status["pool"] = self.api.inference_service.pool_status()
+            status["pool"] = pool_status
         else:
             status["execution_mode"] = "serial_single_pipeline"
         webrtc_stats = self._webrtc_session_stats()
@@ -40,6 +41,18 @@ class ServiceRoutes:
         if webrtc_stats.get("webrtc_active_sessions", 0) > 0 and status.get("service_status") == "idle":
             status["service_status"] = "active"
         return status
+
+    def _pipeline_pool_status(self) -> list[dict] | None:
+        """Return pipeline pool status when the inference service exposes a real pool."""
+        if self.api.inference_service is None:
+            return None
+        pool_status_fn = getattr(self.api.inference_service, "pool_status", None)
+        if not callable(pool_status_fn):
+            return None
+        pool_status = pool_status_fn()
+        if not isinstance(pool_status, list) or not all(isinstance(replica, dict) for replica in pool_status):
+            return None
+        return pool_status
 
     def _webrtc_session_stats(self) -> dict:
         """Return WebRTC session stats if available."""
@@ -67,12 +80,12 @@ class ServiceRoutes:
 
     async def health_check(self) -> dict:
         """Liveness endpoint for monitoring."""
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
 
         status = {
             "status": "healthy",
             "ready": self._is_ready(),
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "version": "1.0.0",
         }
 
@@ -89,9 +102,9 @@ class ServiceRoutes:
     def _is_ready(self) -> bool:
         """Return whether the initialized service can currently accept work."""
         if self.api.inference_service is not None:
-            if hasattr(self.api.inference_service, "pool_status"):
-                pool_status = self.api.inference_service.pool_status()
-                return bool(pool_status.get("alive_replicas", 0) > 0)
+            pool_status = self._pipeline_pool_status()
+            if pool_status is not None:
+                return any(replica.get("status") != "dead" for replica in pool_status)
             return bool(getattr(self.api.inference_service, "is_running", False))
 
         if self.api.stream_service is not None:

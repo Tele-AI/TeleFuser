@@ -98,9 +98,7 @@ class FileService:
                     if response.status_code == 200:
                         content_length = response.headers.get("content-length")
                         if content_length is not None and int(content_length) > max_size:
-                            raise ValueError(
-                                f"File too large: {content_length} bytes, max: {max_size} bytes"
-                            )
+                            raise ValueError(f"File too large: {content_length} bytes, max: {max_size} bytes")
                         await self._write_response_stream(response, destination, max_size)
                         return
                     if response.status_code >= 500:

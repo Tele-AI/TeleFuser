@@ -319,6 +319,31 @@ them. `ephemeral` removes terminal task directories on the next cleanup pass. If
 `TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS=true`, failed task directories are protected from automatic cleanup so
 partial outputs can be inspected manually.
 
+Recommended cleanup profiles:
+
+```bash
+# Development/debugging: keep outputs for one day and preserve failed task outputs.
+export TELEFUSER_ARTIFACT_PERSISTENCE_MODE=persistent
+export TELEFUSER_ARTIFACT_RETENTION_SECONDS=86400
+export TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS=1800
+export TELEFUSER_ARTIFACT_CLEANUP_INTERVAL_SECONDS=600
+export TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS=true
+
+# Temporary benchmarking: remove terminal task directories on the next cleanup pass.
+export TELEFUSER_ARTIFACT_PERSISTENCE_MODE=ephemeral
+export TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS=600
+export TELEFUSER_ARTIFACT_CLEANUP_INTERVAL_SECONDS=300
+export TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS=false
+
+# Long-running service: keep artifacts for seven days with bounded local storage.
+export TELEFUSER_ARTIFACT_PERSISTENCE_MODE=persistent
+export TELEFUSER_ARTIFACT_RETENTION_SECONDS=604800
+export TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS=3600
+export TELEFUSER_ARTIFACT_CLEANUP_INTERVAL_SECONDS=3600
+export TELEFUSER_ARTIFACT_MAX_TOTAL_BYTES=107374182400
+export TELEFUSER_ARTIFACT_MAX_TASK_BYTES=10737418240
+```
+
 ### Rate Limit and Proxy Headers
 
 Rate limiting is in-memory and keyed by client identity. By default, the server uses the direct client address and does

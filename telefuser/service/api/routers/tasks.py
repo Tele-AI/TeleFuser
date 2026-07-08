@@ -7,14 +7,16 @@ Routes are defined as class methods for better testability.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import ValidationError
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from telefuser.service.core.pipeline_contract import default_task_contract, validate_task_name_format
-from telefuser.service_types import AspectRatio, MediaType, OutputFormat, StopTaskStatus
+from telefuser.service_types import MediaType, StopTaskStatus
 from telefuser.utils.logging import logger
 
 from ..schema import StopTaskResponse, TaskRequest, TaskResponse
@@ -40,33 +42,15 @@ def create_router(api_server: ApiServer) -> APIRouter:
 
     @new_router.post("/form", response_model=TaskResponse)
     async def create_task_form(
+        request: Request,
         first_image_file: UploadFile | None = File(default=None, description="First frame image file"),
         last_image_file: UploadFile | None = File(default=None, description="Last frame image file"),
-        prompt: str = Form(default="", description="Generation prompt"),
-        task: str = Form(default="", description="Optional explicit task name"),
-        output_path: str = Form(default="", description="Custom output path"),
-        negative_prompt: str = Form(default="", description="Negative prompt"),
-        target_video_length: int = Form(default=5, description="Video length in seconds (for video tasks)"),
-        seed: int = Form(default=42, description="Random seed"),
-        aspect_ratio: AspectRatio = Form(
-            default=AspectRatio.RATIO_16_9, description="Aspect ratio (16:9, 9:16, 4:3, etc.)"
-        ),
-        output_format: OutputFormat = Form(
-            default=OutputFormat.PNG, description="Output format (png, jpg, webp for images)"
-        ),
     ) -> TaskResponse:
         """Create task with file upload support."""
         return await routes.create_task_form(
+            request=request,
             first_image_file=first_image_file,
             last_image_file=last_image_file,
-            prompt=prompt,
-            task=task,
-            output_path=output_path,
-            negative_prompt=negative_prompt,
-            target_video_length=target_video_length,
-            seed=seed,
-            aspect_ratio=aspect_ratio,
-            output_format=output_format,
         )
 
     @new_router.get("/queue/status", response_model=dict)
@@ -164,18 +148,11 @@ class TaskRoutes:
 
     async def create_task_form(
         self,
+        request: Request,
         first_image_file: UploadFile | None = None,
         last_image_file: UploadFile | None = None,
-        prompt: str | None = None,
-        task: str = "",
-        output_path: str | None = None,
-        negative_prompt: str | None = None,
-        target_video_length: int | None = None,
-        seed: int | None = None,
-        aspect_ratio: AspectRatio = AspectRatio.RATIO_16_9,
-        output_format: OutputFormat = OutputFormat.PNG,
     ) -> TaskResponse:
-        """Create task with file upload support."""
+        """Create task with file upload support and dynamic form parameters."""
         assert self.api.file_service is not None, "File service is not initialized"
 
         async def save_file_async(file: UploadFile, media_type: MediaType) -> str:
@@ -189,49 +166,37 @@ class TaskRoutes:
                 fallback_filename="input.mp4" if media_type == MediaType.VIDEO else "input.png",
             )
 
-        first_image_path = ""
-        ref_video_path = ""
-        if first_image_file and first_image_file.filename:
-            if self._is_video_upload(first_image_file):
-                ref_video_path = await save_file_async(first_image_file, MediaType.VIDEO)
-            else:
-                first_image_path = await save_file_async(first_image_file, MediaType.IMAGE)
-
-        last_image_path = ""
-        if last_image_file and last_image_file.filename:
-            if self._is_video_upload(last_image_file):
-                raise HTTPException(status_code=400, detail="last_image_file must be an image upload")
-            last_image_path = await save_file_async(last_image_file, MediaType.IMAGE)
-
         try:
-            resolved_task = self._resolve_form_task(
-                requested_task=task,
-                first_image_path=first_image_path,
-                last_image_path=last_image_path,
-                ref_video_path=ref_video_path,
-            )
+            task_payload = await self._collect_form_task_payload(request)
 
-            task_payload: dict[str, Any] = {"task": resolved_task}
-            if prompt not in (None, ""):
-                task_payload["prompt"] = prompt
-            if negative_prompt not in (None, ""):
-                task_payload["negative_prompt"] = negative_prompt
+            first_image_path = ""
+            ref_video_path = ""
+            if first_image_file and first_image_file.filename:
+                if self._is_video_upload(first_image_file):
+                    ref_video_path = await save_file_async(first_image_file, MediaType.VIDEO)
+                else:
+                    first_image_path = await save_file_async(first_image_file, MediaType.IMAGE)
+
+            last_image_path = ""
+            if last_image_file and last_image_file.filename:
+                if self._is_video_upload(last_image_file):
+                    raise HTTPException(status_code=400, detail="last_image_file must be an image upload")
+                last_image_path = await save_file_async(last_image_file, MediaType.IMAGE)
+
             if first_image_path:
                 task_payload["first_image_path"] = first_image_path
             if last_image_path:
                 task_payload["last_image_path"] = last_image_path
             if ref_video_path:
                 task_payload["ref_video_path"] = ref_video_path
-            if output_path not in (None, ""):
-                task_payload["output_path"] = output_path
-            if target_video_length is not None:
-                task_payload["target_video_length"] = target_video_length
-            if seed is not None:
-                task_payload["seed"] = seed
-            if aspect_ratio not in (None, ""):
-                task_payload["aspect_ratio"] = aspect_ratio
-            if output_format not in (None, ""):
-                task_payload["output_format"] = output_format
+
+            resolved_task = self._resolve_form_task(
+                requested_task=str(task_payload.get("task") or ""),
+                first_image_path=first_image_path,
+                last_image_path=last_image_path,
+                ref_video_path=ref_video_path,
+            )
+            task_payload["task"] = resolved_task
 
             message = TaskRequest(**task_payload)
             return await self.api.task_app_service.submit(
@@ -246,6 +211,58 @@ class TaskRoutes:
         except Exception as e:
             logger.error(f"Failed to create form task: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def _collect_form_task_payload(self, request: Request) -> dict[str, Any]:
+        """Collect non-file multipart fields into a TaskRequest-compatible payload."""
+        form = await request.form()
+        task_payload: dict[str, Any] = {}
+        file_field_names = {"first_image_file", "last_image_file"}
+
+        for key, value in form.multi_items():
+            if key in file_field_names or isinstance(value, (UploadFile, StarletteUploadFile)):
+                continue
+            if value in (None, ""):
+                continue
+
+            coerced_value = self._coerce_form_value(value)
+            if key in task_payload:
+                existing_value = task_payload[key]
+                if isinstance(existing_value, list):
+                    existing_value.append(coerced_value)
+                else:
+                    task_payload[key] = [existing_value, coerced_value]
+            else:
+                task_payload[key] = coerced_value
+
+        return task_payload
+
+    def _coerce_form_value(self, value: Any) -> Any:
+        """Coerce multipart string values into basic JSON-compatible scalar types."""
+        if not isinstance(value, str):
+            return value
+
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if lowered == "null":
+            return None
+
+        try:
+            return int(value)
+        except ValueError:
+            pass
+
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
 
     def _resolve_form_task(
         self,
