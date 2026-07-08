@@ -150,6 +150,7 @@ class ArtifactStore:
         retention_seconds: int,
         tmp_retention_seconds: int,
         max_total_bytes: int = 0,
+        max_task_bytes: int = 0,
         now: datetime | float | int | None = None,
     ) -> dict[str, Any]:
         """Clean expired local artifacts without touching active task directories."""
@@ -177,6 +178,16 @@ class ArtifactStore:
                     message = f"Failed to remove artifact directory for task {task_id}: {exc}"
                     logger.warning(message)
                     errors.append(message)
+
+        if max_task_bytes > 0:
+            removed_task_ids.extend(
+                self._cleanup_oversized_tasks(
+                    active_task_ids=active_task_ids,
+                    terminal_task_end_times=terminal_task_end_times,
+                    max_task_bytes=max_task_bytes,
+                    already_removed=set(removed_task_ids),
+                )
+            )
 
         if max_total_bytes > 0:
             removed_task_ids.extend(
@@ -239,6 +250,29 @@ class ArtifactStore:
                 removed.append(task_id)
             except Exception as exc:
                 logger.warning(f"Failed to remove artifact directory for task {task_id}: {exc}")
+        return removed
+
+    def _cleanup_oversized_tasks(
+        self,
+        *,
+        active_task_ids: set[str] | frozenset[str],
+        terminal_task_end_times: Mapping[str, datetime | float | int | None],
+        max_task_bytes: int,
+        already_removed: set[str],
+    ) -> list[str]:
+        removed: list[str] = []
+        for task_id in terminal_task_end_times:
+            if task_id in active_task_ids or task_id in already_removed:
+                continue
+
+            task_dir = self.task_root(task_id)
+            if not task_dir.exists() or self._tree_size(task_dir) <= max_task_bytes:
+                continue
+            try:
+                shutil.rmtree(task_dir)
+                removed.append(task_id)
+            except Exception as exc:
+                logger.warning(f"Failed to remove oversized artifact directory for task {task_id}: {exc}")
         return removed
 
     @staticmethod

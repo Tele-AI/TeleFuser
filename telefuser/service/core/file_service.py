@@ -35,6 +35,7 @@ class FileService:
         artifact_retention_seconds: int = 7 * 24 * 60 * 60,
         artifact_tmp_retention_seconds: int = 60 * 60,
         artifact_max_total_bytes: int = 0,
+        artifact_max_task_bytes: int = 0,
     ) -> None:
         self.artifact_store = ArtifactStore(cache_dir)
         self.cache_dir = self.artifact_store.root
@@ -51,6 +52,7 @@ class FileService:
         self.artifact_retention_seconds = artifact_retention_seconds
         self.artifact_tmp_retention_seconds = artifact_tmp_retention_seconds
         self.artifact_max_total_bytes = artifact_max_total_bytes
+        self.artifact_max_task_bytes = artifact_max_task_bytes
 
         self._http_client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
@@ -355,6 +357,7 @@ class FileService:
             retention_seconds=self.artifact_retention_seconds,
             tmp_retention_seconds=self.artifact_tmp_retention_seconds,
             max_total_bytes=self.artifact_max_total_bytes,
+            max_task_bytes=self.artifact_max_task_bytes,
             now=now,
         )
 

@@ -138,6 +138,49 @@ def test_artifact_store_cleanup_removes_expired_part_files(tmp_path: Path) -> No
     assert not part_file.exists()
 
 
+def test_artifact_store_cleanup_removes_oversized_terminal_tasks(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    oversized_output = store.output_path("big.mp4", media_type=MediaType.VIDEO, task_id="oversized-task")
+    active_output = store.output_path("active.mp4", media_type=MediaType.VIDEO, task_id="active-task")
+    small_output = store.output_path("small.mp4", media_type=MediaType.VIDEO, task_id="small-task")
+    oversized_output.write_bytes(b"12345")
+    active_output.write_bytes(b"12345")
+    small_output.write_bytes(b"12")
+    now = datetime.now()
+
+    result = store.cleanup(
+        active_task_ids={"active-task"},
+        terminal_task_end_times={
+            "oversized-task": now,
+            "active-task": now,
+            "small-task": now,
+        },
+        retention_seconds=0,
+        tmp_retention_seconds=0,
+        max_task_bytes=4,
+        now=now,
+    )
+
+    assert result["removed_task_ids"] == ["oversized-task"]
+    assert not oversized_output.exists()
+    assert active_output.exists()
+    assert small_output.exists()
+
+
+def test_file_service_passes_max_task_bytes_to_artifact_cleanup(tmp_path: Path) -> None:
+    files = FileService(tmp_path, artifact_max_task_bytes=3)
+    output = files.get_output_path("big.mp4", media_type=MediaType.VIDEO, task_id="task-123")
+    output.write_bytes(b"1234")
+
+    result = files.cleanup_artifacts(
+        active_task_ids=set(),
+        terminal_task_end_times={"task-123": datetime.now()},
+    )
+
+    assert result["removed_task_ids"] == ["task-123"]
+    assert not output.exists()
+
+
 def test_api_server_runs_artifact_cleanup_from_task_snapshot(tmp_path: Path) -> None:
     task_manager = TaskManager()
     config = ServerConfig(artifact_retention_seconds=1, artifact_tmp_retention_seconds=0)

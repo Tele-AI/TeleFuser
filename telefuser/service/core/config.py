@@ -50,6 +50,14 @@ class ServerConfig(BaseSettings):
 
     # Cache settings
     cache_dir: str = Field(default="work_dirs/server_cache", description="Cache directory path")
+    artifact_storage_backend: Literal["local", "s3"] = Field(
+        default="local",
+        description="Artifact storage backend. Only local is implemented in this refactor stage.",
+    )
+    artifact_local_root: str | None = Field(
+        default=None,
+        description="Local artifact root. Defaults to cache_dir when unset.",
+    )
 
     enable_latent_cache: bool | None = Field(
         default=None,
@@ -217,6 +225,11 @@ class ServerConfig(BaseSettings):
             return True
         except Exception as e:
             raise ValueError(f"Invalid configuration: {e}")
+
+    @property
+    def effective_artifact_local_root(self) -> str:
+        """Return the local artifact root used when no explicit cache_dir override is supplied."""
+        return self.artifact_local_root or self.cache_dir
 
     @property
     def effective_max_concurrent_tasks(self) -> int:

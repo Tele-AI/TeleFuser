@@ -342,6 +342,7 @@ class ApiServer:
             artifact_retention_seconds=self.server_config.artifact_retention_seconds,
             artifact_tmp_retention_seconds=self.server_config.artifact_tmp_retention_seconds,
             artifact_max_total_bytes=self.server_config.artifact_max_total_bytes,
+            artifact_max_task_bytes=self.server_config.artifact_max_task_bytes,
         )
         self.inference_service = inference_service
         self.cache_service = cache_service

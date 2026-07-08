@@ -95,7 +95,13 @@ class ServiceContainer:
 
     def initialize_file_service(self, cache_dir: Path | None = None) -> FileService:
         """Initialize file service."""
-        cache_dir = cache_dir or self._cache_dir or Path(self.config.cache_dir)
+        if self.config.artifact_storage_backend != "local":
+            raise RuntimeError(
+                "Only the local artifact backend is implemented. "
+                f"Configured backend: {self.config.artifact_storage_backend}"
+            )
+
+        cache_dir = cache_dir or self._cache_dir or Path(self.config.effective_artifact_local_root)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.file_service = FileService(
@@ -106,6 +112,7 @@ class ServiceContainer:
             artifact_retention_seconds=self.config.artifact_retention_seconds,
             artifact_tmp_retention_seconds=self.config.artifact_tmp_retention_seconds,
             artifact_max_total_bytes=self.config.artifact_max_total_bytes,
+            artifact_max_task_bytes=self.config.artifact_max_task_bytes,
         )
         return self.file_service
 
