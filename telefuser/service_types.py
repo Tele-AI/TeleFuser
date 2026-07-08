@@ -55,6 +55,7 @@ class TaskStatus(_StringEnum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    STREAMING = "streaming"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

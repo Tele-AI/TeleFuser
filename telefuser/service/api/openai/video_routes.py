@@ -13,21 +13,18 @@ Reference: OpenAI Video API (https://platform.openai.com/docs/api-reference/vide
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, List
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from telefuser.service.api.task_contract_runtime import (
-    apply_task_contract_defaults,
     map_contract_fields,
     match_task_candidates,
-    validate_required_task_parameters,
 )
 from telefuser.service.core.pipeline_contract import is_video_task
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
+from telefuser.service_types import MediaType
 from telefuser.utils.logging import logger
 
 from .adapter import OpenAIRequestAdapter, OpenAIResponseAdapter, is_probable_video_reference
@@ -121,7 +118,7 @@ def create_router(api_server: ApiServer) -> APIRouter:
         return await routes.delete_video(video_id)
 
     @router.get("/{video_id}/content")
-    async def get_video_content(video_id: str) -> FileResponse:
+    async def get_video_content(video_id: str) -> Response:
         """Download a generated video by its ID."""
         return await routes.get_video_content(video_id)
 
@@ -135,7 +132,6 @@ class VideoRoutes:
         """Initialize with ApiServer instance."""
         self.api = api_server
         self.task_manager: TaskManager | None = getattr(api_server, "task_manager", None)
-        self.file_service = getattr(api_server, "file_service", None)
 
     async def create_video(
         self,
@@ -149,18 +145,15 @@ class VideoRoutes:
         try:
             task_type = self._resolve_video_task(request)
             task_request = OpenAIRequestAdapter.to_task_request(request, task_type=task_type)
-            self.api.validate_task_supported(task_request.task)
-            contract = self.api.get_task_contract(task_request.task)
-            apply_task_contract_defaults(
+            task_response = await self.api.task_app_service.submit(
                 task_request,
-                task_contract=contract,
                 explicit_fields=self._get_video_explicit_fields(
                     task_type=task_type,
                     source_fields=explicit_source_fields or set(getattr(request, "model_fields_set", set())),
                 ),
+                ensure_processing=False,
             )
-            validate_required_task_parameters(task_request, task_contract=contract)
-            task_id = self.task_manager.create_task(task_request)
+            task_id = task_response.task_id
             logger.info(f"Created video generation task: {task_id}")
 
             await self._ensure_processing()
@@ -279,64 +272,26 @@ class VideoRoutes:
 
     async def delete_video(self, video_id: str) -> VideoResponse:
         """Cancel or delete a video generation task."""
-        if not self.task_manager:
-            raise HTTPException(status_code=503, detail="Task manager not initialized")
-
-        task_status = self.task_manager.get_task_status(video_id)
-        if not task_status:
+        cancel_result = self.api.task_app_service.cancel_task(video_id)
+        if cancel_result["result"] == "not_found":
             raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
 
-        cancelled = self.task_manager.cancel_task(video_id)
+        task_status = cancel_result["task_status"] or TaskStatus.CANCELLED.value
+        video_status = OpenAIResponseAdapter.task_status_to_video_status(task_status)
 
         return VideoResponse(
             id=video_id,
-            status="cancelled" if cancelled else "deleted",
+            status=video_status,
             model="wan-video",
         )
 
-    async def get_video_content(self, video_id: str) -> FileResponse:
+    async def get_video_content(self, video_id: str) -> Response:
         """Download generated video."""
-        if not self.task_manager:
-            raise HTTPException(status_code=503, detail="Task manager not initialized")
-
-        if not self.file_service:
-            raise HTTPException(status_code=503, detail="File service not initialized")
-
-        task_info = self.task_manager.get_task(video_id)
-        if not task_info:
-            raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
-
-        task_status = self.task_manager.get_task_status(video_id)
-        if task_status.get("status") != TaskStatus.COMPLETED.value:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Video {video_id} is not ready (status: {task_status.get('status')})",
-            )
-
-        output_path = task_info.output_path or task_status.get("output_path")
-        if not output_path:
-            raise HTTPException(status_code=404, detail=f"Video {video_id} has no output path")
-
-        path = Path(output_path)
-        if not path.is_absolute():
-            output_dir = getattr(self.file_service, "output_video_dir", None)
-            if output_dir:
-                path = output_dir / path
-
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Video file not found: {path}")
-
-        suffix = path.suffix.lower()
-        media_types = {
-            ".mp4": "video/mp4",
-            ".avi": "video/x-msvideo",
-            ".mov": "video/quicktime",
-            ".mkv": "video/x-matroska",
-            ".webm": "video/webm",
-        }
-        media_type = media_types.get(suffix, "video/mp4")
-
-        return FileResponse(path=str(path), media_type=media_type, filename=path.name)
+        return self.api.task_app_service.get_output_response(
+            video_id,
+            media_type=MediaType.VIDEO,
+            require_completed=True,
+        )
 
     async def _ensure_processing(self) -> None:
         """Ensure the task processor is running."""
@@ -344,30 +299,12 @@ class VideoRoutes:
 
     async def _save_uploaded_file(self, file: UploadFile, prefix: str = "upload") -> str:
         """Save an uploaded file to disk."""
-        import uuid
-
-        if not self.file_service:
-            raise HTTPException(status_code=503, detail="File service not initialized")
-
-        input_dir = getattr(self.file_service, "input_video_dir", None)
-        if not input_dir:
-            input_dir = getattr(self.file_service, "input_image_dir", None)
-        if not input_dir:
-            input_dir = Path("/tmp/telefuser/inputs")
-            input_dir.mkdir(parents=True, exist_ok=True)
-
-        suffix = Path(file.filename or "input.mp4").suffix
-        filename = f"{prefix}_{uuid.uuid4().hex[:8]}{suffix}"
-        file_path = input_dir / filename
-
-        content = await file.read()
-        await asyncio.to_thread(self._write_file_sync, file_path, content)
-
-        return str(file_path)
-
-    def _write_file_sync(self, file_path: Path, content: bytes) -> None:
-        """Write file synchronously."""
-        file_path.write_bytes(content)
+        return await self.api.task_app_service.save_upload_file(
+            file,
+            media_type=MediaType.VIDEO,
+            prefix=prefix,
+            fallback_filename="input.mp4",
+        )
 
     def _resolve_video_task(self, request: VideoGenerationsRequest) -> str:
         """Resolve the best video task supported by the current pipeline."""

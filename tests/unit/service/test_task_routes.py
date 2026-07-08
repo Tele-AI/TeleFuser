@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException, UploadFile
 
 from telefuser.service.api.routers.tasks import TaskRoutes
+from telefuser.service.api.schema import TaskResponse
+from telefuser.service.api.task_application_service import TaskApplicationService
+from telefuser.service.core.file_service import FileService
+
+
+class _AsyncUpload:
+    def __init__(self, filename: str, content_type: str, chunks: list[bytes]) -> None:
+        self.filename = filename
+        self.content_type = content_type
+        self._chunks = list(chunks)
+
+    async def read(self, size: int) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
 
 
 def _make_routes(supported_tasks: tuple[str, ...] = ()) -> TaskRoutes:
@@ -23,6 +39,16 @@ def _make_routes(supported_tasks: tuple[str, ...] = ()) -> TaskRoutes:
         "vsr": {"required_inputs": ["ref_video_path"]},
     }.get(task)
     return TaskRoutes(api_server)
+
+
+def _make_form_routes(tmp_path: Path, supported_tasks: tuple[str, ...]) -> TaskRoutes:
+    routes = _make_routes(supported_tasks)
+    routes.api.file_service = FileService(tmp_path)
+    routes.api.task_app_service = TaskApplicationService(routes.api)
+    routes.api.task_app_service.submit = AsyncMock(
+        return_value=TaskResponse(task_id="task-123", task_status="pending", output_path="output.mp4")
+    )
+    return routes
 
 
 def test_resolve_form_task_prefers_supported_pipeline_task_order() -> None:
@@ -114,3 +140,29 @@ def test_is_video_upload_detects_video_extension_without_content_type() -> None:
         assert routes._is_video_upload(upload) is True
     finally:
         upload.file.close()
+
+
+def test_create_task_form_uses_file_service_upload_for_image(tmp_path: Path) -> None:
+    routes = _make_form_routes(tmp_path, ("i2i",))
+    upload = _AsyncUpload("cat.png", "image/png", [b"cat"])
+
+    asyncio.run(routes.create_task_form(first_image_file=upload, prompt="make it blue"))
+
+    task_request = routes.api.task_app_service.submit.call_args.args[0]
+    input_path = Path(task_request.first_image_path)
+    assert task_request.task == "i2i"
+    assert input_path.parent == routes.api.file_service.input_image_dir
+    assert input_path.read_bytes() == b"cat"
+
+
+def test_create_task_form_uses_file_service_upload_for_video(tmp_path: Path) -> None:
+    routes = _make_form_routes(tmp_path, ("vc",))
+    upload = _AsyncUpload("clip.mp4", "video/mp4", [b"video"])
+
+    asyncio.run(routes.create_task_form(first_image_file=upload, prompt="continue"))
+
+    task_request = routes.api.task_app_service.submit.call_args.args[0]
+    input_path = Path(task_request.ref_video_path)
+    assert task_request.task == "vc"
+    assert input_path.parent == routes.api.file_service.input_video_dir
+    assert input_path.read_bytes() == b"video"

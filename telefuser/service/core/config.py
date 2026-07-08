@@ -95,6 +95,35 @@ class ServerConfig(BaseSettings):
         le=1024 * 1024 * 1024,  # 1GB
         description="Maximum file download size",
     )
+    artifact_retention_seconds: int = Field(
+        default=7 * 24 * 60 * 60,
+        ge=0,
+        description="Maximum retention time for terminal task artifacts. Zero disables TTL cleanup.",
+    )
+    artifact_tmp_retention_seconds: int = Field(
+        default=60 * 60,
+        ge=0,
+        description="Maximum retention time for temporary .part files. Zero disables tmp cleanup.",
+    )
+    artifact_cleanup_interval_seconds: int = Field(
+        default=60 * 60,
+        ge=60,
+        description="Suggested interval for periodic artifact cleanup.",
+    )
+    artifact_max_total_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum local artifact bytes. Zero disables capacity cleanup.",
+    )
+    artifact_max_task_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum local artifact bytes per task. Zero disables per-task capacity checks.",
+    )
+    artifact_preserve_failed_outputs: bool = Field(
+        default=False,
+        description="Whether failed task output directories should be preserved until normal retention expiry.",
+    )
 
     # Rate limiting settings
     enable_rate_limit: bool = Field(default=True, description="Enable rate limiting middleware")

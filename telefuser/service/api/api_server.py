@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -15,13 +15,17 @@ from fastapi.responses import StreamingResponse
 
 from telefuser.utils.logging import logger
 
+from ..core.config import ServerConfig, server_config
 from ..core.file_service import FileService
-from ..core.pipeline_service import PipelineService
-from ..core.stream_pipeline_service import StreamPipelineService
-from ..core.task_manager import TaskManager, TaskStatus
+from ..core.task_manager import TaskManager
 from ..core.task_processor import AsyncTaskProcessor
 from ..core.task_service import MediaGenerationService
 from . import routers
+from .task_application_service import TaskApplicationService
+
+if TYPE_CHECKING:
+    from ..core.pipeline_service import PipelineService
+    from ..core.stream_pipeline_service import StreamPipelineService
 
 
 class ApiServer:
@@ -41,7 +45,9 @@ class ApiServer:
         enable_rate_limit: bool = True,
         enable_logging: bool = False,
         enable_openai_api: bool = True,
+        config: ServerConfig | None = None,
     ) -> None:
+        self.server_config = config or server_config
         self.app = app or FastAPI(
             title="TeleFuser API",
             description="API for video and image generation using TeleFuser framework. "
@@ -56,6 +62,7 @@ class ApiServer:
         self.stream_service: StreamPipelineService | None = None
         self._webrtc_routes: object | None = None
         self.media_service: MediaGenerationService | None = None
+        self.task_app_service = TaskApplicationService(self)
         self.cache_service: Any | None = None
         self.max_queue_size = max_queue_size
         self.max_concurrent_tasks = max_concurrent_tasks
@@ -65,12 +72,19 @@ class ApiServer:
 
         self.task_processor: AsyncTaskProcessor | None = None
         self._task_processor_lock = asyncio.Lock()
+        self._artifact_cleanup_task: asyncio.Task | None = None
+        self._artifact_cleanup_lock = asyncio.Lock()
 
         self._setup_routes()
 
         from .middleware import setup_middleware
 
-        setup_middleware(self.app, enable_rate_limit=enable_rate_limit, enable_logging=enable_logging)
+        setup_middleware(
+            self.app,
+            enable_rate_limit=enable_rate_limit,
+            enable_logging=enable_logging,
+            config=self.server_config,
+        )
 
     @property
     def task_manager(self):
@@ -122,10 +136,9 @@ class ApiServer:
         assert self.file_service is not None, "File service is not initialized"
 
         try:
-            resolved_path = file_path.resolve()
-
-            # Security: ensure file is within allowed directories
-            if not str(resolved_path).startswith(str(self.file_service.output_video_dir.resolve())):
+            try:
+                resolved_path = self.file_service.resolve_output_file(file_path)
+            except ValueError:
                 raise HTTPException(status_code=403, detail="Access to this file is not allowed")
 
             if not resolved_path.exists() or not resolved_path.is_file():
@@ -164,8 +177,6 @@ class ApiServer:
 
     async def _validate_image_url(self, image_url: str) -> bool:
         """Validate image URL is accessible."""
-        from ..core.config import server_config
-
         if not image_url or not image_url.startswith("http"):
             return True
 
@@ -175,7 +186,11 @@ class ApiServer:
                 return False
 
             timeout = httpx.Timeout(connect=5.0, read=5.0)
-            verify = server_config.ssl_cert_path if server_config.ssl_cert_path else server_config.verify_ssl
+            verify = (
+                self.server_config.ssl_cert_path
+                if self.server_config.ssl_cert_path
+                else self.server_config.verify_ssl
+            )
             async with httpx.AsyncClient(verify=verify, timeout=timeout) as client:
                 response = await client.head(image_url, follow_redirects=True)
                 return response.status_code < 400
@@ -190,6 +205,7 @@ class ApiServer:
             return
 
         if self.task_processor.is_running:
+            await self.ensure_artifact_cleanup_running()
             return
 
         async with self._task_processor_lock:
@@ -199,6 +215,48 @@ class ApiServer:
             if self.task_processor.is_running:
                 return
             await self.task_processor.start()
+            await self.ensure_artifact_cleanup_running()
+
+    async def ensure_artifact_cleanup_running(self) -> None:
+        """Ensure periodic artifact cleanup is running when file service is available."""
+        if self.file_service is None:
+            return
+        if self._artifact_cleanup_task is not None and not self._artifact_cleanup_task.done():
+            return
+
+        async with self._artifact_cleanup_lock:
+            if self.file_service is None:
+                return
+            if self._artifact_cleanup_task is not None and not self._artifact_cleanup_task.done():
+                return
+            self._artifact_cleanup_task = asyncio.create_task(
+                self._artifact_cleanup_loop(),
+                name="telefuser-artifact-cleanup",
+            )
+
+    async def _artifact_cleanup_loop(self) -> None:
+        interval = self.server_config.artifact_cleanup_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.run_artifact_cleanup()
+            except Exception as exc:
+                logger.warning(f"Periodic artifact cleanup failed: {exc}")
+
+    def run_artifact_cleanup(self, *, now: Any | None = None) -> dict[str, Any]:
+        """Run one artifact cleanup pass and return cleanup stats."""
+        if self.file_service is None:
+            return {}
+
+        cleanup_artifacts = getattr(self.file_service, "cleanup_artifacts", None)
+        if not callable(cleanup_artifacts):
+            return {}
+
+        cleanup_snapshot = self.task_manager.get_artifact_cleanup_snapshot()
+        result = cleanup_artifacts(**cleanup_snapshot, now=now)
+        if result.get("removed_task_ids") or result.get("removed_tmp_files"):
+            logger.info(f"Artifact cleanup result: {result}")
+        return result
 
     def get_supported_tasks(self) -> tuple[str, ...]:
         """Get tasks supported by the loaded pipeline contract, if available."""
@@ -273,9 +331,18 @@ class ApiServer:
         inference_service: PipelineService,
         cache_service: Any | None = None,
         cache_adapter: Any | None = None,
+        file_service: FileService | None = None,
     ) -> None:
         """Initialize file and media services."""
-        self.file_service = FileService(cache_dir)
+        self.file_service = file_service or FileService(
+            cache_dir,
+            max_file_size=self.server_config.max_file_size,
+            verify_ssl=self.server_config.verify_ssl,
+            ssl_cert_path=self.server_config.ssl_cert_path,
+            artifact_retention_seconds=self.server_config.artifact_retention_seconds,
+            artifact_tmp_retention_seconds=self.server_config.artifact_tmp_retention_seconds,
+            artifact_max_total_bytes=self.server_config.artifact_max_total_bytes,
+        )
         self.inference_service = inference_service
         self.cache_service = cache_service
         self.cache_adapter = cache_adapter
@@ -303,6 +370,14 @@ class ApiServer:
 
     async def cleanup(self) -> None:
         """Cleanup resources and stop processing workers."""
+        if self._artifact_cleanup_task is not None:
+            self._artifact_cleanup_task.cancel()
+            try:
+                await self._artifact_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._artifact_cleanup_task = None
+
         if self.task_processor is not None:
             await self.task_processor.stop()
 
@@ -313,6 +388,11 @@ class ApiServer:
             await self._webrtc_routes.cleanup()
 
         if self.file_service:
+            try:
+                self.run_artifact_cleanup()
+            except Exception as exc:
+                logger.warning(f"Artifact cleanup failed: {exc}")
+
             cleanup = getattr(self.file_service, "cleanup", None)
             if cleanup is not None:
                 result = cleanup()

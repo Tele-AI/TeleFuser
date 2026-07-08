@@ -127,6 +127,8 @@ def serve(
         num_replicas=num_replicas,
         enable_latent_cache=enable_latent_cache,
         cache_mode=cache_mode.lower() if cache_mode is not None else None,
+        security_level=security_level,
+        skip_validation=skip_validation,
     )
 
 
@@ -176,7 +178,7 @@ def stream_serve(
 
     from telefuser.service.main import run_stream_server
 
-    run_stream_server(pipe_path, port, host, skip_validation=True)
+    run_stream_server(pipe_path, port, host, skip_validation=skip_validation, security_level=security_level)
 
 
 @main.command(name="validate")

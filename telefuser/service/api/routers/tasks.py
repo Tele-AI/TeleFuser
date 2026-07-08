@@ -7,8 +7,6 @@ Routes are defined as class methods for better testability.
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,15 +14,11 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
 from telefuser.service.core.pipeline_contract import default_task_contract, validate_task_name_format
-from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus
+from telefuser.service_types import AspectRatio, MediaType, OutputFormat, StopTaskStatus
 from telefuser.utils.logging import logger
 
 from ..schema import StopTaskResponse, TaskRequest, TaskResponse
-from ..task_contract_runtime import (
-    apply_task_contract_defaults,
-    match_task_candidates,
-    validate_required_task_parameters,
-)
+from ..task_contract_runtime import match_task_candidates
 
 if TYPE_CHECKING:
     from ..api_server import ApiServer
@@ -108,28 +102,13 @@ class TaskRoutes:
                     raise HTTPException(status_code=400, detail=f"{image_name} URL is not accessible")
 
         try:
-            self.api.validate_task_supported(message.task)
-            contract = self._get_task_contract(message.task)
-            apply_task_contract_defaults(
-                message,
-                task_contract=contract,
-                explicit_fields=set(getattr(message, "model_fields_set", set())),
-            )
-            validate_required_task_parameters(message, task_contract=contract)
             await check_image_path("first_image_path")
             await check_image_path("last_image_path")
-            self._validate_task_inputs(
-                message.task,
-                first_image_path=message.first_image_path,
-                last_image_path=message.last_image_path,
-                ref_video_path=message.ref_video_path,
+            return await self.api.task_app_service.submit(
+                message,
+                explicit_fields=set(getattr(message, "model_fields_set", set())),
+                validate_inputs=self._validate_message_inputs,
             )
-            task_id = self.api.task_manager.create_task(message)
-            message.task_id = task_id
-            await self.api.ensure_task_processor_running()
-            return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
         except HTTPException:
             raise
         except Exception as e:
@@ -162,7 +141,8 @@ class TaskRoutes:
     async def stop_task(self, task_id: str) -> StopTaskResponse:
         """Stop/cancel a task and clean up resources."""
         try:
-            if self.api.task_manager.cancel_task(task_id):
+            cancel_result = self.api.task_app_service.cancel_task(task_id)
+            if cancel_result["result"] == "accepted":
                 import gc
 
                 import torch
@@ -170,12 +150,14 @@ class TaskRoutes:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                logger.info(f"Task {task_id} stopped successfully.")
-                return StopTaskResponse(stop_status=StopTaskStatus.SUCCESS, reason="Task stopped successfully.")
-            else:
+                logger.info(f"Task {task_id} cancellation accepted.")
+                return StopTaskResponse(stop_status=StopTaskStatus.SUCCESS, reason="Task cancellation accepted.")
+            if cancel_result["result"] == "already_terminal":
                 return StopTaskResponse(
-                    stop_status=StopTaskStatus.DO_NOTHING, reason="Task not found or already completed."
+                    stop_status=StopTaskStatus.DO_NOTHING,
+                    reason=f"Task already terminal: {cancel_result['task_status']}.",
                 )
+            return StopTaskResponse(stop_status=StopTaskStatus.DO_NOTHING, reason="Task not found.")
         except Exception as e:
             logger.error(f"Error occurred while stopping task {task_id}: {str(e)}")
             return StopTaskResponse(stop_status=StopTaskStatus.ERROR, reason=str(e))
@@ -196,32 +178,30 @@ class TaskRoutes:
         """Create task with file upload support."""
         assert self.api.file_service is not None, "File service is not initialized"
 
-        async def save_file_async(file: UploadFile, target_dir: Path) -> str:
+        async def save_file_async(file: UploadFile, media_type: MediaType) -> str:
             if not file or not file.filename:
                 return ""
 
-            file_extension = Path(file.filename).suffix
-            unique_filename = f"{uuid.uuid4()}{file_extension}"
-            file_path = target_dir / unique_filename
-
-            content = await file.read()
-            await asyncio.to_thread(self._write_file_sync, file_path, content)
-
-            return str(file_path)
+            return await self.api.task_app_service.save_upload_file(
+                file,
+                media_type=media_type,
+                prefix="input",
+                fallback_filename="input.mp4" if media_type == MediaType.VIDEO else "input.png",
+            )
 
         first_image_path = ""
         ref_video_path = ""
         if first_image_file and first_image_file.filename:
             if self._is_video_upload(first_image_file):
-                ref_video_path = await save_file_async(first_image_file, self.api.file_service.input_video_dir)
+                ref_video_path = await save_file_async(first_image_file, MediaType.VIDEO)
             else:
-                first_image_path = await save_file_async(first_image_file, self.api.file_service.input_image_dir)
+                first_image_path = await save_file_async(first_image_file, MediaType.IMAGE)
 
         last_image_path = ""
         if last_image_file and last_image_file.filename:
             if self._is_video_upload(last_image_file):
                 raise HTTPException(status_code=400, detail="last_image_file must be an image upload")
-            last_image_path = await save_file_async(last_image_file, self.api.file_service.input_image_dir)
+            last_image_path = await save_file_async(last_image_file, MediaType.IMAGE)
 
         try:
             resolved_task = self._resolve_form_task(
@@ -254,27 +234,15 @@ class TaskRoutes:
                 task_payload["output_format"] = output_format
 
             message = TaskRequest(**task_payload)
-            self.api.validate_task_supported(message.task)
-            contract = self.api.get_task_contract(message.task)
-            apply_task_contract_defaults(message, task_contract=contract, explicit_fields=set(task_payload))
-            validate_required_task_parameters(message, task_contract=contract)
-            self._validate_task_inputs(
-                message.task,
-                first_image_path=message.first_image_path,
-                last_image_path=message.last_image_path,
-                ref_video_path=message.ref_video_path,
+            return await self.api.task_app_service.submit(
+                message,
+                explicit_fields=set(task_payload),
+                validate_inputs=self._validate_message_inputs,
             )
-            task_id = self.api.task_manager.create_task(message)
-            message.task_id = task_id
-            await self.api.ensure_task_processor_running()
-
-            return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=e.errors())
         except HTTPException:
             raise
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
         except Exception as e:
             logger.error(f"Failed to create form task: {e}")
             raise HTTPException(status_code=500, detail=str(e))
@@ -393,6 +361,14 @@ class TaskRoutes:
             if task in {"vc", "vsr"} and not ref_video_path:
                 raise HTTPException(status_code=400, detail=f"Task '{task}' requires ref_video_path")
 
+    def _validate_message_inputs(self, message: TaskRequest, contract: dict[str, Any] | None) -> None:
+        self._validate_task_inputs(
+            message.task,
+            first_image_path=message.first_image_path,
+            last_image_path=message.last_image_path,
+            ref_video_path=message.ref_video_path,
+        )
+
     def _collect_available_inputs(
         self,
         *,
@@ -419,12 +395,6 @@ class TaskRoutes:
         content_type = (file.content_type or "").lower()
         suffix = Path(file.filename or "").suffix.lower()
         return content_type.startswith("video/") or suffix in _VIDEO_FILE_EXTENSIONS
-
-    def _write_file_sync(self, file_path: Path, content: bytes) -> None:
-        """Write file synchronously."""
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
 
 
 def setup_routes(api_server: ApiServer) -> APIRouter:

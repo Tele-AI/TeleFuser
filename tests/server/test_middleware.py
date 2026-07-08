@@ -5,12 +5,15 @@ Tests rate limiting, logging, and other middleware functionality.
 """
 
 # Set environment before imports
+import asyncio
+import json
 import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
-from starlette.testclient import TestClient
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 os.environ["TELEFUSER_SECURITY_LEVEL"] = "NONE"
 
@@ -20,6 +23,24 @@ from telefuser.service.api.middleware import (
     setup_middleware,
 )
 from telefuser.service.core.config import ServerConfig, server_config
+
+
+def _request(path: str = "/test", *, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "headers": headers or [],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
+async def _ok_call_next(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 class TestRateLimitMiddleware:
@@ -43,17 +64,11 @@ class TestRateLimitMiddleware:
         # Clear any state
         middleware._clients = {}
 
-        @app.middleware("http")
-        async def rate_limit_middleware(request, call_next):
-            return await middleware.dispatch(request, call_next)
-
-        client = TestClient(app)
-
         # Should allow 5 requests
         for i in range(5):
-            response = client.get("/test")
+            response = asyncio.run(middleware.dispatch(_request("/test"), _ok_call_next))
             assert response.status_code == 200
-            assert response.json() == {"status": "ok"}
+            assert json.loads(response.body) == {"status": "ok"}
 
     def test_rate_limit_only_applies_to_limited_paths(self):
         """Test that paths outside the whitelist are not rate limited."""
@@ -76,15 +91,9 @@ class TestRateLimitMiddleware:
         )
         middleware._clients = {}
 
-        @app.middleware("http")
-        async def rate_limit_middleware(request, call_next):
-            return await middleware.dispatch(request, call_next)
-
-        client = TestClient(app)
-
         # /health is not in limited_paths, so it should never be rate limited.
         for i in range(20):
-            response = client.get("/health")
+            response = asyncio.run(middleware.dispatch(_request("/health"), _ok_call_next))
             assert response.status_code == 200, f"Health check failed on request {i + 1}"
 
     def test_rate_limit_headers_present(self):
@@ -103,13 +112,7 @@ class TestRateLimitMiddleware:
         )
         middleware._clients = {}
 
-        @app.middleware("http")
-        async def rate_limit_middleware(request, call_next):
-            return await middleware.dispatch(request, call_next)
-
-        client = TestClient(app)
-
-        response = client.get("/test")
+        response = asyncio.run(middleware.dispatch(_request("/test"), _ok_call_next))
         assert response.status_code == 200
 
         # Check headers
@@ -133,17 +136,7 @@ class TestRateLimitMiddleware:
             limited_paths=["/test"],
         )
 
-        # Test client ID extraction
-        from starlette.requests import Request
-
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/test",
-            "headers": [(b"x-forwarded-for", b"192.168.1.1")],
-            "client": ("127.0.0.1", 12345),
-        }
-        request = Request(scope)
+        request = _request(headers=[(b"x-forwarded-for", b"192.168.1.1")])
 
         client_id = middleware._get_client_id(request)
         assert client_id == "192.168.1.1"
@@ -159,17 +152,17 @@ class TestRateLimitMiddleware:
             limited_paths=["/test"],
         )
 
-        # Test client ID extraction without X-Forwarded-For
-        from starlette.requests import Request
-
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/test",
-            "headers": [],
-            "client": ("10.0.0.1", 12345),
-        }
-        request = Request(scope)
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/test",
+                "scheme": "http",
+                "server": ("testserver", 80),
+                "headers": [],
+                "client": ("10.0.0.1", 12345),
+            }
+        )
 
         client_id = middleware._get_client_id(request)
         assert client_id == "10.0.0.1"
@@ -250,10 +243,8 @@ class TestLoggingMiddleware:
         def test_endpoint():
             return {"status": "ok"}
 
-        app.add_middleware(LoggingMiddleware)
-
-        client = TestClient(app)
-        response = client.get("/test")
+        middleware = LoggingMiddleware(app)
+        response = asyncio.run(middleware.dispatch(_request("/test"), _ok_call_next))
 
         assert response.status_code == 200
         # Verify logger was called
@@ -274,11 +265,7 @@ class TestSetupMiddleware:
 
         setup_middleware(app, enable_rate_limit=False, enable_logging=True)
 
-        client = TestClient(app)
-
-        # Requests should succeed
-        response = client.get("/test")
-        assert response.status_code == 200
+        assert any(item.cls is LoggingMiddleware for item in app.user_middleware)
 
     def test_setup_middleware_no_middleware(self):
         """Test setup with no middleware."""
@@ -290,11 +277,9 @@ class TestSetupMiddleware:
 
         setup_middleware(app, enable_rate_limit=False, enable_logging=False)
 
-        client = TestClient(app)
-
-        # Requests should succeed
-        response = client.get("/test")
-        assert response.status_code == 200
+        middleware_classes = {item.cls for item in app.user_middleware}
+        assert LoggingMiddleware not in middleware_classes
+        assert RateLimitMiddleware not in middleware_classes
 
 
 class TestConfigIntegration:

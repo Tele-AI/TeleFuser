@@ -24,12 +24,13 @@ def _run(
         print(TELEFUSER_LOGO)
         logger.info(f"Starting TeleFuser {label}...")
 
-        if not server_config.validate():
+        config = container.config
+        if not config.validate():
             raise RuntimeError("Invalid server configuration")
 
         app = container.get_api_app(enable_rate_limit=enable_rate_limit)
-        logger.info(f"Starting {label} on {server_config.host}:{server_config.port}")
-        uvicorn.run(app, host=server_config.host, port=server_config.port, log_level="warning")
+        logger.info(f"Starting {label} on {config.host}:{config.port}")
+        uvicorn.run(app, host=config.host, port=config.port, log_level="warning")
 
     except KeyboardInterrupt:
         logger.info(f"{label.capitalize()} interrupted by user")
@@ -54,6 +55,8 @@ def run_server(
     num_replicas: int = 1,
     enable_latent_cache: bool | None = None,
     cache_mode: str | None = None,
+    security_level: str | None = None,
+    skip_validation: bool = False,
 ) -> None:
     """Run the TeleFuser server with dependency injection container."""
     server_config.host = host
@@ -61,6 +64,10 @@ def run_server(
     server_config.num_replicas = num_replicas
     server_config.enable_latent_cache = enable_latent_cache
     server_config.cache_mode = cache_mode
+    if security_level is not None:
+        from .security.security_validator import SecurityLevel
+
+        server_config.security_level = SecurityLevel[security_level.upper()]
 
     container = ServiceContainer.create(
         config=server_config,
@@ -72,6 +79,7 @@ def run_server(
         parallelism=parallelism,
         task=task,
         cache_dir=Path(cache_dir) if cache_dir else None,
+        skip_validation=skip_validation,
     ):
         raise RuntimeError("Failed to initialize services")
 
@@ -85,6 +93,7 @@ def run_stream_server(
     host: str,
     enable_rate_limit: bool = True,
     skip_validation: bool = False,
+    security_level: str | None = None,
 ) -> None:
     """Run the TeleFuser stream server.
 
@@ -93,6 +102,10 @@ def run_stream_server(
     """
     server_config.host = host
     server_config.port = port
+    if security_level is not None:
+        from .security.security_validator import SecurityLevel
+
+        server_config.security_level = SecurityLevel[security_level.upper()]
 
     container = ServiceContainer.create(config=server_config)
 

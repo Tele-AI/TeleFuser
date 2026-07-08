@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 
 from telefuser.metrics import get_service_metrics
 
@@ -65,11 +66,12 @@ class ServiceRoutes:
         raise HTTPException(status_code=503, detail="No service is initialized")
 
     async def health_check(self) -> dict:
-        """Health check endpoint for monitoring."""
+        """Liveness endpoint for monitoring."""
         from datetime import datetime
 
         status = {
             "status": "healthy",
+            "ready": self._is_ready(),
             "timestamp": datetime.utcnow().isoformat(),
             "version": "1.0.0",
         }
@@ -83,6 +85,29 @@ class ServiceRoutes:
             status.update(self._webrtc_session_stats())
 
         return status
+
+    def _is_ready(self) -> bool:
+        """Return whether the initialized service can currently accept work."""
+        if self.api.inference_service is not None:
+            if hasattr(self.api.inference_service, "pool_status"):
+                pool_status = self.api.inference_service.pool_status()
+                return bool(pool_status.get("alive_replicas", 0) > 0)
+            return bool(getattr(self.api.inference_service, "is_running", False))
+
+        if self.api.stream_service is not None:
+            return bool(getattr(self.api.stream_service, "is_running", False))
+
+        return False
+
+    async def readiness_check(self) -> JSONResponse:
+        """Readiness endpoint for load balancers."""
+        body = await self.health_check()
+        ready = bool(body.get("ready", False))
+        body["status"] = "ready" if ready else "not_ready"
+        return JSONResponse(
+            status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=body,
+        )
 
 
 def create_router(api_server: ApiServer) -> APIRouter:
@@ -101,6 +126,10 @@ def create_router(api_server: ApiServer) -> APIRouter:
     @new_router.get("/health")
     async def health_check() -> dict:
         return await routes.health_check()
+
+    @new_router.get("/ready")
+    async def readiness_check() -> JSONResponse:
+        return await routes.readiness_check()
 
     @new_router.get("/metrics", summary="Get Prometheus Metrics")
     async def get_metrics_endpoint() -> Response:

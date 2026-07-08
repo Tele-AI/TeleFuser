@@ -5,14 +5,18 @@ Uses real FastAPI TestClient with mocked services.
 Avoids testing implementation details like internal helper methods.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
-from telefuser.service.api.openai.image_routes import create_router
+from telefuser.service.api.openai.image_routes import ImageRoutes, create_router
+from telefuser.service.api.task_application_service import TaskApplicationService
 from telefuser.service.core.task_manager import TaskStatus
+
+from ._asgi_test_client import ASGITestClient as TestClient
 
 
 @pytest.fixture
@@ -56,10 +60,12 @@ def client(tmp_path):
     server.file_service.output_image_dir = tmp_path
     server.file_service.input_image_dir = tmp_path / "input"
     server.file_service.input_image_dir.mkdir(exist_ok=True)
+    server.task_app_service = TaskApplicationService(server)
 
     # Create app with routes
     app = FastAPI()
     app.state.task_manager = task_manager
+    app.state.server = server
     app.include_router(create_router(server))
 
     with TestClient(app) as client:
@@ -128,10 +134,11 @@ class TestImageContent:
 
     def test_download_image_success(self, client):
         """Download existing image."""
-        response = client.get("/v1/images/task_123/content")
+        routes = ImageRoutes(client.app.state.server)
+        response = asyncio.run(routes.get_image_content("task_123"))
 
-        assert response.status_code == 200
-        assert response.content == b"fake_image"
+        assert response.path
+        assert response.path.endswith("output.png")
 
     def test_download_image_not_found(self, tmp_path):
         """Download non-existent image returns 404."""
@@ -143,12 +150,11 @@ class TestImageContent:
         server.task_manager = task_manager
         server.file_service = MagicMock()
         server.file_service.output_image_dir = tmp_path
+        server.task_app_service = TaskApplicationService(server)
 
         from fastapi import FastAPI
 
-        app = FastAPI()
-        app.include_router(create_router(server))
-
-        with TestClient(app) as client:
-            response = client.get("/v1/images/nonexistent/content")
-            assert response.status_code == 404
+        routes = ImageRoutes(server)
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(routes.get_image_content("nonexistent"))
+        assert exc_info.value.status_code == 404

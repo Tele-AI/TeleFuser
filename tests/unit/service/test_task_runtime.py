@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from telefuser.service.api.schema import TaskRequest, TaskResponse
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
@@ -23,6 +24,20 @@ def test_complete_task_does_not_override_cancelled_status() -> None:
     assert status["status"] == TaskStatus.CANCELLED.value
     assert status["error"] == "Task cancelled by user"
     assert status["output_path"] == message.output_path
+
+
+def test_artifact_cleanup_snapshot_splits_active_and_terminal_tasks() -> None:
+    task_manager = TaskManager()
+    active_id = task_manager.create_task(SimpleNamespace(output_path="active.mp4"))
+    terminal_id = task_manager.create_task(SimpleNamespace(output_path="done.mp4"))
+    task_manager.start_task(active_id)
+    task_manager.complete_task(terminal_id)
+
+    snapshot = task_manager.get_artifact_cleanup_snapshot()
+
+    assert snapshot["active_task_ids"] == {active_id}
+    assert terminal_id in snapshot["terminal_task_end_times"]
+    assert active_id not in snapshot["terminal_task_end_times"]
 
 
 class _ControlledMediaService:

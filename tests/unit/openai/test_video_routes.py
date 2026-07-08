@@ -4,14 +4,18 @@ Integration tests for OpenAI video routes.
 Uses real FastAPI TestClient with mocked services.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
-from telefuser.service.api.openai.video_routes import create_router
+from telefuser.service.api.openai.video_routes import VideoRoutes, create_router
+from telefuser.service.api.task_application_service import TaskApplicationService
 from telefuser.service.core.task_manager import TaskStatus
+
+from ._asgi_test_client import ASGITestClient as TestClient
 
 
 @pytest.fixture
@@ -65,9 +69,11 @@ def client(tmp_path):
     server.file_service.output_video_dir = tmp_path
     server.file_service.input_video_dir = tmp_path / "input"
     server.file_service.input_video_dir.mkdir(exist_ok=True)
+    server.task_app_service = TaskApplicationService(server)
 
     app = FastAPI()
     app.state.task_manager = task_manager
+    app.state.server = server
     app.include_router(create_router(server))
 
     with TestClient(app) as client:
@@ -139,13 +145,24 @@ class TestVideoRetrieve:
         data = response.json()
         assert data["id"] == "vid_123"
 
+    def test_delete_completed_video_reports_completed_status(self, client):
+        """Delete on a terminal task reports the real terminal status."""
+        response = client.delete("/v1/videos/vid_123")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "vid_123"
+        assert data["status"] == "completed"
+        client.app.state.task_manager.cancel_task.assert_not_called()
+
 
 class TestVideoContent:
     """Tests for GET /v1/videos/{id}/content."""
 
     def test_download_video_success(self, client):
         """Download completed video."""
-        response = client.get("/v1/videos/vid_123/content")
+        routes = VideoRoutes(client.app.state.server)
+        response = asyncio.run(routes.get_video_content("vid_123"))
 
-        assert response.status_code == 200
-        assert response.content == b"fake_video"
+        assert response.path
+        assert response.path.endswith("video.mp4")

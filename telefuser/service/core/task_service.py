@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telefuser.service_types import MediaType, PipelineRunStatus, TaskStatus, TaskType
 from telefuser.utils.logging import logger
@@ -13,7 +13,9 @@ from ..api.schema import TaskRequest, TaskResponse
 from ..media.media_base import AudioHandler, ImageHandler, VideoHandler
 from .file_service import FileService
 from .pipeline_contract import infer_media_type_for_task
-from .pipeline_service import PipelineService
+
+if TYPE_CHECKING:
+    from .pipeline_service import PipelineService
 
 # Media handlers
 _image_handler = ImageHandler()
@@ -110,7 +112,14 @@ class MediaGenerationService:
 
         # Determine media type and set appropriate output path
         media_type = infer_media_type_for_task(message.task)
-        actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
+        try:
+            actual_save_path = self.file_service.get_output_path(
+                message.output_path,
+                media_type=media_type,
+                task_id=message.task_id,
+            )
+        except TypeError:
+            actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
         task_data["output_path"] = str(actual_save_path)
 
         # Best-effort: every step degrades silently to "no cache" on failure.

@@ -21,3 +21,13 @@ def test_server_config_ignores_unknown_fields_for_forward_compatibility() -> Non
 
     assert config.max_queue_size == 12
     assert not hasattr(config, "future_option")
+
+
+def test_artifact_retention_defaults_are_configured() -> None:
+    config = ServerConfig()
+
+    assert config.artifact_retention_seconds == 7 * 24 * 60 * 60
+    assert config.artifact_tmp_retention_seconds == 60 * 60
+    assert config.artifact_cleanup_interval_seconds == 60 * 60
+    assert config.artifact_max_total_bytes == 0
+    assert config.artifact_preserve_failed_outputs is False

@@ -11,23 +11,18 @@ Reference: https://platform.openai.com/docs/api-reference/images
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import time
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
-from telefuser.service.api.schema import TaskRequest
 from telefuser.service.api.task_contract_runtime import (
-    apply_task_contract_defaults,
     map_contract_fields,
     match_task_candidates,
-    validate_required_task_parameters,
 )
-from telefuser.service.core.task_manager import TaskManager, TaskStatus
+from telefuser.service.core.task_manager import TaskManager
+from telefuser.service_types import MediaType
 from telefuser.utils.logging import logger
 
 from .adapter import OpenAIRequestAdapter, OpenAIResponseAdapter
@@ -77,7 +72,7 @@ def create_router(api_server: ApiServer) -> APIRouter:
         )
 
     @router.get("/{image_id}/content")
-    async def get_image_content(image_id: str) -> FileResponse:
+    async def get_image_content(image_id: str) -> Response:
         """Download a generated image by its ID."""
         return await routes.get_image_content(image_id)
 
@@ -94,7 +89,6 @@ class ImageRoutes:
         """Initialize with ApiServer instance."""
         self.api = api_server
         self.task_manager: TaskManager | None = getattr(api_server, "task_manager", None)
-        self.file_service = getattr(api_server, "file_service", None)
         self.media_service = getattr(api_server, "media_service", None)
 
     async def create_image_generation(self, request: ImageGenerationsRequest) -> ImageResponse:
@@ -108,20 +102,21 @@ class ImageRoutes:
         try:
             task_type = self._resolve_image_task(has_reference=False)
             task_request = OpenAIRequestAdapter.to_task_request(request, task_type=task_type)
-            self.api.validate_task_supported(task_request.task)
-            contract = self.api.get_task_contract(task_request.task)
-            apply_task_contract_defaults(
+            task_response = await self.api.task_app_service.submit(
                 task_request,
-                task_contract=contract,
                 explicit_fields=self._get_image_generation_explicit_fields(request),
+                ensure_processing=False,
             )
-            validate_required_task_parameters(task_request, task_contract=contract)
-            task_id = self.task_manager.create_task(task_request)
+            task_id = task_response.task_id
             logger.info(f"Created image generation task: {task_id}")
 
             await self._ensure_processing()
 
-            result = await self._wait_for_task_completion(task_id=task_id, timeout=self.DEFAULT_TIMEOUT)
+            result = await self.api.task_app_service.wait_for_completion(
+                task_id=task_id,
+                timeout=self.DEFAULT_TIMEOUT,
+                poll_interval=self.POLL_INTERVAL,
+            )
 
             if result is None:
                 self.task_manager.cancel_task(task_id)
@@ -201,11 +196,8 @@ class ImageRoutes:
 
             task_type = self._resolve_image_task(has_reference=True)
             task_request = OpenAIRequestAdapter.to_task_request(edit_request, task_type=task_type)
-            self.api.validate_task_supported(task_request.task)
-            contract = self.api.get_task_contract(task_request.task)
-            apply_task_contract_defaults(
+            task_response = await self.api.task_app_service.submit(
                 task_request,
-                task_contract=contract,
                 explicit_fields=self._get_image_edit_explicit_fields(
                     prompt=prompt,
                     image_path=image_path,
@@ -217,14 +209,18 @@ class ImageRoutes:
                     seed=seed,
                     negative_prompt=negative_prompt,
                 ),
+                ensure_processing=False,
             )
-            validate_required_task_parameters(task_request, task_contract=contract)
-            task_id = self.task_manager.create_task(task_request)
+            task_id = task_response.task_id
             logger.info(f"Created image edit task: {task_id}")
 
             await self._ensure_processing()
 
-            result = await self._wait_for_task_completion(task_id=task_id, timeout=self.DEFAULT_TIMEOUT)
+            result = await self.api.task_app_service.wait_for_completion(
+                task_id=task_id,
+                timeout=self.DEFAULT_TIMEOUT,
+                poll_interval=self.POLL_INTERVAL,
+            )
 
             if result is None:
                 self.task_manager.cancel_task(task_id)
@@ -252,41 +248,9 @@ class ImageRoutes:
             logger.exception(f"Image edit failed: {e}")
             raise HTTPException(status_code=500, detail=f"Image edit failed: {str(e)}")
 
-    async def get_image_content(self, image_id: str) -> FileResponse:
+    async def get_image_content(self, image_id: str) -> Response:
         """Retrieve generated image by ID."""
-        if not self.task_manager:
-            raise HTTPException(status_code=503, detail="Task manager not initialized")
-
-        if not self.file_service:
-            raise HTTPException(status_code=503, detail="File service not initialized")
-
-        task_info = self.task_manager.get_task(image_id)
-        if not task_info:
-            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
-
-        output_path = task_info.output_path
-        if not output_path:
-            raise HTTPException(status_code=404, detail=f"Image {image_id} has no output path")
-
-        path = Path(output_path)
-        if not path.is_absolute():
-            output_dir = getattr(self.file_service, "output_image_dir", None)
-            if output_dir:
-                path = output_dir / path
-
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"Image file not found: {path}")
-
-        suffix = path.suffix.lower()
-        media_types = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-        }
-        media_type = media_types.get(suffix, "image/png")
-
-        return FileResponse(path=str(path), media_type=media_type, filename=path.name)
+        return self.api.task_app_service.get_output_response(image_id, media_type=MediaType.IMAGE)
 
     async def _ensure_processing(self) -> None:
         """Ensure the task processor is running."""
@@ -301,57 +265,14 @@ class ImageRoutes:
             return f"http://{host}:{port}"
         return "http://localhost:8000"
 
-    async def _wait_for_task_completion(self, task_id: str, timeout: float) -> dict[str, Any] | None:
-        """Wait for a task to complete with timeout."""
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            status = self.task_manager.get_task_status(task_id)
-
-            if not status:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-            task_status = status.get("status")
-
-            if task_status == TaskStatus.COMPLETED.value:
-                return {
-                    "output_path": status.get("output_path"),
-                    "error": status.get("error"),
-                }
-            elif task_status == TaskStatus.FAILED.value:
-                error_msg = status.get("error", "Unknown error")
-                raise HTTPException(status_code=500, detail=f"Generation failed: {error_msg}")
-            elif task_status == TaskStatus.CANCELLED.value:
-                raise HTTPException(status_code=400, detail="Generation was cancelled")
-
-            await asyncio.sleep(self.POLL_INTERVAL)
-
-        raise HTTPException(status_code=504, detail=f"Generation timeout after {timeout} seconds")
-
     async def _save_uploaded_file(self, file: UploadFile, prefix: str = "upload") -> str:
         """Save an uploaded file to disk."""
-        import uuid
-
-        if not self.file_service:
-            raise HTTPException(status_code=503, detail="File service not initialized")
-
-        input_dir = getattr(self.file_service, "input_image_dir", None)
-        if not input_dir:
-            input_dir = Path("/tmp/telefuser/inputs")
-            input_dir.mkdir(parents=True, exist_ok=True)
-
-        suffix = Path(file.filename or "image.png").suffix
-        filename = f"{prefix}_{uuid.uuid4().hex[:8]}{suffix}"
-        file_path = input_dir / filename
-
-        content = await file.read()
-        await asyncio.to_thread(self._write_file_sync, file_path, content)
-
-        return str(file_path)
-
-    def _write_file_sync(self, file_path: Path, content: bytes) -> None:
-        """Write file synchronously."""
-        file_path.write_bytes(content)
+        return await self.api.task_app_service.save_upload_file(
+            file,
+            media_type=MediaType.IMAGE,
+            prefix=prefix,
+            fallback_filename="image.png",
+        )
 
     def _resolve_image_task(self, *, has_reference: bool) -> str:
         """Resolve the best image task supported by the current pipeline."""

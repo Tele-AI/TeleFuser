@@ -6,7 +6,6 @@ Handles file upload and download operations.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
@@ -31,16 +30,10 @@ class FileRoutes:
         assert self.api.file_service is not None, "File service is not initialized"
 
         try:
-            # Try video directory first
-            full_path = self.api.file_service.output_video_dir / file_path
-            if not full_path.exists():
-                # Try image directory
-                full_path = self.api.file_service.output_image_dir / file_path
-            if not full_path.exists():
-                # Try general output directory
-                full_path = self.api.file_service.output_dir / file_path
-
+            full_path = self.api.file_service.resolve_output_file(file_path)
             return self.api._stream_file_response(full_path)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access to this file is not allowed")
         except HTTPException:
             raise
         except Exception as e:

@@ -7,23 +7,12 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from telefuser.metrics import get_service_metrics
 from telefuser.service.core.pipeline_contract import infer_media_type_for_task
+from telefuser.service_types import TaskStatus
 from telefuser.utils.logging import logger
-
-
-class TaskStatus(Enum):
-    """Task status enumeration."""
-
-    PENDING = "pending"
-    PROCESSING = "processing"
-    STREAMING = "streaming"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 _ACTIVE_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.STREAMING})
@@ -238,6 +227,20 @@ class TaskManager:
         """Get count of pending and processing tasks."""
         with self._lock:
             return sum(1 for t in self._tasks.values() if t.status in _ACTIVE_STATUSES)
+
+    def get_artifact_cleanup_snapshot(self) -> dict[str, Any]:
+        """Return active and terminal task state needed by artifact cleanup."""
+        with self._lock:
+            active_task_ids = {task_id for task_id, task in self._tasks.items() if task.status in _ACTIVE_STATUSES}
+            terminal_task_end_times = {
+                task_id: task.end_time or task.start_time
+                for task_id, task in self._tasks.items()
+                if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+            }
+            return {
+                "active_task_ids": active_task_ids,
+                "terminal_task_end_times": terminal_task_end_times,
+            }
 
     def get_pending_task_count(self) -> int:
         """Get count of pending tasks."""

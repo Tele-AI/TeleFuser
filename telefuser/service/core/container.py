@@ -101,6 +101,11 @@ class ServiceContainer:
         self.file_service = FileService(
             cache_dir=cache_dir,
             max_file_size=getattr(self.config, "max_file_size", None),
+            verify_ssl=getattr(self.config, "verify_ssl", True),
+            ssl_cert_path=getattr(self.config, "ssl_cert_path", None),
+            artifact_retention_seconds=self.config.artifact_retention_seconds,
+            artifact_tmp_retention_seconds=self.config.artifact_tmp_retention_seconds,
+            artifact_max_total_bytes=self.config.artifact_max_total_bytes,
         )
         return self.file_service
 
@@ -254,6 +259,7 @@ class ServiceContainer:
             task_manager=self.task_manager,
             enable_rate_limit=enable_rate_limit,
             enable_logging=False,
+            config=self.config,
         )
 
         if self.file_service and self.pipeline_service:
@@ -262,6 +268,7 @@ class ServiceContainer:
                 self.pipeline_service,
                 cache_service=self.cache_service,
                 cache_adapter=self.cache_adapter,  # forward adapter to api_server
+                file_service=self.file_service,
             )
 
         if self.stream_pipeline_service:

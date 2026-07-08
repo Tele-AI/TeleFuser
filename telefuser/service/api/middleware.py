@@ -17,10 +17,10 @@ from starlette.types import ASGIApp
 
 from telefuser.utils.logging import logger
 
-from ..core.config import server_config
-
 if TYPE_CHECKING:
     from telefuser.metrics import MetricRegistry
+
+    from ..core.config import ServerConfig
 
 
 class RateLimitErrorResponse:
@@ -83,12 +83,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         requests_per_minute: int | None = None,
         window_size: int | None = None,
         limited_paths: list[str] | None = None,
+        enabled: bool = True,
     ):
         super().__init__(app)
-        config = server_config
-        self.requests_per_minute = requests_per_minute or config.rate_limit_requests_per_minute
-        self.window_size = window_size or config.rate_limit_window_size
-        self.limited_paths = tuple(limited_paths if limited_paths is not None else config.rate_limit_paths)
+        self.enabled = enabled
+        self.requests_per_minute = requests_per_minute or 60
+        self.window_size = window_size or 60
+        self.limited_paths = tuple(limited_paths if limited_paths is not None else [])
 
         self._clients: dict[str, list[float]] = {}
 
@@ -104,7 +105,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             response.headers["X-Request-ID"] = request_id
             return response
 
-        if not server_config.enable_rate_limit:
+        if not self.enabled:
             response = await call_next(request)
             response.headers["X-Request-ID"] = request_id
             return response
@@ -306,6 +307,7 @@ def setup_middleware(
     enable_logging: bool = True,
     enable_metrics: bool = True,
     metrics_registry: MetricRegistry | None = None,
+    config: ServerConfig | None = None,
 ) -> None:
     """Setup middleware for FastAPI app.
 
@@ -325,10 +327,14 @@ def setup_middleware(
             registry=metrics_registry,
         )
 
-    if enable_rate_limit and server_config.enable_rate_limit:
+    if config is None:
+        from ..core.config import server_config as config
+
+    if enable_rate_limit and config.enable_rate_limit:
         app.add_middleware(
             RateLimitMiddleware,
-            requests_per_minute=server_config.rate_limit_requests_per_minute,
-            window_size=server_config.rate_limit_window_size,
-            limited_paths=server_config.rate_limit_paths,
+            requests_per_minute=config.rate_limit_requests_per_minute,
+            window_size=config.rate_limit_window_size,
+            limited_paths=config.rate_limit_paths,
+            enabled=config.enable_rate_limit,
         )
