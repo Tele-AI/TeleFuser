@@ -67,12 +67,12 @@ class ServiceRoutes:
 
     async def health_check(self) -> dict:
         """Liveness endpoint for monitoring."""
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         status = {
             "status": "healthy",
             "ready": self._is_ready(),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "version": "1.0.0",
         }
 

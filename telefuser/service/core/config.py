@@ -141,17 +141,23 @@ class ServerConfig(BaseSettings):
     )
 
     rate_limit_window_size: int = Field(default=60, ge=10, le=3600, description="Rate limiting window size in seconds")
+    trust_forwarded_for: bool = Field(
+        default=False,
+        description="Trust X-Forwarded-For for rate-limit client identity. Enable only behind trusted proxies.",
+    )
 
     rate_limit_paths: list = Field(
         default_factory=lambda: [
             "/v1/tasks/create",
             "/v1/tasks/form",
-            "/v1/images/generations",
-            "/v1/videos/generations",
+            "/v1/images",
+            "/v1/videos",
+            "/v1/files/download",
+            "/v1/stream",
         ],
         description=(
-            "Path prefixes subject to rate limiting (whitelist). "
-            "Requests whose URL path does not start with any of these are not rate limited."
+            "Path prefixes subject to rate limiting. Defaults cover expensive task creation, "
+            "OpenAI-compatible generation, artifact downloads, and stream negotiation paths."
         ),
     )
 

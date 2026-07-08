@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
@@ -19,7 +20,14 @@ from ..security.security_validator import (
     SecurityLevel,
     validate_with_report,
 )
-from .config import server_config
+
+
+@dataclass(frozen=True)
+class PipelineValidationConfig:
+    """Runtime validation behavior for dynamic pipeline loading."""
+
+    allow_unsafe_pipelines: bool = False
+    strict_validation: bool = True
 
 
 def load_pipeline_module(ppl_file: str, prefix: str = "telefuser_ppl") -> tuple[ModuleType, str]:
@@ -51,6 +59,7 @@ def validate_pipeline_file(
     ppl_file: str,
     security_level: SecurityLevel,
     security_validator: PipelineSecurityValidator,
+    validation_config: PipelineValidationConfig | None = None,
 ) -> bool:
     """Validate a pipeline file for security issues.
 
@@ -59,6 +68,7 @@ def validate_pipeline_file(
     if security_level == SecurityLevel.NONE:
         logger.warning("Security validation is disabled (SecurityLevel.NONE)")
         return True
+    validation_config = validation_config or PipelineValidationConfig()
 
     try:
         logger.info(f"Validating pipeline file: {ppl_file}")
@@ -79,7 +89,7 @@ def validate_pipeline_file(
         if critical_count > 0:
             raise SecurityError(f"Pipeline file contains {critical_count} critical security violations.")
 
-        if getattr(server_config, "allow_unsafe_pipelines", False):
+        if validation_config.allow_unsafe_pipelines:
             logger.warning("Allowing unsafe pipeline (allow_unsafe_pipelines=True)")
             return True
 
@@ -89,6 +99,6 @@ def validate_pipeline_file(
         raise
     except Exception as e:
         logger.error(f"Unexpected validation error: {e}")
-        if getattr(server_config, "strict_validation", True):
+        if validation_config.strict_validation:
             raise SecurityError(f"Validation failed: {e}")
         return True

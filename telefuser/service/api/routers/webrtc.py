@@ -31,25 +31,25 @@ class WebRTCRoutes:
 
         from aiortc import RTCConfiguration, RTCIceServer
 
-        from ...core.config import server_config
         from ...webrtc.session_manager import WebRTCSessionManager
 
+        config = api_server.server_config
         ice_servers: list[RTCIceServer] = []
-        for url in server_config.stun_servers:
+        for url in config.stun_servers:
             ice_servers.append(RTCIceServer(urls=url))
-        if server_config.turn_server:
+        if config.turn_server:
             ice_servers.append(
                 RTCIceServer(
-                    urls=server_config.turn_server,
-                    username=server_config.turn_username or "",
-                    credential=server_config.turn_credential or "",
+                    urls=config.turn_server,
+                    username=config.turn_username or "",
+                    credential=config.turn_credential or "",
                 )
             )
 
         configuration = RTCConfiguration(iceServers=ice_servers) if ice_servers else None
 
         self._session_manager = WebRTCSessionManager(
-            max_sessions=server_config.webrtc_max_sessions,
+            max_sessions=config.webrtc_max_sessions,
             configuration=configuration,
         )
 

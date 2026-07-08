@@ -29,8 +29,13 @@ from ..security.security_validator import (
     SecurityError,
     SecurityLevel,
 )
-from .config import server_config
-from .pipeline_loader import load_pipeline_module, unload_pipeline_module, validate_pipeline_file
+from .config import ServerConfig, server_config
+from .pipeline_loader import (
+    PipelineValidationConfig,
+    load_pipeline_module,
+    unload_pipeline_module,
+    validate_pipeline_file,
+)
 
 # ---------------------------------------------------------------------------
 # Stream mode constants
@@ -77,7 +82,13 @@ class StreamPipelineService:
         def get_service() -> ServerPushService | BidirectionalService
     """
 
-    def __init__(self, security_level: SecurityLevel | None = None) -> None:
+    def __init__(
+        self,
+        security_level: SecurityLevel | None = None,
+        *,
+        config: ServerConfig | None = None,
+    ) -> None:
+        self.server_config = config or server_config
         self.is_running = False
         self.service: ServerPushService | BidirectionalService | None = None
         self.stream_mode: str | None = None
@@ -85,10 +96,14 @@ class StreamPipelineService:
         self._module: ModuleType | None = None
         self._module_name: str | None = None
 
-        self.security_level = security_level or getattr(server_config, "security_level", SecurityLevel.STRICT)
+        self.security_level = security_level or self.server_config.security_level
         self.security_validator = PipelineSecurityValidator(
             security_level=self.security_level,
-            max_file_size=getattr(server_config, "max_ppl_file_size", 1024 * 1024),
+            max_file_size=self.server_config.max_ppl_file_size,
+        )
+        self.validation_config = PipelineValidationConfig(
+            allow_unsafe_pipelines=self.server_config.allow_unsafe_pipelines,
+            strict_validation=self.server_config.strict_validation,
         )
         logger.info(f"StreamPipelineService initialized with security_level={self.security_level.name}")
 
@@ -102,7 +117,12 @@ class StreamPipelineService:
 
         try:
             if not skip_validation:
-                validate_pipeline_file(ppl_file, self.security_level, self.security_validator)
+                validate_pipeline_file(
+                    ppl_file,
+                    self.security_level,
+                    self.security_validator,
+                    validation_config=self.validation_config,
+                )
             else:
                 logger.warning("Skipping security validation for pipeline file")
 

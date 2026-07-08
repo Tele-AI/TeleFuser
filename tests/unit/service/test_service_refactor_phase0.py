@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
+import types
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -12,6 +15,8 @@ from telefuser.service.api.api_server import ApiServer
 from telefuser.service.api.routers.service import ServiceRoutes
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.file_service import FileService
+from telefuser.service.core.pipeline_service import PipelineService
+from telefuser.service.core.stream_pipeline_service import StreamPipelineService
 from telefuser.service.core.task_manager import TaskManager, TaskStatus as CoreTaskStatus
 from telefuser.service.security.security_validator import SecurityLevel
 from telefuser.service_types import MediaType, TaskStatus
@@ -173,3 +178,120 @@ def test_run_server_security_level_is_applied(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert captured["config"].security_level is SecurityLevel.BASIC
+
+
+def test_pipeline_service_uses_injected_config() -> None:
+    config = ServerConfig(
+        security_level=SecurityLevel.BASIC,
+        max_ppl_file_size=4096,
+        allow_unsafe_pipelines=True,
+        strict_validation=False,
+    )
+
+    service = PipelineService(config=config)
+
+    assert service.security_level is SecurityLevel.BASIC
+    assert service.security_validator.max_file_size == 4096
+    assert service.validation_config.allow_unsafe_pipelines is True
+    assert service.validation_config.strict_validation is False
+
+
+def test_pipeline_service_task_timeout_uses_injected_config() -> None:
+    class Status:
+        value = "completed"
+
+    class Result:
+        status = Status()
+        output_path = "output.mp4"
+        message = "ok"
+        raw = {"ok": True}
+
+    class Runner:
+        def __init__(self) -> None:
+            self.timeout_s = None
+
+        async def run(self, **kwargs: object) -> Result:
+            self.timeout_s = kwargs["timeout_s"]
+            return Result()
+
+    config = ServerConfig(task_timeout=60, security_level=SecurityLevel.NONE)
+    service = PipelineService(config=config)
+    runner = Runner()
+    service.is_running = True
+    service.pipeline = object()
+    service._runner = runner
+
+    result = asyncio.run(service.run_task_with_stop_event({"task_id": "task-1"}, threading.Event()))
+
+    assert runner.timeout_s == 60.0
+    assert result["status"] == "completed"
+
+
+def test_stream_pipeline_service_uses_injected_config() -> None:
+    config = ServerConfig(
+        security_level=SecurityLevel.NONE,
+        max_ppl_file_size=8192,
+        allow_unsafe_pipelines=True,
+        strict_validation=False,
+    )
+
+    service = StreamPipelineService(config=config)
+
+    assert service.security_level is SecurityLevel.NONE
+    assert service.security_validator.max_file_size == 8192
+    assert service.validation_config.allow_unsafe_pipelines is True
+    assert service.validation_config.strict_validation is False
+
+
+def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeRTCIceServer:
+        def __init__(self, urls: str, username: str | None = None, credential: str | None = None) -> None:
+            self.urls = urls
+            self.username = username
+            self.credential = credential
+
+    class FakeRTCConfiguration:
+        def __init__(self, iceServers: list[FakeRTCIceServer]) -> None:
+            self.iceServers = iceServers
+
+    class FakeWebRTCSessionManager:
+        def __init__(self, max_sessions: int, configuration: FakeRTCConfiguration) -> None:
+            captured["max_sessions"] = max_sessions
+            captured["configuration"] = configuration
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiortc",
+        types.SimpleNamespace(RTCConfiguration=FakeRTCConfiguration, RTCIceServer=FakeRTCIceServer),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "telefuser.service.webrtc.session_manager",
+        types.SimpleNamespace(WebRTCSessionManager=FakeWebRTCSessionManager),
+    )
+
+    config = ServerConfig(
+        webrtc_max_sessions=3,
+        stun_servers=["stun:local:3478"],
+        turn_server="turn:local:3478",
+        turn_username="user",
+        turn_credential="secret",
+    )
+    server = ApiServer(
+        task_manager=TaskManager(),
+        enable_openai_api=False,
+        config=config,
+        route_profile="request_response",
+    )
+
+    from telefuser.service.api.routers.webrtc import WebRTCRoutes
+
+    WebRTCRoutes(server)
+
+    assert captured["max_sessions"] == 3
+    ice_servers = captured["configuration"].iceServers
+    assert [server.urls for server in ice_servers] == ["stun:local:3478", "turn:local:3478"]
+    assert ice_servers[1].username == "user"
+    assert ice_servers[1].credential == "secret"

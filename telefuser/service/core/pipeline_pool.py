@@ -26,6 +26,7 @@ from .replica_worker import (
 _spawn_ctx = mp_stdlib.get_context("spawn")
 
 if TYPE_CHECKING:
+    from .config import ServerConfig
     from .task_manager import TaskManager
 
 
@@ -41,11 +42,13 @@ class PipelinePool:
         num_replicas: int,
         replica_device_ids: list[list[str]],
         security_level_name: str,
+        config: ServerConfig | None = None,
         task_manager: TaskManager | None = None,
     ) -> None:
         self._num_replicas = num_replicas
         self._replica_device_ids = replica_device_ids
         self._security_level_name = security_level_name
+        self._server_config_data = config.model_dump(mode="json") if config is not None else None
         self._task_manager = task_manager
         self._handles: list[ReplicaHandle] = []
         self._available: asyncio.Queue[int] = asyncio.Queue()
@@ -104,6 +107,7 @@ class PipelinePool:
                     cancel_event,
                     self._security_level_name,
                     skip_validation,
+                    self._server_config_data,
                 ),
                 daemon=False,
             )

@@ -84,7 +84,7 @@ class ServiceContainer:
         skip_validation: bool = False,
     ) -> bool:
         """Initialize the pipeline service."""
-        self.pipeline_service = PipelineService(security_level=self.config.security_level)
+        self.pipeline_service = PipelineService(security_level=self.config.security_level, config=self.config)
 
         return self.pipeline_service.start_pipeline(
             ppl_file=pipe_path,
@@ -217,6 +217,7 @@ class ServiceContainer:
                 num_replicas=self.config.num_replicas,
                 replica_device_ids=replica_device_ids,
                 security_level_name=self.config.security_level.name,
+                config=self.config,
                 task_manager=self.task_manager,
             )
             if not pool.start_all(
@@ -228,7 +229,7 @@ class ServiceContainer:
                 return False
             self.pipeline_service = pool  # duck-type compatible
         else:
-            self.pipeline_service = PipelineService(security_level=self.config.security_level)
+            self.pipeline_service = PipelineService(security_level=self.config.security_level, config=self.config)
             if not self.pipeline_service.start_pipeline(
                 ppl_file=pipe_path,
                 parallelism=parallelism,
@@ -251,6 +252,7 @@ class ServiceContainer:
         """Initialize stream pipeline service (alternative to initialize_all)."""
         self.stream_pipeline_service = StreamPipelineService(
             security_level=self.config.security_level,
+            config=self.config,
         )
         return self.stream_pipeline_service.start_service(
             ppl_file=pipe_path,

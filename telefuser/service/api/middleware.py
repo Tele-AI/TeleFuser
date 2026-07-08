@@ -69,9 +69,10 @@ class RateLimitErrorResponse:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Rate limiting middleware based on client IP with sliding window.
 
-    Operates as a whitelist: only requests whose path starts with one of
-    ``limited_paths`` are counted and gated. Everything else (status polls,
-    health checks, file downloads, stream endpoints) passes through untouched.
+    Only requests whose path starts with one of ``limited_paths`` are counted
+    and gated. Defaults are configured to cover expensive generation, artifact
+    download, and stream negotiation paths while leaving liveness/readiness
+    checks available for infrastructure probes.
 
     Uses in-memory storage. For production with multiple instances,
     consider using Redis-based rate limiting with fastapi-limiter.
@@ -83,6 +84,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         requests_per_minute: int | None = None,
         window_size: int | None = None,
         limited_paths: list[str] | None = None,
+        trust_forwarded_for: bool = False,
         enabled: bool = True,
     ):
         super().__init__(app)
@@ -90,6 +92,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.requests_per_minute = requests_per_minute or 60
         self.window_size = window_size or 60
         self.limited_paths = tuple(limited_paths if limited_paths is not None else [])
+        self.trust_forwarded_for = trust_forwarded_for
 
         self._clients: dict[str, list[float]] = {}
 
@@ -147,7 +150,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def _get_client_id(self, request: Request) -> str:
         """Get client identifier from request."""
         forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
+        if self.trust_forwarded_for and forwarded_for:
             return forwarded_for.split(",")[0].strip()
 
         if request.client:
@@ -328,7 +331,9 @@ def setup_middleware(
         )
 
     if config is None:
-        from ..core.config import server_config as config
+        from ..core.config import ServerConfig
+
+        config = ServerConfig()
 
     if enable_rate_limit and config.enable_rate_limit:
         app.add_middleware(
@@ -336,5 +341,6 @@ def setup_middleware(
             requests_per_minute=config.rate_limit_requests_per_minute,
             window_size=config.rate_limit_window_size,
             limited_paths=config.rate_limit_paths,
+            trust_forwarded_for=config.trust_forwarded_for,
             enabled=config.enable_rate_limit,
         )

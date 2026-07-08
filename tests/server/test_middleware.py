@@ -22,7 +22,7 @@ from telefuser.service.api.middleware import (
     RateLimitMiddleware,
     setup_middleware,
 )
-from telefuser.service.core.config import ServerConfig, server_config
+from telefuser.service.core.config import ServerConfig
 
 
 def _request(path: str = "/test", *, headers: list[tuple[bytes, bytes]] | None = None) -> Request:
@@ -71,7 +71,7 @@ class TestRateLimitMiddleware:
             assert json.loads(response.body) == {"status": "ok"}
 
     def test_rate_limit_only_applies_to_limited_paths(self):
-        """Test that paths outside the whitelist are not rate limited."""
+        """Test that paths outside the configured limited paths are not rate limited."""
         app = FastAPI()
 
         @app.get("/health")
@@ -82,7 +82,6 @@ class TestRateLimitMiddleware:
         def test_endpoint():
             return {"status": "ok"}
 
-        # Only /test is rate limited; /health passes through untouched.
         middleware = RateLimitMiddleware(
             app,
             requests_per_minute=10,
@@ -91,7 +90,6 @@ class TestRateLimitMiddleware:
         )
         middleware._clients = {}
 
-        # /health is not in limited_paths, so it should never be rate limited.
         for i in range(20):
             response = asyncio.run(middleware.dispatch(_request("/health"), _ok_call_next))
             assert response.status_code == 200, f"Health check failed on request {i + 1}"
@@ -121,8 +119,8 @@ class TestRateLimitMiddleware:
         assert "X-RateLimit-Window" in response.headers
         assert response.headers["X-RateLimit-Limit"] == "60"
 
-    def test_rate_limit_get_client_id_from_forwarded_for(self):
-        """Test client identification from X-Forwarded-For header."""
+    def test_rate_limit_ignores_forwarded_for_by_default(self):
+        """Test client identification does not trust forwarded headers by default."""
         app = FastAPI()
 
         @app.get("/test")
@@ -137,6 +135,22 @@ class TestRateLimitMiddleware:
         )
 
         request = _request(headers=[(b"x-forwarded-for", b"192.168.1.1")])
+
+        client_id = middleware._get_client_id(request)
+        assert client_id == "127.0.0.1"
+
+    def test_rate_limit_can_trust_forwarded_for_when_configured(self):
+        """Test client identification can use X-Forwarded-For behind trusted proxies."""
+        app = FastAPI()
+
+        middleware = RateLimitMiddleware(
+            app,
+            requests_per_minute=60,
+            window_size=60,
+            limited_paths=["/test"],
+            trust_forwarded_for=True,
+        )
+        request = _request(headers=[(b"x-forwarded-for", b"192.168.1.1, 10.0.0.1")])
 
         client_id = middleware._get_client_id(request)
         assert client_id == "192.168.1.1"
@@ -203,6 +217,8 @@ class TestRateLimitMiddleware:
 
         assert middleware._is_limited("/v1/tasks/create") is True
         assert middleware._is_limited("/v1/images/generations") is True
+        assert middleware._is_limited("/v1/images/edits") is True
+        assert middleware._is_limited("/v1/videos") is False
         assert middleware._is_limited("/v1/tasks/123/status") is False
         assert middleware._is_limited("/v1/files/download/x.mp4") is False
         assert middleware._is_limited("/v1/service/health") is False
@@ -312,8 +328,14 @@ class TestConfigIntegration:
         assert config.enable_rate_limit is True
         assert config.rate_limit_requests_per_minute == 60
         assert config.rate_limit_window_size == 60
+        assert config.trust_forwarded_for is False
         assert "/v1/tasks/create" in config.rate_limit_paths
         assert "/v1/tasks/form" in config.rate_limit_paths
+        assert "/v1/images" in config.rate_limit_paths
+        assert "/v1/videos" in config.rate_limit_paths
+        assert "/v1/files/download" in config.rate_limit_paths
+        assert "/v1/stream" in config.rate_limit_paths
+        assert "/v1/service/health" not in config.rate_limit_paths
 
     def test_rate_limit_config_validation(self):
         """Test rate limit config validation."""

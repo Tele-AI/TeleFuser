@@ -18,9 +18,14 @@ from ..security.security_validator import (
     SecurityError,
     SecurityLevel,
 )
-from .config import server_config
+from .config import ServerConfig, server_config
 from .pipeline_contract import load_pipeline_contract
-from .pipeline_loader import load_pipeline_module, unload_pipeline_module, validate_pipeline_file
+from .pipeline_loader import (
+    PipelineValidationConfig,
+    load_pipeline_module,
+    unload_pipeline_module,
+    validate_pipeline_file,
+)
 from .pipeline_runner import PipelineRunner
 
 mp.set_start_method("spawn", force=True)
@@ -37,8 +42,14 @@ class PipelineService:
     - Configurable security levels
     """
 
-    def __init__(self, security_level: SecurityLevel | None = None) -> None:
+    def __init__(
+        self,
+        security_level: SecurityLevel | None = None,
+        *,
+        config: ServerConfig | None = None,
+    ) -> None:
         """Initialize PipelineService."""
+        self.server_config = config or server_config
         self.is_running = False
         self.pipeline = None
         self.task: TaskType | None = None
@@ -51,10 +62,14 @@ class PipelineService:
         self._contract = None
         self._declared_contract = False
 
-        self.security_level = security_level or getattr(server_config, "security_level", SecurityLevel.STRICT)
+        self.security_level = security_level or self.server_config.security_level
         self.security_validator = PipelineSecurityValidator(
             security_level=self.security_level,
-            max_file_size=getattr(server_config, "max_ppl_file_size", 1024 * 1024),
+            max_file_size=self.server_config.max_ppl_file_size,
+        )
+        self.validation_config = PipelineValidationConfig(
+            allow_unsafe_pipelines=self.server_config.allow_unsafe_pipelines,
+            strict_validation=self.server_config.strict_validation,
         )
 
         logger.info(f"PipelineService initialized with security_level={self.security_level.name}")
@@ -65,7 +80,12 @@ class PipelineService:
         return module
 
     def _validate_pipeline_file(self, ppl_file: str) -> bool:
-        return validate_pipeline_file(ppl_file, self.security_level, self.security_validator)
+        return validate_pipeline_file(
+            ppl_file,
+            self.security_level,
+            self.security_validator,
+            validation_config=self.validation_config,
+        )
 
     def start_pipeline(
         self, ppl_file: str, parallelism: int, task: TaskType | str, skip_validation: bool = False
@@ -173,7 +193,7 @@ class PipelineService:
         if not self.is_running or self.pipeline is None or self._runner is None:
             raise RuntimeError("Pipeline service is not started")
 
-        timeout_s = timeout_s if timeout_s is not None else float(getattr(server_config, "task_timeout", 600))
+        timeout_s = timeout_s if timeout_s is not None else float(self.server_config.task_timeout)
 
         result = await self._runner.run(
             task_data=task_data,

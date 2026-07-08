@@ -47,6 +47,7 @@ def _replica_main(
     cancel_event: mp_stdlib.Event,
     security_level_name: str,
     skip_validation: bool,
+    server_config_data: dict[str, Any] | None = None,
 ) -> None:
     """Entry point for a replica subprocess.
 
@@ -60,6 +61,7 @@ def _replica_main(
     asyncio.set_event_loop(loop)
 
     from telefuser.service.core.pipeline_service import PipelineService
+    from telefuser.service.core.config import ServerConfig
     from telefuser.service.security.security_validator import SecurityLevel
     from telefuser.service_types import TaskType
     from telefuser.utils.logging import logger
@@ -67,7 +69,8 @@ def _replica_main(
     logger.info(f"Replica {replica_id} started: {device_env_var}={visible_devices}, parallelism={parallelism}")
 
     security_level = SecurityLevel[security_level_name]
-    svc = PipelineService(security_level=security_level)
+    config = ServerConfig.model_validate(server_config_data) if server_config_data is not None else None
+    svc = PipelineService(security_level=security_level, config=config)
 
     try:
         success = svc.start_pipeline(
