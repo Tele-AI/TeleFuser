@@ -111,6 +111,8 @@ class ServiceContainer:
             ssl_cert_path=getattr(self.config, "ssl_cert_path", None),
             artifact_retention_seconds=self.config.artifact_retention_seconds,
             artifact_tmp_retention_seconds=self.config.artifact_tmp_retention_seconds,
+            artifact_persistence_mode=self.config.artifact_persistence_mode,
+            artifact_preserve_failed_outputs=self.config.artifact_preserve_failed_outputs,
             artifact_max_total_bytes=self.config.artifact_max_total_bytes,
             artifact_max_task_bytes=self.config.artifact_max_task_bytes,
         )

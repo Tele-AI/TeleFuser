@@ -7,10 +7,11 @@ Tests actual route registration without over-mocking.
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 from telefuser.service.api.api_server import ApiServer
 from telefuser.service.core.task_manager import TaskStatus
+
+from ._asgi_test_client import ASGITestClient as TestClient
 
 
 @pytest.fixture

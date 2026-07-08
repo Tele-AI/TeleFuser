@@ -38,7 +38,7 @@ class PipelineService:
     - Static AST analysis for dangerous operations
     - Import restriction and verification
     - Content pattern matching
-    - Optional sandboxed execution
+    - Optional best-effort restricted-load validation
     - Configurable security levels
     """
 

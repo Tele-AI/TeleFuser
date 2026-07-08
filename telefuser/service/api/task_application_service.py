@@ -145,6 +145,55 @@ class TaskApplicationService:
         response_media_type = "image/png" if str(media_type) == MediaType.IMAGE.value else "video/mp4"
         return FileResponse(path=str(path), media_type=response_media_type, filename=path.name)
 
+    def resolve_task_output_path(self, output_path: str, *, media_type: MediaType | str) -> Path:
+        """Resolve a task output path through the configured file service."""
+        file_service = getattr(self.api, "file_service", None)
+        if not file_service:
+            return Path(output_path)
+        return self.resolve_output_file(file_service, output_path, media_type=media_type)
+
+    def get_output_metadata(
+        self,
+        task_id: str,
+        *,
+        output_path: str | None = None,
+        media_type: MediaType | str,
+    ) -> dict[str, Any] | None:
+        """Return artifact metadata for a task output when the file service supports it."""
+        file_service = getattr(self.api, "file_service", None)
+        if not file_service:
+            return None
+
+        if output_path is None:
+            task_info = self.api.task_manager.get_task(task_id)
+            task_status = self.api.task_manager.get_task_status(task_id) or {}
+            output_path = getattr(task_info, "output_path", None) or task_status.get("output_path")
+        if not output_path:
+            return None
+
+        metadata_builder = self.get_declared_method(file_service, "artifact_metadata")
+        if not callable(metadata_builder):
+            return None
+
+        try:
+            return metadata_builder(output_path, task_id=task_id, media_type=media_type)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access to this file is not allowed")
+
+    def get_base_url(self) -> str:
+        """Return the configured HTTP base URL for local content routes."""
+        server_config = getattr(self.api, "server_config", None)
+        if server_config:
+            host = getattr(server_config, "host", "localhost")
+            port = getattr(server_config, "port", 8000)
+            return f"http://{host}:{port}"
+        return "http://localhost:8000"
+
+    def get_openai_content_url(self, task_id: str, *, media_type: MediaType | str) -> str:
+        """Return the OpenAI-compatible content URL for a task output."""
+        resource = "images" if str(media_type) == MediaType.IMAGE.value else "videos"
+        return f"{self.get_base_url()}/v1/{resource}/{task_id}/content"
+
     def cancel_task(self, task_id: str) -> dict[str, Any]:
         """Cancel a task and distinguish accepted, terminal, and missing outcomes."""
         task_manager = getattr(self.api, "task_manager", None)

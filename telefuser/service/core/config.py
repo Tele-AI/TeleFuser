@@ -58,6 +58,13 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Local artifact root. Defaults to cache_dir when unset.",
     )
+    artifact_persistence_mode: Literal["persistent", "ephemeral"] = Field(
+        default="persistent",
+        description=(
+            "Local artifact retention mode. Persistent keeps terminal artifacts until retention/capacity cleanup; "
+            "ephemeral removes terminal artifacts on the next cleanup pass."
+        ),
+    )
 
     enable_latent_cache: bool | None = Field(
         default=None,
@@ -130,7 +137,7 @@ class ServerConfig(BaseSettings):
     )
     artifact_preserve_failed_outputs: bool = Field(
         default=False,
-        description="Whether failed task output directories should be preserved until normal retention expiry.",
+        description="Whether failed task output directories should be preserved until manual cleanup.",
     )
 
     # Rate limiting settings

@@ -60,8 +60,8 @@ def _replica_main(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    from telefuser.service.core.pipeline_service import PipelineService
     from telefuser.service.core.config import ServerConfig
+    from telefuser.service.core.pipeline_service import PipelineService
     from telefuser.service.security.security_validator import SecurityLevel
     from telefuser.service_types import TaskType
     from telefuser.utils.logging import logger

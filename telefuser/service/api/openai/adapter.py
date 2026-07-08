@@ -240,9 +240,11 @@ class OpenAIResponseAdapter:
         task_id: str = "",
         peak_memory_mb: float | None = None,
         inference_time_s: float | None = None,
+        artifact_metadata: dict[str, Any] | None = None,
     ) -> ImageResponse:
         """Convert TeleFuser output to OpenAI ImageResponse."""
         data_list: List[ImageResponseData] = []
+        artifact_id = artifact_metadata.get("artifact_id") if artifact_metadata else None
 
         if response_format == "b64_json":
             try:
@@ -256,6 +258,8 @@ class OpenAIResponseAdapter:
                         b64_json=b64_string,
                         revised_prompt=prompt,
                         file_path=output_path,
+                        artifact_id=artifact_id,
+                        artifact_metadata=artifact_metadata,
                     )
                 )
             except Exception as e:
@@ -272,6 +276,8 @@ class OpenAIResponseAdapter:
                     url=url,
                     revised_prompt=prompt,
                     file_path=output_path,
+                    artifact_id=artifact_id,
+                    artifact_metadata=artifact_metadata,
                 )
             )
 
@@ -295,6 +301,7 @@ class OpenAIResponseAdapter:
         peak_memory_mb: float | None = None,
         inference_time_s: float | None = None,
         error: Dict[str, Any] | None = None,
+        artifact_metadata: dict[str, Any] | None = None,
     ) -> VideoResponse:
         """Convert TeleFuser task info to OpenAI VideoResponse."""
         status_map = {
@@ -318,7 +325,48 @@ class OpenAIResponseAdapter:
             peak_memory_mb=peak_memory_mb,
             inference_time_s=inference_time_s,
             error=error,
+            artifact_id=artifact_metadata.get("artifact_id") if artifact_metadata else None,
+            artifact_metadata=artifact_metadata,
         )
+
+    @staticmethod
+    def progress_for_task_status(status: str) -> int:
+        """Return a coarse OpenAI-compatible progress value for a task status."""
+        if status == "completed":
+            return 100
+        if status == "processing":
+            return 50
+        return 0
+
+    @staticmethod
+    def to_video_response_from_task(
+        task_id: str,
+        task_status: dict[str, Any],
+        message: Any | None,
+        *,
+        url: str | None = None,
+        artifact_metadata: dict[str, Any] | None = None,
+    ) -> VideoResponse:
+        """Convert a TaskManager status dictionary and optional task message to VideoResponse."""
+        status = task_status.get("status", "pending")
+        response = OpenAIResponseAdapter.to_video_response(
+            task_id=task_id,
+            status=status,
+            prompt=getattr(message, "prompt", ""),
+            size=getattr(message, "resolution", ""),
+            seconds=getattr(message, "target_video_length", 4),
+            model=getattr(message, "model", None) or "wan-video",
+            output_path=task_status.get("output_path"),
+            url=url,
+            progress=OpenAIResponseAdapter.progress_for_task_status(status),
+            peak_memory_mb=task_status.get("peak_memory_mb"),
+            inference_time_s=task_status.get("inference_time_s"),
+            artifact_metadata=artifact_metadata,
+        )
+
+        if status == "failed":
+            response.error = {"message": task_status.get("error", "Unknown error")}
+        return response
 
     @staticmethod
     def to_video_list_response(

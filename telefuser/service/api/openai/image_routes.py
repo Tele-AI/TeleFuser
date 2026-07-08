@@ -126,18 +126,28 @@ class ImageRoutes:
             if not output_path:
                 raise HTTPException(status_code=500, detail="Generation completed but no output path found")
 
+            resolved_output_path = self.api.task_app_service.resolve_task_output_path(
+                output_path,
+                media_type=MediaType.IMAGE,
+            )
+            artifact_metadata = self.api.task_app_service.get_output_metadata(
+                task_id,
+                output_path=str(resolved_output_path),
+                media_type=MediaType.IMAGE,
+            )
             peak_memory_mb = result.get("peak_memory_mb")
             inference_time_s = result.get("inference_time_s")
-            base_url = self._get_base_url()
+            base_url = self.api.task_app_service.get_base_url()
 
             response = OpenAIResponseAdapter.to_image_response(
-                output_path=output_path,
+                output_path=str(resolved_output_path),
                 prompt=request.prompt,
                 response_format=request.response_format or "url",
                 base_url=base_url,
                 task_id=task_id,
                 peak_memory_mb=peak_memory_mb,
                 inference_time_s=inference_time_s,
+                artifact_metadata=artifact_metadata,
             )
 
             logger.info(f"Image generation completed: {task_id}")
@@ -230,13 +240,23 @@ class ImageRoutes:
             if not output_path:
                 raise HTTPException(status_code=500, detail="No output from generation")
 
-            base_url = self._get_base_url()
+            resolved_output_path = self.api.task_app_service.resolve_task_output_path(
+                output_path,
+                media_type=MediaType.IMAGE,
+            )
+            artifact_metadata = self.api.task_app_service.get_output_metadata(
+                task_id,
+                output_path=str(resolved_output_path),
+                media_type=MediaType.IMAGE,
+            )
+            base_url = self.api.task_app_service.get_base_url()
             response = OpenAIResponseAdapter.to_image_response(
-                output_path=output_path,
+                output_path=str(resolved_output_path),
                 prompt=prompt,
                 response_format=response_format or "url",
                 base_url=base_url,
                 task_id=task_id,
+                artifact_metadata=artifact_metadata,
             )
 
             logger.info(f"Image edit completed: {task_id}")

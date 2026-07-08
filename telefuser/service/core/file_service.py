@@ -34,6 +34,8 @@ class FileService:
         ssl_cert_path: str | None = None,
         artifact_retention_seconds: int = 7 * 24 * 60 * 60,
         artifact_tmp_retention_seconds: int = 60 * 60,
+        artifact_persistence_mode: str = "persistent",
+        artifact_preserve_failed_outputs: bool = False,
         artifact_max_total_bytes: int = 0,
         artifact_max_task_bytes: int = 0,
     ) -> None:
@@ -51,6 +53,8 @@ class FileService:
         self.ssl_cert_path = ssl_cert_path
         self.artifact_retention_seconds = artifact_retention_seconds
         self.artifact_tmp_retention_seconds = artifact_tmp_retention_seconds
+        self.artifact_persistence_mode = artifact_persistence_mode
+        self.artifact_preserve_failed_outputs = artifact_preserve_failed_outputs
         self.artifact_max_total_bytes = artifact_max_total_bytes
         self.artifact_max_task_bytes = artifact_max_task_bytes
 
@@ -343,19 +347,41 @@ class FileService:
         """Resolve a downloadable output file within the configured cache root."""
         return self.artifact_store.resolve_output_file(file_path)
 
+    def artifact_id_for_path(self, file_path: str | Path) -> str:
+        """Return a stable local artifact id for a file under the artifact root."""
+        return self.artifact_store.artifact_id_for_path(file_path)
+
+    def resolve_artifact_id(self, artifact_id: str) -> Path:
+        """Resolve a local artifact id to an output file path."""
+        return self.artifact_store.resolve_artifact_id(artifact_id)
+
+    def artifact_metadata(
+        self,
+        file_path: str | Path,
+        *,
+        task_id: str | None = None,
+        media_type: MediaType | str | None = None,
+    ) -> dict[str, Any]:
+        """Return local artifact metadata for an output file."""
+        return self.artifact_store.artifact_metadata(file_path, task_id=task_id, media_type=media_type)
+
     def cleanup_artifacts(
         self,
         *,
         active_task_ids: set[str] | frozenset[str],
         terminal_task_end_times: Mapping[str, datetime | float | int | None],
+        terminal_task_statuses: Mapping[str, str] | None = None,
         now: datetime | float | int | None = None,
     ) -> dict[str, Any]:
         """Clean expired local artifacts according to configured retention settings."""
         return self.artifact_store.cleanup(
             active_task_ids=active_task_ids,
             terminal_task_end_times=terminal_task_end_times,
+            terminal_task_statuses=terminal_task_statuses,
             retention_seconds=self.artifact_retention_seconds,
             tmp_retention_seconds=self.artifact_tmp_retention_seconds,
+            persistence_mode=self.artifact_persistence_mode,
+            preserve_failed_outputs=self.artifact_preserve_failed_outputs,
             max_total_bytes=self.artifact_max_total_bytes,
             max_task_bytes=self.artifact_max_task_bytes,
             now=now,

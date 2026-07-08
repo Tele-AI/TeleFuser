@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.container import ServiceContainer
 
@@ -33,9 +35,17 @@ def test_artifact_retention_defaults_are_configured() -> None:
     assert config.artifact_retention_seconds == 7 * 24 * 60 * 60
     assert config.artifact_tmp_retention_seconds == 60 * 60
     assert config.artifact_cleanup_interval_seconds == 60 * 60
+    assert config.artifact_persistence_mode == "persistent"
     assert config.artifact_max_total_bytes == 0
     assert config.artifact_max_task_bytes == 0
     assert config.artifact_preserve_failed_outputs is False
+
+
+def test_artifact_persistence_mode_is_validated() -> None:
+    assert ServerConfig(artifact_persistence_mode="ephemeral").artifact_persistence_mode == "ephemeral"
+
+    with pytest.raises(ValueError):
+        ServerConfig(artifact_persistence_mode="invalid")
 
 
 def test_artifact_local_root_can_override_cache_dir() -> None:

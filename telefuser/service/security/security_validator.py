@@ -24,7 +24,7 @@ class SecurityLevel(Enum):
     NONE = auto()  # No validation
     BASIC = auto()  # Static AST analysis only
     STRICT = auto()  # AST + import restriction
-    SANDBOX = auto()  # Full sandbox execution
+    SANDBOX = auto()  # Strict validation plus best-effort restricted load check
 
 
 class SecurityError(Exception):
@@ -450,13 +450,13 @@ class ASTSecurityAnalyzer(ast.NodeVisitor):
 
 
 class SandboxedLoader:
-    """Restricted Python loader that executes code in a controlled environment.
+    """Best-effort restricted loader for pipeline validation.
 
     WARNING: This is NOT a complete sandbox and should not be used for
     truly untrusted code. It's a best-effort restriction.
     """
 
-    # Safe builtins that are allowed in sandboxed environment
+    # Safe builtins that are allowed in the restricted-load environment.
     SAFE_BUILTINS: dict[str, Any] = {
         "True": True,
         "False": False,
@@ -566,11 +566,11 @@ class SandboxedLoader:
                 return __import__(name, globals, locals, fromlist, level)
 
         raise ImportError(
-            f"Import of '{name}' is not allowed in sandboxed environment. Allowed modules: {self.allowed_modules}"
+            f"Import of '{name}' is not allowed in restricted-load validation. Allowed modules: {self.allowed_modules}"
         )
 
     def load_module(self, source_code: str, filename: str = "<sandbox>") -> types.ModuleType:
-        """Load a module in a restricted sandbox environment."""
+        """Load a module in a best-effort restricted environment."""
         restricted_globals = self.create_restricted_globals()
         restricted_globals["__builtins__"]["__import__"] = self.import_hook
 
@@ -581,7 +581,7 @@ class SandboxedLoader:
             exec(compiled, module.__dict__)
             return module
         except Exception as e:
-            raise SecurityError(f"Failed to load module in sandbox: {e}")
+            raise SecurityError(f"Failed to load module in restricted validation: {e}")
 
 
 class PipelineSecurityValidator:
@@ -665,7 +665,7 @@ class PipelineSecurityValidator:
         if self.blocked_patterns:
             self._check_custom_patterns(source_code, result)
 
-        # Level 4: Sandboxed execution (optional, for strict mode)
+        # Level 4: Best-effort restricted load check. This is not a runtime sandbox.
         if self.security_level == SecurityLevel.SANDBOX:
             self._try_sandboxed_load(source_code, filename, result)
 
@@ -712,7 +712,7 @@ class PipelineSecurityValidator:
                 logger.warning(f"Invalid regex pattern '{pattern}': {e}")
 
     def _try_sandboxed_load(self, source_code: str, filename: str, result: ValidationResult) -> None:
-        """Try to load code in sandboxed environment."""
+        """Try to load code in a best-effort restricted environment."""
         try:
             loader = SandboxedLoader(allowed_modules=self.allowed_imports)
             loader.load_module(source_code, filename)
@@ -722,13 +722,13 @@ class PipelineSecurityValidator:
                     line_number=0,
                     column=0,
                     violation_type="SANDBOX_LOAD_FAILED",
-                    description=f"Code failed sandboxed load: {e}",
+                    description=f"Code failed restricted-load validation: {e}",
                     code_snippet="",
                     severity="high",
                 )
             )
         except Exception as e:
-            logger.debug(f"Sandboxed load raised (possibly legitimate error): {e}")
+            logger.debug(f"Restricted-load validation raised (possibly legitimate error): {e}")
 
     def assert_safe(self, file_path: str) -> None:
         """Validate file and raise SecurityError if unsafe."""

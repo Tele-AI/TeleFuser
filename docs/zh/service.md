@@ -150,7 +150,7 @@ telefuser serve /path/to/pipeline --task i2v [选项]
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | 缓存目录 |
 | `--parallelism` | `-g` | int | `1` | 并行工作进程数 |
 | `--num-replicas` | `-n` | int | `1` | 独立 Pipeline 副本数量（Pipeline Pool） |
-| `--security-level` | | choice | `strict` | 安全级别: none/basic/strict/sandbox |
+| `--security-level` | | choice | `strict` | 验证级别：none/basic/strict/sandbox。`sandbox` 是 best-effort 受限加载检查，不是运行时隔离。 |
 | `--skip-validation` | | flag | `False` | 跳过安全验证 |
 | `--validate-only` | | flag | `False` | 仅验证不启动 |
 
@@ -186,7 +186,7 @@ telefuser validate /path/to/pipeline.py [选项]
 | 参数 | 默认值 | 描述 |
 |-----------|---------|-------------|
 | `pipeline_file` | **必需** | 管道 Python 文件路径 |
-| `--level` | `strict` | 安全级别: none/basic/strict/sandbox |
+| `--level` | `strict` | 验证级别：none/basic/strict/sandbox。`sandbox` 是 best-effort 受限加载检查，不是运行时隔离。 |
 | `--json` | `False` | 以 JSON 格式输出 |
 
 ```bash
@@ -258,7 +258,17 @@ telefuser serve --help
 | `TELEFUSER_HOST` | 服务器主机 | `127.0.0.1` |
 | `TELEFUSER_PORT` | 服务器端口 | `8000` |
 | `TELEFUSER_RATE_LIMIT_ENABLED` | 启用速率限制 | `true` |
-| `TELEFUSER_RATE_LIMIT_RPM` | 每分钟请求限制 | `60` |
+| `TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE` | 每分钟请求限制 | `60` |
+| `TELEFUSER_TRUST_FORWARDED_FOR` | 是否信任 `X-Forwarded-For` 作为限流身份。仅应在可信反向代理后启用。 | `false` |
+| `TELEFUSER_ARTIFACT_STORAGE_BACKEND` | Artifact 后端。当前只实现 `local`。 | `local` |
+| `TELEFUSER_ARTIFACT_LOCAL_ROOT` | 本地 artifact 根目录。未设置时使用 `TELEFUSER_CACHE_DIR`。 | 未设置 |
+| `TELEFUSER_ARTIFACT_PERSISTENCE_MODE` | 本地 artifact 保留模式：`persistent` 或 `ephemeral`。 | `persistent` |
+| `TELEFUSER_ARTIFACT_RETENTION_SECONDS` | 终态任务 artifact 保留时间。`0` 表示关闭 TTL 清理。 | `604800` |
+| `TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS` | 临时 `.part` 文件保留时间。`0` 表示关闭临时文件清理。 | `3600` |
+| `TELEFUSER_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | 后台 artifact 清理周期。 | `3600` |
+| `TELEFUSER_ARTIFACT_MAX_TOTAL_BYTES` | 本地 artifact 缓存总容量上限。`0` 表示关闭容量清理。 | `0` |
+| `TELEFUSER_ARTIFACT_MAX_TASK_BYTES` | 单任务 artifact 容量上限，仅清理终态任务。`0` 表示关闭。 | `0` |
+| `TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS` | 保护失败任务目录，不让自动 artifact 清理删除。 | `false` |
 
 ### 配置文件示例
 
@@ -269,8 +279,63 @@ TELEFUSER_SECURITY_LEVEL=STRICT
 TELEFUSER_PORT=8080
 TELEFUSER_HOST=0.0.0.0
 TELEFUSER_RATE_LIMIT_ENABLED=true
-TELEFUSER_RATE_LIMIT_RPM=100
+TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 ```
+
+### 运行边界
+
+请求-响应服务默认是本地、单进程语义：
+
+- 任务状态、队列状态、取消状态和限流 bucket 保存在进程内存中。多实例之间不共享，服务重启后也不会恢复。
+- 文件输入、生成输出和临时 `.part` 文件由本地 artifact store 管理，根目录来自配置的 cache/artifact root。
+- `artifact_storage_backend=s3` 只是后续远端后端的边界声明，当前尚未实现。显式配置为 `s3` 会在启动阶段报错，不会静默退回本地存储。
+- `telefuser serve` 只暴露请求-响应路由：`/v1/tasks/*`、`/v1/files/*`、`/v1/images/*`、`/v1/videos/*` 和 `/v1/service/*`。
+- `telefuser stream-serve` 只暴露流式路由：`/v1/stream/*`、`/v1/stream/webrtc/*` 和 `/v1/service/*`。它不会暴露任务、文件下载或 OpenAI 兼容的请求-响应路由。
+
+### Artifact 存储与清理
+
+Artifact 是本地文件。设置 `TELEFUSER_ARTIFACT_LOCAL_ROOT` 时使用该目录，否则使用 `TELEFUSER_CACHE_DIR`。
+上传和远程下载会先写入临时 `.part` 文件，成功完成后再原子重命名。
+
+当有 task id 时，输出采用 task-scoped 目录：
+
+```text
+<artifact_root>/tasks/<task_id>/inputs/
+<artifact_root>/tasks/<task_id>/outputs/
+<artifact_root>/tasks/<task_id>/tmp/
+```
+
+服务只接受解析后仍位于 artifact root 内的路径。绝对输出路径和 `..` 路径逃逸会被拒绝。
+下载路由接受校验后的输出路径和本地 artifact id。本地 artifact id 使用
+`local:tasks/<task_id>/outputs/<media_type>/<filename>` 格式，只表示本地 artifact 后端中的可下载输出；
+它不是远端对象存储 id。
+
+清理是 best-effort 行为，并且不会删除 active task（`pending`、`processing`、`streaming`）。
+终态任务（`completed`、`failed`、`cancelled`）可能被 TTL、总容量上限或单任务容量上限清理。
+临时 `.part` 文件按 `TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS` 独立清理。
+
+`TELEFUSER_ARTIFACT_PERSISTENCE_MODE=persistent` 会保留终态任务 artifact，直到 TTL 或容量清理删除。
+`ephemeral` 会在下一次清理时删除终态任务目录。设置
+`TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS=true` 后，失败任务目录会跳过自动清理，便于人工检查部分输出。
+
+### 限流和代理 Header
+
+限流状态保存在进程内存中，并按客户端身份计数。默认使用直接客户端地址，不信任 `X-Forwarded-For`，
+因为普通客户端可以伪造这个 header。只有当 TeleFuser 部署在会清洗转发 header 的可信反向代理之后，
+才应设置 `TELEFUSER_TRUST_FORWARDED_FOR=true`。
+
+默认限流路径覆盖昂贵生成入口、artifact 下载和 stream 协商：
+
+```text
+/v1/tasks/create
+/v1/tasks/form
+/v1/images
+/v1/videos
+/v1/files/download
+/v1/stream
+```
+
+Liveness/readiness 端点不会被默认限流，便于基础设施探针访问。
 
 ### Pipeline 契约与参数定义
 
@@ -461,9 +526,9 @@ http://localhost:8000/v1
 | POST | `/tasks/create` | 创建新的生成任务 |
 | POST | `/tasks/form` | 带文件上传创建任务 |
 | GET | `/tasks/{task_id}/status` | 获取任务状态 |
-| DELETE | `/tasks/{task_id}` | 取消任务 |
+| DELETE | `/tasks/{task_id}` | 请求协作式取消任务 |
 | GET | `/tasks/queue/status` | 获取队列状态 |
-| GET | `/files/download/{file_id}` | 下载输出文件 |
+| GET | `/files/download/{file_id}` | 通过校验后的路径或本地 artifact id 下载输出文件 |
 | GET | `/service/health` | 健康检查 |
 | GET | `/service/status` | 服务状态 |
 | GET | `/service/metadata` | 服务元数据 |
@@ -812,7 +877,17 @@ TeleFuser 提供 **OpenAI 兼容**的 REST API，让您可以使用标准的 Ope
   "data": [
     {
       "url": "http://localhost:8000/v1/images/task_xxx/content",
-      "revised_prompt": "一只美丽的猫"
+      "revised_prompt": "一只美丽的猫",
+      "file_path": "/cache/tasks/task_xxx/outputs/images/result.png",
+      "artifact_id": "local:tasks/task_xxx/outputs/images/result.png",
+      "artifact_metadata": {
+        "backend": "local",
+        "relative_path": "tasks/task_xxx/outputs/images/result.png",
+        "task_id": "task_xxx",
+        "media_type": "image",
+        "filename": "result.png",
+        "size_bytes": 123456
+      }
     }
   ],
   "peak_memory_mb": 4096.5,
@@ -873,7 +948,7 @@ response.data[0].save("sunset.png")
   "size": "1024x576",                 // 可选：视频尺寸
   "seed": 1024,                       // 可选：随机种子
   "negative_prompt": "模糊",          // 可选：反向提示词
-  "output_path": "/path/to/output.mp4" // 可选：自定义输出路径
+  "output_path": "custom-output.mp4"  // 可选：相对自定义输出路径
 }
 ```
 
@@ -889,7 +964,31 @@ response.data[0].save("sunset.png")
   "created_at": 1699000000,
   "size": "1024x576",
   "seconds": "5",
-  "url": null
+  "url": null,
+  "file_path": null,
+  "artifact_id": null,
+  "artifact_metadata": null
+}
+```
+
+完成后的视频响应会包含内容 URL 和本地 artifact metadata：
+
+```json
+{
+  "id": "vid_xxx",
+  "status": "completed",
+  "progress": 100,
+  "url": "http://localhost:8000/v1/videos/vid_xxx/content",
+  "file_path": "/cache/tasks/vid_xxx/outputs/videos/result.mp4",
+  "artifact_id": "local:tasks/vid_xxx/outputs/videos/result.mp4",
+  "artifact_metadata": {
+    "backend": "local",
+    "relative_path": "tasks/vid_xxx/outputs/videos/result.mp4",
+    "task_id": "vid_xxx",
+    "media_type": "video",
+    "filename": "result.mp4",
+    "size_bytes": 987654
+  }
 }
 ```
 

@@ -14,7 +14,6 @@ from telefuser.service.core.pipeline_contract import infer_media_type_for_task
 from telefuser.service_types import TaskStatus
 from telefuser.utils.logging import logger
 
-
 _ACTIVE_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.STREAMING})
 
 
@@ -237,9 +236,15 @@ class TaskManager:
                 for task_id, task in self._tasks.items()
                 if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
             }
+            terminal_task_statuses = {
+                task_id: task.status.value
+                for task_id, task in self._tasks.items()
+                if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+            }
             return {
                 "active_task_ids": active_task_ids,
                 "terminal_task_end_times": terminal_task_end_times,
+                "terminal_task_statuses": terminal_task_statuses,
             }
 
     def get_pending_task_count(self) -> int:

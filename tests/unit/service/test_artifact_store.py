@@ -9,11 +9,11 @@ from unittest.mock import Mock
 import pytest
 
 from telefuser.service.api.api_server import ApiServer
-from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.artifact_store import ArtifactStore
+from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.file_service import FileService
 from telefuser.service.core.task_manager import TaskManager
-from telefuser.service_types import MediaType
+from telefuser.service_types import MediaType, TaskStatus
 
 
 class _AsyncUpload:
@@ -58,12 +58,70 @@ def test_artifact_store_resolves_task_scoped_outputs_for_download(tmp_path: Path
     assert store.resolve_output_file(output) == output
 
 
+def test_artifact_store_round_trips_local_artifact_ids(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    output = store.output_path("result.png", media_type=MediaType.IMAGE, task_id="task-123")
+    output.write_bytes(b"image")
+
+    artifact_id = store.artifact_id_for_path(output)
+
+    assert artifact_id == "local:tasks/task-123/outputs/images/result.png"
+    assert store.resolve_artifact_id(artifact_id) == output
+    assert store.resolve_output_file(artifact_id) == output
+    assert store.resolve_output_file("tasks/task-123/outputs/images/result.png") == output
+
+
+def test_artifact_store_rejects_artifact_ids_outside_outputs(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    input_file = store.task_input_dir("task-123", MediaType.IMAGE) / "input.png"
+    input_file.write_bytes(b"image")
+
+    with pytest.raises(ValueError, match="downloadable output"):
+        store.artifact_id_for_path(input_file)
+
+    with pytest.raises(ValueError, match="not allowed"):
+        store.resolve_artifact_id("local:tasks/task-123/inputs/images/input.png")
+
+    with pytest.raises(ValueError, match="escapes"):
+        store.resolve_artifact_id("local:../escape.png")
+
+
+def test_artifact_store_returns_local_artifact_metadata(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    output = store.output_path("result.mp4", media_type=MediaType.VIDEO, task_id="task-123")
+    output.write_bytes(b"video")
+
+    metadata = store.artifact_metadata(output, task_id="task-123", media_type=MediaType.VIDEO)
+
+    assert metadata["artifact_id"] == "local:tasks/task-123/outputs/videos/result.mp4"
+    assert metadata["backend"] == "local"
+    assert metadata["relative_path"] == "tasks/task-123/outputs/videos/result.mp4"
+    assert metadata["task_id"] == "task-123"
+    assert metadata["media_type"] == "video"
+    assert metadata["filename"] == "result.mp4"
+    assert metadata["size_bytes"] == 5
+    assert metadata["created_at"].endswith("Z")
+    assert metadata["modified_at"].endswith("Z")
+
+
 def test_file_service_uses_task_scoped_outputs_when_task_id_is_provided(tmp_path: Path) -> None:
     files = FileService(tmp_path)
 
     output = files.get_output_path("result.png", media_type=MediaType.IMAGE, task_id="task-123")
 
     assert output == tmp_path / "tasks" / "task-123" / "outputs" / "images" / "result.png"
+
+
+def test_file_service_exposes_artifact_metadata_helpers(tmp_path: Path) -> None:
+    files = FileService(tmp_path)
+    output = files.get_output_path("result.png", media_type=MediaType.IMAGE, task_id="task-123")
+    output.write_bytes(b"image")
+
+    artifact_id = files.artifact_id_for_path(output)
+
+    assert artifact_id == "local:tasks/task-123/outputs/images/result.png"
+    assert files.resolve_artifact_id(artifact_id) == output
+    assert files.artifact_metadata(artifact_id, task_id="task-123", media_type=MediaType.IMAGE)["size_bytes"] == 5
 
 
 def test_file_service_saves_upload_stream_to_media_input_dir(tmp_path: Path) -> None:
@@ -167,6 +225,66 @@ def test_artifact_store_cleanup_removes_oversized_terminal_tasks(tmp_path: Path)
     assert small_output.exists()
 
 
+def test_artifact_store_ephemeral_cleanup_removes_terminal_tasks(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    completed_output = store.output_path("done.mp4", media_type=MediaType.VIDEO, task_id="completed-task")
+    active_output = store.output_path("active.mp4", media_type=MediaType.VIDEO, task_id="active-task")
+    completed_output.write_bytes(b"done")
+    active_output.write_bytes(b"active")
+    now = datetime.now()
+
+    result = store.cleanup(
+        active_task_ids={"active-task"},
+        terminal_task_end_times={
+            "completed-task": now,
+            "active-task": now,
+        },
+        terminal_task_statuses={
+            "completed-task": TaskStatus.COMPLETED.value,
+            "active-task": TaskStatus.PROCESSING.value,
+        },
+        retention_seconds=0,
+        tmp_retention_seconds=0,
+        persistence_mode="ephemeral",
+        now=now,
+    )
+
+    assert result["removed_task_ids"] == ["completed-task"]
+    assert not completed_output.exists()
+    assert active_output.exists()
+
+
+def test_artifact_store_preserves_failed_outputs_from_automatic_cleanup(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    failed_output = store.output_path("failed.mp4", media_type=MediaType.VIDEO, task_id="failed-task")
+    completed_output = store.output_path("done.mp4", media_type=MediaType.VIDEO, task_id="completed-task")
+    failed_output.write_bytes(b"failed" * 10)
+    completed_output.write_bytes(b"done" * 10)
+    now = datetime.now()
+
+    result = store.cleanup(
+        active_task_ids=set(),
+        terminal_task_end_times={
+            "failed-task": now - timedelta(seconds=120),
+            "completed-task": now - timedelta(seconds=120),
+        },
+        terminal_task_statuses={
+            "failed-task": TaskStatus.FAILED.value,
+            "completed-task": TaskStatus.COMPLETED.value,
+        },
+        retention_seconds=60,
+        tmp_retention_seconds=0,
+        persistence_mode="persistent",
+        preserve_failed_outputs=True,
+        max_task_bytes=1,
+        now=now,
+    )
+
+    assert result["removed_task_ids"] == ["completed-task"]
+    assert failed_output.exists()
+    assert not completed_output.exists()
+
+
 def test_file_service_passes_max_task_bytes_to_artifact_cleanup(tmp_path: Path) -> None:
     files = FileService(tmp_path, artifact_max_task_bytes=3)
     output = files.get_output_path("big.mp4", media_type=MediaType.VIDEO, task_id="task-123")
@@ -179,6 +297,35 @@ def test_file_service_passes_max_task_bytes_to_artifact_cleanup(tmp_path: Path) 
 
     assert result["removed_task_ids"] == ["task-123"]
     assert not output.exists()
+
+
+def test_file_service_passes_persistence_and_failed_preservation_to_artifact_cleanup(tmp_path: Path) -> None:
+    files = FileService(
+        tmp_path,
+        artifact_persistence_mode="ephemeral",
+        artifact_preserve_failed_outputs=True,
+    )
+    failed_output = files.get_output_path("failed.mp4", media_type=MediaType.VIDEO, task_id="failed-task")
+    completed_output = files.get_output_path("done.mp4", media_type=MediaType.VIDEO, task_id="completed-task")
+    failed_output.write_bytes(b"failed")
+    completed_output.write_bytes(b"done")
+    now = datetime.now()
+
+    result = files.cleanup_artifacts(
+        active_task_ids=set(),
+        terminal_task_end_times={
+            "failed-task": now,
+            "completed-task": now,
+        },
+        terminal_task_statuses={
+            "failed-task": TaskStatus.FAILED.value,
+            "completed-task": TaskStatus.COMPLETED.value,
+        },
+    )
+
+    assert result["removed_task_ids"] == ["completed-task"]
+    assert failed_output.exists()
+    assert not completed_output.exists()
 
 
 def test_api_server_runs_artifact_cleanup_from_task_snapshot(tmp_path: Path) -> None:
@@ -197,6 +344,19 @@ def test_api_server_runs_artifact_cleanup_from_task_snapshot(tmp_path: Path) -> 
 
     assert result["removed_task_ids"] == [task_id]
     assert not output.exists()
+
+
+def test_api_server_initializes_file_service_with_artifact_lifecycle_config(tmp_path: Path) -> None:
+    task_manager = TaskManager()
+    config = ServerConfig(
+        artifact_persistence_mode="ephemeral",
+        artifact_preserve_failed_outputs=True,
+    )
+    server = ApiServer(task_manager=task_manager, config=config, enable_openai_api=False)
+    server.initialize_services(tmp_path, Mock())
+
+    assert server.file_service.artifact_persistence_mode == "ephemeral"
+    assert server.file_service.artifact_preserve_failed_outputs is True
 
 
 def test_api_server_artifact_cleanup_loop_starts_and_stops(tmp_path: Path) -> None:

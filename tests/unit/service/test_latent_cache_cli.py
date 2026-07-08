@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from telefuser.entrypoints.cli.main import main
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.container import ServiceContainer
+from telefuser.service_types import TaskType
 
 
 def test_telefuser_pyproject_does_not_vendor_cacheseek_dependencies() -> None:
@@ -57,7 +58,7 @@ def test_serve_cli_forwards_latent_cache_options(monkeypatch: pytest.MonkeyPatch
     assert calls == [
         {
             "pipe_path": "pipeline.py",
-            "task": "i2v",
+            "task": TaskType.I2V,
             "port": 8000,
             "host": "127.0.0.1",
             "cache_dir": "work_dirs/server_cache",
@@ -65,6 +66,8 @@ def test_serve_cli_forwards_latent_cache_options(monkeypatch: pytest.MonkeyPatch
             "num_replicas": 1,
             "enable_latent_cache": True,
             "cache_mode": "read_only",
+            "security_level": "strict",
+            "skip_validation": True,
         }
     ]
 

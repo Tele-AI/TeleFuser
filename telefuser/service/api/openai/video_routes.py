@@ -211,14 +211,15 @@ class VideoRoutes:
             # Convert to VideoResponse objects
             videos: List[VideoResponse] = []
             for task_id, task_data in video_tasks:
-                video = OpenAIResponseAdapter.to_video_response(
+                task_info = self.task_manager.get_task(task_id)
+                message = task_info.message if task_info else None
+                status = task_data.get("status", TaskStatus.PENDING.value)
+                video = OpenAIResponseAdapter.to_video_response_from_task(
                     task_id=task_id,
-                    status=task_data.get("status", TaskStatus.PENDING.value),
-                    prompt=task_data.get("prompt", ""),
-                    size=task_data.get("resolution", ""),
-                    seconds=task_data.get("target_video_length", 4),
-                    model=task_data.get("model", "wan-video"),
-                    output_path=task_data.get("output_path"),
+                    task_status=task_data,
+                    message=message,
+                    url=self._content_url_for_completed_video(task_id, status),
+                    artifact_metadata=self._artifact_metadata_for_video(task_id, task_data.get("output_path")),
                 )
                 videos.append(video)
 
@@ -246,29 +247,14 @@ class VideoRoutes:
         task_info = self.task_manager.get_task(video_id)
         message = task_info.message if task_info else None
 
-        # Calculate progress (simplified)
         status = task_status.get("status", TaskStatus.PENDING.value)
-        progress = 0
-        if status == TaskStatus.COMPLETED.value:
-            progress = 100
-        elif status == TaskStatus.PROCESSING.value:
-            progress = 50
-
-        response = OpenAIResponseAdapter.to_video_response(
+        return OpenAIResponseAdapter.to_video_response_from_task(
             task_id=video_id,
-            status=status,
-            prompt=message.prompt if message else "",
-            size=message.resolution if message else "",
-            seconds=message.target_video_length if message else 4,
-            model=getattr(message, "model", None) or "wan-video",
-            output_path=task_status.get("output_path"),
-            progress=progress,
+            task_status=task_status,
+            message=message,
+            url=self._content_url_for_completed_video(video_id, status),
+            artifact_metadata=self._artifact_metadata_for_video(video_id, task_status.get("output_path")),
         )
-
-        if status == TaskStatus.FAILED.value:
-            response.error = {"message": task_status.get("error", "Unknown error")}
-
-        return response
 
     async def delete_video(self, video_id: str) -> VideoResponse:
         """Cancel or delete a video generation task."""
@@ -296,6 +282,22 @@ class VideoRoutes:
     async def _ensure_processing(self) -> None:
         """Ensure the task processor is running."""
         await self.api.ensure_task_processor_running()
+
+    def _content_url_for_completed_video(self, video_id: str, status: str) -> str | None:
+        """Return a video content URL only when the output is ready."""
+        if status != TaskStatus.COMPLETED.value:
+            return None
+        return self.api.task_app_service.get_openai_content_url(video_id, media_type=MediaType.VIDEO)
+
+    def _artifact_metadata_for_video(self, video_id: str, output_path: str | None) -> dict | None:
+        """Return artifact metadata for a video output when it exists."""
+        if not output_path:
+            return None
+        return self.api.task_app_service.get_output_metadata(
+            video_id,
+            output_path=output_path,
+            media_type=MediaType.VIDEO,
+        )
 
     async def _save_uploaded_file(self, file: UploadFile, prefix: str = "upload") -> str:
         """Save an uploaded file to disk."""

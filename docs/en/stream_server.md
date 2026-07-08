@@ -32,6 +32,10 @@ TeleFuser stream server supports two interaction modes, both available over WebR
 | **Server Push** | WebRTC (RTP) | Server → Client | Real-time preview, text-to-video streaming |
 | **Bidirectional** | WebRTC (RTP + DataChannel) | Client ↔ Server | Interactive generation, keyboard/camera control, speech-to-video |
 
+`telefuser stream-serve` starts a stream-only app. It exposes `/v1/stream/*`, `/v1/stream/webrtc/*`, and
+`/v1/service/*`; it does not expose request-response task routes, file-download routes, or OpenAI-compatible
+`/v1/images` and `/v1/videos` routes. Use `telefuser serve` for batch task submission.
+
 ### Server Push (WebRTC)
 
 ```
@@ -105,7 +109,7 @@ telefuser stream-serve <pipeline_file> [OPTIONS]
 |------|---------|-------------|
 | `--port`, `-p` | `8088` | Server port |
 | `--host` | `0.0.0.0` | Bind address |
-| `--security-level` | `strict` | Pipeline validation level (`none`, `basic`, `strict`, `sandbox`) |
+| `--security-level` | `strict` | Pipeline validation level (`none`, `basic`, `strict`, `sandbox`). `sandbox` is a best-effort restricted-load check, not runtime isolation. |
 | `--skip-validation` | `false` | Skip pipeline file security checks |
 
 ### Examples
@@ -227,6 +231,9 @@ Server-push chunks should contain the following fields:
 | `/v1/stream/sessions/{session_id}` | DELETE | Both | Close session (pipeline + WebRTC) |
 | `/v1/stream/sessions/{session_id}/status` | GET | Both | Get session status |
 
+The stream app also exposes service endpoints such as `/v1/service/health`, `/v1/service/ready`,
+`/v1/service/metadata`, and `/v1/service/metrics/json`.
+
 ### WebRTC: SDP Offer
 
 **POST** `/v1/stream/webrtc/offer`
@@ -289,6 +296,10 @@ Response (`200 OK`):
   "status": "closed"
 }
 ```
+
+**DELETE** `/v1/stream/sessions/{session_id}` closes the pipeline session and WebRTC session together when both
+owners are present. If one side has already disappeared but the other closes successfully, the endpoint still returns
+`200 OK`; pipeline-side close failures are logged as warnings instead of being silently ignored.
 
 ### WebRTC: DataChannel Protocol (Bidirectional)
 
@@ -757,7 +768,7 @@ Pipeline files are validated before loading. Use `--skip-validation` only for de
 | `none` | Disable validation |
 | `basic` | Static AST analysis |
 | `strict` | Static AST analysis plus import restrictions |
-| `sandbox` | Full sandbox execution |
+| `sandbox` | Strict checks plus a best-effort restricted-load validation step. This is not runtime isolation. |
 
 ---
 

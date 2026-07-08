@@ -155,6 +155,25 @@ def test_task_application_service_returns_output_response(tmp_path: Path) -> Non
     assert response.headers["content-length"] == "5"
 
 
+def test_task_application_service_returns_output_metadata(tmp_path: Path) -> None:
+    task_manager = TaskManager()
+    server = ApiServer(task_manager=task_manager, enable_openai_api=False)
+    server.file_service = FileService(tmp_path)
+    message = TaskRequest(task="t2i")
+    task_id = task_manager.create_task(message)
+    output_path = server.file_service.get_output_path("result.png", media_type="image", task_id=task_id)
+    output_path.write_bytes(b"image")
+    task_manager.complete_task(task_id, output_path=str(output_path))
+
+    metadata = server.task_app_service.get_output_metadata(task_id, media_type="image")
+
+    assert metadata is not None
+    assert metadata["artifact_id"] == f"local:tasks/{task_id}/outputs/images/result.png"
+    assert metadata["backend"] == "local"
+    assert metadata["task_id"] == task_id
+    assert metadata["size_bytes"] == 5
+
+
 def test_task_application_service_rejects_unready_required_output(tmp_path: Path) -> None:
     task_manager = TaskManager()
     server = ApiServer(task_manager=task_manager, enable_openai_api=False)

@@ -345,6 +345,8 @@ class ApiServer:
             ssl_cert_path=self.server_config.ssl_cert_path,
             artifact_retention_seconds=self.server_config.artifact_retention_seconds,
             artifact_tmp_retention_seconds=self.server_config.artifact_tmp_retention_seconds,
+            artifact_persistence_mode=self.server_config.artifact_persistence_mode,
+            artifact_preserve_failed_outputs=self.server_config.artifact_preserve_failed_outputs,
             artifact_max_total_bytes=self.server_config.artifact_max_total_bytes,
             artifact_max_task_bytes=self.server_config.artifact_max_task_bytes,
         )

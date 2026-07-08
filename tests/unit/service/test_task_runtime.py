@@ -37,6 +37,7 @@ def test_artifact_cleanup_snapshot_splits_active_and_terminal_tasks() -> None:
 
     assert snapshot["active_task_ids"] == {active_id}
     assert terminal_id in snapshot["terminal_task_end_times"]
+    assert snapshot["terminal_task_statuses"] == {terminal_id: TaskStatus.COMPLETED.value}
     assert active_id not in snapshot["terminal_task_end_times"]
 
 

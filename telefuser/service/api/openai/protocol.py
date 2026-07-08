@@ -125,6 +125,8 @@ class ImageResponseData(BaseModel):
         None, description="The prompt that was used to generate the image, if any revision was made."
     )
     file_path: str | None = Field(None, description="Local file path of the generated image (TeleFuser ext).")
+    artifact_id: str | None = Field(None, description="Stable output artifact id (TeleFuser ext).")
+    artifact_metadata: Dict[str, Any] | None = Field(None, description="Output artifact metadata (TeleFuser ext).")
 
 
 class ImageResponse(BaseModel):
@@ -195,6 +197,8 @@ class VideoResponse(BaseModel):
     expires_at: int | None = Field(None, description="The Unix timestamp when the video will be deleted.")
     error: Dict[str, Any] | None = Field(None, description="Error information if generation failed.")
     file_path: str | None = Field(None, description="Local file path of the generated video.")
+    artifact_id: str | None = Field(None, description="Stable output artifact id (TeleFuser ext).")
+    artifact_metadata: Dict[str, Any] | None = Field(None, description="Output artifact metadata (TeleFuser ext).")
 
     # TeleFuser extensions
     peak_memory_mb: float | None = Field(None, description="Peak memory usage in MB during generation.")

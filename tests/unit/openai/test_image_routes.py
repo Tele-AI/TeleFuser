@@ -9,8 +9,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 
 from telefuser.service.api.openai.image_routes import ImageRoutes, create_router
 from telefuser.service.api.task_application_service import TaskApplicationService

@@ -150,7 +150,7 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | Cache directory |
 | `--parallelism` | `-g` | int | `1` | Number of parallel workers |
 | `--num-replicas` | `-n` | int | `1` | Number of independent pipeline replicas (Pipeline Pool) |
-| `--security-level` | | choice | `strict` | Security level: none/basic/strict/sandbox |
+| `--security-level` | | choice | `strict` | Validation level: none/basic/strict/sandbox. `sandbox` is a best-effort restricted-load check, not runtime isolation. |
 | `--skip-validation` | | flag | `False` | Skip security validation |
 | `--validate-only` | | flag | `False` | Only validate without starting |
 
@@ -186,7 +186,7 @@ telefuser validate /path/to/pipeline.py [OPTIONS]
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `pipeline_file` | **Required** | Path to pipeline Python file |
-| `--level` | `strict` | Security level: none/basic/strict/sandbox |
+| `--level` | `strict` | Validation level: none/basic/strict/sandbox. `sandbox` is a best-effort restricted-load check, not runtime isolation. |
 | `--json` | `False` | Output in JSON format |
 
 ```bash
@@ -258,7 +258,17 @@ telefuser serve --help
 | `TELEFUSER_HOST` | Server host | `127.0.0.1` |
 | `TELEFUSER_PORT` | Server port | `8000` |
 | `TELEFUSER_RATE_LIMIT_ENABLED` | Enable rate limiting | `true` |
-| `TELEFUSER_RATE_LIMIT_RPM` | Requests per minute limit | `60` |
+| `TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE` | Requests per minute limit | `60` |
+| `TELEFUSER_TRUST_FORWARDED_FOR` | Trust `X-Forwarded-For` for rate-limit identity. Enable only behind trusted proxies. | `false` |
+| `TELEFUSER_ARTIFACT_STORAGE_BACKEND` | Artifact backend. Only `local` is implemented currently. | `local` |
+| `TELEFUSER_ARTIFACT_LOCAL_ROOT` | Local artifact root. Defaults to `TELEFUSER_CACHE_DIR`. | unset |
+| `TELEFUSER_ARTIFACT_PERSISTENCE_MODE` | Local artifact retention mode: `persistent` or `ephemeral`. | `persistent` |
+| `TELEFUSER_ARTIFACT_RETENTION_SECONDS` | Retention time for terminal task artifacts. `0` disables TTL cleanup. | `604800` |
+| `TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS` | Retention time for temporary `.part` files. `0` disables tmp cleanup. | `3600` |
+| `TELEFUSER_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | Background artifact cleanup interval. | `3600` |
+| `TELEFUSER_ARTIFACT_MAX_TOTAL_BYTES` | Local artifact cache size limit. `0` disables capacity cleanup. | `0` |
+| `TELEFUSER_ARTIFACT_MAX_TASK_BYTES` | Per-task artifact size limit for terminal tasks. `0` disables per-task cleanup. | `0` |
+| `TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS` | Preserve failed task directories from automatic artifact cleanup. | `false` |
 
 ### Configuration File Example
 
@@ -269,8 +279,65 @@ TELEFUSER_SECURITY_LEVEL=STRICT
 TELEFUSER_PORT=8080
 TELEFUSER_HOST=0.0.0.0
 TELEFUSER_RATE_LIMIT_ENABLED=true
-TELEFUSER_RATE_LIMIT_RPM=100
+TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 ```
+
+### Runtime Boundaries
+
+The request-response service is intentionally local and single-process by default:
+
+- Task status, queue state, cancellation state, and rate-limit buckets are kept in process memory. They are not shared across multiple server instances and are not restored after restart.
+- File inputs, generated outputs, and temporary `.part` files are managed by the local artifact store under the configured cache root.
+- `artifact_storage_backend=s3` is declared as a future backend boundary, but it is not implemented yet. Setting it to `s3` fails at startup instead of silently falling back to local storage.
+- `telefuser serve` exposes request-response routes only: `/v1/tasks/*`, `/v1/files/*`, `/v1/images/*`, `/v1/videos/*`, and `/v1/service/*`.
+- `telefuser stream-serve` exposes stream routes only: `/v1/stream/*`, `/v1/stream/webrtc/*`, and `/v1/service/*`. It does not expose task, file-download, or OpenAI-compatible request-response routes.
+
+### Artifact Storage and Cleanup
+
+Artifacts are local files rooted at `TELEFUSER_ARTIFACT_LOCAL_ROOT` when set, otherwise `TELEFUSER_CACHE_DIR`.
+Uploads and remote downloads are written through temporary `.part` files and atomically renamed after successful completion.
+
+Outputs are task-scoped when a task id is available:
+
+```text
+<artifact_root>/tasks/<task_id>/inputs/
+<artifact_root>/tasks/<task_id>/outputs/
+<artifact_root>/tasks/<task_id>/tmp/
+```
+
+Only paths resolved inside the artifact root are accepted. Absolute output paths and `..` traversal are rejected.
+Download routes accept validated output paths and local artifact ids. Local artifact ids use the
+`local:tasks/<task_id>/outputs/<media_type>/<filename>` form and only refer to downloadable outputs in the local
+artifact backend. They are not remote object-storage ids.
+
+Cleanup is best-effort and never removes active tasks (`pending`, `processing`, or `streaming`). Terminal tasks
+(`completed`, `failed`, or `cancelled`) may be removed by TTL cleanup, total-cache capacity cleanup, or per-task size cleanup.
+Temporary `.part` files are cleaned independently by `TELEFUSER_ARTIFACT_TMP_RETENTION_SECONDS`.
+
+`TELEFUSER_ARTIFACT_PERSISTENCE_MODE=persistent` keeps terminal task artifacts until TTL or capacity cleanup removes
+them. `ephemeral` removes terminal task directories on the next cleanup pass. If
+`TELEFUSER_ARTIFACT_PRESERVE_FAILED_OUTPUTS=true`, failed task directories are protected from automatic cleanup so
+partial outputs can be inspected manually.
+
+### Rate Limit and Proxy Headers
+
+Rate limiting is in-memory and keyed by client identity. By default, the server uses the direct client address and does
+not trust `X-Forwarded-For`, because arbitrary clients can spoof that header. Set
+`TELEFUSER_TRUST_FORWARDED_FOR=true` only when TeleFuser is behind a trusted reverse proxy that sanitizes forwarded
+headers.
+
+The default limited paths cover expensive generation endpoints, artifact downloads, and stream negotiation:
+
+```text
+/v1/tasks/create
+/v1/tasks/form
+/v1/images
+/v1/videos
+/v1/files/download
+/v1/stream
+```
+
+Liveness/readiness endpoints remain unthrottled for infrastructure probes.
 
 ### Pipeline Contract and Parameter Definitions
 
@@ -463,9 +530,9 @@ When the server is running:
 | POST | `/tasks/create` | Create a new generation task |
 | POST | `/tasks/form` | Create task with file upload |
 | GET | `/tasks/{task_id}/status` | Get task status |
-| DELETE | `/tasks/{task_id}` | Cancel a task |
+| DELETE | `/tasks/{task_id}` | Request cooperative task cancellation |
 | GET | `/tasks/queue/status` | Get queue status |
-| GET | `/files/download/{file_id}` | Download output files |
+| GET | `/files/download/{file_id}` | Download an output file by validated path or local artifact id |
 | GET | `/service/health` | Health check |
 | GET | `/service/status` | Service status |
 | GET | `/service/metadata` | Service metadata |
@@ -814,7 +881,17 @@ TeleFuser provides an **OpenAI-compatible** REST API that allows you to use stan
   "data": [
     {
       "url": "http://localhost:8000/v1/images/task_xxx/content",
-      "revised_prompt": "a beautiful cat"
+      "revised_prompt": "a beautiful cat",
+      "file_path": "/cache/tasks/task_xxx/outputs/images/result.png",
+      "artifact_id": "local:tasks/task_xxx/outputs/images/result.png",
+      "artifact_metadata": {
+        "backend": "local",
+        "relative_path": "tasks/task_xxx/outputs/images/result.png",
+        "task_id": "task_xxx",
+        "media_type": "image",
+        "filename": "result.png",
+        "size_bytes": 123456
+      }
     }
   ],
   "peak_memory_mb": 4096.5,
@@ -875,7 +952,7 @@ response.data[0].save("sunset.png")
   "size": "1024x576",                   // Optional: video size
   "seed": 1024,                         // Optional: random seed
   "negative_prompt": "blurry",          // Optional: negative prompt
-  "output_path": "/path/to/output.mp4"  // Optional: custom output path
+  "output_path": "custom-output.mp4"    // Optional: relative custom output path
 }
 ```
 
@@ -891,7 +968,31 @@ response.data[0].save("sunset.png")
   "created_at": 1699000000,
   "size": "1024x576",
   "seconds": "5",
-  "url": null
+  "url": null,
+  "file_path": null,
+  "artifact_id": null,
+  "artifact_metadata": null
+}
+```
+
+Completed video responses include a content URL and local artifact metadata:
+
+```json
+{
+  "id": "vid_xxx",
+  "status": "completed",
+  "progress": 100,
+  "url": "http://localhost:8000/v1/videos/vid_xxx/content",
+  "file_path": "/cache/tasks/vid_xxx/outputs/videos/result.mp4",
+  "artifact_id": "local:tasks/vid_xxx/outputs/videos/result.mp4",
+  "artifact_metadata": {
+    "backend": "local",
+    "relative_path": "tasks/vid_xxx/outputs/videos/result.mp4",
+    "task_id": "vid_xxx",
+    "media_type": "video",
+    "filename": "result.mp4",
+    "size_bytes": 987654
+  }
 }
 ```
 
