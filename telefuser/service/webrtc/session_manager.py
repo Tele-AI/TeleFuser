@@ -91,7 +91,7 @@ class WebRTCSessionManager:
                 state = pc.connectionState
                 if state in ("failed", "disconnected", "closed"):
                     logger.info(f"WebRTC connection {state}: session={session_id}")
-                    await self.close_session(session_id)
+                    await self.close_session(session_id, reason=f"connection_{state}")
 
             pc.addTrack(track)
             if audio_track is not None:
@@ -178,12 +178,16 @@ class WebRTCSessionManager:
                 def _on_message(message) -> None:
                     try:
                         data = json.loads(message) if isinstance(message, str) else message
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning(f"DataChannel message decode failed: session={session_id} {exc}")
                         return
                     if isinstance(data, dict) and data.get("type") == "stop":
-                        asyncio.ensure_future(self.close_session(session_id))
+                        asyncio.ensure_future(self.close_session(session_id, reason="client_stop"))
                         return
-                    on_input(session_id, data)
+                    try:
+                        on_input(session_id, data)
+                    except Exception as exc:
+                        logger.warning(f"DataChannel input callback failed: session={session_id} {exc}")
 
                 router = ChunkRouter(
                     generator=output_generator,
@@ -216,7 +220,7 @@ class WebRTCSessionManager:
                 state = pc.connectionState
                 if state in ("failed", "disconnected", "closed"):
                     logger.info(f"WebRTC connection {state}: session={session_id}")
-                    await self.close_session(session_id)
+                    await self.close_session(session_id, reason=f"connection_{state}")
 
             # --- SDP exchange -----------------------------------------------
 
@@ -237,48 +241,58 @@ class WebRTCSessionManager:
 
     # -- Session lifecycle ---------------------------------------------------
 
-    async def close_session(self, session_id: str) -> bool:
+    async def close_session(self, session_id: str, *, reason: str = "api", notify_pipeline: bool = True) -> bool:
         async with self._lock:
             entry = self._sessions.pop(session_id, None)
         if entry is None or entry is _SENTINEL:
             return False
+
+        logger.info(f"Closing WebRTC session: session={session_id} reason={reason}")
 
         if isinstance(entry, _Session):
             entry.track.stop()
             if entry.track._task is not None and not entry.track._task.done():
                 try:
                     await entry.track._task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except asyncio.CancelledError:
+                    logger.info(f"WebRTC server-push track cancelled: session={session_id}")
+                except Exception as exc:
+                    logger.warning(f"WebRTC server-push track close failed: session={session_id} {exc}")
         elif isinstance(entry, _BidirectionalSession):
             for task in entry.relay_tasks:
                 if not task.done():
                     task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except asyncio.CancelledError:
+                    logger.info(f"WebRTC relay task cancelled: session={session_id}")
+                except Exception as exc:
+                    logger.warning(f"WebRTC relay task close failed: session={session_id} {exc}")
             if entry.router_task is not None and not entry.router_task.done():
                 entry.router_task.cancel()
                 try:
                     await entry.router_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except asyncio.CancelledError:
+                    logger.info(f"WebRTC chunk router cancelled: session={session_id}")
+                except Exception as exc:
+                    logger.warning(f"WebRTC chunk router close failed: session={session_id} {exc}")
             if entry.output_video_track is not None:
                 entry.output_video_track.stop()
             if entry.output_audio_track is not None:
                 entry.output_audio_track.stop()
-            if entry.on_close is not None:
+            if notify_pipeline and entry.on_close is not None:
                 try:
                     entry.on_close(entry.session_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(f"WebRTC pipeline close callback failed: session={session_id} {exc}")
 
         try:
             await asyncio.wait_for(entry.pc.close(), timeout=5.0)
-        except (asyncio.TimeoutError, Exception):
-            pass
-        logger.info(f"WebRTC session closed: session={session_id}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timed out closing WebRTC peer connection: session={session_id}")
+        except Exception as exc:
+            logger.warning(f"WebRTC peer connection close failed: session={session_id} {exc}")
+        logger.info(f"WebRTC session closed: session={session_id} reason={reason}")
         return True
 
     async def close_all(self) -> None:

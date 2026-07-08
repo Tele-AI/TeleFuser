@@ -13,11 +13,14 @@ from click.testing import CliRunner
 from telefuser.entrypoints.cli.main import main
 from telefuser.service.api.api_server import ApiServer
 from telefuser.service.api.routers.service import ServiceRoutes
+from telefuser.service.api.routers.stream import StreamRoutes
 from telefuser.service.core.config import ServerConfig
+from telefuser.service.core.container import ServiceContainer
 from telefuser.service.core.file_service import FileService
 from telefuser.service.core.pipeline_service import PipelineService
 from telefuser.service.core.stream_pipeline_service import StreamPipelineService
-from telefuser.service.core.task_manager import TaskManager, TaskStatus as CoreTaskStatus
+from telefuser.service.core.task_manager import TaskManager
+from telefuser.service.core.task_manager import TaskStatus as CoreTaskStatus
 from telefuser.service.security.security_validator import SecurityLevel
 from telefuser.service_types import MediaType, TaskStatus
 
@@ -86,6 +89,142 @@ def test_readiness_passes_when_pipeline_is_running() -> None:
     assert ready.status_code == 200
     assert health["ready"] is True
     assert health["pipeline_ready"] is True
+
+
+def test_stream_route_profile_exposes_only_stream_service_routes() -> None:
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=True, route_profile="stream")
+    paths = {route.path for route in server.app.routes}
+
+    assert "/v1/service/health" in paths
+    assert "/v1/stream/sessions/{session_id}/status" in paths
+    assert "/v1/tasks/create" not in paths
+    assert "/v1/tasks/form" not in paths
+    assert "/v1/files/download/{file_path:path}" not in paths
+    assert "/v1/images/generations" not in paths
+    assert "/v1/videos" not in paths
+
+
+def test_request_response_route_profile_excludes_stream_routes() -> None:
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=False, route_profile="request_response")
+    paths = {route.path for route in server.app.routes}
+
+    assert "/v1/service/health" in paths
+    assert "/v1/tasks/create" in paths
+    assert "/v1/files/download/{file_path:path}" in paths
+    assert "/v1/stream/sessions/{session_id}/status" not in paths
+
+
+def test_container_stream_app_uses_stream_route_profile() -> None:
+    container = ServiceContainer.create(config=ServerConfig())
+    container.stream_pipeline_service = Mock()
+    container.stream_pipeline_service.is_running = True
+
+    app = container.get_api_app()
+    paths = {route.path for route in app.routes}
+
+    assert "/v1/service/health" in paths
+    assert "/v1/stream/sessions/{session_id}/status" in paths
+    assert "/v1/tasks/create" not in paths
+    assert "/v1/files/download/{file_path:path}" not in paths
+
+
+def test_stream_session_close_logs_pipeline_close_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RunningStreamService:
+        is_running = True
+
+        def close_session(self, session_id: str) -> None:
+            raise RuntimeError("pipeline close failed")
+
+    class WebRTCSessionManager:
+        async def close_session(self, session_id: str, **kwargs: object) -> bool:
+            return True
+
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=False)
+    server.stream_service = RunningStreamService()
+    server._webrtc_routes = Mock(_session_manager=WebRTCSessionManager())
+    warnings: list[str] = []
+    monkeypatch.setattr("telefuser.service.api.routers.stream.logger.warning", warnings.append)
+
+    result = asyncio.run(StreamRoutes(server).close_session("session-123"))
+
+    assert result == {"session_id": "session-123", "status": "closed"}
+    assert warnings == ["Failed to close pipeline stream session session-123: pipeline close failed"]
+
+
+def test_stream_session_alias_closes_webrtc_without_pipeline_notify() -> None:
+    class RunningStreamService:
+        is_running = True
+
+        def __init__(self) -> None:
+            self.closed_sessions: list[str] = []
+
+        def close_session(self, session_id: str) -> None:
+            self.closed_sessions.append(session_id)
+
+    class WebRTCSessionManager:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def close_session(self, session_id: str, *, reason: str, notify_pipeline: bool) -> bool:
+            self.calls.append(
+                {
+                    "session_id": session_id,
+                    "reason": reason,
+                    "notify_pipeline": notify_pipeline,
+                }
+            )
+            return True
+
+    stream_service = RunningStreamService()
+    webrtc_manager = WebRTCSessionManager()
+    server = ApiServer(task_manager=TaskManager(), enable_openai_api=False)
+    server.stream_service = stream_service
+    server._webrtc_routes = Mock(_session_manager=webrtc_manager)
+
+    result = asyncio.run(StreamRoutes(server).close_session("session-123"))
+
+    assert result == {"session_id": "session-123", "status": "closed"}
+    assert stream_service.closed_sessions == ["session-123"]
+    assert webrtc_manager.calls == [
+        {
+            "session_id": "session-123",
+            "reason": "stream_session_delete",
+            "notify_pipeline": False,
+        }
+    ]
+
+
+def test_webrtc_delete_uses_session_manager_pipeline_owner() -> None:
+    from telefuser.service.api.routers.webrtc import WebRTCRoutes
+
+    class RunningStreamService:
+        stream_mode = "bidirectional"
+
+        def __init__(self) -> None:
+            self.closed_sessions: list[str] = []
+
+        def close_session(self, session_id: str) -> None:
+            self.closed_sessions.append(session_id)
+
+    class WebRTCSessionManager:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def close_session(self, session_id: str, *, reason: str) -> bool:
+            self.calls.append({"session_id": session_id, "reason": reason})
+            return True
+
+    stream_service = RunningStreamService()
+    webrtc_manager = WebRTCSessionManager()
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=stream_service)
+    routes._session_manager = webrtc_manager
+
+    result = asyncio.run(routes.close_session("session-123"))
+
+    assert result == {"session_id": "session-123", "status": "closed"}
+    assert stream_service.closed_sessions == []
+    assert webrtc_manager.calls == [{"session_id": "session-123", "reason": "webrtc_session_delete"}]
 
 
 def test_cli_serve_forwards_security_and_skip_validation(monkeypatch: pytest.MonkeyPatch) -> None:

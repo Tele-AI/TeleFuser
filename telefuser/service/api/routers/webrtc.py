@@ -128,15 +128,9 @@ class WebRTCRoutes:
         )
 
     async def close_session(self, session_id: str) -> dict:
-        closed = await self._session_manager.close_session(session_id)
+        closed = await self._session_manager.close_session(session_id, reason="webrtc_session_delete")
         if not closed:
             raise HTTPException(status_code=404, detail=f"WebRTC session {session_id} not found")
-        svc = self.api.stream_service
-        if svc and svc.stream_mode == STREAM_MODE_BIDIRECTIONAL:
-            try:
-                svc.close_session(session_id)
-            except Exception:
-                pass
         return {"session_id": session_id, "status": "closed"}
 
     async def cleanup(self) -> None:

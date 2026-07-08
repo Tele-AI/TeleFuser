@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 
+from telefuser.utils.logging import logger
+
 if TYPE_CHECKING:
     from ..api_server import ApiServer
 
@@ -38,12 +40,16 @@ class StreamRoutes:
         try:
             svc.close_session(session_id)
             pipeline_closed = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Failed to close pipeline stream session {session_id}: {exc}")
         webrtc_closed = False
         webrtc_routes = self.api._webrtc_routes
         if webrtc_routes is not None:
-            webrtc_closed = await webrtc_routes._session_manager.close_session(session_id)
+            webrtc_closed = await webrtc_routes._session_manager.close_session(
+                session_id,
+                reason="stream_session_delete",
+                notify_pipeline=False,
+            )
         if not pipeline_closed and not webrtc_closed:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         return {"session_id": session_id, "status": "closed"}

@@ -73,6 +73,7 @@ class ChunkRouter:
                 np_arr = np.frombuffer(raw, dtype=np.uint8)
                 bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                 if bgr is None:
+                    logger.warning(f"ChunkRouter dropped undecodable video frame: session={self._session_id}")
                     continue
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
@@ -95,8 +96,8 @@ class ChunkRouter:
             )
             try:
                 self._dc_send(msg.model_dump_json())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"ChunkRouter metadata send failed: session={self._session_id} {exc}")
 
     def _send_done(self) -> None:
         if self._dc_send is None:
@@ -107,5 +108,5 @@ class ChunkRouter:
         )
         try:
             self._dc_send(done.model_dump_json())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"ChunkRouter done send failed: session={self._session_id} {exc}")

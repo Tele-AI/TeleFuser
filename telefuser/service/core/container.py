@@ -261,6 +261,7 @@ class ServiceContainer:
 
     def get_api_app(self, enable_rate_limit: bool = True) -> FastAPI:
         """Get FastAPI application with all services initialized."""
+        route_profile = "stream" if self.stream_pipeline_service and not self.pipeline_service else "request_response"
         api_server = ApiServer(
             max_queue_size=self.config.max_queue_size,
             max_concurrent_tasks=self.config.effective_max_concurrent_tasks,
@@ -269,6 +270,7 @@ class ServiceContainer:
             enable_rate_limit=enable_rate_limit,
             enable_logging=False,
             config=self.config,
+            route_profile=route_profile,
         )
 
         if self.file_service and self.pipeline_service:

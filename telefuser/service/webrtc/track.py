@@ -53,13 +53,18 @@ class AudioGeneratorTrack(MediaStreamTrack):
         self._frame_count = 0
         self._start_time: float | None = None
         self._finished = False
+        self.dropped_chunks = 0
 
-    def feed(self, data: bytes) -> None:
+    def feed(self, data: bytes) -> bool:
         """Push raw PCM16 bytes (called by FrameGeneratorTrack from its consumer task)."""
         try:
             self._queue.put_nowait(data)
+            return True
         except asyncio.QueueFull:
-            pass
+            self.dropped_chunks += 1
+            if self.dropped_chunks == 1 or self.dropped_chunks % 100 == 0:
+                logger.warning(f"AudioGeneratorTrack queue full; dropped_chunks={self.dropped_chunks}")
+            return False
 
     def signal_done(self) -> None:
         self._finished = True
@@ -141,15 +146,20 @@ class FrameGeneratorTrack(MediaStreamTrack):
         self._last_frame: av.VideoFrame | None = None
         self._placeholder_width = 640
         self._placeholder_height = 360
+        self.dropped_frames = 0
 
-    def push_frame(self, frame: av.VideoFrame) -> None:
+    def push_frame(self, frame: av.VideoFrame) -> bool:
         """Push a decoded frame directly (used by ChunkRouter in bidirectional mode)."""
         self._placeholder_width = frame.width
         self._placeholder_height = frame.height
         try:
             self._queue.put_nowait(frame)
+            return True
         except asyncio.QueueFull:
-            pass
+            self.dropped_frames += 1
+            if self.dropped_frames == 1 or self.dropped_frames % 100 == 0:
+                logger.warning(f"FrameGeneratorTrack queue full; dropped_frames={self.dropped_frames}")
+            return False
 
     def signal_done(self) -> None:
         self._finished = True
@@ -262,9 +272,10 @@ class IncomingVideoRelay:
                 rgb = frame.to_ndarray(format="rgb24")
                 self._on_chunk(self._session_id, {"type": "media", "video_frames": [rgb]})
         except MediaStreamError:
-            pass
+            logger.info(f"IncomingVideoRelay ended: session={self._session_id}")
         except asyncio.CancelledError:
-            pass
+            logger.info(f"IncomingVideoRelay cancelled: session={self._session_id}")
+            raise
         except Exception as exc:
             logger.error(f"IncomingVideoRelay error: session={self._session_id} {exc}")
 
@@ -300,8 +311,9 @@ class IncomingAudioRelay:
                     },
                 )
         except MediaStreamError:
-            pass
+            logger.info(f"IncomingAudioRelay ended: session={self._session_id}")
         except asyncio.CancelledError:
-            pass
+            logger.info(f"IncomingAudioRelay cancelled: session={self._session_id}")
+            raise
         except Exception as exc:
             logger.error(f"IncomingAudioRelay error: session={self._session_id} {exc}")
