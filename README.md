@@ -17,7 +17,7 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
-- ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
+- ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
 
 ## Why TeleFuser
 
@@ -99,7 +99,7 @@ This starts a continuous session where the client sends control messages over a 
 ### 3. Batch Service Mode
 
 ```bash
-telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --task t2v --port 8000
+telefuser serve examples/wan_video/wan22_14b_text_to_video_h100.py --task t2v --port 8000
 ```
 
 TeleFuser exposes:
