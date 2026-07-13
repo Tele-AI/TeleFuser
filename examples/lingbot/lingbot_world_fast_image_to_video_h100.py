@@ -42,7 +42,7 @@ DEFAULT_PROMPT = (
     "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped "
     "mountains under a bright blue sky with drifting white clouds. Gentle ripples reflect the tree and sky."
 )
-RESOLUTION_AREAS = {"240p": 240 * 416, "480p": 480 * 832, "720p": 720 * 1280}
+RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
     control_mode="cam",

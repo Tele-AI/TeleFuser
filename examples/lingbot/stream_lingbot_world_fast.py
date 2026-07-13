@@ -16,7 +16,7 @@ from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeCon
 from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 
-RESOLUTION_AREAS = {"240p": 240 * 416, "480p": 480 * 832, "720p": 720 * 1280}
+RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
     parallelism=4,

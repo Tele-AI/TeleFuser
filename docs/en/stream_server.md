@@ -725,18 +725,18 @@ device, dtype, and full latent-chunk shape.
 
 #### VRAM and Resolution
 
-LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 frames approaches the 80 GB H100 VRAM limit. Start with a lower resolution to verify the pipeline:
+LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 frames approaches the 80 GB H100 VRAM limit. Start with fewer frames to verify the pipeline:
 
 ```bash
-# In examples/lingbot/stream_lingbot_world_fast.py:
-PPL_CONFIG["resolution"] = "240p"
+# In the browser demo or session configuration:
+--frame-num 21
 ```
 
 Common tuning parameters:
 
 | Parameter | Effect |
 |-----------|--------|
-| `PPL_CONFIG["resolution"]` | Select the configured output area; use the included `240p` preset to reduce VRAM |
+| `PPL_CONFIG["resolution"]` | Select either the 480p or 720p output area |
 | `--frame-num` | Reduce total generated frames and latent chunk count |
 | `--chunk-size` | Affect the latent chunk size per generation step |
 
