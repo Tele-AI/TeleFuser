@@ -24,7 +24,6 @@ class LingBotWorldFastSessionConfig:
     sample_shift: float = 10.0
     seed: int = 42
     max_attention_size: int | None = None
-    offload_model: bool = False
     max_sequence_length: int = 512
     # Optional CacheSeek world_kv reuse. None preserves baseline behavior.
     world_kv_binding: object | None = None

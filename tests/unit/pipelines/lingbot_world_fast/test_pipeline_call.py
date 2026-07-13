@@ -45,8 +45,18 @@ def _session(
     )
 
 
-def test_pipeline_call_generates_one_explicitly_indexed_chunk() -> None:
+def _control() -> torch.Tensor:
+    return torch.zeros(1, 384, 1, 1, 1, dtype=torch.float32)
+
+
+def _pipeline() -> LingBotWorldFastPipeline:
     pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline.config = SimpleNamespace(control_type="cam")
+    return pipeline
+
+
+def test_pipeline_call_generates_one_explicitly_indexed_chunk() -> None:
+    pipeline = _pipeline()
     pipeline.denoise_stage = MagicMock()
     runtime = _session()
     expected = [Image.new("RGB", (8, 8), "red") for _ in range(9)]
@@ -58,7 +68,7 @@ def test_pipeline_call_generates_one_explicitly_indexed_chunk() -> None:
 
     pipeline.generate_next_chunk = MagicMock(side_effect=generate_next_chunk)
     progress_callback = MagicMock()
-    control = torch.zeros(1)
+    control = _control()
 
     result = pipeline(
         runtime,
@@ -92,7 +102,7 @@ def test_chunk_request_rejects_invalid_inputs() -> None:
 
 
 def test_pipeline_call_rejects_inactive_runtime() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     runtime = _session(active=False)
     pipeline.generate_next_chunk = MagicMock()
 
@@ -103,7 +113,7 @@ def test_pipeline_call_rejects_inactive_runtime() -> None:
 
 
 def test_pipeline_call_rejects_out_of_order_chunk() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     runtime = _session(current_chunk_index=1)
     pipeline.generate_next_chunk = MagicMock()
 
@@ -114,11 +124,11 @@ def test_pipeline_call_rejects_out_of_order_chunk() -> None:
 
 
 def test_new_session_rejects_out_of_order_chunk_without_initializing() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     session = LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)))
     )
-    deferred_control = MagicMock(return_value=torch.zeros(1))
+    deferred_control = MagicMock(return_value=_control())
     pipeline._create_initialized_session = MagicMock()
 
     with pytest.raises(ValueError, match="does not match session index"):
@@ -129,13 +139,13 @@ def test_new_session_rejects_out_of_order_chunk_without_initializing() -> None:
 
 
 def test_first_pipeline_call_initializes_the_external_session() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     pipeline.denoise_stage = MagicMock()
     initialized = _session()
     session = LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)))
     )
-    control = torch.zeros(1)
+    control = _control()
     events: list[str] = []
 
     def initialize(config, progress_callback, before_cache):
@@ -161,13 +171,13 @@ def test_first_pipeline_call_initializes_the_external_session() -> None:
 
 
 def test_pipeline_call_releases_runtime_when_generation_fails() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     pipeline.denoise_stage = MagicMock()
     runtime = _session(chunk_count=1)
     pipeline.generate_next_chunk = MagicMock(side_effect=RuntimeError("generation failed"))
 
     with pytest.raises(RuntimeError, match="generation failed"):
-        pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=torch.zeros(1)))
+        pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=_control()))
 
     assert runtime.active is False
     assert runtime.status == LingBotWorldFastSessionStatus.POISONED
@@ -175,11 +185,22 @@ def test_pipeline_call_releases_runtime_when_generation_fails() -> None:
     pipeline.denoise_stage.release_cache.assert_called_once_with(7)
 
     with pytest.raises(RuntimeError, match="poisoned"):
-        pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=torch.zeros(1)))
+        pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=_control()))
+
+
+def test_pipeline_call_rejects_control_with_wrong_shape() -> None:
+    pipeline = _pipeline()
+    pipeline.denoise_stage = MagicMock()
+    runtime = _session()
+
+    with pytest.raises(ValueError, match="Control shape"):
+        pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=torch.zeros(1, dtype=torch.float32)))
+
+    pipeline.denoise_stage.release_cache.assert_not_called()
 
 
 def test_release_session_is_idempotent() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     pipeline.denoise_stage = MagicMock()
     session = _session()
 
@@ -192,7 +213,7 @@ def test_release_session_is_idempotent() -> None:
 
 
 def test_concurrent_chunk_on_same_session_is_rejected() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu")
+    pipeline = _pipeline()
     session = _session()
     lock_acquired = threading.Event()
     release_lock = threading.Event()

@@ -182,13 +182,24 @@ def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None
     assert runtime.active is False
 
 
-@pytest.mark.xfail(strict=True, reason="Non-aligned frame counts are silently truncated instead of rejected")
 def test_runtime_rejects_non_aligned_frame_count() -> None:
     with pytest.raises(ValueError, match="frame_num"):
         _create_runtime(frame_num=13)
 
 
-@pytest.mark.xfail(strict=True, reason="Frame counts smaller than one complete chunk are not validated")
 def test_runtime_rejects_frame_count_smaller_than_first_chunk() -> None:
     with pytest.raises(ValueError, match="frame_num"):
         _create_runtime(frame_num=5)
+
+
+def test_control_mode_must_match_the_initialized_pipeline() -> None:
+    pipeline = _build_runtime_pipeline()
+    with pytest.raises(ValueError, match="does not match"):
+        pipeline.control_context(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                control_mode="act",
+                frame_num=9,
+            )
+        )
