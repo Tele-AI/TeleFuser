@@ -46,9 +46,6 @@ class BasePipeline(ABC):
 
             @wraps(original_call)
             def wrapped_call(self, *args, **kwargs):
-                import gc
-
-                from telefuser.platforms import current_platform
                 from telefuser.utils.profiler import reset_timing_registry
 
                 reset_timing_registry()
@@ -56,9 +53,14 @@ class BasePipeline(ABC):
                 try:
                     return original_call(self, *args, **kwargs)
                 finally:
-                    # Clear GPU memory after pipeline execution
-                    gc.collect()
-                    current_platform.empty_cache()
+                    if getattr(self, "clear_memory_after_call", True):
+                        # Clear GPU memory after pipeline execution.
+                        import gc
+
+                        from telefuser.platforms import current_platform
+
+                        gc.collect()
+                        current_platform.empty_cache()
 
             cls.__call__ = wrapped_call
 

@@ -144,13 +144,6 @@ def get_plucker_embeddings(
     return torch.cat([rays_o, rays_d], dim=-1).view(n_frames, height, width, 6)
 
 
-@dataclass
-class CameraControlChunk:
-    control_tensor: torch.Tensor
-    num_latent_frames: int
-    control_type: str
-
-
 def build_camera_control_chunk(
     poses: torch.Tensor,
     intrinsics: torch.Tensor,
@@ -158,7 +151,7 @@ def build_camera_control_chunk(
     latent_w: int,
     height: int,
     width: int,
-) -> CameraControlChunk:
+) -> torch.Tensor:
     plucker = get_plucker_embeddings(poses, intrinsics, height, width, only_rays_d=False)
     control = rearrange(
         plucker,
@@ -168,7 +161,7 @@ def build_camera_control_chunk(
         h=latent_h,
         w=latent_w,
     ).contiguous()
-    return CameraControlChunk(control_tensor=control, num_latent_frames=control.shape[2], control_type="cam")
+    return control
 
 
 def build_action_control_chunk(
@@ -179,7 +172,7 @@ def build_action_control_chunk(
     latent_w: int,
     height: int,
     width: int,
-) -> CameraControlChunk:
+) -> torch.Tensor:
     plucker = get_plucker_embeddings(poses, intrinsics, height, width, only_rays_d=True)
     action_map = action[:, None, None, :].repeat(1, height, width, 1)
     combined = torch.cat([plucker, action_map], dim=-1)
@@ -191,7 +184,7 @@ def build_action_control_chunk(
         h=latent_h,
         w=latent_w,
     ).contiguous()
-    return CameraControlChunk(control_tensor=control, num_latent_frames=control.shape[2], control_type="act")
+    return control
 
 
 def truncate_control_sequence(
@@ -226,7 +219,7 @@ class LingBotWorldFastControlContext:
 
     control_type: str
     device: str | torch.device
-    torch_dtype: torch.dtype
+    control_dtype: torch.dtype
     orig_height: int
     orig_width: int
     height: int
@@ -328,7 +321,7 @@ class LingBotWorldFastControlBuilder:
             return torch.as_tensor(
                 action["control_tensor"],
                 device=self.context.device,
-                dtype=self.context.torch_dtype,
+                dtype=self.context.control_dtype,
             )
         poses = action.get("poses")
         intrinsics = action.get("intrinsics")
@@ -394,12 +387,12 @@ class LingBotWorldFastControlBuilder:
                 self.context.latent_w,
                 self.context.height,
                 self.context.width,
-            ).control_tensor
+            )
         if action is not None:
             raise ValueError("Camera control mode does not accept an action sequence")
         return build_camera_control_chunk(
             poses, intrinsics, self.context.latent_h, self.context.latent_w, self.context.height, self.context.width
-        ).control_tensor
+        )
 
 
 def load_camera_control_inputs(action_path: str | Path) -> tuple[np.ndarray, np.ndarray]:

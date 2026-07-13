@@ -192,6 +192,19 @@ def test_runtime_rejects_frame_count_smaller_than_first_chunk() -> None:
         _create_runtime(frame_num=5)
 
 
+def test_runtime_rejects_non_positive_chunk_size() -> None:
+    pipeline = _build_runtime_pipeline()
+    with pytest.raises(ValueError, match="chunk_size"):
+        pipeline.control_context(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                chunk_size=0,
+                frame_num=9,
+            )
+        )
+
+
 def test_control_mode_must_match_the_initialized_pipeline() -> None:
     pipeline = _build_runtime_pipeline()
     with pytest.raises(ValueError, match="does not match"):

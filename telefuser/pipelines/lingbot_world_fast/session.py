@@ -12,6 +12,8 @@ from PIL import Image
 
 from telefuser.models.wan_video_vae import WanVideoVAEStreamingDecodeState
 
+from .control import LingBotWorldFastControlContext
+
 
 @dataclass
 class LingBotWorldFastSessionConfig:
@@ -76,7 +78,6 @@ class LingBotWorldFastGenerationSession:
 
     config: LingBotWorldFastSessionConfig
     prompt_emb: torch.Tensor | None = field(default=None, repr=False)
-    encoded_image_latent: torch.Tensor | None = field(default=None, repr=False)
     noise_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
     condition_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
     latent_h: int = 0
@@ -84,7 +85,6 @@ class LingBotWorldFastGenerationSession:
     latent_f: int = 0
     height: int = 0
     width: int = 0
-    max_seq_len: int = 0
     frame_tokens: int = 0
     chunk_size: int = 0
     max_attention_size: int = 0
@@ -96,21 +96,15 @@ class LingBotWorldFastGenerationSession:
     status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.NEW
     poisoned_reason: str | None = None
     transaction_lock: object = field(default_factory=threading.RLock, repr=False)
-    # KV geometry in latent frames; -1 means full-length KV.
-    kv_local_attn_size: int = -1
-    kv_sink_size: int = 0
     # CacheSeek world_kv binding and decode-only latents for fast-forward hits.
     world_kv_binding: object | None = None
     world_kv_cached_latents: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
-# Compatibility alias for callers migrating from the Stage 1 API.
-LingBotWorldFastRuntimeState = LingBotWorldFastGenerationSession
-
-
 @dataclass
 class LingBotWorldFastSessionState:
     config: LingBotWorldFastSessionConfig
+    control_context: LingBotWorldFastControlContext | None = None
     generation_session: LingBotWorldFastGenerationSession | None = None
     pending_inputs: "queue.Queue[dict]" = field(default_factory=queue.Queue)
     output_queue: asyncio.Queue | None = None

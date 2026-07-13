@@ -27,7 +27,6 @@ def _session(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
         status=LingBotWorldFastSessionStatus.READY,
         prompt_emb=empty,
-        encoded_image_latent=empty,
         noise_chunks=[empty for _ in range(chunk_count)],
         condition_chunks=[empty for _ in range(chunk_count)],
         latent_h=1,
@@ -35,7 +34,6 @@ def _session(
         latent_f=chunk_count,
         height=8,
         width=8,
-        max_seq_len=1,
         frame_tokens=1,
         chunk_size=1,
         max_attention_size=1,
@@ -197,6 +195,30 @@ def test_pipeline_call_rejects_control_with_wrong_shape() -> None:
         pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=torch.zeros(1, dtype=torch.float32)))
 
     pipeline.denoise_stage.release_cache.assert_not_called()
+
+
+def test_final_chunk_releases_decoder_state_and_cache() -> None:
+    pipeline = _pipeline()
+    pipeline.denoise_stage = MagicMock()
+    runtime = _session(chunk_count=1)
+    runtime.decoder_state.feat_cache = [torch.ones(1)]
+    runtime.decoder_state.feat_idx = [1]
+
+    def generate_next_chunk(session, control, progress_callback=None):
+        session.current_chunk_index = 1
+        session.active = False
+        return []
+
+    pipeline.generate_next_chunk = MagicMock(side_effect=generate_next_chunk)
+
+    result = pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=_control()))
+
+    assert result.done is True
+    assert runtime.cache_handle is None
+    assert runtime.decoder_state.feat_cache == []
+    assert runtime.decoder_state.feat_idx == [0]
+    assert runtime.status == LingBotWorldFastSessionStatus.RELEASED
+    pipeline.denoise_stage.release_cache.assert_called_once_with(7)
 
 
 def test_release_session_is_idempotent() -> None:

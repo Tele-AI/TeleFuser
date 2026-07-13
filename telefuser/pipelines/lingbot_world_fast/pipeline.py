@@ -51,6 +51,8 @@ class LingBotWorldFastPipelineConfig:
 class LingBotWorldFastPipeline(BasePipeline):
     """Pipeline wrapper for LingBot-World-Fast chunked causal generation."""
 
+    clear_memory_after_call = False
+
     def __init__(self, device: str, torch_dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__(device=device, torch_dtype=torch_dtype)
         self.height_division_factor = 16
@@ -80,6 +82,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         return torch.device(runtime_config.device_type)
 
     def init(self, config: LingBotWorldFastPipelineConfig) -> None:
+        if config.control_type not in {"cam", "act"}:
+            raise ValueError(f"Unsupported LingBot control_type: {config.control_type!r}")
         self.config = config
         checkpoint_root = Path(config.checkpoint_dir).expanduser().resolve()
         self._model_info = [{"name": "lingbot_world_fast", "path": str(checkpoint_root)}]
@@ -202,13 +206,10 @@ class LingBotWorldFastPipeline(BasePipeline):
         height, width = self.check_resize_height_width(height, width)
         frame_num = session_config.frame_num
         latent_frames = (frame_num - 1) // 4 + 1
-        latent_frames -= latent_frames % session_config.chunk_size
-        if latent_frames < session_config.chunk_size:
-            raise ValueError("frame_num must contain at least one complete latent chunk")
         return LingBotWorldFastControlContext(
             control_type=self.config.control_type,
             device=self.device,
-            torch_dtype=torch.float32,
+            control_dtype=torch.float32,
             orig_height=self.config.orig_height,
             orig_width=self.config.orig_width,
             height=height,
@@ -225,7 +226,13 @@ class LingBotWorldFastPipeline(BasePipeline):
                 f"Session control_mode {session_config.control_mode!r} does not match "
                 f"pipeline control_type {self.config.control_type!r}"
             )
-        frame_num = int(session_config.frame_num)
+        if not isinstance(session_config.chunk_size, int) or isinstance(session_config.chunk_size, bool):
+            raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size!r}")
+        if session_config.chunk_size < 1:
+            raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size}")
+        if not isinstance(session_config.frame_num, int) or isinstance(session_config.frame_num, bool):
+            raise ValueError(f"frame_num must be an integer, got {session_config.frame_num!r}")
+        frame_num = session_config.frame_num
         if frame_num < 1 or (frame_num - 1) % 4:
             raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
         latent_frames = (frame_num - 1) // 4 + 1
@@ -405,10 +412,10 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise
 
         session.status = LingBotWorldFastSessionStatus.COMMITTED
-        if not session.active and not self._release_session_cache(session):
-            session.status = LingBotWorldFastSessionStatus.POISONED
-            session.poisoned_reason = "Final chunk committed but cache release failed"
-            raise RuntimeError(session.poisoned_reason)
+        if not session.active:
+            self.release_session(session)
+            if session.status == LingBotWorldFastSessionStatus.POISONED:
+                raise RuntimeError(session.poisoned_reason or "Final chunk cleanup failed")
         logger.info(
             f"Generated LingBot chunk {request.chunk_index + 1}/{len(session.noise_chunks)}: {len(chunk_frames)} frames"
         )
@@ -456,14 +463,13 @@ class LingBotWorldFastPipeline(BasePipeline):
         before_cache: Callable[[], None] | None = None,
     ) -> LingBotWorldFastGenerationSession:
         """Allocate model state for the first chunk; callers never invoke this directly."""
-        self._validate_session_config(session_config)
+        control_context = self.control_context(session_config)
         self._notify_progress(progress_callback, "encoding_prompt", device=str(self.text_device))
         prompt_emb = self.encode_prompt(session_config.prompt)
         self._notify_progress(progress_callback, "prompt_encoded")
 
-        w0, h0 = session_config.image.size
-        width, height = self._best_output_size(w0, h0, self.config.max_area)
-        height, width = self.check_resize_height_width(height, width)
+        width = control_context.width
+        height = control_context.height
 
         self._notify_progress(progress_callback, "preparing_image", width=width, height=height)
         image_tensor = self._prepare_image_tensor(session_config.image, height, width)
@@ -478,9 +484,9 @@ class LingBotWorldFastPipeline(BasePipeline):
         latent_condition = self._encode_condition_video(image_tensor, frame_num)
         self._notify_progress(progress_callback, "condition_video_encoded")
 
-        lat_h = height // 8
-        lat_w = width // 8
-        lat_f = (frame_num - 1) // 4 + 1
+        lat_h = control_context.latent_h
+        lat_w = control_context.latent_w
+        lat_f = control_context.latent_frames
         patch_area = self.dit.patch_size[1] * self.dit.patch_size[2]
         frame_tokens = (lat_h * lat_w) // patch_area
         kv_size = self._resolve_self_kv_size(
@@ -488,7 +494,6 @@ class LingBotWorldFastPipeline(BasePipeline):
             latent_frames=lat_f,
             config=self.config,
         )
-        max_seq_len = session_config.chunk_size * frame_tokens
         max_attention_size = (
             kv_size if session_config.max_attention_size is None else int(session_config.max_attention_size)
         )
@@ -517,7 +522,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         self._next_cache_handle += 1
         session = LingBotWorldFastGenerationSession(
             prompt_emb=prompt_emb,
-            encoded_image_latent=latent_condition,
             config=session_config,
             noise_chunks=noise_chunks,
             condition_chunks=condition_chunks,
@@ -526,13 +530,10 @@ class LingBotWorldFastPipeline(BasePipeline):
             latent_f=lat_f,
             height=height,
             width=width,
-            max_seq_len=max_seq_len,
             frame_tokens=frame_tokens,
             chunk_size=session_config.chunk_size,
             max_attention_size=max_attention_size,
             cache_handle=cache_handle,
-            kv_local_attn_size=self.config.local_attn_size,
-            kv_sink_size=self.config.sink_size if self.config.local_attn_size != -1 else 0,
         )
         try:
             initialize_cache_kwargs = dict(

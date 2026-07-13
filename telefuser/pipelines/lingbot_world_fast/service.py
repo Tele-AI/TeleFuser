@@ -109,8 +109,10 @@ class LingBotWorldFastService:
             control_lateral_step=float(config.get("control_lateral_step", 0.12)),
             show_control_hud=bool(config.get("show_control_hud", True)),
         )
+        control_context = self.pipeline.control_context(session_config)
         state = LingBotWorldFastSessionState(
             config=session_config,
+            control_context=control_context,
             output_queue=asyncio.Queue(),
             loop=None,
         )
@@ -152,8 +154,8 @@ class LingBotWorldFastService:
 
     def _emit_preview_frame(self, state: LingBotWorldFastSessionState) -> None:
         image = state.config.image.convert("RGB")
-        width, height = self.pipeline._best_output_size(image.width, image.height, self.pipeline.config.max_area)
-        height, width = self.pipeline.check_resize_height_width(height, width)
+        control_context = state.control_context or self.pipeline.control_context(state.config)
+        width, height = control_context.width, control_context.height
         preview = image.resize((width, height), Image.BICUBIC)
         self._put_output(
             state,
@@ -367,7 +369,7 @@ class LingBotWorldFastService:
     ) -> None:
         try:
             self._emit_preview_frame(state)
-            control_context = self.pipeline.control_context(state.config)
+            control_context = state.control_context or self.pipeline.control_context(state.config)
             control_builder = LingBotWorldFastControlBuilder(control_context)
             state.generation_session = LingBotWorldFastGenerationSession(config=state.config)
             runtime = state.generation_session
@@ -483,7 +485,7 @@ class LingBotWorldFastService:
             )
             state.worker_thread.start()
 
-        while state.active:
+        while True:
             chunk = await state.output_queue.get()
             if chunk.get("type") == "done":
                 break

@@ -1,7 +1,9 @@
+import asyncio
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from PIL import Image
 
@@ -99,3 +101,32 @@ def test_service_stop_closes_sessions_before_pipeline() -> None:
         (("session-b",),),
     ]
     pipeline.close.assert_called_once_with()
+
+
+def test_create_session_rejects_invalid_pipeline_configuration() -> None:
+    pipeline = MagicMock()
+    pipeline.control_context.side_effect = ValueError("invalid session configuration")
+    service = LingBotWorldFastService(pipeline)
+
+    with pytest.raises(ValueError, match="invalid session"):
+        service.create_session({"image": Image.new("RGB", (8, 8))})
+
+    assert service._sessions == {}
+
+
+def test_pull_chunks_drains_terminal_messages_after_session_becomes_inactive() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.active = False
+    state.worker_thread = MagicMock()
+    state.worker_thread.is_alive.return_value = True
+    state.output_queue = asyncio.Queue()
+    state.output_queue.put_nowait({"type": "preview"})
+    state.output_queue.put_nowait({"type": "error"})
+    state.output_queue.put_nowait({"type": "done"})
+    service._sessions["session-a"] = state
+
+    async def collect() -> list[dict]:
+        return [chunk async for chunk in service.pull_chunks("session-a")]
+
+    assert asyncio.run(collect()) == [{"type": "preview"}, {"type": "error"}]

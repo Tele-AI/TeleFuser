@@ -19,7 +19,7 @@ def _builder() -> LingBotWorldFastControlBuilder:
         LingBotWorldFastControlContext(
             control_type="act",
             device="cpu",
-            torch_dtype=torch.float32,
+            control_dtype=torch.float32,
             orig_height=8,
             orig_width=8,
             height=8,
@@ -82,7 +82,7 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
     context = LingBotWorldFastControlContext(
         control_type="cam",
         device="cpu",
-        torch_dtype=torch.float32,
+        control_dtype=torch.float32,
         orig_height=8,
         orig_width=8,
         height=8,
@@ -118,7 +118,7 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
         context.latent_w,
         context.height,
         context.width,
-    ).control_tensor
+    )
 
     assert torch.equal(controls, legacy)
 
@@ -142,7 +142,7 @@ def test_action_mode_requires_actions_and_camera_mode_accepts_per_frame_intrinsi
     camera_context = LingBotWorldFastControlContext(
         control_type="cam",
         device="cpu",
-        torch_dtype=torch.float32,
+        control_dtype=torch.float32,
         orig_height=8,
         orig_width=8,
         height=8,
