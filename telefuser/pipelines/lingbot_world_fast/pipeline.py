@@ -415,6 +415,19 @@ class LingBotWorldFastPipeline(BasePipeline):
         """Compatibility wrapper for the Stage 1 runtime API."""
         self.release_session(runtime)
 
+    def close(self) -> None:
+        """Deterministically close the multi-process denoising worker group."""
+        denoise_stage = getattr(self, "denoise_stage", None)
+        if isinstance(denoise_stage, ParallelWorker):
+            denoise_stage.close()
+
+    def __del__(self) -> None:
+        """Best-effort fallback for callers that do not explicitly close the pipeline."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
     @torch.inference_mode()
     def __call__(
         self,

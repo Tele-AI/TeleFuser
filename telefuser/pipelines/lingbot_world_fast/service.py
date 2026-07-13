@@ -60,6 +60,7 @@ class LingBotWorldFastService:
     def stop(self) -> None:
         for session_id in list(self._sessions.keys()):
             self.close_session(session_id)
+        self.pipeline.close()
 
     def has_session(self, session_id: str) -> bool:
         return session_id in self._sessions
