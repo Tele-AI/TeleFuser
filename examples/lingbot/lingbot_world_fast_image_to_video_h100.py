@@ -181,26 +181,29 @@ def main(
 ) -> None:
     """Generate an offline video with LingBot-World-Fast."""
     pipeline = get_pipeline(gpu_num, model_root, fast_model_root)
-    image = Image.open(image_path).convert("RGB")
+    try:
+        image = Image.open(image_path).convert("RGB")
 
-    start = time.perf_counter()
-    frames = run(
-        pipeline,
-        image,
-        prompt,
-        seed=seed,
-        resolution=resolution,
-        action_path=action_path,
-        frame_num=frame_num,
-        fps=fps,
-    )
-    elapsed = time.perf_counter() - start
+        start = time.perf_counter()
+        frames = run(
+            pipeline,
+            image,
+            prompt,
+            seed=seed,
+            resolution=resolution,
+            action_path=action_path,
+            frame_num=frame_num,
+            fps=fps,
+        )
+        elapsed = time.perf_counter() - start
 
-    output_path = Path(output) if output else DEFAULT_OUTPUT_DIR / f"lingbot_world_fast_i2v_{gpu_num}gpu.mp4"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_video(frames, str(output_path), fps=fps, quality=6)
-    print(f"Video generation time: {elapsed:.2f} seconds")
-    print(f"Video saved to: {output_path}")
+        output_path = Path(output) if output else DEFAULT_OUTPUT_DIR / f"lingbot_world_fast_i2v_{gpu_num}gpu.mp4"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_video(frames, str(output_path), fps=fps, quality=6)
+        print(f"Video generation time: {elapsed:.2f} seconds")
+        print(f"Video saved to: {output_path}")
+    finally:
+        pipeline.close()
 
 
 if __name__ == "__main__":

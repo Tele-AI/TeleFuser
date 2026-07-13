@@ -81,3 +81,18 @@ def test_direction_action_updates_state_and_wakes_worker() -> None:
 
     assert state.pressed_controls == {"up"}
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
+
+
+def test_service_stop_closes_sessions_before_pipeline() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(pipeline)
+    service._sessions = {"session-a": MagicMock(), "session-b": MagicMock()}
+    service.close_session = MagicMock()
+
+    service.stop()
+
+    assert service.close_session.call_args_list == [
+        (("session-a",),),
+        (("session-b",),),
+    ]
+    pipeline.close.assert_called_once_with()

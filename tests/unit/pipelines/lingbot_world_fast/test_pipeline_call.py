@@ -13,6 +13,7 @@ from telefuser.pipelines.lingbot_world_fast.session import (
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionStatus,
 )
+from telefuser.worker.parallel_worker import ParallelWorker
 
 
 def _session(
@@ -242,3 +243,14 @@ def test_generate_video_drains_runtime_and_releases_it() -> None:
     assert generate_chunk.call_count == 2
     pipeline.create_session.assert_called_once_with(config, progress_callback=None)
     pipeline.release_session.assert_called_once_with(runtime)
+
+
+def test_pipeline_close_delegates_to_parallel_worker() -> None:
+    pipeline = LingBotWorldFastPipeline(device="cpu")
+    worker = object.__new__(ParallelWorker)
+    worker.close = MagicMock()
+    pipeline.denoise_stage = worker
+
+    pipeline.close()
+
+    worker.close.assert_called_once_with()

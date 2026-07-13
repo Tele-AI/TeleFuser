@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import os
+import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
@@ -63,6 +64,8 @@ def _worker_loop(
     from telefuser.utils.profiler import mark_as_worker_process
 
     mark_as_worker_process()
+    args = None
+    kwargs = None
     try:
         device = stage.device
         if world_size > 1:
@@ -124,9 +127,15 @@ def _worker_loop(
 
         traceback.print_exc()
         logger.error(f"Error in worker loop (rank {rank}): {e}")
-        queue_out.put(e)  # any exception caught in the worker will be raised to the main process
+        message = f"Parallel worker rank {rank} failed with {type(e).__name__}: {e}"
+        try:
+            worker_error = type(e)(message)
+        except Exception:
+            worker_error = RuntimeError(message)
+        queue_out.put(worker_error)
     finally:
-        del stage, args, kwargs
+        args = None
+        kwargs = None
         current_platform.synchronize()
         gc.collect()
         current_platform.empty_cache()
@@ -155,6 +164,10 @@ class ParallelWorker:
         self.name: str = f"Parallel Worker {stage.name}"
         self.queue_with_cpu: bool = parallel_config.queue_with_cpu
         self.timeout: int = parallel_config.timeout
+        self._lifecycle_lock = threading.Lock()
+        self._failed = False
+        self._closed = False
+        self._failure_reason: str | None = None
 
         # Use spawn to start processes regardless of world_size
         current_method = mp.get_start_method(allow_none=True)
@@ -185,6 +198,64 @@ class ParallelWorker:
             join=False,
         )
 
+    @property
+    def failed(self) -> bool:
+        """Return whether this worker group encountered an unrecoverable failure."""
+        return self._failed
+
+    @property
+    def closed(self) -> bool:
+        """Return whether this worker group has been deterministically closed."""
+        return self._closed
+
+    @property
+    def failure_reason(self) -> str | None:
+        """Return the first failure that made this worker group unusable."""
+        return self._failure_reason
+
+    def _ensure_usable(self) -> None:
+        if self._closed:
+            raise RuntimeError(f"ParallelWorker:{self.name} is closed")
+        if self._failed:
+            raise RuntimeError(f"ParallelWorker:{self.name} has failed: {self._failure_reason}")
+
+    def _terminate_processes(self) -> None:
+        if not hasattr(self, "ctx"):
+            return
+        for process in self.ctx.processes:
+            try:
+                if process.is_alive():
+                    process.kill()
+                process.join(timeout=2)
+            except Exception as exc:
+                logger.warning(f"Failed to terminate {self.name} process: {exc}")
+
+    def _mark_failed(self, reason: str) -> None:
+        with self._lifecycle_lock:
+            if self._failed:
+                return
+            self._failed = True
+            self._failure_reason = reason
+        logger.error(f"ParallelWorker:{self.name} marked failed: {reason}")
+        self._terminate_processes()
+
+    def _wait_result(self, method_name: str) -> Any:
+        try:
+            result = self.queue_out.get(timeout=self.timeout)
+        except Empty as exc:
+            reason = f"{method_name} timeout after {self.timeout} seconds"
+            self._mark_failed(reason)
+            raise RuntimeError(f"ParallelWorker:{self.name} {reason}") from exc
+        except Exception as exc:
+            reason = f"{method_name} result queue failed: {exc}"
+            self._mark_failed(reason)
+            raise RuntimeError(f"ParallelWorker:{self.name} {reason}") from exc
+        if isinstance(result, Exception):
+            reason = f"{method_name} failed: {result}"
+            self._mark_failed(reason)
+            raise RuntimeError(f"ParallelWorker:{self.name} {reason}") from result
+        return result
+
     def enable_metrics(self, registry: Any | None = None) -> None:
         """Enable metrics collection on the wrapped stage.
 
@@ -210,6 +281,7 @@ class ParallelWorker:
 
     def put_data(self, data: Any) -> None:
         """Send data to all worker processes."""
+        self._ensure_usable()
         if self.queue_with_cpu:
             data = to_device(data, "cpu")
         for i, q in enumerate(self.queue_in):
@@ -218,22 +290,13 @@ class ParallelWorker:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | Callable[[], Any]:
         """Submit __call__ task to all workers."""
+        self._ensure_usable()
         sync = kwargs.pop("sync", False)
         data = ["__call__", args, kwargs]
         self.put_data(data)
 
         def wait() -> Any:
-            try:
-                res = self.queue_out.get(timeout=self.timeout)
-            except Empty:
-                logger.error(f"ParallelWorker:{self.name} __call__ timeout")
-                raise RuntimeError(f"ParallelWorker:{self.name} __call__ timeout")
-            except Exception as e:
-                logger.error(f"ParallelWorker:{self.name} __call__ error: {e}")
-                raise RuntimeError(f"ParallelWorker:{self.name} __call__ error: {e}")
-            if isinstance(res, Exception):
-                raise res
-            return res
+            return self._wait_result("__call__")
 
         if sync:
             return wait()
@@ -244,6 +307,7 @@ class ParallelWorker:
         """Submit arbitrary method call to all workers."""
 
         def wrapped_func(*args: Any, **kwargs: Any) -> Any | Callable[[], Any]:
+            self._ensure_usable()
             sync = kwargs.pop("sync", False)
             data = [name, args, kwargs]
             self.put_data(data)
@@ -254,23 +318,17 @@ class ParallelWorker:
 
             def wait() -> Any:
                 start_time = time.perf_counter()
+                success = False
                 try:
-                    res = self.queue_out.get(timeout=self.timeout)
-                except Empty:
-                    logger.error(f"ParallelWorker:{self.name} {name} timeout")
-                    raise RuntimeError(f"ParallelWorker:{self.name} {name} timeout")
-                except Exception as e:
-                    logger.error(f"ParallelWorker:{self.name} {name} error: {e}")
-                    raise RuntimeError(f"ParallelWorker:{self.name} {name} error: {e}")
+                    result = self._wait_result(name)
+                    success = True
+                    logger.info(f"ParallelWorker:{self.name} {name} done")
+                    return result
                 finally:
                     if hook is not None:
                         duration = time.perf_counter() - start_time
-                        hook.record_execution(duration, success=True)
+                        hook.record_execution(duration, success=success)
                         hook.exit()
-                if isinstance(res, Exception):
-                    raise res
-                logger.info(f"ParallelWorker:{self.name} {name} done")
-                return res
 
             if sync:
                 return wait()
@@ -279,14 +337,41 @@ class ParallelWorker:
 
         return wrapped_func
 
-    def __del__(self) -> None:
-        """Cleanup worker processes on deletion."""
+    def close(self) -> None:
+        """Idempotently stop all ranks and close multiprocessing queues."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+
         if hasattr(self, "ctx"):
-            self.put_data(["exit", None, None])
-            for p in self.ctx.processes:
-                p.join(timeout=10)
-                if p.is_alive():
-                    p.kill()
-            for q in self.queue_in:
-                q.close()
-            self.queue_out.close()
+            if not self._failed:
+                for queue in self.queue_in:
+                    try:
+                        queue.put(["exit", None, None])
+                    except Exception as exc:
+                        logger.warning(f"Failed to send exit to {self.name}: {exc}")
+            for process in self.ctx.processes:
+                try:
+                    process.join(timeout=10)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=2)
+                except Exception as exc:
+                    logger.warning(f"Failed to join {self.name} process: {exc}")
+            for queue in self.queue_in:
+                try:
+                    queue.close()
+                except Exception:
+                    pass
+            try:
+                self.queue_out.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        """Best-effort fallback; callers should use close explicitly."""
+        try:
+            self.close()
+        except Exception:
+            pass
