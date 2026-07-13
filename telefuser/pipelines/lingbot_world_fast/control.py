@@ -200,16 +200,23 @@ def truncate_control_sequence(
     action: object | None,
     frame_num: int,
 ) -> tuple[object, object, object | None]:
-    """Limit an external offline control sequence to the requested 4n+1 video frames."""
-    requested_frame_num = ((int(frame_num) - 1) // 4) * 4 + 1
-    available_frame_num = ((len(poses) - 1) // 4) * 4 + 1
-    effective_frame_num = min(requested_frame_num, available_frame_num)
-    if effective_frame_num < 2:
-        raise ValueError("Control sequence must contain at least two video frames")
-    trimmed_poses = poses[:effective_frame_num]
+    """Select the requested complete video-rate control window without shortening it."""
+    if frame_num < 1 or (frame_num - 1) % 4:
+        raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
+    if len(poses) < frame_num:
+        raise ValueError(f"Pose sequence has {len(poses)} frames but frame_num requires {frame_num}")
+
     intrinsics_arr = np.asarray(intrinsics)
-    trimmed_intrinsics = intrinsics[:effective_frame_num] if intrinsics_arr.ndim > 1 else intrinsics
-    trimmed_action = action[:effective_frame_num] if action is not None else None
+    if intrinsics_arr.ndim not in (1, 2) or intrinsics_arr.shape[-1] != 4:
+        raise ValueError("Intrinsics must have shape (4,) or (frames, 4)")
+    if intrinsics_arr.ndim == 2 and len(intrinsics_arr) not in (1,) and len(intrinsics_arr) < frame_num:
+        raise ValueError(f"Intrinsics sequence has {len(intrinsics_arr)} frames but frame_num requires {frame_num}")
+    if action is not None and len(action) < frame_num:
+        raise ValueError(f"Action sequence has {len(action)} frames but frame_num requires {frame_num}")
+
+    trimmed_poses = poses[:frame_num]
+    trimmed_intrinsics = intrinsics[:frame_num] if intrinsics_arr.ndim > 1 else intrinsics
+    trimmed_action = action[:frame_num] if action is not None else None
     return trimmed_poses, trimmed_intrinsics, trimmed_action
 
 
@@ -283,15 +290,37 @@ class LingBotWorldFastControlBuilder:
             action = action.unsqueeze(0)
         if action.shape[0] == target_frames:
             return action
-        sampled = action[::4]
-        if sampled.shape[0] >= target_frames:
-            return sampled[:target_frames]
-        if action.shape[0] == 1:
-            return action.repeat(target_frames, 1)
-        if action.shape[0] < target_frames:
-            raise ValueError(f"Action length {action.shape[0]} is shorter than target latent frames {target_frames}")
-        indices = torch.linspace(0, action.shape[0] - 1, target_frames, device=action.device)
-        return action.index_select(0, indices.round().long())
+        video_rate_frames = (target_frames - 1) * 4 + 1
+        if action.shape[0] == video_rate_frames:
+            return action[::4]
+        raise ValueError(
+            f"Action length must be {target_frames} latent frames or {video_rate_frames} video-rate frames, "
+            f"got {action.shape[0]}"
+        )
+
+    @staticmethod
+    def _validate_poses(poses: torch.Tensor, target_frames: int) -> None:
+        if poses.shape != (target_frames, 4, 4):
+            raise ValueError(f"Poses must have shape ({target_frames}, 4, 4), got {tuple(poses.shape)}")
+
+    @staticmethod
+    def _resample_intrinsics(intrinsics: torch.Tensor, target_frames: int) -> torch.Tensor:
+        if intrinsics.ndim == 1:
+            if intrinsics.shape[0] != 4:
+                raise ValueError(f"Static intrinsics must have shape (4,), got {tuple(intrinsics.shape)}")
+            return intrinsics.unsqueeze(0).repeat(target_frames, 1)
+        if intrinsics.ndim != 2 or intrinsics.shape[1] != 4:
+            raise ValueError(f"Intrinsics must have shape (4,) or (frames, 4), got {tuple(intrinsics.shape)}")
+        if intrinsics.shape[0] == 1:
+            return intrinsics.repeat(target_frames, 1)
+        if intrinsics.shape[0] == target_frames:
+            return intrinsics
+
+        source_positions = torch.linspace(0, intrinsics.shape[0] - 1, target_frames, device=intrinsics.device)
+        lower = source_positions.floor().long()
+        upper = source_positions.ceil().long()
+        weight = (source_positions - lower).unsqueeze(1)
+        return torch.lerp(intrinsics.index_select(0, lower), intrinsics.index_select(0, upper), weight)
 
     def build(self, action: dict[str, object]) -> torch.Tensor:
         """Build one model control tensor from one external chunk action."""
@@ -307,11 +336,10 @@ class LingBotWorldFastControlBuilder:
             raise ValueError("External action requires poses and intrinsics")
         poses_t = torch.as_tensor(poses, dtype=torch.float32, device=self.context.device)
         intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.context.device)
-        if intrinsics_t.ndim == 1:
-            intrinsics_t = intrinsics_t.unsqueeze(0).repeat(poses_t.shape[0], 1)
-        intrinsics_t = self._transform_intrinsics(intrinsics_t)
+        self._validate_poses(poses_t, self.context.chunk_size)
+        intrinsics_t = self._transform_intrinsics(self._resample_intrinsics(intrinsics_t, self.context.chunk_size))
         poses_rel = compute_relative_poses(poses_t, framewise=True)
-        return self._build_tensor(poses_rel, intrinsics_t, action.get("action"))
+        return self._build_tensor(poses_rel, intrinsics_t, action.get("action")).to(dtype=torch.float32)
 
     def build_sequence(
         self,
@@ -321,10 +349,11 @@ class LingBotWorldFastControlBuilder:
     ) -> list[torch.Tensor]:
         """Build all controls for an offline action sequence without storing it in a session."""
         poses_t = torch.as_tensor(poses, dtype=torch.float32)
-        intrinsics_t = self._transform_intrinsics(torch.as_tensor(intrinsics, dtype=torch.float32))
         source_frames = len(poses_t)
         if source_frames < 2:
             raise ValueError("Control sequence requires at least two poses")
+        if poses_t.shape != (source_frames, 4, 4):
+            raise ValueError(f"Poses must have shape (frames, 4, 4), got {tuple(poses_t.shape)}")
         interpolated = interpolate_camera_poses(
             src_indices=np.linspace(0, source_frames - 1, source_frames),
             src_rot_mat=np.asarray(poses_t[:, :3, :3]),
@@ -332,9 +361,13 @@ class LingBotWorldFastControlBuilder:
             tgt_indices=np.linspace(0, source_frames - 1, self.context.latent_frames),
         )
         poses_rel = compute_relative_poses(interpolated.to(self.context.device), framewise=True)
-        intrinsics_t = intrinsics_t[0].to(self.context.device).repeat(len(poses_rel), 1)
+        intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.context.device)
+        intrinsics_t = self._transform_intrinsics(self._resample_intrinsics(intrinsics_t, len(poses_rel)))
         control = self._build_tensor(poses_rel, intrinsics_t, action)
-        return list(control.split(self.context.chunk_size, dim=2))
+        chunks = list(control.to(dtype=torch.float32).split(self.context.chunk_size, dim=2))
+        if any(chunk.shape[2] != self.context.chunk_size for chunk in chunks):
+            raise ValueError("Control sequence must contain complete chunks")
+        return chunks
 
     def _transform_intrinsics(self, intrinsics: torch.Tensor) -> torch.Tensor:
         return get_ks_transformed(
@@ -348,7 +381,9 @@ class LingBotWorldFastControlBuilder:
         )
 
     def _build_tensor(self, poses: torch.Tensor, intrinsics: torch.Tensor, action: object | None) -> torch.Tensor:
-        if self.context.control_type == "act" and action is not None:
+        if self.context.control_type == "act":
+            if action is None:
+                raise ValueError("Action control mode requires an action sequence")
             action_t = torch.as_tensor(action, dtype=torch.float32, device=self.context.device)
             action_t = self._align_action_frames(action_t, len(poses))
             return build_action_control_chunk(
@@ -360,6 +395,8 @@ class LingBotWorldFastControlBuilder:
                 self.context.height,
                 self.context.width,
             ).control_tensor
+        if action is not None:
+            raise ValueError("Camera control mode does not accept an action sequence")
         return build_camera_control_chunk(
             poses, intrinsics, self.context.latent_h, self.context.latent_w, self.context.height, self.context.width
         ).control_tensor

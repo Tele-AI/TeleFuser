@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import base64
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -36,7 +34,7 @@ from .session import (
 @dataclass
 class LingBotWorldFastPipelineConfig:
     checkpoint_dir: str = ""
-    fast_checkpoint_subdir: str = "lingbot_world_fast"
+    fast_checkpoint_path: str = "lingbot_world_fast"
     vae_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     dit_torch_dtype: torch.dtype = torch.bfloat16
@@ -81,7 +79,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             return torch.device(f"cuda:{runtime_config.device_id}")
         return torch.device(runtime_config.device_type)
 
-    def init(self, module_manager, config: LingBotWorldFastPipelineConfig) -> None:
+    def init(self, config: LingBotWorldFastPipelineConfig) -> None:
         self.config = config
         checkpoint_root = Path(config.checkpoint_dir).expanduser().resolve()
         self._model_info = [{"name": "lingbot_world_fast", "path": str(checkpoint_root)}]
@@ -101,7 +99,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae.load_state_dict(vae_state_dict, strict=False)
         self.vae = self.vae.to(device=self.vae_device, dtype=self.torch_dtype).eval()
 
-        fast_path = checkpoint_root / config.fast_checkpoint_subdir
+        fast_path = checkpoint_root / config.fast_checkpoint_path
         dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
         self.dit = LingBotWorldFastDiT.from_pretrained(
             str(fast_path),
@@ -195,13 +193,14 @@ class LingBotWorldFastPipeline(BasePipeline):
 
     def control_context(self, session_config: LingBotWorldFastSessionConfig) -> LingBotWorldFastControlContext:
         """Return control geometry without allocating a generation runtime."""
+        self._validate_session_config(session_config)
         width, height = self._best_output_size(
             session_config.image.width,
             session_config.image.height,
             self.config.max_area,
         )
         height, width = self.check_resize_height_width(height, width)
-        frame_num = ((session_config.frame_num - 1) // 4) * 4 + 1
+        frame_num = session_config.frame_num
         latent_frames = (frame_num - 1) // 4 + 1
         latent_frames -= latent_frames % session_config.chunk_size
         if latent_frames < session_config.chunk_size:
@@ -209,7 +208,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         return LingBotWorldFastControlContext(
             control_type=self.config.control_type,
             device=self.device,
-            torch_dtype=self.torch_dtype,
+            torch_dtype=torch.float32,
             orig_height=self.config.orig_height,
             orig_width=self.config.orig_width,
             height=height,
@@ -219,6 +218,38 @@ class LingBotWorldFastPipeline(BasePipeline):
             latent_frames=latent_frames,
             chunk_size=session_config.chunk_size,
         )
+
+    def _validate_session_config(self, session_config: LingBotWorldFastSessionConfig) -> None:
+        if session_config.control_mode != self.config.control_type:
+            raise ValueError(
+                f"Session control_mode {session_config.control_mode!r} does not match "
+                f"pipeline control_type {self.config.control_type!r}"
+            )
+        frame_num = int(session_config.frame_num)
+        if frame_num < 1 or (frame_num - 1) % 4:
+            raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
+        latent_frames = (frame_num - 1) // 4 + 1
+        if latent_frames < session_config.chunk_size or latent_frames % session_config.chunk_size:
+            raise ValueError(
+                f"frame_num {frame_num} does not contain a whole number of latent chunks of size "
+                f"{session_config.chunk_size}"
+            )
+
+    def _validate_control(self, session: LingBotWorldFastGenerationSession, control: torch.Tensor) -> None:
+        expected_device = torch.device(self.device)
+        if control.device.type != expected_device.type or (
+            expected_device.index is not None and control.device.index != expected_device.index
+        ):
+            raise ValueError(f"Control device must be compatible with {self.device}, got {control.device}")
+        if control.dtype != torch.float32:
+            raise ValueError(f"Control dtype must be torch.float32, got {control.dtype}")
+        channels_per_pixel = 7 if self.config.control_type == "act" else 6
+        height_factor = max(1, session.height // session.latent_h)
+        width_factor = max(1, session.width // session.latent_w)
+        expected_channels = channels_per_pixel * height_factor * width_factor
+        expected_shape = (1, expected_channels, session.chunk_size, session.latent_h, session.latent_w)
+        if tuple(control.shape) != expected_shape:
+            raise ValueError(f"Control shape must be {expected_shape}, got {tuple(control.shape)}")
 
     def _prepare_image_tensor(self, image: Image.Image, height: int, width: int) -> torch.Tensor:
         image = image.convert("RGB").resize((width, height), Image.BICUBIC)
@@ -323,6 +354,7 @@ class LingBotWorldFastPipeline(BasePipeline):
                     raise
             if resolved_control is None:
                 resolved_control = self._resolve_control(request.control)
+            self._validate_control(session, resolved_control)
             return self._generate_session_chunk(session, request, resolved_control, progress_callback)
         finally:
             session.transaction_lock.release()
@@ -424,6 +456,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         before_cache: Callable[[], None] | None = None,
     ) -> LingBotWorldFastGenerationSession:
         """Allocate model state for the first chunk; callers never invoke this directly."""
+        self._validate_session_config(session_config)
         self._notify_progress(progress_callback, "encoding_prompt", device=str(self.text_device))
         prompt_emb = self.encode_prompt(session_config.prompt)
         self._notify_progress(progress_callback, "prompt_encoded")
@@ -435,7 +468,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         self._notify_progress(progress_callback, "preparing_image", width=width, height=height)
         image_tensor = self._prepare_image_tensor(session_config.image, height, width)
 
-        frame_num = ((session_config.frame_num - 1) // 4) * 4 + 1
+        frame_num = session_config.frame_num
         self._notify_progress(
             progress_callback,
             "encoding_condition_video",
@@ -448,8 +481,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         lat_h = height // 8
         lat_w = width // 8
         lat_f = (frame_num - 1) // 4 + 1
-        lat_f = int(lat_f - (lat_f % session_config.chunk_size))
-        frame_num = (lat_f - 1) * 4 + 1
         patch_area = self.dit.patch_size[1] * self.dit.patch_size[2]
         frame_tokens = (lat_h * lat_w) // patch_area
         kv_size = self._resolve_self_kv_size(
@@ -595,14 +626,3 @@ class LingBotWorldFastPipeline(BasePipeline):
             if runtime.current_chunk_index >= len(runtime.noise_chunks):
                 runtime.active = False
             return images
-
-    @staticmethod
-    def encode_frames_to_b64(frames: list[Image.Image], quality: int = 85) -> list[str]:
-        encoded: list[str] = []
-        for frame in frames:
-            rgb = np.asarray(frame.convert("RGB"))
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
-            if ok:
-                encoded.append(base64.b64encode(buf.tobytes()).decode("ascii"))
-        return encoded

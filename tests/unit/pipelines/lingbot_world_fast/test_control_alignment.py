@@ -10,6 +10,7 @@ from telefuser.pipelines.lingbot_world_fast.control import (
     compute_relative_poses,
     get_ks_transformed,
     interpolate_camera_poses,
+    truncate_control_sequence,
 )
 
 
@@ -40,7 +41,7 @@ def test_action_alignment_samples_external_video_rate_actions() -> None:
 
 
 def test_action_alignment_rejects_an_incomplete_chunk_action() -> None:
-    with pytest.raises(ValueError, match="shorter"):
+    with pytest.raises(ValueError, match="must be"):
         _builder()._align_action_frames(torch.zeros(2, 4), target_frames=3)
 
 
@@ -78,8 +79,20 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
     poses = np.repeat(np.eye(4, dtype=np.float32)[None], 9, axis=0)
     poses[:, 2, 3] = np.linspace(0.0, 1.0, len(poses))
     intrinsics = np.repeat(np.array([[8.0, 8.0, 4.0, 4.0]], dtype=np.float32), len(poses), axis=0)
-    context = _builder().context
-    controls = torch.cat(_builder().build_sequence(poses, intrinsics), dim=2)
+    context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        torch_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=3,
+        chunk_size=3,
+    )
+    controls = torch.cat(LingBotWorldFastControlBuilder(context).build_sequence(poses, intrinsics), dim=2)
 
     poses_t = torch.as_tensor(poses, dtype=torch.float32)
     intrinsics_t = get_ks_transformed(
@@ -108,3 +121,36 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
     ).control_tensor
 
     assert torch.equal(controls, legacy)
+
+
+def test_offline_control_window_rejects_short_action_or_intrinsics() -> None:
+    poses = np.repeat(np.eye(4, dtype=np.float32)[None], 9, axis=0)
+
+    with pytest.raises(ValueError, match="Intrinsics sequence"):
+        truncate_control_sequence(poses, np.ones((8, 4), dtype=np.float32), None, frame_num=9)
+    with pytest.raises(ValueError, match="Action sequence"):
+        truncate_control_sequence(poses, np.ones(4, dtype=np.float32), np.ones((8, 4), dtype=np.float32), frame_num=9)
+
+
+def test_action_mode_requires_actions_and_camera_mode_accepts_per_frame_intrinsics() -> None:
+    poses = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
+    intrinsics = np.repeat(np.array([[8.0, 8.0, 4.0, 4.0]], dtype=np.float32), 3, axis=0)
+
+    with pytest.raises(ValueError, match="requires an action"):
+        _builder().build({"poses": poses, "intrinsics": intrinsics})
+
+    camera_context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        torch_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=3,
+        chunk_size=3,
+    )
+    control = LingBotWorldFastControlBuilder(camera_context).build({"poses": poses, "intrinsics": intrinsics})
+    assert control.shape == (1, 384, 3, 1, 1)

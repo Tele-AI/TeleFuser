@@ -7,23 +7,18 @@ Run the four-GPU stream service:
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import torch
 
 from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
-from telefuser.core.module_manager import ModuleManager
-from telefuser.pipelines.lingbot_world_fast.pipeline import (
-    LingBotWorldFastPipeline,
-    LingBotWorldFastPipelineConfig,
-)
+from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 
-TF_MODEL_ZOO_PATH = "/hhb-data/aigc/model_zoo"
-RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
+RESOLUTION_AREAS = {"240p": 240 * 416, "480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
-    name="lingbot_world_fast_stream",
-    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
-    fast_model_root=TF_MODEL_ZOO_PATH + "/lingbot-world-fast",
     parallelism=4,
     control_mode="cam",
     resolution="480p",
@@ -38,20 +33,24 @@ PPL_CONFIG = dict(
 
 def get_pipeline(
     parallelism: int = PPL_CONFIG["parallelism"],
-    model_root: str = PPL_CONFIG["model_root"],
-    fast_model_root: str = PPL_CONFIG["fast_model_root"],
+    model_root: str | None = None,
+    fast_model_root: str | None = None,
 ) -> LingBotWorldFastPipeline:
     """Load LingBot-World-Fast with internal multi-GPU workers."""
+    if model_root is None or fast_model_root is None:
+        model_zoo_path = Path(os.environ["TF_MODEL_ZOO_PATH"]).expanduser()
+        default_model_root = str(model_zoo_path / "Wan2.2-I2V-A14B")
+        default_fast_model_root = str(model_zoo_path / "lingbot" / "lingbot-world-fast")
+    else:
+        default_model_root, default_fast_model_root = model_root, fast_model_root
     if parallelism < 1:
         raise ValueError(f"parallelism must be positive, got {parallelism}")
-
     dtype = PPL_CONFIG["torch_dtype"]
     pipeline = LingBotWorldFastPipeline(device="cuda", torch_dtype=dtype)
     pipeline.init(
-        ModuleManager(device="cpu"),
         LingBotWorldFastPipelineConfig(
-            checkpoint_dir=model_root,
-            fast_checkpoint_subdir=fast_model_root,
+            checkpoint_dir=model_root or default_model_root,
+            fast_checkpoint_path=fast_model_root or default_fast_model_root,
             vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
             dit_torch_dtype=dtype,

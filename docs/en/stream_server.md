@@ -557,15 +557,16 @@ LingBot-World-Fast requires two sets of weights:
 
 | Setting | Example | Description |
 |---------|---------|-------------|
-| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Model root constant configured in the example script |
+| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Required environment variable that locates both model trees |
 | Base model subdirectory | `/storage/model_zoo/Wan2.2-I2V-A14B` | Base Wan2.2 I2V weights containing VAE, T5 text encoder, and tokenizer |
-| Fast model subdirectory | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT weights |
+| Fast model subdirectory | `/storage/model_zoo/lingbot/lingbot-world-fast` | LingBot-World-Fast DiT weights |
 
 #### Start the Server
 
-Set `TF_MODEL_ZOO_PATH` and `PPL_CONFIG["parallelism"]` in `examples/lingbot/stream_lingbot_world_fast.py`. The default configuration uses four GPUs and creates Ulysses workers internally, so the server command does not need `torchrun` or distributed environment variables.
+Set `TF_MODEL_ZOO_PATH` and, if needed, `PPL_CONFIG["parallelism"]` before starting the service. The default configuration uses four GPUs and creates Ulysses workers internally, so the server command does not need `torchrun` or distributed environment variables.
 
 ```bash
+TF_MODEL_ZOO_PATH=/storage/model_zoo \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=your-turn-password \
@@ -705,10 +706,22 @@ Only switch to `act` when using action-control weights:
 --control-mode act
 ```
 
-The service example currently sets `control_type="cam"` inside
-`examples/lingbot/stream_lingbot_world_fast.py`. To use action-control
-weights, edit `PPL_CONFIG["control_type"]` in that script as well as passing
-`--control-mode act` to the demo.
+The service example sets `PPL_CONFIG["control_mode"]="cam"` inside
+`examples/lingbot/stream_lingbot_world_fast.py`. A session's control mode must
+match the mode used to initialize the pipeline. To use action-control weights,
+set that value to `"act"` before starting the service and pass `--control-mode
+act` to the demo.
+
+#### Frame and Control Contract
+
+LingBot accepts complete latent chunks only. `frame_num` must be `4n + 1`, and
+the resulting latent-frame count must divide evenly by `chunk_size`. With the
+default chunk size of 3, valid output lengths are 9, 21, 33, ..., 81 frames;
+invalid values are rejected rather than rounded down. Offline control files
+must provide enough poses and action samples for the requested video window.
+Intrinsics may be either one static `(4,)` value or one `(frames, 4)` value per
+video frame. Explicit control tensors must match the pipeline's selected mode,
+device, dtype, and full latent-chunk shape.
 
 #### VRAM and Resolution
 
@@ -716,14 +729,14 @@ LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 
 
 ```bash
 # In examples/lingbot/stream_lingbot_world_fast.py:
-PPL_CONFIG["max_area"] = 99840  # approximately 416×240
+PPL_CONFIG["resolution"] = "240p"
 ```
 
 Common tuning parameters:
 
 | Parameter | Effect |
 |-----------|--------|
-| `PPL_CONFIG["max_area"]` | Reduce output area, significantly lower VRAM usage |
+| `PPL_CONFIG["resolution"]` | Select the configured output area; use the included `240p` preset to reduce VRAM |
 | `--frame-num` | Reduce total generated frames and latent chunk count |
 | `--chunk-size` | Affect the latent chunk size per generation step |
 

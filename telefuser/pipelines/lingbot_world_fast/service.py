@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import math
 import queue
@@ -9,6 +10,8 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
 
+import cv2
+import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
@@ -100,7 +103,6 @@ class LingBotWorldFastService:
             sample_shift=float(config.get("sample_shift", 10.0)),
             seed=int(config.get("seed", 42)),
             max_attention_size=config.get("max_attention_size"),
-            offload_model=bool(config.get("offload_model", False)),
             max_sequence_length=int(config.get("max_sequence_length", 512)),
             control_move_step=float(config.get("control_move_step", 0.18)),
             control_yaw_step_degrees=float(config.get("control_yaw_step_degrees", 10.0)),
@@ -125,6 +127,18 @@ class LingBotWorldFastService:
         except Exception as exc:
             logger.warning(f"Failed to enqueue LingBotWorld output: {exc}")
 
+    @staticmethod
+    def _encode_frames_to_b64(frames: list[Image.Image], quality: int = 85) -> list[str]:
+        """Serialize generated frames for the streaming transport."""
+        encoded: list[str] = []
+        for frame in frames:
+            rgb = np.asarray(frame.convert("RGB"))
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+            if ok:
+                encoded.append(base64.b64encode(buf.tobytes()).decode("ascii"))
+        return encoded
+
     def _release_generation_session(self, state: LingBotWorldFastSessionState) -> None:
         if state.generation_session is not None:
             self.pipeline.release_session(state.generation_session)
@@ -148,7 +162,7 @@ class LingBotWorldFastService:
                 "index": -1,
                 "fps": state.config.fps,
                 "timestamp": time.time(),
-                "frames_b64": self.pipeline.encode_frames_to_b64([preview]),
+                "frames_b64": self._encode_frames_to_b64([preview]),
             },
         )
 
@@ -422,7 +436,7 @@ class LingBotWorldFastService:
                     "index": chunk_index,
                     "fps": state.config.fps,
                     "timestamp": time.time(),
-                    "frames_b64": self.pipeline.encode_frames_to_b64(frames),
+                    "frames_b64": self._encode_frames_to_b64(frames),
                 }
                 self._put_output(state, payload)
                 emit_status("chunk_sent", index=chunk_index, frames=len(frames))
