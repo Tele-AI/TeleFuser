@@ -151,3 +151,7 @@ INSTALL_HYS.md
 AGENTS.md
 _version.py.mcp.json
 telefuser/_version.py
+# LingBot regression example assets
+!examples/data/lingbot_world_fast/image.jpg
+!examples/data/lingbot_world_fast/poses.npy
+!examples/data/lingbot_world_fast/intrinsics.npy

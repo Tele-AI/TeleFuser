@@ -45,8 +45,8 @@ telefuser serve \
     --parallelism 1
 
 # 实时世界模型流式推理（默认安装已包含 WebRTC 支持）
-export TF_MODEL_ZOO_PATH=/path/to/model_zoo
-# 预期子目录：Wan2.2-I2V-A14B 和 lingbot-world-fast
+# 在 examples/lingbot/stream_lingbot_world_fast.py 中设置
+# TF_MODEL_ZOO_PATH 和 PPL_CONFIG["parallelism"]
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
 ```
 

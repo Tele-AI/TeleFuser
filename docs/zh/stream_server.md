@@ -557,19 +557,18 @@ LingBot-World-Fast 需要两类权重：
 
 | 配置 | 示例 | 说明 |
 |----------|------|------|
-| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | 示例脚本读取的模型根目录 |
+| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | 在示例脚本中配置的模型根目录常量 |
 | 基础模型子目录 | `/storage/model_zoo/Wan2.2-I2V-A14B` | 基础 Wan2.2 I2V 权重，包含 VAE、T5 文本编码器和 tokenizer |
 | Fast 模型子目录 | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT 权重 |
 
 #### 启动服务端
 
-两张 GPU 的推荐启动方式如下。DiT 放在 GPU0，文本编码器和 VAE 放在 GPU1；如果 GPU1 显存紧张，可以把 VAE 改回 CPU。
+在 `examples/lingbot/stream_lingbot_world_fast.py` 中设置 `TF_MODEL_ZOO_PATH` 和 `PPL_CONFIG["parallelism"]`。默认配置使用四张 GPU，并由 TeleFuser 在服务内部创建 Ulysses worker，因此启动命令不需要 `torchrun` 或分布式环境变量。
 
 ```bash
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=your-turn-password \
-TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
@@ -626,7 +625,6 @@ http://localhost:8091
 env -u TELEFUSER_TURN_SERVER \
 -u TELEFUSER_TURN_USERNAME \
 -u TELEFUSER_TURN_CREDENTIAL \
-TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```

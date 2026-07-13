@@ -82,8 +82,8 @@ video = pipe(
 TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 
 ```bash
-export TF_MODEL_ZOO_PATH=/path/to/model_zoo
-# Expected subdirectories: Wan2.2-I2V-A14B and lingbot-world-fast
+# Set TF_MODEL_ZOO_PATH and PPL_CONFIG["parallelism"] in:
+# examples/lingbot/stream_lingbot_world_fast.py
 
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 \

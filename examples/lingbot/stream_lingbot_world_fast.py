@@ -1,83 +1,76 @@
-from __future__ import annotations
+"""LingBot-World-Fast bidirectional streaming service example.
 
-import os
+Run the four-GPU stream service:
+    telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+        -p 8088 --skip-validation
+"""
+
+from __future__ import annotations
 
 import torch
 
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_world_fast.pipeline import (
     LingBotWorldFastPipeline,
     LingBotWorldFastPipelineConfig,
 )
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 
-TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+TF_MODEL_ZOO_PATH = "/hhb-data/aigc/model_zoo"
+RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
+
 PPL_CONFIG = dict(
     name="lingbot_world_fast_stream",
-    # LingBot-World-Fast reuses the Wan2.2 base weights (VAE + T5 text encoder + ``google/umt5-xxl``
-    # tokenizer), which ship in the shared Wan2.2-I2V-A14B directory. The DiT fast weights live in their
-    # own ``lingbot-world-fast`` directory, given as an absolute path so the pipeline keeps it standalone
-    # rather than nesting it under ``checkpoint_dir``.
-    checkpoint_dir=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
-    fast_checkpoint_subdir=TF_MODEL_ZOO_PATH + "/lingbot-world-fast",
-    control_type="cam",
-    vae_device="cuda",
-    vae_device_id=0,
-    text_device="cuda",
-    text_device_id=0,
-    dit_device="cuda",
-    max_area=480 * 832,
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
+    fast_model_root=TF_MODEL_ZOO_PATH + "/lingbot-world-fast",
+    parallelism=4,
+    control_mode="cam",
+    resolution="480p",
+    target_fps=16,
+    attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
+    enable_fsdp=False,
+    local_attn_size=-1,
+    sink_size=0,
     torch_dtype=torch.bfloat16,
 )
 
 
-class _LocalModuleManager:
-    def __init__(self) -> None:
-        self._modules: list[tuple[str, object, str]] = []
+def get_pipeline(
+    parallelism: int = PPL_CONFIG["parallelism"],
+    model_root: str = PPL_CONFIG["model_root"],
+    fast_model_root: str = PPL_CONFIG["fast_model_root"],
+) -> LingBotWorldFastPipeline:
+    """Load LingBot-World-Fast with internal multi-GPU workers."""
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be positive, got {parallelism}")
 
-    def fetch_module(
-        self,
-        model_name: str,
-        file_path: str | None = None,
-        require_model_path: bool = False,
-        index: int | None = None,
-    ):
-        matches = [(module, path) for name, module, path in self._modules if name == model_name]
-        if not matches:
-            return None
-        module, path = matches[0]
-        return (module, path) if require_model_path else module
-
-    def add_module(self, module, name: str, path: str = "manual") -> None:
-        self._modules.append((name, module, path))
-
-    def get_model_info(self):
-        return [{"name": name, "path": path} for name, _, path in self._modules]
+    dtype = PPL_CONFIG["torch_dtype"]
+    pipeline = LingBotWorldFastPipeline(device="cuda", torch_dtype=dtype)
+    pipeline.init(
+        ModuleManager(device="cpu"),
+        LingBotWorldFastPipelineConfig(
+            checkpoint_dir=model_root,
+            fast_checkpoint_subdir=fast_model_root,
+            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
+            text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
+            dit_torch_dtype=dtype,
+            control_type=PPL_CONFIG["control_mode"],
+            max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]],
+            local_attn_size=PPL_CONFIG["local_attn_size"],
+            sink_size=PPL_CONFIG["sink_size"],
+            attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
+            parallel_config=ParallelConfig(
+                device_ids=list(range(parallelism)) if parallelism > 1 else None,
+                sp_ulysses_degree=parallelism,
+                enable_fsdp=PPL_CONFIG["enable_fsdp"],
+            ),
+        ),
+    )
+    return pipeline
 
 
 def get_service() -> LingBotWorldFastService:
-    dtype = PPL_CONFIG["torch_dtype"]
-    mm = _LocalModuleManager()
-
-    pipeline = LingBotWorldFastPipeline(device=PPL_CONFIG["dit_device"], torch_dtype=dtype)
-    pipeline.init(
-        mm,
-        LingBotWorldFastPipelineConfig(
-            checkpoint_dir=PPL_CONFIG["checkpoint_dir"],
-            fast_checkpoint_subdir=PPL_CONFIG["fast_checkpoint_subdir"],
-            vae_config=ModelRuntimeConfig(
-                device_type=PPL_CONFIG["vae_device"],
-                device_id=PPL_CONFIG["vae_device_id"],
-                torch_dtype=dtype,
-            ),
-            text_encoding_config=ModelRuntimeConfig(
-                device_type=PPL_CONFIG["text_device"],
-                device_id=PPL_CONFIG["text_device_id"],
-                torch_dtype=dtype,
-            ),
-            dit_torch_dtype=dtype,
-            control_type=PPL_CONFIG["control_type"],
-            max_area=PPL_CONFIG["max_area"],
-        ),
-    )
-    return LingBotWorldFastService(pipeline)
+    """Build the service loaded by the TeleFuser stream server."""
+    pipeline = get_pipeline()
+    return LingBotWorldFastService(pipeline, default_fps=PPL_CONFIG["target_fps"])

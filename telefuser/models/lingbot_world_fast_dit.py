@@ -8,8 +8,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
+from telefuser.core.config import AttentionConfig
+from telefuser.distributed.device_mesh import get_ulysses_group, get_ulysses_world_size
+from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
+from telefuser.ops.attention import attention as attn_func
 from telefuser.ops.normalization import LayerNorm, RMSNorm
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import init_weights_on_device, load_state_dict
@@ -44,6 +50,7 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
+        self.attention_config = AttentionConfig()
 
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -88,7 +95,10 @@ class CausalSelfAttention(nn.Module):
             dim=-1,
         ).reshape(seq_len, 1, -1)
 
-        return apply_rotary_emb(x, (cos, sin))
+        roped = apply_rotary_emb(x[:, :seq_len], (cos, sin))
+        if x.shape[1] == seq_len:
+            return roped
+        return torch.cat([roped, x[:, seq_len:]], dim=1)
 
     def forward(
         self,
@@ -99,16 +109,28 @@ class CausalSelfAttention(nn.Module):
         kv_cache: dict[str, torch.Tensor | int],
         current_start: int,
         max_attention_size: int,
+        device_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
         q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
         k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
         v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
 
+        group = get_ulysses_group(device_mesh)
+        ulysses_enabled = group is not None and get_ulysses_world_size(device_mesh) > 1
         frame_tokens = grid_size[1] * grid_size[2]
         start_frame = current_start // frame_tokens
-
-        q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)
-        k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)
+        valid_seq_len = math.prod(grid_size)
+        if ulysses_enabled:
+            q = ulysses_scatter_heads(q, group)()
+            k = ulysses_scatter_heads(k, group)()
+            v = ulysses_scatter_heads(v, group)()
+            padded_seq_len = q.shape[1]
+            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
+            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
+            v = v[:, :valid_seq_len]
+        else:
+            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)
+            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)
 
         num_new_tokens = q.shape[1]
         current_end = current_start + num_new_tokens
@@ -141,14 +163,23 @@ class CausalSelfAttention(nn.Module):
         k_cache = cache_k[:, attn_start:local_end]
         v_cache = cache_v[:, attn_start:local_end]
 
-        q = q.permute(0, 2, 1, 3)
-        k_cache = k_cache.permute(0, 2, 1, 3)
-        v_cache = v_cache.permute(0, 2, 1, 3)
-        out = F.scaled_dot_product_attention(q, k_cache, v_cache, is_causal=False)
-        out = out.permute(0, 2, 1, 3).contiguous()
+        out = attn_func(
+            q,
+            k_cache,
+            v_cache,
+            attention_config=self.attention_config,
+            input_layout="BSND",
+            output_layout="BSND",
+        )
 
         kv_cache["global_end_index"] = current_end
         kv_cache["local_end_index"] = local_end
+
+        if ulysses_enabled:
+            pad_len = padded_seq_len - num_new_tokens
+            if pad_len > 0:
+                out = F.pad(out, (0, 0, 0, 0, 0, pad_len))
+            out = ulysses_gather_heads(out, group, num_heads=self.num_heads)()
 
         out = rearrange(out, "b s n d -> b s (n d)")
         return self.o(out)
@@ -162,6 +193,7 @@ class CachedCrossAttention(nn.Module):
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.attention_config = AttentionConfig()
 
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -176,21 +208,28 @@ class CachedCrossAttention(nn.Module):
         context: torch.Tensor,
         cache: dict[str, torch.Tensor | bool] | None,
     ) -> torch.Tensor:
-        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b n s d", n=self.num_heads)
+        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
 
         if cache is not None and bool(cache.get("is_init", False)):
             k = cache["k"]
             v = cache["v"]
         else:
-            k = rearrange(self.norm_k(self.k(context)), "b s (n d) -> b n s d", n=self.num_heads)
-            v = rearrange(self.v(context), "b s (n d) -> b n s d", n=self.num_heads)
+            k = rearrange(self.norm_k(self.k(context)), "b s (n d) -> b s n d", n=self.num_heads)
+            v = rearrange(self.v(context), "b s (n d) -> b s n d", n=self.num_heads)
             if cache is not None:
                 cache["k"] = k
                 cache["v"] = v
                 cache["is_init"] = True
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-        out = rearrange(out, "b n s d -> b s (n d)")
+        out = attn_func(
+            q,
+            k,
+            v,
+            attention_config=self.attention_config,
+            input_layout="BSND",
+            output_layout="BSND",
+        )
+        out = rearrange(out, "b s n d -> b s (n d)")
         return self.o(out)
 
 
@@ -252,6 +291,7 @@ class LingBotWorldFastBlock(nn.Module):
         current_start: int,
         max_attention_size: int,
         control_tokens: torch.Tensor | None = None,
+        device_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
         modulation = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (modulation.unsqueeze(0) + t_mod).chunk(
@@ -274,6 +314,7 @@ class LingBotWorldFastBlock(nn.Module):
             kv_cache=kv_cache,
             current_start=current_start,
             max_attention_size=max_attention_size,
+            device_mesh=device_mesh,
         )
         x = self.gate(x, gate_msa, attn_out)
 
@@ -388,6 +429,8 @@ class LingBotWorldFastDiT(BaseModel):
         freqs = precompute_freqs_cis_3d(head_dim)
         self.freqs_cos = torch.cat([f.real for f in freqs], dim=-1)
         self.freqs_sin = torch.cat([f.imag for f in freqs], dim=-1)
+        self.device_mesh: DeviceMesh | None = None
+        self.usp_flag = False
 
         self.init_weights()
 
@@ -480,6 +523,15 @@ class LingBotWorldFastDiT(BaseModel):
 
         freqs_cos = self.freqs_cos.to(device=x.device)
         freqs_sin = self.freqs_sin.to(device=x.device)
+        full_seq_len = seq_len
+
+        if self.usp_flag:
+            shard_tensors = [x, t_mod, control_tokens]
+            shard_dims = [1, 1, 1]
+            if t_head.shape[1] == seq_len:
+                shard_tensors.append(t_head)
+                shard_dims.append(1)
+            sequence_parallel_shard(self.device_mesh, shard_tensors, shard_dims)
 
         if kv_cache is None or crossattn_cache is None:
             raise ValueError("LingBotWorldFastDiT requires kv_cache and crossattn_cache")
@@ -497,10 +549,25 @@ class LingBotWorldFastDiT(BaseModel):
                 current_start=current_start,
                 max_attention_size=max_attention_size,
                 control_tokens=control_tokens,
+                device_mesh=self.device_mesh,
             )
 
         x = self.head(x, t_head)
+        if self.usp_flag:
+            (x,) = sequence_parallel_unshard(self.device_mesh, [x], [1], [full_seq_len])
         return self.unpatchify(x, grid_size)
+
+    def enable_usp(self, device_mesh: DeviceMesh | None = None) -> None:
+        """Enable Ulysses sequence parallelism for LingBot-World-Fast DiT."""
+        self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
+        self.usp_flag = get_ulysses_world_size(self.device_mesh) > 1
+
+    def set_attention_config(self, attention_config: AttentionConfig) -> None:
+        """Set the unified attention backend for self-attention and cross-attention."""
+        logger.info(f"LingBot-World-Fast DiT set attention config to {attention_config.attn_impl}")
+        for block in self.blocks:
+            block.self_attn.attention_config = attention_config
+            block.cross_attn.attention_config = attention_config
 
     @classmethod
     def from_pretrained(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -12,6 +14,14 @@ from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
 
 CACHE_T = 2
+
+
+@dataclass
+class WanVideoVAEStreamingDecodeState:
+    """Session-owned temporal feature cache for incremental VAE decoding."""
+
+    feat_cache: list[object] = field(default_factory=list)
+    feat_idx: list[int] = field(default_factory=lambda: [0])
 
 
 def _count_conv3d(model: nn.Module) -> int:
@@ -1389,6 +1399,7 @@ class WanVideoVAE(BaseModel):
         device: torch.device,
         is_first_clip: bool,
         is_last_clip: bool,
+        decode_state: WanVideoVAEStreamingDecodeState | None = None,
     ) -> torch.Tensor:
         """Decode with persistent feature cache for streaming generation.
 
@@ -1400,15 +1411,26 @@ class WanVideoVAE(BaseModel):
             device: Target device
             is_first_clip: If True, clear cache before decoding (first segment)
             is_last_clip: If True, clear cache after decoding (last segment)
+            decode_state: Optional session-owned cache. The legacy model-owned cache
+                is used when omitted.
 
         Returns:
             Decoded video tensor [C, T_out, H_out, W_out]
         """
+        feat_cache = self._feat_cache if decode_state is None else decode_state.feat_cache
+        feat_idx = self._feat_idx if decode_state is None else decode_state.feat_idx
+
         # Clear cache on first clip
         if is_first_clip:
             conv_num = _count_conv3d(self.model.decoder)
-            self._feat_cache = [None] * conv_num
-            self._feat_idx = [0]
+            feat_cache = [None] * conv_num
+            feat_idx = [0]
+            if decode_state is None:
+                self._feat_cache = feat_cache
+                self._feat_idx = feat_idx
+            else:
+                decode_state.feat_cache = feat_cache
+                decode_state.feat_idx = feat_idx
 
         # Add batch dimension if needed
         if hidden_state.dim() == 4:
@@ -1429,25 +1451,29 @@ class WanVideoVAE(BaseModel):
         x = self.model.conv2(z)
 
         for i in range(iter_):
-            self._feat_idx[0] = 0  # Reset index for each frame
+            feat_idx[0] = 0  # Reset index for each frame
             if i == 0:
                 out = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_cache,
-                    feat_idx=self._feat_idx,
+                    feat_cache=feat_cache,
+                    feat_idx=feat_idx,
                 )
             else:
                 out_ = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_cache,
-                    feat_idx=self._feat_idx,
+                    feat_cache=feat_cache,
+                    feat_idx=feat_idx,
                 )
                 out = torch.cat([out, out_], 2)
 
         # Clear cache on last clip
         if is_last_clip:
-            self._feat_cache = []
-            self._feat_idx = [0]
+            if decode_state is None:
+                self._feat_cache = []
+                self._feat_idx = [0]
+            else:
+                decode_state.feat_cache = []
+                decode_state.feat_idx = [0]
 
         video = out.clamp_(-1, 1)
 

@@ -17,7 +17,8 @@ from telefuser.utils.profiler import ProfilingContext4Debug
 
 from .pipeline import LingBotWorldFastPipeline
 from .session import (
-    LingBotWorldFastRuntimeState,
+    LingBotWorldFastChunkRequest,
+    LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionState,
 )
@@ -94,7 +95,7 @@ class LingBotWorldFastService:
             fps=int(config.get("fps") or self.default_fps),
             chunk_size=int(config.get("chunk_size", 3)),
             frame_num=int(config.get("frame_num", 81)),
-            sample_shift=float(config.get("sample_shift", 5.0)),
+            sample_shift=float(config.get("sample_shift", 10.0)),
             seed=int(config.get("seed", 42)),
             max_attention_size=config.get("max_attention_size"),
             offload_model=bool(config.get("offload_model", False)),
@@ -126,11 +127,10 @@ class LingBotWorldFastService:
         except Exception as exc:
             logger.warning(f"Failed to enqueue LingBotWorld output: {exc}")
 
-    @staticmethod
-    def _release_runtime(state: LingBotWorldFastSessionState) -> None:
-        if state.runtime is not None:
-            state.runtime.active = False
-            state.runtime = None
+    def _release_generation_session(self, state: LingBotWorldFastSessionState) -> None:
+        if state.generation_session is not None:
+            self.pipeline.release_session(state.generation_session)
+            state.generation_session = None
         with state.control_lock:
             state.pressed_controls.clear()
             state.queued_controls.clear()
@@ -245,7 +245,7 @@ class LingBotWorldFastService:
     def _build_directional_control_chunk(
         self,
         state: LingBotWorldFastSessionState,
-        runtime: LingBotWorldFastRuntimeState,
+        runtime: LingBotWorldFastGenerationSession,
     ) -> dict | None:
         with state.control_lock:
             controls = set(state.pressed_controls) | set(state.queued_controls)
@@ -253,7 +253,7 @@ class LingBotWorldFastService:
             yaw = float(state.control_yaw)
             position = [float(v) for v in state.control_position]
 
-        if not controls or runtime.current_chunk_index >= len(runtime.noise_chunks):
+        if runtime.current_chunk_index >= len(runtime.noise_chunks):
             return None
 
         latent_frames = int(runtime.noise_chunks[runtime.current_chunk_index].shape[2])
@@ -364,8 +364,8 @@ class LingBotWorldFastService:
         try:
             self._emit_preview_frame(state)
             emit_status("initializing_runtime")
-            state.runtime = self.pipeline.create_runtime(state.config, progress_callback=emit_status)
-            runtime = state.runtime
+            state.generation_session = self.pipeline.create_session(state.config, progress_callback=emit_status)
+            runtime = state.generation_session
             emit_status(
                 "runtime_ready",
                 width=runtime.width,
@@ -375,8 +375,11 @@ class LingBotWorldFastService:
             )
             chunk_index = 0
             while state.active and runtime.active:
-                control_override = None
-                incoming = None
+                incoming = state.pending_inputs.get()
+                if incoming.get("type") == "stop":
+                    break
+
+                explicit_control = incoming if self._is_explicit_control_chunk(incoming) else None
                 applied_controls = None
                 while True:
                     try:
@@ -387,32 +390,40 @@ class LingBotWorldFastService:
                         incoming = next_item
                         break
                     if self._is_explicit_control_chunk(next_item):
-                        incoming = next_item
+                        explicit_control = next_item
 
                 if incoming and incoming.get("type") == "stop":
                     break
-                if incoming:
-                    control_override = self.pipeline.build_control_override(runtime, incoming)
-                if control_override is None:
+                if explicit_control is not None:
+                    control_override = self.pipeline.build_control_override(runtime, explicit_control)
+                else:
                     directional_chunk = self._build_directional_control_chunk(state, runtime)
-                    if directional_chunk is not None:
-                        applied_controls = directional_chunk["controls"]
-                        emit_status(
-                            "applying_direction_control",
-                            index=chunk_index,
-                            controls=applied_controls,
-                            move_step=state.config.control_move_step,
-                            yaw_step_degrees=state.config.control_yaw_step_degrees,
-                            lateral_step=state.config.control_lateral_step,
-                        )
-                        control_override = self.pipeline.build_control_override(runtime, directional_chunk)
+                    if directional_chunk is None:
+                        raise RuntimeError("Directional action could not be converted into a control chunk")
+                    applied_controls = directional_chunk["controls"]
+                    emit_status(
+                        "applying_direction_control",
+                        index=chunk_index,
+                        controls=applied_controls,
+                        move_step=state.config.control_move_step,
+                        yaw_step_degrees=state.config.control_yaw_step_degrees,
+                        lateral_step=state.config.control_lateral_step,
+                    )
+                    control_override = self.pipeline.build_control_override(runtime, directional_chunk)
+                if control_override is None:
+                    raise ValueError("Action did not produce a control tensor")
 
                 emit_status("generating_chunk", index=chunk_index)
-                frames = self.pipeline.generate_next_chunk(
+                result = self.pipeline(
                     runtime,
-                    control_override=control_override,
+                    LingBotWorldFastChunkRequest(
+                        chunk_index=runtime.current_chunk_index,
+                        session_id=session_id,
+                        control_override=control_override,
+                    ),
                     progress_callback=emit_status,
                 )
+                frames = result.frames
                 if not frames:
                     break
                 if state.config.show_control_hud and applied_controls:
@@ -441,13 +452,15 @@ class LingBotWorldFastService:
         finally:
             state.active = False
             self._put_output(state, {"type": "done"})
-            self._release_runtime(state)
+            self._release_generation_session(state)
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)
         if state is None:
             return
-        if chunk.get("type") == "control" and self._update_direction_controls(state, chunk):
+        is_direction_action = chunk.get("type") == "control" and self._update_direction_controls(state, chunk)
+        if is_direction_action:
+            state.pending_inputs.put({"type": "direction_control"})
             return
         state.pending_inputs.put(chunk)
 
@@ -479,5 +492,5 @@ class LingBotWorldFastService:
             return
         state.active = False
         state.pending_inputs.put({"type": "stop"})
-        self._release_runtime(state)
+        self._release_generation_session(state)
         logger.info(f"LingBotWorld session closed: {session_id}")

@@ -12,15 +12,15 @@ import torch
 from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import AttentionConfig, ModelRuntimeConfig, ParallelConfig
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
 from telefuser.models.t5_tokenizer import HuggingfaceTokenizer
 from telefuser.models.wan_video_text_encoder import WanTextEncoder
 from telefuser.models.wan_video_vae import WanVideoVAE
-from telefuser.schedulers.unipc import FlowUniPCMultistepScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.worker.parallel_worker import ParallelWorker
 
 from .control import (
     build_action_control_chunk,
@@ -31,8 +31,15 @@ from .control import (
     load_action_control_inputs,
     load_camera_control_inputs,
 )
-from .denoising import LingBotWorldFastDenoisingStage, LingBotWorldFastTimesteps
-from .session import LingBotWorldFastRuntimeState, LingBotWorldFastSessionConfig
+from .denoising import LingBotWorldFastDenoisingStage
+from .session import (
+    LingBotWorldFastChunkRequest,
+    LingBotWorldFastChunkResult,
+    LingBotWorldFastGenerationSession,
+    LingBotWorldFastRuntimeState,
+    LingBotWorldFastSessionConfig,
+    LingBotWorldFastSessionStatus,
+)
 
 
 @dataclass
@@ -48,6 +55,8 @@ class LingBotWorldFastPipelineConfig:
     max_area: int = 480 * 832
     local_attn_size: int = -1
     sink_size: int = 0
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    attention_config: AttentionConfig = field(default_factory=AttentionConfig)
 
 
 class LingBotWorldFastPipeline(BasePipeline):
@@ -59,7 +68,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.width_division_factor = 16
 
     def _get_stages(self) -> list:
-        return []
+        return [self.denoise_stage] if hasattr(self, "denoise_stage") else []
 
     @staticmethod
     def _notify_progress(
@@ -102,16 +111,26 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae = self.vae.to(device=self.vae_device, dtype=self.torch_dtype).eval()
 
         fast_path = checkpoint_root / config.fast_checkpoint_subdir
+        dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
         self.dit = LingBotWorldFastDiT.from_pretrained(
             str(fast_path),
             torch_dtype=config.dit_torch_dtype,
             control_type=config.control_type,
             config=self._build_dit_config(config),
-        ).to(self.device)
+        ).to(dit_device)
         self.dit.eval().requires_grad_(False)
 
-        self.denoise_stage = LingBotWorldFastDenoisingStage(self.dit, torch_dtype=self.torch_dtype)
-        self.timesteps = LingBotWorldFastTimesteps()
+        pipeline_device = torch.device(self.device)
+        dit_runtime_config = ModelRuntimeConfig(
+            device_type=pipeline_device.type,
+            device_id=pipeline_device.index or 0,
+            torch_dtype=config.dit_torch_dtype,
+            attention_config=config.attention_config,
+            parallel_config=config.parallel_config,
+        )
+        denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", self.dit, dit_runtime_config)
+        self.denoise_stage = ParallelWorker(denoise_stage) if config.parallel_config.world_size > 1 else denoise_stage
+        self._next_cache_handle = 0
 
     @staticmethod
     def _build_dit_config(config: LingBotWorldFastPipelineConfig) -> dict[str, object]:
@@ -146,12 +165,19 @@ class LingBotWorldFastPipeline(BasePipeline):
         return prompt_emb.to(self.device)
 
     @torch.inference_mode()
-    def decode_video_cached(self, latents: torch.Tensor, is_first_clip: bool, is_last_clip: bool) -> torch.Tensor:
+    def decode_video_cached(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        latents: torch.Tensor,
+        is_first_clip: bool,
+        is_last_clip: bool,
+    ) -> torch.Tensor:
         return self.vae.cached_decode_withflag(
             latents,
             device=self.vae_device,
             is_first_clip=is_first_clip,
             is_last_clip=is_last_clip,
+            decode_state=session.decoder_state,
         )
 
     @staticmethod
@@ -202,43 +228,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         mask = torch.cat([torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1), mask[:, 1:]], dim=1)
         mask = mask.view(1, mask.shape[1] // 4, 4, latent_h, latent_w).transpose(1, 2)[0]
         return torch.cat([mask, latent], dim=0)
-
-    def _init_self_kv_cache(
-        self,
-        batch_size: int,
-        kv_size: int,
-        dtype: torch.dtype,
-        device: str | torch.device,
-    ) -> list[dict[str, torch.Tensor | int]]:
-        head_dim = self.dit.dim // self.dit.num_heads
-        shape = (batch_size, kv_size, self.dit.num_heads, head_dim)
-        return [
-            {
-                "k": torch.zeros(shape, dtype=dtype, device=device),
-                "v": torch.zeros(shape, dtype=dtype, device=device),
-                "global_end_index": 0,
-                "local_end_index": 0,
-            }
-            for _ in range(self.dit.num_layers)
-        ]
-
-    def _init_crossattn_cache(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: str | torch.device,
-        max_sequence_length: int,
-    ) -> list[dict[str, torch.Tensor | bool]]:
-        head_dim = self.dit.dim // self.dit.num_heads
-        shape = (batch_size, self.dit.num_heads, max_sequence_length, head_dim)
-        return [
-            {
-                "k": torch.zeros(shape, dtype=dtype, device=device),
-                "v": torch.zeros(shape, dtype=dtype, device=device),
-                "is_init": False,
-            }
-            for _ in range(self.dit.num_layers)
-        ]
 
     def _populate_session_controls(self, session_config: LingBotWorldFastSessionConfig) -> None:
         if session_config.action_path is None:
@@ -394,13 +383,143 @@ class LingBotWorldFastPipeline(BasePipeline):
             )
         return control.control_tensor
 
-    @ProfilingContext4Debug("create_runtime")
+    def _release_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
+        cache_handle = session.cache_handle
+        if cache_handle is None:
+            return True
+        try:
+            if isinstance(self.denoise_stage, ParallelWorker):
+                self.denoise_stage.release_cache(cache_handle, sync=True)
+            else:
+                self.denoise_stage.release_cache(cache_handle)
+        except Exception as exc:
+            logger.error(f"Failed to release LingBot cache handle {cache_handle}: {exc}")
+            return False
+        session.cache_handle = None
+        return True
+
+    def release_session(self, session: LingBotWorldFastGenerationSession) -> None:
+        """Idempotently release cache and decoder state owned by a session."""
+        with session.transaction_lock:
+            cache_released = self._release_session_cache(session)
+            session.decoder_state.feat_cache = []
+            session.decoder_state.feat_idx = [0]
+            session.active = False
+            if not cache_released:
+                session.status = LingBotWorldFastSessionStatus.POISONED
+                session.poisoned_reason = f"Failed to release cache handle {session.cache_handle}"
+            elif session.status != LingBotWorldFastSessionStatus.POISONED:
+                session.status = LingBotWorldFastSessionStatus.RELEASED
+
+    def release_runtime(self, runtime: LingBotWorldFastRuntimeState) -> None:
+        """Compatibility wrapper for the Stage 1 runtime API."""
+        self.release_session(runtime)
+
     @torch.inference_mode()
-    def create_runtime(
+    def __call__(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        request: LingBotWorldFastChunkRequest,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> LingBotWorldFastChunkResult:
+        """Generate one transactional, action-driven chunk for an external session."""
+        if not session.transaction_lock.acquire(blocking=False):
+            raise RuntimeError("LingBot session already has a chunk in progress")
+        try:
+            return self._generate_session_chunk(session, request, progress_callback)
+        finally:
+            session.transaction_lock.release()
+
+    def _generate_session_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        request: LingBotWorldFastChunkRequest,
+        progress_callback: Callable[..., None] | None,
+    ) -> LingBotWorldFastChunkResult:
+        """Execute a chunk while the caller holds the session transaction lock."""
+        if session.status == LingBotWorldFastSessionStatus.POISONED:
+            raise RuntimeError(f"Cannot continue poisoned LingBot session: {session.poisoned_reason}")
+        if session.status == LingBotWorldFastSessionStatus.RUNNING:
+            raise RuntimeError("LingBot session already has a chunk in progress")
+        if not session.active or session.status == LingBotWorldFastSessionStatus.RELEASED:
+            raise RuntimeError("Cannot generate a chunk from an inactive LingBot session")
+        if request.chunk_index != session.current_chunk_index:
+            raise ValueError(
+                f"Chunk request index {request.chunk_index} does not match session index {session.current_chunk_index}"
+            )
+
+        session.status = LingBotWorldFastSessionStatus.RUNNING
+        try:
+            control_override = request.control_override
+            if request.action is not None:
+                control_override = self.build_control_override(session, request.action)
+            if control_override is None:
+                raise ValueError("Chunk action did not produce a control tensor")
+
+            chunk_frames = self.generate_next_chunk(
+                session,
+                control_override=control_override,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            session.status = LingBotWorldFastSessionStatus.POISONED
+            session.poisoned_reason = f"{type(exc).__name__}: {exc}"
+            session.active = False
+            self.release_session(session)
+            raise
+
+        session.status = LingBotWorldFastSessionStatus.COMMITTED
+        if not session.active and not self._release_session_cache(session):
+            session.status = LingBotWorldFastSessionStatus.POISONED
+            session.poisoned_reason = "Final chunk committed but cache release failed"
+            raise RuntimeError(session.poisoned_reason)
+        logger.info(
+            f"Generated LingBot chunk {request.chunk_index + 1}/{len(session.noise_chunks)}: {len(chunk_frames)} frames"
+        )
+        return LingBotWorldFastChunkResult(
+            chunk_index=request.chunk_index,
+            frames=chunk_frames,
+            emitted_frames=session.emitted_frames,
+            done=not session.active,
+            session_id=request.session_id,
+        )
+
+    @torch.inference_mode()
+    def generate_video(
         self,
         session_config: LingBotWorldFastSessionConfig,
         progress_callback: Callable[..., None] | None = None,
-    ) -> LingBotWorldFastRuntimeState:
+    ) -> list[Image.Image]:
+        """Compatibility helper that drains an explicit generation session into one video."""
+        session = self.create_session(session_config, progress_callback=progress_callback)
+        frames: list[Image.Image] = []
+        try:
+            while session.active:
+                chunk_index = session.current_chunk_index
+                control_override = None
+                if session.control_chunks is not None and chunk_index < len(session.control_chunks):
+                    control_override = session.control_chunks[chunk_index]
+                result = self(
+                    session,
+                    LingBotWorldFastChunkRequest(
+                        chunk_index=chunk_index,
+                        control_override=control_override,
+                    ),
+                    progress_callback=progress_callback,
+                )
+                frames.extend(result.frames)
+        finally:
+            self.release_session(session)
+        return frames
+
+    @ProfilingContext4Debug("create_session")
+    @torch.inference_mode()
+    def create_session(
+        self,
+        session_config: LingBotWorldFastSessionConfig,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> LingBotWorldFastGenerationSession:
+        """Prepare externally owned inputs and a worker-local cache for one session."""
         self._notify_progress(progress_callback, "loading_controls")
         self._populate_session_controls(session_config)
         self._notify_progress(progress_callback, "encoding_prompt", device=str(self.text_device))
@@ -479,25 +598,14 @@ class LingBotWorldFastPipeline(BasePipeline):
             chunk_size=session_config.chunk_size,
         )
 
-        runtime = LingBotWorldFastRuntimeState(
+        cache_handle = self._next_cache_handle
+        self._next_cache_handle += 1
+        session = LingBotWorldFastGenerationSession(
             prompt_emb=prompt_emb,
             encoded_image_latent=latent_condition,
             noise_chunks=noise_chunks,
             condition_chunks=condition_chunks,
             control_chunks=control_chunks,
-            timesteps=torch.empty(0, dtype=torch.int64),
-            self_kv_cache=self._init_self_kv_cache(
-                batch_size=1,
-                kv_size=kv_size,
-                dtype=self.torch_dtype,
-                device=self.device,
-            ),
-            crossattn_cache=self._init_crossattn_cache(
-                batch_size=1,
-                dtype=self.torch_dtype,
-                device=self.device,
-                max_sequence_length=session_config.max_sequence_length,
-            ),
             latent_h=lat_h,
             latent_w=lat_w,
             latent_f=lat_f,
@@ -507,24 +615,46 @@ class LingBotWorldFastPipeline(BasePipeline):
             frame_tokens=frame_tokens,
             chunk_size=session_config.chunk_size,
             max_attention_size=max_attention_size,
-            scheduler=FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False),
-            generator=generator,
+            cache_handle=cache_handle,
             kv_local_attn_size=self.config.local_attn_size,
             kv_sink_size=self.config.sink_size if self.config.local_attn_size != -1 else 0,
         )
-        runtime.timesteps = self.timesteps.select(runtime.scheduler, session_config.sample_shift)
+        try:
+            initialize_cache_kwargs = dict(
+                cache_handle=cache_handle,
+                batch_size=1,
+                kv_size=kv_size,
+                max_sequence_length=session_config.max_sequence_length,
+                sample_shift=session_config.sample_shift,
+                generator_state=generator.get_state().tolist(),
+            )
+            if isinstance(self.denoise_stage, ParallelWorker):
+                self.denoise_stage.initialize_cache(**initialize_cache_kwargs, sync=True)
+            else:
+                self.denoise_stage.initialize_cache(**initialize_cache_kwargs)
+        except Exception:
+            self._release_session_cache(session)
+            raise
         if session_config.world_kv_binding is not None:
-            runtime.world_kv_binding = session_config.world_kv_binding
+            session.world_kv_binding = session_config.world_kv_binding
             try:
-                runtime.world_kv_binding.on_runtime_created(runtime, session_config)
-                if runtime.world_kv_cached_latents:
-                    logger.info(f"world_kv: fast-forward {len(runtime.world_kv_cached_latents)} chunks (decode-only)")
+                session.world_kv_binding.on_runtime_created(session, session_config)
+                if session.world_kv_cached_latents:
+                    logger.info(f"world_kv: fast-forward {len(session.world_kv_cached_latents)} chunks (decode-only)")
             except Exception as exc:
                 logger.warning(f"world_kv on_runtime_created failed; falling back to cold run: {exc}")
-                runtime.world_kv_cached_latents = {}
+                session.world_kv_cached_latents = {}
         self._notify_progress(progress_callback, "runtime_created", width=width, height=height, latent_frames=lat_f)
         logger.info(f"LingBot runtime created: {width}x{height}, latent={lat_f}x{lat_h}x{lat_w}")
-        return runtime
+        return session
+
+    def create_runtime(
+        self,
+        session_config: LingBotWorldFastSessionConfig,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> LingBotWorldFastRuntimeState:
+        """Compatibility wrapper for the Stage 1 runtime API."""
+        return self.create_session(session_config, progress_callback=progress_callback)
 
     @torch.inference_mode()
     def generate_next_chunk(
@@ -555,33 +685,19 @@ class LingBotWorldFastPipeline(BasePipeline):
                 denoised = cached_latent.to(device=self.device, dtype=self.torch_dtype)
             else:
                 with ProfilingContext4Debug("denoise_chunk"):
-                    denoised = self.denoise_stage.denoise_chunk(
+                    denoise_kwargs = dict(
+                        cache_handle=runtime.cache_handle,
                         latent_chunk=latent_chunk,
                         condition_chunk=condition_chunk,
                         prompt_emb=runtime.prompt_emb,
-                        timesteps=runtime.timesteps,
-                        scheduler=runtime.scheduler,
                         control_chunk=control_chunk,
-                        self_kv_cache=runtime.self_kv_cache,
-                        crossattn_cache=runtime.crossattn_cache,
-                        current_start=current_start,
-                        max_attention_size=runtime.max_attention_size,
-                        generator=runtime.generator,
-                    )
-
-                self._notify_progress(progress_callback, "updating_cache", index=idx)
-                with ProfilingContext4Debug("kv_cache_update_forward"):
-                    self.dit(
-                        x=denoised.to(dtype=self.torch_dtype),
-                        timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
-                        context=runtime.prompt_emb,
-                        y=condition_chunk,
-                        control_tensor=control_chunk,
-                        kv_cache=runtime.self_kv_cache,
-                        crossattn_cache=runtime.crossattn_cache,
                         current_start=current_start,
                         max_attention_size=runtime.max_attention_size,
                     )
+                    if isinstance(self.denoise_stage, ParallelWorker):
+                        denoised = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs, sync=True)
+                    else:
+                        denoised = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs)
 
                 if runtime.world_kv_binding is not None:
                     try:
@@ -592,6 +708,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             self._notify_progress(progress_callback, "decoding_chunk", index=idx, device=str(self.vae_device))
             with ProfilingContext4Debug("vae_decode"):
                 frames = self.decode_video_cached(
+                    runtime,
                     denoised,
                     is_first_clip=(idx == 0),
                     is_last_clip=(idx == len(runtime.noise_chunks) - 1),

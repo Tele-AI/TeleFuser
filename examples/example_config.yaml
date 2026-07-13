@@ -102,6 +102,21 @@ pipelines:
       attn_impl: TORCH_SDPA
 
   # ============================================================
+  # lingbot_world_fast - Image to Video
+  # ============================================================
+
+  lingbot_world_fast_i2v:
+    script: lingbot/lingbot_world_fast_image_to_video_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/lingbot_world_fast/image.jpg
+    timeout_seconds: 3600
+    resolution: "480p"
+    ppl_config_overrides:
+      attn_impl: TORCH_SDPA
+      frame_num: 13
+
+  # ============================================================
   # hunyuan_video
   # ============================================================
 

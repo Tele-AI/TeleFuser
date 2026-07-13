@@ -557,19 +557,18 @@ LingBot-World-Fast requires two sets of weights:
 
 | Setting | Example | Description |
 |---------|---------|-------------|
-| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Root model directory read by the example script |
+| `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Model root constant configured in the example script |
 | Base model subdirectory | `/storage/model_zoo/Wan2.2-I2V-A14B` | Base Wan2.2 I2V weights containing VAE, T5 text encoder, and tokenizer |
 | Fast model subdirectory | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT weights |
 
 #### Start the Server
 
-Recommended launch with two GPUs: DiT on GPU 0, text encoder and VAE on GPU 1. If GPU 1 VRAM is tight, move VAE back to CPU.
+Set `TF_MODEL_ZOO_PATH` and `PPL_CONFIG["parallelism"]` in `examples/lingbot/stream_lingbot_world_fast.py`. The default configuration uses four GPUs and creates Ulysses workers internally, so the server command does not need `torchrun` or distributed environment variables.
 
 ```bash
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=your-turn-password \
-TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```
@@ -626,7 +625,6 @@ Server:
 env -u TELEFUSER_TURN_SERVER \
 -u TELEFUSER_TURN_USERNAME \
 -u TELEFUSER_TURN_CREDENTIAL \
-TF_MODEL_ZOO_PATH=/storage/model_zoo \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   -p 8088 --host 0.0.0.0 --skip-validation
 ```

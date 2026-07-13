@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 import torch
 
+from telefuser.core.base_stage import BaseStage, with_model_offload
+from telefuser.core.config import ModelRuntimeConfig
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_world_size
+from telefuser.distributed.fsdp import shard_model
+from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
 from telefuser.schedulers.unipc import FlowUniPCMultistepScheduler
 from telefuser.utils.logging import logger
 
@@ -18,12 +23,113 @@ class LingBotWorldFastTimesteps:
         return scheduler.timesteps[list(self.indices)].clone()
 
 
-class LingBotWorldFastDenoisingStage:
-    """Chunk-level denoising for LingBot-World-Fast."""
+@dataclass
+class _DenoisingCacheState:
+    scheduler: FlowUniPCMultistepScheduler
+    timesteps: torch.Tensor
+    self_kv_cache: list[dict[str, torch.Tensor | int]]
+    crossattn_cache: list[dict[str, torch.Tensor | bool]]
+    generator: torch.Generator
 
-    def __init__(self, dit_model, torch_dtype: torch.dtype = torch.bfloat16) -> None:
+
+class LingBotWorldFastDenoisingStage(BaseStage):
+    """Chunk-level denoising stage with worker-local persistent KV caches."""
+
+    def __init__(
+        self,
+        name: str,
+        dit_model: LingBotWorldFastDiT,
+        model_runtime_config: ModelRuntimeConfig,
+    ) -> None:
+        super().__init__(name, model_runtime_config)
         self.dit = dit_model
-        self.torch_dtype = torch_dtype
+        self.dit.set_attention_config(model_runtime_config.attention_config)
+        self.model_names = ["dit"]
+        self._cache_registry: dict[int, _DenoisingCacheState] = {}
+
+    def parallel_models(self) -> None:
+        """Configure Ulysses SP and optional FSDP inside a ParallelWorker."""
+        parallel_config = self.model_runtime_config.parallel_config
+        self.dit.device_mesh = create_device_mesh_from_config(parallel_config)
+        self.dit.set_attention_config(self.model_runtime_config.attention_config)
+        if parallel_config.sp_ulysses_degree > 1:
+            self.dit.enable_usp(self.dit.device_mesh)
+        if parallel_config.enable_fsdp:
+            logger.info(f"Enabling FSDP for {self.name}")
+            self.dit = shard_model(
+                module=self.dit,
+                device_id=self.device,
+                wrap_module_names=self.dit.get_fsdp_module_names(),
+                param_dtype=self.torch_dtype,
+                reduce_dtype=self.torch_dtype,
+                buffer_dtype=self.torch_dtype,
+            )
+            self.onload_models_flag = True
+
+    def _init_self_kv_cache(
+        self,
+        batch_size: int,
+        kv_size: int,
+    ) -> list[dict[str, torch.Tensor | int]]:
+        head_dim = self.dit.dim // self.dit.num_heads
+        ulysses_world_size = get_ulysses_world_size(getattr(self.dit, "device_mesh", None))
+        num_heads = self.dit.num_heads
+        if ulysses_world_size > 1:
+            num_heads = (num_heads + ulysses_world_size - 1) // ulysses_world_size
+        shape = (batch_size, kv_size, num_heads, head_dim)
+        return [
+            {
+                "k": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
+                "v": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
+                "global_end_index": 0,
+                "local_end_index": 0,
+            }
+            for _ in range(self.dit.num_layers)
+        ]
+
+    def _init_crossattn_cache(
+        self,
+        batch_size: int,
+        max_sequence_length: int,
+    ) -> list[dict[str, torch.Tensor | bool]]:
+        head_dim = self.dit.dim // self.dit.num_heads
+        shape = (batch_size, max_sequence_length, self.dit.num_heads, head_dim)
+        return [
+            {
+                "k": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
+                "v": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
+                "is_init": False,
+            }
+            for _ in range(self.dit.num_layers)
+        ]
+
+    @with_model_offload(["dit"])
+    def initialize_cache(
+        self,
+        cache_handle: int,
+        batch_size: int,
+        kv_size: int,
+        max_sequence_length: int,
+        sample_shift: float,
+        generator_state: list[int],
+    ) -> bool:
+        """Atomically register session-scoped KV, scheduler, and RNG state."""
+        if cache_handle in self._cache_registry:
+            raise ValueError(f"Cache handle {cache_handle} is already registered")
+
+        scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False)
+        timesteps = LingBotWorldFastTimesteps().select(scheduler, sample_shift)
+        generator = torch.Generator(device=self.device)
+        generator.set_state(torch.tensor(generator_state, dtype=torch.uint8))
+        state = _DenoisingCacheState(
+            scheduler=scheduler,
+            timesteps=timesteps,
+            self_kv_cache=self._init_self_kv_cache(batch_size, kv_size),
+            crossattn_cache=self._init_crossattn_cache(batch_size, max_sequence_length),
+            generator=generator,
+        )
+        self._cache_registry[cache_handle] = state
+        return True
 
     @staticmethod
     def _convert_flow_pred_to_x0(
@@ -83,3 +189,57 @@ class LingBotWorldFastDenoisingStage:
 
         logger.debug("LingBotWorldFast chunk denoised")
         return current_latent
+
+    @with_model_offload(["dit"])
+    def denoise_and_update_cache(
+        self,
+        cache_handle: int,
+        latent_chunk: torch.Tensor,
+        condition_chunk: torch.Tensor,
+        prompt_emb: torch.Tensor,
+        control_chunk: torch.Tensor | None,
+        current_start: int,
+        max_attention_size: int,
+    ) -> torch.Tensor:
+        """Denoise a chunk and commit its clean KV state inside each worker."""
+        try:
+            state = self._cache_registry[cache_handle]
+        except KeyError as exc:
+            raise KeyError(f"Unknown cache handle {cache_handle}") from exc
+        denoised = self.denoise_chunk(
+            latent_chunk=latent_chunk,
+            condition_chunk=condition_chunk,
+            prompt_emb=prompt_emb,
+            timesteps=state.timesteps,
+            scheduler=state.scheduler,
+            control_chunk=control_chunk,
+            self_kv_cache=state.self_kv_cache,
+            crossattn_cache=state.crossattn_cache,
+            current_start=current_start,
+            max_attention_size=max_attention_size,
+            generator=state.generator,
+        )
+        self.dit(
+            x=denoised.to(dtype=self.torch_dtype),
+            timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
+            context=prompt_emb,
+            y=condition_chunk,
+            control_tensor=control_chunk,
+            kv_cache=state.self_kv_cache,
+            crossattn_cache=state.crossattn_cache,
+            current_start=current_start,
+            max_attention_size=max_attention_size,
+        )
+        return denoised
+
+    def has_cache(self, cache_handle: int) -> bool:
+        """Return whether this worker owns the requested cache handle."""
+        return cache_handle in self._cache_registry
+
+    def list_cache_handles(self) -> tuple[int, ...]:
+        """Return registered cache handles for diagnostics and tests."""
+        return tuple(sorted(self._cache_registry))
+
+    def release_cache(self, cache_handle: int) -> bool:
+        """Idempotently release worker-local state for one generation session."""
+        return self._cache_registry.pop(cache_handle, None) is not None
