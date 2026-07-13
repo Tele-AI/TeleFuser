@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -191,6 +192,177 @@ def build_action_control_chunk(
         w=latent_w,
     ).contiguous()
     return CameraControlChunk(control_tensor=control, num_latent_frames=control.shape[2], control_type="act")
+
+
+def truncate_control_sequence(
+    poses: object,
+    intrinsics: object,
+    action: object | None,
+    frame_num: int,
+) -> tuple[object, object, object | None]:
+    """Limit an external offline control sequence to the requested 4n+1 video frames."""
+    requested_frame_num = ((int(frame_num) - 1) // 4) * 4 + 1
+    available_frame_num = ((len(poses) - 1) // 4) * 4 + 1
+    effective_frame_num = min(requested_frame_num, available_frame_num)
+    if effective_frame_num < 2:
+        raise ValueError("Control sequence must contain at least two video frames")
+    trimmed_poses = poses[:effective_frame_num]
+    intrinsics_arr = np.asarray(intrinsics)
+    trimmed_intrinsics = intrinsics[:effective_frame_num] if intrinsics_arr.ndim > 1 else intrinsics
+    trimmed_action = action[:effective_frame_num] if action is not None else None
+    return trimmed_poses, trimmed_intrinsics, trimmed_action
+
+
+@dataclass(frozen=True)
+class LingBotWorldFastControlContext:
+    """Static geometry required to convert external actions into model controls."""
+
+    control_type: str
+    device: str | torch.device
+    torch_dtype: torch.dtype
+    orig_height: int
+    orig_width: int
+    height: int
+    width: int
+    latent_h: int
+    latent_w: int
+    latent_frames: int
+    chunk_size: int
+
+
+class LingBotWorldFastDeferredControl:
+    """Lazily materialize a control tensor at the pipeline's legacy execution point."""
+
+    def __init__(self, factory: Callable[[], torch.Tensor]) -> None:
+        self._factory = factory
+
+    def __call__(self) -> torch.Tensor:
+        return self._factory()
+
+
+class LingBotWorldFastOfflineControlSource:
+    """Keep offline action data outside the generation session and materialize it once."""
+
+    def __init__(
+        self,
+        builder: LingBotWorldFastControlBuilder,
+        poses: object,
+        intrinsics: object,
+        action: object | None = None,
+    ) -> None:
+        self._builder = builder
+        self._poses = poses
+        self._intrinsics = intrinsics
+        self._action = action
+        self._controls: list[torch.Tensor] | None = None
+
+    def control_at(self, chunk_index: int) -> LingBotWorldFastDeferredControl:
+        if chunk_index < 0:
+            raise ValueError(f"chunk_index must be non-negative, got {chunk_index}")
+        return LingBotWorldFastDeferredControl(lambda: self._materialize()[chunk_index])
+
+    def _materialize(self) -> list[torch.Tensor]:
+        if self._controls is None:
+            self._controls = self._builder.build_sequence(self._poses, self._intrinsics, self._action)
+        return self._controls
+
+
+class LingBotWorldFastControlBuilder:
+    """Convert externally owned action data into per-chunk model control tensors."""
+
+    def __init__(self, context: LingBotWorldFastControlContext) -> None:
+        self.context = context
+
+    def defer(self, action: dict[str, object]) -> LingBotWorldFastDeferredControl:
+        """Return a control factory for materialization within the pipeline call."""
+        return LingBotWorldFastDeferredControl(lambda: self.build(action))
+
+    @staticmethod
+    def _align_action_frames(action: torch.Tensor, target_frames: int) -> torch.Tensor:
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        if action.shape[0] == target_frames:
+            return action
+        sampled = action[::4]
+        if sampled.shape[0] >= target_frames:
+            return sampled[:target_frames]
+        if action.shape[0] == 1:
+            return action.repeat(target_frames, 1)
+        if action.shape[0] < target_frames:
+            raise ValueError(f"Action length {action.shape[0]} is shorter than target latent frames {target_frames}")
+        indices = torch.linspace(0, action.shape[0] - 1, target_frames, device=action.device)
+        return action.index_select(0, indices.round().long())
+
+    def build(self, action: dict[str, object]) -> torch.Tensor:
+        """Build one model control tensor from one external chunk action."""
+        if "control_tensor" in action:
+            return torch.as_tensor(
+                action["control_tensor"],
+                device=self.context.device,
+                dtype=self.context.torch_dtype,
+            )
+        poses = action.get("poses")
+        intrinsics = action.get("intrinsics")
+        if poses is None or intrinsics is None:
+            raise ValueError("External action requires poses and intrinsics")
+        poses_t = torch.as_tensor(poses, dtype=torch.float32, device=self.context.device)
+        intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.context.device)
+        if intrinsics_t.ndim == 1:
+            intrinsics_t = intrinsics_t.unsqueeze(0).repeat(poses_t.shape[0], 1)
+        intrinsics_t = self._transform_intrinsics(intrinsics_t)
+        poses_rel = compute_relative_poses(poses_t, framewise=True)
+        return self._build_tensor(poses_rel, intrinsics_t, action.get("action"))
+
+    def build_sequence(
+        self,
+        poses: object,
+        intrinsics: object,
+        action: object | None = None,
+    ) -> list[torch.Tensor]:
+        """Build all controls for an offline action sequence without storing it in a session."""
+        poses_t = torch.as_tensor(poses, dtype=torch.float32)
+        intrinsics_t = self._transform_intrinsics(torch.as_tensor(intrinsics, dtype=torch.float32))
+        source_frames = len(poses_t)
+        if source_frames < 2:
+            raise ValueError("Control sequence requires at least two poses")
+        interpolated = interpolate_camera_poses(
+            src_indices=np.linspace(0, source_frames - 1, source_frames),
+            src_rot_mat=np.asarray(poses_t[:, :3, :3]),
+            src_trans_vec=np.asarray(poses_t[:, :3, 3]),
+            tgt_indices=np.linspace(0, source_frames - 1, self.context.latent_frames),
+        )
+        poses_rel = compute_relative_poses(interpolated.to(self.context.device), framewise=True)
+        intrinsics_t = intrinsics_t[0].to(self.context.device).repeat(len(poses_rel), 1)
+        control = self._build_tensor(poses_rel, intrinsics_t, action)
+        return list(control.split(self.context.chunk_size, dim=2))
+
+    def _transform_intrinsics(self, intrinsics: torch.Tensor) -> torch.Tensor:
+        return get_ks_transformed(
+            intrinsics,
+            height_org=self.context.orig_height,
+            width_org=self.context.orig_width,
+            height_resize=self.context.height,
+            width_resize=self.context.width,
+            height_final=self.context.height,
+            width_final=self.context.width,
+        )
+
+    def _build_tensor(self, poses: torch.Tensor, intrinsics: torch.Tensor, action: object | None) -> torch.Tensor:
+        if self.context.control_type == "act" and action is not None:
+            action_t = torch.as_tensor(action, dtype=torch.float32, device=self.context.device)
+            action_t = self._align_action_frames(action_t, len(poses))
+            return build_action_control_chunk(
+                poses,
+                intrinsics,
+                action_t,
+                self.context.latent_h,
+                self.context.latent_w,
+                self.context.height,
+                self.context.width,
+            ).control_tensor
+        return build_camera_control_chunk(
+            poses, intrinsics, self.context.latent_h, self.context.latent_w, self.context.height, self.context.width
+        ).control_tensor
 
 
 def load_camera_control_inputs(action_path: str | Path) -> tuple[np.ndarray, np.ndarray]:

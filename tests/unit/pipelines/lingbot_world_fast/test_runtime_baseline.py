@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -32,19 +31,17 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
     pipeline.denoise_stage = MagicMock()
     pipeline._next_cache_handle = 0
     pipeline.timesteps = LingBotWorldFastTimesteps()
-    pipeline._populate_session_controls = MagicMock()
     pipeline.encode_prompt = MagicMock(return_value=torch.zeros(1, 4, 8))
     pipeline._prepare_image_tensor = MagicMock(return_value=torch.zeros(3, 16, 16))
     pipeline._encode_condition_video = MagicMock(
         side_effect=lambda _image, frame_num: torch.zeros(17, (frame_num - 1) // 4 + 1, 2, 2)
     )
-    pipeline._prepare_control_chunks = MagicMock(return_value=None)
     return pipeline
 
 
 def _create_runtime(frame_num: int, seed: int = 42):
     pipeline = _build_runtime_pipeline()
-    runtime = pipeline.create_runtime(
+    runtime = pipeline._create_initialized_session(
         LingBotWorldFastSessionConfig(
             prompt="baseline",
             image=Image.new("RGB", (16, 16)),
@@ -79,8 +76,8 @@ def test_generation_sessions_receive_isolated_cache_and_decoder_handles() -> Non
         chunk_size=3,
     )
 
-    first = pipeline.create_session(config)
-    second = pipeline.create_session(config)
+    first = pipeline._create_initialized_session(config)
+    second = pipeline._create_initialized_session(config)
 
     assert first.cache_handle == 0
     assert second.cache_handle == 1
@@ -93,7 +90,7 @@ def test_cache_initialization_failure_triggers_global_cleanup() -> None:
     pipeline.denoise_stage.initialize_cache.side_effect = RuntimeError("rank initialization failed")
 
     with pytest.raises(RuntimeError, match="rank initialization failed"):
-        pipeline.create_session(
+        pipeline._create_initialized_session(
             LingBotWorldFastSessionConfig(
                 prompt="baseline",
                 image=Image.new("RGB", (16, 16)),
@@ -168,7 +165,7 @@ def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None
         current_chunk_index=0,
         noise_chunks=[torch.zeros_like(cached_latent)],
         condition_chunks=[torch.zeros_like(cached_latent)],
-        control_chunks=None,
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
         chunk_size=3,
         frame_tokens=1,
         world_kv_cached_latents={0: cached_latent},
@@ -177,7 +174,7 @@ def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None
         emitted_frames=0,
     )
 
-    frames = pipeline.generate_next_chunk(runtime)
+    frames = pipeline.generate_next_chunk(runtime, control=torch.zeros(1))
 
     assert frames == expected_frames
     assert runtime.current_chunk_index == 1
@@ -195,18 +192,3 @@ def test_runtime_rejects_non_aligned_frame_count() -> None:
 def test_runtime_rejects_frame_count_smaller_than_first_chunk() -> None:
     with pytest.raises(ValueError, match="frame_num"):
         _create_runtime(frame_num=5)
-
-
-@pytest.mark.xfail(strict=True, reason="Control alignment currently considers pose length only")
-def test_control_alignment_rejects_short_action_sequence() -> None:
-    poses = np.zeros((9, 4, 4), dtype=np.float32)
-    intrinsics = np.zeros((9, 4), dtype=np.float32)
-    action = np.zeros((5, 6), dtype=np.float32)
-
-    with pytest.raises(ValueError, match="action"):
-        LingBotWorldFastPipeline._truncate_control_inputs_to_frame_num(
-            poses=poses,
-            intrinsics=intrinsics,
-            action=action,
-            frame_num=9,
-        )

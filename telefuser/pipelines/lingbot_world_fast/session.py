@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -25,10 +26,6 @@ class LingBotWorldFastSessionConfig:
     max_attention_size: int | None = None
     offload_model: bool = False
     max_sequence_length: int = 512
-    action_path: str | None = None
-    poses: object | None = None
-    intrinsics: object | None = None
-    action: object | None = None
     # Optional CacheSeek world_kv reuse. None preserves baseline behavior.
     world_kv_binding: object | None = None
     control_move_step: float = 0.18
@@ -42,17 +39,14 @@ class LingBotWorldFastChunkRequest:
     """Inputs for one explicitly indexed LingBot video chunk."""
 
     chunk_index: int
+    control: torch.Tensor | Callable[[], torch.Tensor] = field(repr=False)
     session_id: str | None = None
-    action: dict[str, object] | None = field(default=None, repr=False)
-    control_override: torch.Tensor | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.chunk_index < 0:
             raise ValueError(f"chunk_index must be non-negative, got {self.chunk_index}")
-        if self.action is not None and self.control_override is not None:
-            raise ValueError("Provide either action or control_override, not both")
-        if self.action is None and self.control_override is None:
-            raise ValueError("Each chunk request requires action or control_override")
+        if not isinstance(self.control, torch.Tensor) and not callable(self.control):
+            raise TypeError("Each chunk request requires a model control tensor or deferred control factory")
 
 
 @dataclass
@@ -71,6 +65,7 @@ class LingBotWorldFastSessionStatus(str, Enum):
 
     READY = "ready"
     RUNNING = "running"
+    NEW = "new"
     COMMITTED = "committed"
     POISONED = "poisoned"
     RELEASED = "released"
@@ -80,26 +75,26 @@ class LingBotWorldFastSessionStatus(str, Enum):
 class LingBotWorldFastGenerationSession:
     """Externally owned state for one chunked LingBot generation."""
 
-    prompt_emb: torch.Tensor
-    encoded_image_latent: torch.Tensor
-    noise_chunks: list[torch.Tensor]
-    condition_chunks: list[torch.Tensor]
-    control_chunks: list[torch.Tensor] | None
-    latent_h: int
-    latent_w: int
-    latent_f: int
-    height: int
-    width: int
-    max_seq_len: int
-    frame_tokens: int
-    chunk_size: int
-    max_attention_size: int
-    cache_handle: int | None
+    config: LingBotWorldFastSessionConfig
+    prompt_emb: torch.Tensor | None = field(default=None, repr=False)
+    encoded_image_latent: torch.Tensor | None = field(default=None, repr=False)
+    noise_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
+    condition_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
+    latent_h: int = 0
+    latent_w: int = 0
+    latent_f: int = 0
+    height: int = 0
+    width: int = 0
+    max_seq_len: int = 0
+    frame_tokens: int = 0
+    chunk_size: int = 0
+    max_attention_size: int = 0
+    cache_handle: int | None = None
     decoder_state: WanVideoVAEStreamingDecodeState = field(default_factory=WanVideoVAEStreamingDecodeState)
     current_chunk_index: int = 0
     emitted_frames: int = 0
     active: bool = True
-    status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.READY
+    status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.NEW
     poisoned_reason: str | None = None
     transaction_lock: object = field(default_factory=threading.RLock, repr=False)
     # KV geometry in latent frames; -1 means full-length KV.

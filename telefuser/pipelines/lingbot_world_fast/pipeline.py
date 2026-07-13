@@ -22,21 +22,12 @@ from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
 
-from .control import (
-    build_action_control_chunk,
-    build_camera_control_chunk,
-    compute_relative_poses,
-    get_ks_transformed,
-    interpolate_camera_poses,
-    load_action_control_inputs,
-    load_camera_control_inputs,
-)
+from .control import LingBotWorldFastControlContext
 from .denoising import LingBotWorldFastDenoisingStage
 from .session import (
     LingBotWorldFastChunkRequest,
     LingBotWorldFastChunkResult,
     LingBotWorldFastGenerationSession,
-    LingBotWorldFastRuntimeState,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionStatus,
 )
@@ -202,6 +193,33 @@ class LingBotWorldFastPipeline(BasePipeline):
             return ow1, oh1
         return ow2, oh2
 
+    def control_context(self, session_config: LingBotWorldFastSessionConfig) -> LingBotWorldFastControlContext:
+        """Return control geometry without allocating a generation runtime."""
+        width, height = self._best_output_size(
+            session_config.image.width,
+            session_config.image.height,
+            self.config.max_area,
+        )
+        height, width = self.check_resize_height_width(height, width)
+        frame_num = ((session_config.frame_num - 1) // 4) * 4 + 1
+        latent_frames = (frame_num - 1) // 4 + 1
+        latent_frames -= latent_frames % session_config.chunk_size
+        if latent_frames < session_config.chunk_size:
+            raise ValueError("frame_num must contain at least one complete latent chunk")
+        return LingBotWorldFastControlContext(
+            control_type=self.config.control_type,
+            device=self.device,
+            torch_dtype=self.torch_dtype,
+            orig_height=self.config.orig_height,
+            orig_width=self.config.orig_width,
+            height=height,
+            width=width,
+            latent_h=height // 8,
+            latent_w=width // 8,
+            latent_frames=latent_frames,
+            chunk_size=session_config.chunk_size,
+        )
+
     def _prepare_image_tensor(self, image: Image.Image, height: int, width: int) -> torch.Tensor:
         image = image.convert("RGB").resize((width, height), Image.BICUBIC)
         array = np.asarray(image, dtype=np.float32) / 255.0
@@ -228,160 +246,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         mask = torch.cat([torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1), mask[:, 1:]], dim=1)
         mask = mask.view(1, mask.shape[1] // 4, 4, latent_h, latent_w).transpose(1, 2)[0]
         return torch.cat([mask, latent], dim=0)
-
-    def _populate_session_controls(self, session_config: LingBotWorldFastSessionConfig) -> None:
-        if session_config.action_path is None:
-            return
-        if session_config.poses is not None and session_config.intrinsics is not None:
-            if session_config.control_mode != "act" or session_config.action is not None:
-                return
-
-        if session_config.control_mode == "act":
-            poses, intrinsics, action = load_action_control_inputs(session_config.action_path)
-            if session_config.action is None:
-                session_config.action = action
-        else:
-            poses, intrinsics = load_camera_control_inputs(session_config.action_path)
-
-        if session_config.poses is None:
-            session_config.poses = poses
-        if session_config.intrinsics is None:
-            session_config.intrinsics = intrinsics
-
-    @staticmethod
-    def _truncate_control_inputs_to_frame_num(
-        poses: object,
-        intrinsics: object,
-        action: object | None,
-        frame_num: int,
-    ) -> tuple[object, object, object | None, int]:
-        requested_frame_num = ((int(frame_num) - 1) // 4) * 4 + 1
-        pose_frame_num = ((len(poses) - 1) // 4) * 4 + 1
-        effective_frame_num = min(requested_frame_num, pose_frame_num)
-
-        trimmed_poses = poses[:effective_frame_num]
-        intrinsics_arr = np.asarray(intrinsics)
-        if intrinsics_arr.ndim > 1:
-            trimmed_intrinsics = intrinsics[:effective_frame_num]
-        else:
-            trimmed_intrinsics = intrinsics
-        trimmed_action = action[:effective_frame_num] if action is not None else None
-        return trimmed_poses, trimmed_intrinsics, trimmed_action, effective_frame_num
-
-    @staticmethod
-    def _align_action_frames(action: torch.Tensor, target_frames: int) -> torch.Tensor:
-        if action.ndim == 1:
-            action = action.unsqueeze(0)
-        if action.shape[0] == target_frames:
-            return action
-
-        sampled = action[::4]
-        if sampled.shape[0] >= target_frames:
-            return sampled[:target_frames]
-        if action.shape[0] == 1:
-            return action.repeat(target_frames, 1)
-        if action.shape[0] < target_frames:
-            raise ValueError(f"Action length {action.shape[0]} is shorter than target latent frames {target_frames}")
-
-        indices = torch.linspace(0, action.shape[0] - 1, target_frames, device=action.device)
-        return action.index_select(0, indices.round().long())
-
-    def _prepare_control_chunks(
-        self,
-        session_config: LingBotWorldFastSessionConfig,
-        lat_f: int,
-        lat_h: int,
-        lat_w: int,
-        height: int,
-        width: int,
-        chunk_size: int,
-    ) -> list[torch.Tensor] | None:
-        if session_config.poses is None or session_config.intrinsics is None:
-            return None
-
-        poses = torch.as_tensor(session_config.poses, dtype=torch.float32)
-        intrinsics = torch.as_tensor(session_config.intrinsics, dtype=torch.float32)
-        intrinsics = get_ks_transformed(
-            intrinsics,
-            height_org=self.config.orig_height,
-            width_org=self.config.orig_width,
-            height_resize=height,
-            width_resize=width,
-            height_final=height,
-            width_final=width,
-        )
-
-        len_c2ws = len(poses)
-        lat_f_target = int(lat_f - (lat_f % chunk_size))
-        poses_interp = interpolate_camera_poses(
-            src_indices=np.linspace(0, len_c2ws - 1, len_c2ws),
-            src_rot_mat=np.asarray(poses[:, :3, :3]),
-            src_trans_vec=np.asarray(poses[:, :3, 3]),
-            tgt_indices=np.linspace(0, len_c2ws - 1, lat_f_target),
-        )
-        poses_rel = compute_relative_poses(poses_interp.to(self.device), framewise=True)
-        intrinsics = intrinsics[0].to(self.device).repeat(len(poses_rel), 1)
-
-        if session_config.control_mode == "act" and session_config.action is not None:
-            action = torch.as_tensor(session_config.action, dtype=torch.float32, device=self.device)
-            action = self._align_action_frames(action, len(poses_rel))
-            chunk = build_action_control_chunk(poses_rel, intrinsics, action, lat_h, lat_w, height, width)
-        else:
-            chunk = build_camera_control_chunk(poses_rel, intrinsics, lat_h, lat_w, height, width)
-
-        return list(chunk.control_tensor.split(chunk_size, dim=2))
-
-    def build_control_override(
-        self,
-        runtime: LingBotWorldFastRuntimeState,
-        chunk: dict,
-    ) -> torch.Tensor | None:
-        if "control_tensor" in chunk:
-            return torch.as_tensor(chunk["control_tensor"], device=self.device, dtype=self.torch_dtype)
-
-        poses = chunk.get("poses")
-        intrinsics = chunk.get("intrinsics")
-        if poses is None or intrinsics is None:
-            return None
-
-        poses_t = torch.as_tensor(poses, dtype=torch.float32, device=self.device)
-        intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.device)
-        if intrinsics_t.ndim == 1:
-            intrinsics_t = intrinsics_t.unsqueeze(0).repeat(poses_t.shape[0], 1)
-
-        intrinsics_t = get_ks_transformed(
-            intrinsics_t,
-            height_org=self.config.orig_height,
-            width_org=self.config.orig_width,
-            height_resize=runtime.height,
-            width_resize=runtime.width,
-            height_final=runtime.height,
-            width_final=runtime.width,
-        )
-        poses_rel = compute_relative_poses(poses_t, framewise=True)
-
-        if chunk.get("action") is not None:
-            action_t = torch.as_tensor(chunk["action"], dtype=torch.float32, device=self.device)
-            action_t = self._align_action_frames(action_t, len(poses_rel))
-            control = build_action_control_chunk(
-                poses_rel,
-                intrinsics_t,
-                action_t,
-                runtime.latent_h,
-                runtime.latent_w,
-                runtime.height,
-                runtime.width,
-            )
-        else:
-            control = build_camera_control_chunk(
-                poses_rel,
-                intrinsics_t,
-                runtime.latent_h,
-                runtime.latent_w,
-                runtime.height,
-                runtime.width,
-            )
-        return control.control_tensor
 
     def _release_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
         cache_handle = session.cache_handle
@@ -411,10 +275,6 @@ class LingBotWorldFastPipeline(BasePipeline):
             elif session.status != LingBotWorldFastSessionStatus.POISONED:
                 session.status = LingBotWorldFastSessionStatus.RELEASED
 
-    def release_runtime(self, runtime: LingBotWorldFastRuntimeState) -> None:
-        """Compatibility wrapper for the Stage 1 runtime API."""
-        self.release_session(runtime)
-
     def close(self) -> None:
         """Deterministically close the multi-process denoising worker group."""
         denoise_stage = getattr(self, "denoise_stage", None)
@@ -435,21 +295,43 @@ class LingBotWorldFastPipeline(BasePipeline):
         request: LingBotWorldFastChunkRequest,
         progress_callback: Callable[..., None] | None = None,
     ) -> LingBotWorldFastChunkResult:
-        """Generate one transactional, action-driven chunk for an external session."""
+        """Initialize a session on first use and generate one controlled chunk."""
         if not session.transaction_lock.acquire(blocking=False):
             raise RuntimeError("LingBot session already has a chunk in progress")
         try:
-            return self._generate_session_chunk(session, request, progress_callback)
+            self._validate_chunk_request(session, request)
+            resolved_control: torch.Tensor | None = None
+            if session.status == LingBotWorldFastSessionStatus.NEW:
+                try:
+
+                    def materialize_first_control() -> None:
+                        nonlocal resolved_control
+                        resolved_control = self._resolve_control(request.control)
+
+                    initialized = self._create_initialized_session(
+                        session.config,
+                        progress_callback,
+                        before_cache=materialize_first_control,
+                    )
+                    session.__dict__.update(
+                        (key, value) for key, value in initialized.__dict__.items() if key != "transaction_lock"
+                    )
+                except Exception as exc:
+                    session.status = LingBotWorldFastSessionStatus.POISONED
+                    session.poisoned_reason = f"{type(exc).__name__}: {exc}"
+                    self.release_session(session)
+                    raise
+            if resolved_control is None:
+                resolved_control = self._resolve_control(request.control)
+            return self._generate_session_chunk(session, request, resolved_control, progress_callback)
         finally:
             session.transaction_lock.release()
 
-    def _generate_session_chunk(
-        self,
+    @staticmethod
+    def _validate_chunk_request(
         session: LingBotWorldFastGenerationSession,
         request: LingBotWorldFastChunkRequest,
-        progress_callback: Callable[..., None] | None,
-    ) -> LingBotWorldFastChunkResult:
-        """Execute a chunk while the caller holds the session transaction lock."""
+    ) -> None:
         if session.status == LingBotWorldFastSessionStatus.POISONED:
             raise RuntimeError(f"Cannot continue poisoned LingBot session: {session.poisoned_reason}")
         if session.status == LingBotWorldFastSessionStatus.RUNNING:
@@ -461,17 +343,26 @@ class LingBotWorldFastPipeline(BasePipeline):
                 f"Chunk request index {request.chunk_index} does not match session index {session.current_chunk_index}"
             )
 
+    @staticmethod
+    def _resolve_control(control: torch.Tensor | Callable[[], torch.Tensor]) -> torch.Tensor:
+        resolved = control() if callable(control) else control
+        if not isinstance(resolved, torch.Tensor):
+            raise TypeError("Deferred control factory must return a torch.Tensor")
+        return resolved
+
+    def _generate_session_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        request: LingBotWorldFastChunkRequest,
+        control: torch.Tensor,
+        progress_callback: Callable[..., None] | None,
+    ) -> LingBotWorldFastChunkResult:
+        """Execute a chunk while the caller holds the session transaction lock."""
         session.status = LingBotWorldFastSessionStatus.RUNNING
         try:
-            control_override = request.control_override
-            if request.action is not None:
-                control_override = self.build_control_override(session, request.action)
-            if control_override is None:
-                raise ValueError("Chunk action did not produce a control tensor")
-
             chunk_frames = self.generate_next_chunk(
                 session,
-                control_override=control_override,
+                control=control,
                 progress_callback=progress_callback,
             )
         except Exception as exc:
@@ -501,40 +392,38 @@ class LingBotWorldFastPipeline(BasePipeline):
     def generate_video(
         self,
         session_config: LingBotWorldFastSessionConfig,
+        controls: list[torch.Tensor | Callable[[], torch.Tensor]],
         progress_callback: Callable[..., None] | None = None,
     ) -> list[Image.Image]:
-        """Compatibility helper that drains an explicit generation session into one video."""
-        session = self.create_session(session_config, progress_callback=progress_callback)
+        """Drain externally prepared controls through the single-chunk API."""
+        session = LingBotWorldFastGenerationSession(config=session_config)
         frames: list[Image.Image] = []
         try:
-            while session.active:
-                chunk_index = session.current_chunk_index
-                control_override = None
-                if session.control_chunks is not None and chunk_index < len(session.control_chunks):
-                    control_override = session.control_chunks[chunk_index]
+            for chunk_index, control in enumerate(controls):
                 result = self(
                     session,
                     LingBotWorldFastChunkRequest(
                         chunk_index=chunk_index,
-                        control_override=control_override,
+                        control=control,
                     ),
                     progress_callback=progress_callback,
                 )
                 frames.extend(result.frames)
+            if session.active:
+                raise ValueError("Control sequence ended before the generation session completed")
         finally:
             self.release_session(session)
         return frames
 
-    @ProfilingContext4Debug("create_session")
+    @ProfilingContext4Debug("initialize_session")
     @torch.inference_mode()
-    def create_session(
+    def _create_initialized_session(
         self,
         session_config: LingBotWorldFastSessionConfig,
         progress_callback: Callable[..., None] | None = None,
+        before_cache: Callable[[], None] | None = None,
     ) -> LingBotWorldFastGenerationSession:
-        """Prepare externally owned inputs and a worker-local cache for one session."""
-        self._notify_progress(progress_callback, "loading_controls")
-        self._populate_session_controls(session_config)
+        """Allocate model state for the first chunk; callers never invoke this directly."""
         self._notify_progress(progress_callback, "encoding_prompt", device=str(self.text_device))
         prompt_emb = self.encode_prompt(session_config.prompt)
         self._notify_progress(progress_callback, "prompt_encoded")
@@ -547,15 +436,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         image_tensor = self._prepare_image_tensor(session_config.image, height, width)
 
         frame_num = ((session_config.frame_num - 1) // 4) * 4 + 1
-        if session_config.poses is not None and session_config.intrinsics is not None:
-            session_config.poses, session_config.intrinsics, session_config.action, frame_num = (
-                self._truncate_control_inputs_to_frame_num(
-                    poses=session_config.poses,
-                    intrinsics=session_config.intrinsics,
-                    action=session_config.action,
-                    frame_num=frame_num,
-                )
-            )
         self._notify_progress(
             progress_callback,
             "encoding_condition_video",
@@ -600,25 +480,16 @@ class LingBotWorldFastPipeline(BasePipeline):
         )
         noise_chunks = list(noise.split(session_config.chunk_size, dim=2))
         condition_chunks = list(latent_condition.unsqueeze(0).split(session_config.chunk_size, dim=2))
-        self._notify_progress(progress_callback, "preparing_controls")
-        control_chunks = self._prepare_control_chunks(
-            session_config=session_config,
-            lat_f=lat_f,
-            lat_h=lat_h,
-            lat_w=lat_w,
-            height=height,
-            width=width,
-            chunk_size=session_config.chunk_size,
-        )
-
+        if before_cache is not None:
+            before_cache()
         cache_handle = self._next_cache_handle
         self._next_cache_handle += 1
         session = LingBotWorldFastGenerationSession(
             prompt_emb=prompt_emb,
             encoded_image_latent=latent_condition,
+            config=session_config,
             noise_chunks=noise_chunks,
             condition_chunks=condition_chunks,
-            control_chunks=control_chunks,
             latent_h=lat_h,
             latent_w=lat_w,
             latent_f=lat_f,
@@ -659,21 +530,14 @@ class LingBotWorldFastPipeline(BasePipeline):
                 session.world_kv_cached_latents = {}
         self._notify_progress(progress_callback, "runtime_created", width=width, height=height, latent_frames=lat_f)
         logger.info(f"LingBot runtime created: {width}x{height}, latent={lat_f}x{lat_h}x{lat_w}")
+        session.status = LingBotWorldFastSessionStatus.READY
         return session
-
-    def create_runtime(
-        self,
-        session_config: LingBotWorldFastSessionConfig,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> LingBotWorldFastRuntimeState:
-        """Compatibility wrapper for the Stage 1 runtime API."""
-        return self.create_session(session_config, progress_callback=progress_callback)
 
     @torch.inference_mode()
     def generate_next_chunk(
         self,
-        runtime: LingBotWorldFastRuntimeState,
-        control_override: torch.Tensor | None = None,
+        runtime: LingBotWorldFastGenerationSession,
+        control: torch.Tensor,
         progress_callback: Callable[..., None] | None = None,
     ) -> list[Image.Image]:
         if runtime.current_chunk_index >= len(runtime.noise_chunks):
@@ -684,9 +548,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             idx = runtime.current_chunk_index
             latent_chunk = runtime.noise_chunks[idx]
             condition_chunk = runtime.condition_chunks[idx]
-            control_chunk = control_override
-            if control_chunk is None and runtime.control_chunks is not None and idx < len(runtime.control_chunks):
-                control_chunk = runtime.control_chunks[idx]
+            control_chunk = control
 
             self._notify_progress(progress_callback, "denoising_chunk", index=idx)
             current_start = idx * runtime.chunk_size * runtime.frame_tokens

@@ -18,12 +18,20 @@ from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
 from telefuser.core.module_manager import ModuleManager
+from telefuser.pipelines.lingbot_world_fast.control import (
+    LingBotWorldFastControlBuilder,
+    LingBotWorldFastOfflineControlSource,
+    load_action_control_inputs,
+    load_camera_control_inputs,
+    truncate_control_sequence,
+)
 from telefuser.pipelines.lingbot_world_fast.pipeline import (
     LingBotWorldFastPipeline,
     LingBotWorldFastPipelineConfig,
 )
 from telefuser.pipelines.lingbot_world_fast.session import (
     LingBotWorldFastChunkRequest,
+    LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
 )
 from telefuser.utils.video import save_video
@@ -122,21 +130,25 @@ def run(
         sample_shift=PPL_CONFIG["sample_shift"],
         seed=seed,
         max_attention_size=PPL_CONFIG["max_attention_size"],
-        action_path=action_path,
     )
-    session = pipeline.create_session(session_config)
+    control_context = pipeline.control_context(session_config)
+    control_builder = LingBotWorldFastControlBuilder(control_context)
+    if session_config.control_mode == "act":
+        poses, intrinsics, action = load_action_control_inputs(action_path)
+    else:
+        poses, intrinsics = load_camera_control_inputs(action_path)
+        action = None
+    poses, intrinsics, action = truncate_control_sequence(poses, intrinsics, action, session_config.frame_num)
+    control_source = LingBotWorldFastOfflineControlSource(control_builder, poses, intrinsics, action)
+    session = LingBotWorldFastGenerationSession(config=session_config)
     frames: list[Image.Image] = []
     try:
-        while session.active:
-            chunk_index = session.current_chunk_index
-            control_override = None
-            if session.control_chunks is not None and chunk_index < len(session.control_chunks):
-                control_override = session.control_chunks[chunk_index]
+        for chunk_index in range(control_context.latent_frames // control_context.chunk_size):
             result = pipeline(
                 session,
                 LingBotWorldFastChunkRequest(
                     chunk_index=chunk_index,
-                    control_override=control_override,
+                    control=control_source.control_at(chunk_index),
                 ),
             )
             frames.extend(result.frames)
