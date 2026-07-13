@@ -7,12 +7,20 @@ Test markers:
 import pytest
 import torch
 
-from telefuser.kernel.triton import (
-    fused_layernorm_scale_shift_gate_select01,
-    fused_residual_layernorm_scale_shift_gate_select01,
-    fused_scale_shift,
-    fused_scale_shift_gate_select,
-)
+try:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+    from telefuser.kernel.triton import (
+        fused_layernorm_scale_shift_gate_select01,
+        fused_residual_layernorm_scale_shift_gate_select01,
+        fused_scale_shift,
+        fused_scale_shift_gate_select,
+    )
+except (ImportError, RuntimeError) as exc:
+    pytest.skip(
+        f"Skipping Triton scale/shift tests: {exc}",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Reference Implementations

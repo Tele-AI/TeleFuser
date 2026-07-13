@@ -38,6 +38,7 @@ class FileService:
 
         for directory in [
             self.input_image_dir,
+            self.input_video_dir,
             self.output_dir,
             self.output_video_dir,
             self.output_image_dir,

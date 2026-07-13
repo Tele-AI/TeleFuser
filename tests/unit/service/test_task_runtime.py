@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 from telefuser.service.api.schema import TaskRequest, TaskResponse
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
@@ -23,6 +24,25 @@ def test_complete_task_does_not_override_cancelled_status() -> None:
     assert status["status"] == TaskStatus.CANCELLED.value
     assert status["error"] == "Task cancelled by user"
     assert status["output_path"] == message.output_path
+
+
+def test_complete_task_exports_runtime_metrics() -> None:
+    task_manager = TaskManager(max_queue_size=10)
+    task_id = task_manager.create_task(TaskRequest(task="t2v"))
+    task = task_manager.start_task(task_id)
+    task.start_time -= timedelta(seconds=2)
+
+    task_manager.complete_task(
+        task_id,
+        output_path="result.mp4",
+        peak_memory_mb=2048.0,
+        inference_time_s=1.5,
+    )
+
+    status = task_manager.get_task_status(task_id)
+    assert status is not None
+    assert status["peak_memory_mb"] == 2048.0
+    assert status["inference_time_s"] == 1.5
 
 
 class _ControlledMediaService:

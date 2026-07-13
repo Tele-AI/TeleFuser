@@ -49,5 +49,5 @@ benchmark:
   serverMetrics:
     enabled: ${TELEFUSER_AIPERF_SERVER_METRICS:true}
     urls:
-      - ${TELEFUSER_AIPERF_METRICS_URL:http://127.0.0.1:8000/metrics}
+      - ${TELEFUSER_AIPERF_METRICS_URL:http://127.0.0.1:8000/v1/service/metrics}
     formats: [json, csv]

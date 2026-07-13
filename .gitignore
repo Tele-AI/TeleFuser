@@ -107,6 +107,10 @@ venv.bak/
 .mypy_cache/
 
 # custom
+.tmp/
+/artifacts/
+/benchmarks/aiperf/
+/skills/
 /models
 /data
 .vscode
@@ -137,6 +141,11 @@ docs/**/modelzoo.md
 *.jpg
 *.MP3
 *.mp3
+
+# Source-controlled AIPerf stream benchmark profiles and control trace.
+!benchmarks/telefuser_aiperf/configs/*.json
+!benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+!benchmarks/baseline/sglang_lingbot_stream/configs/*.json
 
 project
 output

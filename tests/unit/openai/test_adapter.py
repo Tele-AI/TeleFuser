@@ -66,7 +66,7 @@ class TestRequestAdapter:
         assert task_req.aspect_ratio == "16:9"
 
     def test_video_to_task_preserves_exact_openai_size(self):
-        """Keep exact WxH size available for fixed-workload benchmark services."""
+        """Keep exact WxH size while using a TaskRequest-compatible aspect ratio."""
         openai_req = VideoGenerationsRequest(
             prompt="a cat playing",
             seconds=5,
@@ -78,7 +78,7 @@ class TestRequestAdapter:
         assert task_req.openai_video_size == "832x480"
         assert task_req.width == 832
         assert task_req.height == 480
-        assert task_req.aspect_ratio == "26:15"
+        assert task_req.aspect_ratio == "16:9"
 
     def test_video_to_task_image_to_video(self):
         """Convert I2V request (auto-detected from input)."""

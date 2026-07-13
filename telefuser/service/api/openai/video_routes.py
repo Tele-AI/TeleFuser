@@ -135,7 +135,15 @@ class VideoRoutes:
         """Initialize with ApiServer instance."""
         self.api = api_server
         self.task_manager: TaskManager | None = getattr(api_server, "task_manager", None)
-        self.file_service = getattr(api_server, "file_service", None)
+
+    @property
+    def file_service(self) -> Any | None:
+        """Return the current file service from the API server.
+
+        The ApiServer installs routes before initialize_services() wires the
+        file service, so route handlers must not keep the initial None value.
+        """
+        return getattr(self.api, "file_service", None)
 
     async def create_video(
         self,
@@ -226,6 +234,8 @@ class VideoRoutes:
                     seconds=task_data.get("target_video_length", 4),
                     model=task_data.get("model", "wan-video"),
                     output_path=task_data.get("output_path"),
+                    peak_memory_mb=task_data.get("peak_memory_mb"),
+                    inference_time_s=task_data.get("inference_time_s"),
                 )
                 videos.append(video)
 
@@ -270,6 +280,8 @@ class VideoRoutes:
             model=getattr(message, "model", None) or "wan-video",
             output_path=task_status.get("output_path"),
             progress=progress,
+            peak_memory_mb=task_status.get("peak_memory_mb"),
+            inference_time_s=task_status.get("inference_time_s"),
         )
 
         if status == TaskStatus.FAILED.value:
@@ -318,7 +330,7 @@ class VideoRoutes:
             raise HTTPException(status_code=404, detail=f"Video {video_id} has no output path")
 
         path = Path(output_path)
-        if not path.is_absolute():
+        if not path.is_absolute() and not path.exists():
             output_dir = getattr(self.file_service, "output_video_dir", None)
             if output_dir:
                 path = output_dir / path

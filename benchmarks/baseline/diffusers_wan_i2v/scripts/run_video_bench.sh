@@ -10,7 +10,7 @@ HEALTH_URL="${DIFFUSERS_WAN_AIPERF_HEALTH_URL:-${SERVER_URL}/v1/service/health}"
 AIPERF_BIN="${AIPERF_BIN:-aiperf}"
 
 if ! command -v "${AIPERF_BIN}" >/dev/null 2>&1; then
-    echo "aiperf is not installed. Set AIPERF_BIN or run: pip install -e ./benchmarks/aiperf" >&2
+    echo "aiperf is not installed. Set AIPERF_BIN or run: bash scripts/setup_aiperf_repo.sh" >&2
     exit 1
 fi
 

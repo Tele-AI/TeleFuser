@@ -1,0 +1,33 @@
+{
+  "contract": "benchmarks/telefuser_aiperf/stream_benchmark_contract.yaml",
+  "server_url": "http://127.0.0.1:8088",
+  "mode": "bidirectional",
+  "task": "bidirectional",
+  "prompt": "mock streaming transport benchmark",
+  "fps": 16,
+  "session_count": 4,
+  "warmup_sessions": 1,
+  "session_duration_s": 20.0,
+  "stagger_s": 0.25,
+  "control_trace_path": "benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json",
+  "request_extra": {
+    "frame_width": 320,
+    "frame_height": 180,
+    "frame_num": 320,
+    "frames_per_chunk": 1,
+    "jpeg_quality": 80,
+    "preencoded_frames": 16,
+    "ack_controls": true
+  },
+  "transport": {
+    "connect_timeout_s": 30.0,
+    "frame_timeout_s": 30.0,
+    "ice_gather_timeout_s": 5.0,
+    "shutdown_timeout_s": 5.0,
+    "receive_audio": false
+  },
+  "server_metrics": {
+    "enabled": false
+  },
+  "artifacts_dir": "artifacts/telefuser_aiperf/stream_transport_mock_compare"
+}

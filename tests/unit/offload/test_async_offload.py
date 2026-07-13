@@ -6,6 +6,12 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping async offload tests: CUDA not available",
+        allow_module_level=True,
+    )
+
 from telefuser.offload.async_offload import AsyncOffloadManager
 
 # All tests in this file require GPU

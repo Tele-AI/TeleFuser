@@ -58,7 +58,7 @@ telefuser/
 ├── feature_cache/    # Feature caching: AdaTaylorCache
 ├── cache/            # General cache management
 ├── offload/          # CPU offload strategies
-├── metrics/          # Metrics collection and monitoring
+├── metrics/          # Metrics collection, monitoring, and raw runtime facts
 ├── orchestrator/     # Pipeline orchestration
 ├── worker/           # Distributed worker management
 ├── entrypoints/      # CLI entry points
@@ -107,6 +107,12 @@ TeleFuser's model follows a strict layered architecture for operations:
    - No `torch.compiler.is_compiling()` checks
    - May use `torch.library.custom_op` for torch.compile compatibility
    - Only used by ops/ layer, never directly by models/
+
+### Benchmark Metrics Boundary
+
+- `telefuser/metrics/runtime.py` may measure synchronized target-side phase duration and allocator peaks.
+- Target services emit only raw, bounded phase/chunk/runtime facts; AIPerf owns warmup exclusion, aggregation, semantic mapping, artifacts, and UI.
+- Client delivery metrics and target compute metrics must remain distinct (`stream_fps` versus `chunk_compute_fps`).
 
 ## Code Style
 

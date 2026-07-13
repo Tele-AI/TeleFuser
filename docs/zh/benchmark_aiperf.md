@@ -4,10 +4,11 @@
 
 - 批处理视频服务的压测运行方式
 - AIPerf 配置、参数和结果文件
-- 远程同步、部署和复现实验脚本
+- 本地与 baseline benchmark 的运行说明
 
-更细的 benchmark 设计、分层、对标 shortlist 和 `stream-serve` 规划放在：
+更细的 benchmark 设计、接口边界和已实现资产清单放在：
 
+- [当前 Benchmark 对比快照](benchmark_current_comparison.md)
 - [TeleFuser 与 AIPerf Benchmark 设计](benchmark_aiperf_design.md)
 
 ## 目录结构
@@ -16,17 +17,34 @@
 
 ```text
 benchmarks/telefuser_aiperf/
-├── README.md
+├── benchmark_contract.yaml
+├── stream_benchmark_contract.yaml
 ├── configs/
 │   ├── video_generation_quick.yaml
 │   ├── video_generation_e2e.yaml
 │   ├── video_generation_rate.yaml
-│   └── stream_lingbot_world_fast_quick.json
+│   ├── stream_lingbot_world_fast_compare.json
+│   ├── stream_lingbot_world_fast_quick.json
+│   ├── stream_transport_mock_compare.json
+│   └── stream_transport_mock_quick.json
 ├── data/
 │   ├── video_prompts.jsonl
 │   └── stream_lingbot_controls.json
 └── scripts/
+    ├── run_mock_webrtc_service.sh
     ├── run_video_bench.sh
+    └── run_stream_bench.sh
+
+benchmarks/baseline/sglang_lingbot_stream/
+├── benchmark_contract.yaml
+├── configs/
+│   ├── stream_lingbot_world_fast_compare.json
+│   ├── stream_lingbot_world_fast_quick.json
+│   ├── stream_transport_mock_compare.json
+│   └── stream_transport_mock_quick.json
+└── scripts/
+    ├── run_service.sh
+    ├── run_mock_stream_service.sh
     └── run_stream_bench.sh
 ```
 
@@ -46,16 +64,18 @@ telefuser serve \
 确认服务健康检查可访问：
 
 ```bash
-curl http://127.0.0.1:8000/v1/service/health
+curl http://<telefuser-batch-host>:8000/v1/service/health
 ```
 
 ### 2. 安装 AIPerf
 
-当前仓库已经 vendored 一份 AIPerf clone 到 `benchmarks/aiperf`，可直接本地安装：
+TeleFuser 不直接 vendored AIPerf 源码。通过 setup 脚本拉取依赖仓库：
 
 ```bash
-pip install -e ./benchmarks/aiperf
+bash scripts/setup_aiperf_repo.sh
 ```
+
+脚本默认使用 `https://github.com/ActivePeter/aiperf` 的 `teleai` 分支，并把 checkout 放在 `benchmarks/aiperf` 后做 editable install。
 
 安装后确认 `aiperf` 命令可用：
 
@@ -76,13 +96,13 @@ bash benchmarks/telefuser_aiperf/scripts/run_video_bench.sh
 默认使用：
 
 - 配置文件：`benchmarks/telefuser_aiperf/configs/video_generation_quick.yaml`
-- 服务地址：`http://127.0.0.1:8000`
+- 服务地址：`http://<telefuser-batch-host>:8000`
 - prompt 文件：`benchmarks/telefuser_aiperf/data/video_prompts.jsonl`
 
 脚本会先检查：
 
 ```bash
-curl http://127.0.0.1:8000/v1/service/health
+curl http://<telefuser-batch-host>:8000/v1/service/health
 ```
 
 然后执行：
@@ -105,7 +125,7 @@ telefuser stream-serve \
 确认流式服务健康检查可访问：
 
 ```bash
-curl http://127.0.0.1:8088/v1/service/health
+curl http://<telefuser-stream-host>:8088/v1/service/health
 ```
 
 然后运行最小流式 benchmark：
@@ -118,23 +138,102 @@ bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 
 - 配置文件：`benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_quick.json`
 - 控制 trace：`benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json`
-- 服务地址：`http://127.0.0.1:8088`
+- 服务地址：`http://<telefuser-stream-host>:8088`
 
-如果远端机器有很多网卡或容器 veth，`run_stream_bench.py` 现在会默认自动探测本机的非 loopback 地址并用于 ICE host candidate 收敛。
-
-只有在你明确知道要锁定某个地址时，才手动传 `--ice-host-ip` 或设置 `TELEFUSER_WEBRTC_ICE_HOST_IPS`。不要默认写 `127.0.0.1`，否则在远程主机 / 容器网络里很容易把 WebRTC 连接锁死在本机回环地址。
-
-这条路径当前不是 AIPerf 原生 endpoint，而是 TeleFuser 侧独立的 WebRTC benchmark harness。
-
-如果在远程环境执行，建议直接用：
+这条路径由 AIPerf 原生 `profile --stream-config` 模式执行；TeleFuser 脚本只是薄启动器。等价的直接命令是：
 
 ```bash
-python3 scripts/remote_bench_sync.py stream-bootstrap
+uv run --project benchmarks/aiperf --extra streaming-webrtc \
+  aiperf profile \
+  --stream-config benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_quick.json
 ```
 
-它会同步代码、安装 WebRTC 依赖、自动探测可用的 `model_zoo` 根目录，并在远程仓库里写回一个非破坏性的 `model_zoo` 软链，方便后续直接起 `telefuser stream-serve`。
+AIPerf 默认使用 `ice_host_ips: ["auto"]`，按到 stream target 的系统路由自动选择本机源地址，适用于常见多网卡主机。
+容器、TURN 或特殊路由需要固定 candidate 时，设置逗号分隔的 `TELEFUSER_STREAM_BENCH_ICE_HOST_IPS`，
+或直接向 AIPerf 重复传入 `--stream-ice-host-ip`；配置空列表才恢复全部地址枚举。
 
-另外，`run_stream_bench.sh` 和 `run_video_bench.sh` 会默认把 open-file limit 提升到 `8192`，避免 AIPerf/WebRTC 在启动时撞到文件描述符上限；如果你的环境需要不同值，可以用 `TELEFUSER_BENCH_NOFILE_LIMIT` 覆盖。
+Quick/compare 配置启用 `benchmark_metrics: true`，除客户端首帧、FPS 和控制延迟外，还采集 pipeline/runtime 初始化、
+逐 chunk compute/encode、分阶段 allocator peak、KV-cache/runtime 参数及 target 环境信息。`warmup_chunks` 按每个 measured
+session 排除开头 chunk 后再计算 mean、p50、p90、std 和加权 compute FPS；raw chunk 仍保留在 `sessions.jsonl`。
+
+### SGLang-Diffusion stream baseline
+
+SGLang-Diffusion 对接的是 `sgl-project/sglang` 主仓库里的 `sglang.multimodal_gen` diffusion runtime，不依赖单独的 `SGLang-Diffusion` 仓库。
+
+先启动 SGLang-Diffusion LingBot World 服务：
+
+```bash
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_service.sh
+```
+
+确认服务健康检查可访问：
+
+```bash
+curl http://<sglang-stream-host>:30000/health
+```
+
+然后运行 SGLang stream baseline：
+
+```bash
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_stream_bench.sh
+```
+
+默认使用：
+
+- 配置文件：`benchmarks/baseline/sglang_lingbot_stream/configs/stream_lingbot_world_fast_quick.json`
+- 控制 trace：`benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json`
+- 服务地址：`http://<sglang-stream-host>:30000`
+
+这条 baseline 使用 `robbyant/lingbot-world-fast-diffusers`，协议是 WebSocket + MessagePack。AIPerf adapter 将 `ArrowUp/ArrowDown/ArrowLeft/ArrowRight` 映射为 SGLang LingBot 的 `w/s/a/d` camera actions，结果写入和 TeleFuser stream benchmark 相同的 AIPerf streaming summary 结构。
+
+AIPerf 同时直接归一化 SGLang 原生 `chunk_stats`：scheduler compute、request prepare、输出编码/pacing/write、chunk 总时长、帧数、batch 数及 raw/wire bytes 都进入统一的 `summary.json`、`sessions.jsonl` 和 `stream_report.html`。插桩后的 SGLang endpoint 还会上报已有的 reset-scoped `OutputBatch.peak_memory_mb`；由于它来自 `max_memory_reserved()`，AIPerf 只映射到 `chunk_peak_reserved_bytes`，不会伪造 allocated peak。初始化 phase 时长仍保持不可用。
+
+正式 GPU-resident baseline 必须使用 `--performance-mode speed`。SGLang 的 `auto` 模式即使收到三个 `*-cpu-offload=false`，仍可能自动启用 VAE layerwise offload；这类结果只能单独标为 auto-offload，不能并入 TeleFuser 默认 GPU-resident 公平对比。
+
+### 纯流式 mock 压测
+
+这组 benchmark 只测 streaming 层，不加载底层生成模型。它适合回答：
+
+- WebRTC offer/answer 和连接建立本身需要多久
+- WebRTC media track 按固定 FPS 推帧时能否稳定
+- DataChannel 控制消息的 ack 和下一帧反馈延迟
+- WebSocket + MessagePack frame batch 协议在同样 session/count 下的开销
+
+TeleFuser mock target 走 TeleFuser-compatible WebRTC mock service，服务端只生成合成视频帧：
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_mock_webrtc_service.sh \
+  --host <telefuser-stream-bind-host> \
+  --port <telefuser-stream-port>
+
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_transport_mock_compare.json \
+  --stream-server-url http://<telefuser-stream-host>:<telefuser-stream-port>
+```
+
+SGLang mock target 只启动兼容 `/health` 和 `/v1/realtime_video/generate` 的 WebSocket mock server，不调用 SGLang runtime 或任何模型：
+
+```bash
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_mock_stream_service.sh \
+  --host <sglang-stream-bind-host> \
+  --port <sglang-stream-port>
+
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_stream_bench.sh \
+  benchmarks/baseline/sglang_lingbot_stream/configs/stream_transport_mock_compare.json \
+  --stream-server-url http://<sglang-stream-host>:<sglang-stream-port>
+```
+
+默认 compare 配置使用：
+
+- `session_count=4`
+- `warmup_sessions=1`
+- `session_duration_s=20`
+- `fps=16`
+- 同一份 `stream_lingbot_controls.json` 控制 trace
+- TeleFuser mock：`320x180` 合成帧，经 WebRTC media track 发送
+- SGLang mock：每个 `frame_batch` 携带固定大小二进制 payload，经 WebSocket + MessagePack 发送
+
+这组结果只能说明流式协议、harness 和控制消息路径开销，不能说明真实模型推理速度。
 
 ## 可用配置
 
@@ -218,8 +317,8 @@ bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
 这些配置支持通过环境变量覆盖：
 
 ```bash
-export TELEFUSER_AIPERF_URL=http://127.0.0.1:8000
-export TELEFUSER_AIPERF_METRICS_URL=http://127.0.0.1:8000/v1/service/metrics
+export TELEFUSER_AIPERF_URL=http://<telefuser-batch-host>:8000
+export TELEFUSER_AIPERF_METRICS_URL=http://<telefuser-batch-host>:8000/v1/service/metrics
 export TELEFUSER_AIPERF_CONCURRENCY=4
 export TELEFUSER_AIPERF_REQUESTS=12
 export TELEFUSER_AIPERF_SIZE=1280x720
@@ -245,305 +344,6 @@ bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
   --session-count 1 \
   --session-duration-s 20 \
   --print-events
-```
-
-## 远程一键同步与校验
-
-为了方便把这套 benchmark 资产同步到远程测试机，仓库中新增了：
-
-```bash
-python3 scripts/remote_bench_sync.py --help
-```
-
-这个脚本默认面向当前测试机：
-
-- `root@116.238.240.2`
-- SSH 端口 `30724`
-- 远程仓库路径 `/workspace/TeleFuser`
-- TeleFuser 服务 Python `/root/venv/cu128/bin/python`
-- 独立 benchmark Python `/root/venv/telefuser-bench/bin/python`
-
-推荐模式是**分离部署**：
-
-- 已经部署好的 TeleFuser 服务环境继续保留
-- 额外创建一个独立的 benchmark venv，只安装 AIPerf 和压测依赖
-
-这样可以避免 benchmark 依赖覆盖 TeleFuser 现有运行环境里的：
-
-- `transformers`
-- `protobuf`
-- `pillow`
-- `huggingface_hub`
-
-如果你要跑 `telefuser stream-serve` 的世界模型流式 benchmark，推荐直接走一键自动化预备：
-
-```bash
-python3 scripts/remote_bench_sync.py stream-bootstrap
-```
-
-这条命令会自动完成：
-
-- 同步流式 benchmark 资产
-- 安装 AIPerf 和 `aiortc` / `opencv-python-headless`
-- 安装 TeleFuser 到独立服务环境
-- 校验 `examples/lingbot/stream_lingbot_world_fast.py`
-- 校验 `model_zoo` 路径
-- 打印远程 GPU 状态
-
-如果你只想更新安装而不重新同步：
-
-```bash
-python3 scripts/remote_bench_sync.py install --install-webrtc --install-telefuser
-```
-
-如果目标机器变化，可以通过参数覆盖：
-
-```bash
-python3 scripts/remote_bench_sync.py \
-  --host <host> \
-  --port <port> \
-  --user <user> \
-  --remote-repo <remote_repo> \
-  --remote-python <remote_service_python> \
-  --remote-bench-python <remote_bench_python> \
-  gpu-status
-```
-
-### 1. 查看远程 GPU 状态
-
-```bash
-python3 scripts/remote_bench_sync.py gpu-status
-```
-
-这个命令会通过 SSH 执行 `nvidia-smi`，输出：
-
-- 每张卡的利用率
-- 显存占用
-- 当前活跃计算进程
-
-### 2. 首次全量同步
-
-```bash
-python3 scripts/remote_bench_sync.py bootstrap
-```
-
-这个命令会把当前管理的 benchmark 资产全量同步到远程，包括：
-
-- `benchmarks/aiperf`
-- `benchmarks/telefuser_aiperf`
-- `docs/en/benchmark_aiperf.md`
-- `docs/zh/benchmark_aiperf.md`
-- `docs/en/index.md`
-- `docs/zh/index.md`
-- `mkdocs.yml`
-
-如果你还希望同步完成后直接安装并校验：
-
-```bash
-python3 scripts/remote_bench_sync.py bootstrap --install --verify
-```
-
-默认行为是：
-
-- 创建独立 benchmark venv
-- 在独立环境中安装 vendored `benchmarks/aiperf`
-- 复用同一个 benchmark venv 运行流式 benchmark Python 脚本
-- 不修改当前 TeleFuser 服务环境
-
-如果你明确希望同时刷新 TeleFuser 服务环境：
-
-```bash
-python3 scripts/remote_bench_sync.py bootstrap --install --verify --install-telefuser
-```
-
-如果你想强制重建独立 benchmark venv：
-
-```bash
-python3 scripts/remote_bench_sync.py bootstrap --install --verify --recreate-bench-venv
-```
-
-如果当前只想演练命令而不真正执行：
-
-```bash
-python3 scripts/remote_bench_sync.py --dry-run bootstrap --install --verify
-```
-
-### 3. 后续增量同步
-
-首次同步后，脚本会在本地写一个状态文件，用于记录上次已同步的文件哈希：
-
-```text
-~/.cache/telefuser/remote_bench_sync/<target>.json
-```
-
-后续直接运行：
-
-```bash
-python3 scripts/remote_bench_sync.py sync
-```
-
-脚本只会上传发生变化的受管文件。
-
-如果你想看本次计划同步哪些文件：
-
-```bash
-python3 scripts/remote_bench_sync.py sync --print-files
-```
-
-如果你想忽略状态文件并强制重新全量上传：
-
-```bash
-python3 scripts/remote_bench_sync.py sync --full
-```
-
-### 4. 远程安装
-
-```bash
-python3 scripts/remote_bench_sync.py install
-```
-
-默认会在远程执行：
-
-- 创建独立 venv：`/root/venv/telefuser-bench`
-- `pip install -e /workspace/TeleFuser/benchmarks/aiperf`
-
-也就是说，默认**不会**修改现有 TeleFuser 服务环境。
-
-如果你确实要刷新 TeleFuser 服务环境：
-
-```bash
-python3 scripts/remote_bench_sync.py install --install-telefuser
-```
-
-如果你想强制重建独立 benchmark venv：
-
-```bash
-python3 scripts/remote_bench_sync.py install --recreate-bench-venv
-```
-
-如果你只想更新源码，不想拉依赖，可以使用：
-
-```bash
-python3 scripts/remote_bench_sync.py install --no-deps
-```
-
-如果你当前不想安装 AIPerf，只想做其它步骤：
-
-```bash
-python3 scripts/remote_bench_sync.py install --skip-aiperf
-```
-
-### 5. 远程校验
-
-```bash
-python3 scripts/remote_bench_sync.py verify
-```
-
-校验内容包括：
-
-- benchmark 配置文件是否存在
-- TeleFuser 服务环境中的 `import telefuser`
-- TeleFuser 服务环境中的 `telefuser --help`
-- 独立 benchmark 环境中的 `import aiperf`
-- 独立 benchmark 环境中的 `aiperf --help`
-- 独立 benchmark 环境中的 `python benchmarks/telefuser_aiperf/scripts/run_stream_bench.py --help`
-
-注意：
-
-- 如果你之前使用的是 `install --no-deps`，那么对应环境的 CLI 校验可能失败
-- 如果你只想检查 benchmark 环境，可以使用：
-
-```bash
-python3 scripts/remote_bench_sync.py verify --skip-telefuser
-```
-
-### 6. 运行 benchmark
-
-#### 6.1 一键跑 `Wan2.1-I2V-14B-480P` 对比
-
-如果远程机器上的 benchmark 资产和隔离环境已经准备好，可以直接用一条命令顺序跑：
-
-- `TeleFuser`
-- `Diffusers` baseline
-
-```bash
-python3 scripts/remote_bench_sync.py batch-compare \
-  --framework both \
-  --gpu 0
-```
-
-这条命令会自动完成：
-
-- 校验远程 `telefuser` / `aiperf` 环境
-- 解析 TeleFuser batch 模型目录
-- 对指定 GPU 执行 `gpu_burner.sh stop <gpu>`
-- 检查该 GPU 是否真的空闲
-- 拉起 TeleFuser 480P 服务
-- 跑对齐后的 TeleFuser AIPerf config
-- 停掉 TeleFuser 服务
-- 拉起 Diffusers baseline 服务
-- 跑对齐后的 Diffusers AIPerf config
-- 输出两边最新 `summary.json` 路径和关键指标
-
-默认行为是**非破坏性的**：
-
-- 只会停止指定 GPU 上的 burner 占位
-- 不会主动杀掉远程机器上已有的其它计算任务
-- 如果 GPU 在停止 burner 之后仍然被真实任务占用，会直接失败
-
-如果你希望它等待 GPU 空闲，而不是立即失败，可以显式给等待窗口：
-
-```bash
-python3 scripts/remote_bench_sync.py batch-compare \
-  --framework both \
-  --gpu 0 \
-  --gpu-idle-timeout 600
-```
-
-如果你只想单独跑一边：
-
-```bash
-python3 scripts/remote_bench_sync.py batch-compare --framework telefuser --gpu 0
-python3 scripts/remote_bench_sync.py batch-compare --framework diffusers --gpu 0
-```
-
-这条自动化入口当前固定使用：
-
-- TeleFuser config:
-  `benchmarks/telefuser_aiperf/configs/video_generation_wan21_i2v_480p_compare.yaml`
-- Diffusers config:
-  `benchmarks/baseline/diffusers_wan_i2v/configs/video_generation_compare.yaml`
-
-如果远程环境还没准备好，先执行：
-
-```bash
-python3 scripts/remote_bench_sync.py sync
-python3 scripts/remote_bench_sync.py install --install-telefuser
-python3 scripts/remote_bench_sync.py verify
-```
-
-#### 6.2 手工跑 TeleFuser batch benchmark
-
-当 TeleFuser 服务已经在远程机器上启动后，可以直接指定独立 benchmark 环境中的 `aiperf` 可执行文件：
-
-```bash
-export AIPERF_BIN=/root/venv/telefuser-bench/bin/aiperf
-
-bash benchmarks/telefuser_aiperf/scripts/run_video_bench.sh \
-  benchmarks/telefuser_aiperf/configs/video_generation_e2e.yaml
-```
-
-这样 benchmark 走独立环境，TeleFuser 服务继续走原来的运行环境，两边互不覆盖。
-
-#### 6.3 手工跑流式 benchmark
-
-流式 benchmark 则直接走独立环境里的 Python：
-
-```bash
-export TELEFUSER_STREAM_BENCH_PYTHON=/root/venv/telefuser-bench/bin/python
-
-bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
-  benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_quick.json
 ```
 
 ## 为什么没有启用 AIPerf 自带 readiness probe
@@ -595,6 +395,10 @@ artifacts/telefuser_aiperf/
 - `artifacts/telefuser_aiperf/video_e2e`
 - `artifacts/telefuser_aiperf/video_rate`
 - `artifacts/telefuser_aiperf/stream_lingbot_quick/<timestamp>`
+- `artifacts/telefuser_aiperf/stream_lingbot_compare/<timestamp>`
+- `artifacts/telefuser_aiperf/stream_transport_mock_compare/<timestamp>`
+- `artifacts/sglang_lingbot_stream/stream_lingbot_compare/<timestamp>`
+- `artifacts/sglang_lingbot_stream/stream_transport_mock_compare/<timestamp>`
 
 通常可以关注：
 
@@ -603,3 +407,269 @@ artifacts/telefuser_aiperf/
 - server metrics JSON / CSV
 - stream benchmark 的逐 session JSONL
 - stream benchmark 的逐事件 JSONL
+- stream benchmark 的 `target_metadata.json`，包含 target 启动 phase 和软件/硬件环境 snapshot
+- stream benchmark 的 `stream_report.html`；这是 AIPerf 生成的跨系统统一查看界面，可直接用浏览器打开
+
+## 历史指标服务（GreptimeDB）
+
+跨任务历史存储、API 和前端统一由 AIPerf 提供。TeleFuser 与 SGLang 只生成标准产物，不在 target 仓库实现数据库 client、历史 API
+或专用前端分支。
+
+GreptimeDB 可用后，先导入已有的 profile 和 stream 产物：
+
+```bash
+uv run --project benchmarks/aiperf aiperf history ingest \
+  --greptime-url http://127.0.0.1:4000 \
+  --greptime-database public \
+  --artifact-root artifacts \
+  --artifact-root work_dirs/benchmarks
+```
+
+再启动只读 API 和内置 Vue 前端：
+
+```bash
+uv run --project benchmarks/aiperf aiperf history serve \
+  --greptime-url http://127.0.0.1:4000 \
+  --greptime-database public \
+  --artifact-root artifacts \
+  --artifact-root work_dirs/benchmarks \
+  --host 127.0.0.1 \
+  --port 8095
+```
+
+打开 `http://127.0.0.1:8095/` 查看历史任务、跨 Run 指标曲线，以及单 Run 的 session、control、phase、chunk、timeslice、GPU、
+Prometheus 和 normalized 指标。warmup 与 profiling 通过 `phase` 区分；客户端 `stream_fps` 与 target
+`chunk_compute_fps` 保持为两个指标。
+
+GreptimeDB 是强依赖。连接或建表失败会终止启动，运行期查询失败返回 HTTP 503；API 和 UI 不会切换到 SQLite、内存索引、文件直查
+或缓存结果。JSON/JSONL 仍是可重放输入，但不属于在线查询路径。
+
+完整部署说明见 [AIPerf Benchmark History Dashboard](https://github.com/ActivePeter/aiperf/blob/teleai/docs/tutorials/history-dashboard.md)，实现边界见
+[AIPerf Benchmark History Service Design](https://github.com/ActivePeter/aiperf/blob/teleai/docs/dev/history-service-design.md) 和
+[TeleFuser 与 AIPerf Benchmark 设计](benchmark_aiperf_design.md)。
+
+## 实测记录
+
+### 2026-07-09，Wan2.1 I2V 480P batch benchmark
+
+运行环境：
+
+- 机器：远端 H100 测试环境，具体机器信息已脱敏
+- GPU：4 卡可见配置
+- 模型：Wan2.1-I2V-14B-480P
+- 服务入口：TeleFuser Wan2.1 I2V 480P 固定 workload 服务
+- benchmark 配置：TeleFuser Wan2.1 I2V 480P compare 配置
+- artifact：已归档，具体路径不在公开文档中暴露
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| warmup 请求数 | 1 |
+| profiling 请求数 | 2 |
+| profiling errors | 0 |
+| benchmark duration | 325.49 s |
+| request latency avg | 163084.80 ms |
+| request latency p50 | 163084.80 ms |
+| request latency p90 | 163373.28 ms |
+| request latency p99 | 163438.19 ms |
+| request latency min / max | 162724.20 / 163445.40 ms |
+| request throughput | 0.00614 requests/s |
+
+备注：该配置的 `server_metrics.enabled=false`，所以 AIPerf 没有导出 GPU telemetry；运行过程中 GPU 4/5/6/7 处于高负载。
+
+### 2026-07-09，LingBot-World-Fast stream benchmark
+
+运行环境：
+
+- 机器：远端 H100 测试环境，具体机器信息已脱敏
+- GPU：4 卡可见配置；LingBot-World-Fast 当前默认单卡 GPU-resident
+- 模型：Wan2.2-I2V-A14B + LingBot-World-Fast
+- 服务入口：TeleFuser LingBot stream 服务
+- benchmark 配置：TeleFuser LingBot stream compare 配置
+- artifact：已归档，具体路径不在公开文档中暴露
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| profile sessions | 1 / 1 |
+| failed sessions | 0 |
+| success rate | 100% |
+| configured session duration | 90.0 s |
+| actual session runtime | 40.15 s |
+| frames received | 406 |
+| offer RTT | 6783.97 ms |
+| WebRTC connected latency | 14432.81 ms |
+| first metadata latency | 14540.01 ms |
+| first frame latency | 14598.90 ms |
+| stream FPS | 16.05 |
+| control ack latency avg / p50 / p90 / max | 8.88 / 2.11 / 22.56 / 42.69 ms |
+| control-to-next-frame latency avg / p50 / p90 / max | 37.60 / 36.63 / 53.76 / 55.50 ms |
+
+备注：
+
+- 本次是单 session benchmark，没有并发；当前 `LingBotWorldFastService` 也只允许一个 active session。
+- `stream_lingbot_world_fast_compare.json` 的 `session_duration_s=90` 是等待上限；本次服务在完成生成后发送 `done`，所以实际 session runtime 为 40.15 s。
+- 运行结束后 stream 服务仍为 `stream_ready=true`，服务所在 GPU 常驻显存约 47 GB。
+
+### 2026-07-09，SGLang-Diffusion LingBot-World-Fast 早期可用性记录
+
+运行环境：
+
+- 机器：远端 H100 测试环境，具体机器信息已脱敏
+- GPU：单卡可见配置
+- 模型：LingBot-World-Fast Diffusers layout
+- 临时 Diffusers layout：已脱敏
+- benchmark 配置：SGLang LingBot stream compare 配置
+- artifact：已归档，具体路径不在公开文档中暴露
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| profile sessions | 1 / 1 |
+| failed sessions | 0 |
+| success rate | 100% |
+| configured session duration | 90.0 s |
+| actual session runtime | 27.68 s |
+| frames received | 93 |
+| offer RTT | 81.00 ms |
+| WebSocket connected latency | 81.01 ms |
+| first metadata latency | 9896.79 ms |
+| first frame latency | 9896.79 ms |
+| stream FPS | 5.18 |
+| control ack latency avg / p50 / p90 / max | 6622.36 / 6622.36 / 6622.36 / 6622.36 ms |
+| control-to-next-frame latency avg / p50 / p90 / max | 6621.65 / 6621.65 / 6621.65 / 6621.65 ms |
+
+备注：
+
+- 本次是单 session benchmark，没有并发。
+- 该记录早于 `performance_mode=speed` 公平性约束，不作为当前 GPU-resident 正式对比表输入。
+- `request_extra` 显式设置 `realtime_causal_sink_size=9` 和 `realtime_causal_kv_cache_num_frames=18`；未设置时 SGLang 默认 45 帧 causal KV cache，在单张 H100 上 runtime OOM。
+- `SGLANG_LINGBOT_DISABLE_FLASHINFER_ROPE=1` 让 SGLang 使用 RoPE fallback。当前远端只有 pip CUDA 13 toolkit，`flashinfer` 首次 JIT RoPE kernel 会因为 CUDA compiler/header 不兼容失败。
+- 服务启动后常驻显存约 48 GB；运行过程中日志记录 peak memory usage 约 73522 MB。
+
+### 2026-07-13，SGLang 1xH100 GPU-resident 正式 baseline
+
+运行条件：
+
+- 单张 80GB H100，`performance_mode=speed`
+- DiT、text encoder、VAE 均驻留 GPU，无 CPU 或 layerwise offload
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- warmup 1 session，profile 1 session，每个 session 8 chunks
+- 远端 FlashInfer 的 CUDA compiler/header 不兼容，因此启用了已记录的 PyTorch RoPE fallback
+
+同一服务得到两个必须分开解释的结果：
+
+| Cache 配置 | 结果 | 解释 |
+| --- | --- | --- |
+| sink 9 / window 18 | warmup 0/1、profile 0/1，CUDA OOM | 进程显存约 79.16 GiB，不能作为成功性能样本 |
+| sink 6 / window 9 | warmup 1/1、profile 1/1 | 单卡 GPU-resident tuned baseline |
+
+6/9 tuned profile 指标：
+
+| 指标 | 数值 |
+| --- | ---: |
+| frames / chunks | 93 / 8 |
+| warmup 排除后的 chunks | 7 |
+| target compute FPS | 5.1906 |
+| client stream FPS | 5.6788 |
+| first frame latency | 3076.18 ms |
+| session runtime | 19.277 s |
+| chunk compute mean / p90 | 2.3119 / 2.3362 s |
+| chunk encode mean | 0.0551 s |
+| chunk total mean | 2.3699 s |
+| control ack mean | 3333.92 ms |
+| peak reserved allocator | 76,919,341,056 bytes（73,356 MiB） |
+
+成功产物位于 `work_dirs/benchmarks/sglang_lingbot_stream/h100_gpu_resident_speed_rope_fallback_peak_20260713/20260713_115343_a2eae617`；9/18 OOM 产物位于 `work_dirs/benchmarks/sglang_lingbot_stream/h100_gpu_resident_speed_official_cache_oom_20260713/20260713_115523_418b0f5e`。两者 cache 几何不同，不能合并成同配置对比结论。
+
+### 2026-07-10，纯流式 mock benchmark
+
+运行环境：
+
+- 机器：本地/远端测试环境信息已脱敏
+- 模型：不加载真实模型
+- TeleFuser target：TeleFuser-compatible WebRTC mock service
+- SGLang target：SGLang-style WebSocket + MessagePack mock service
+- benchmark 配置：纯流式 mock compare 配置
+- artifact：已归档，具体路径不在公开文档中暴露
+
+运行口径：
+
+- `session_count=4`
+- `warmup_sessions=1`
+- `session_duration_s=20`
+- `fps=16`
+- 同一份控制 trace
+
+结果：
+
+| 指标 | TeleFuser WebRTC mock | SGLang WebSocket mock |
+| --- | ---: | ---: |
+| profile sessions | 4 / 4 | 4 / 4 |
+| failed sessions | 0 | 0 |
+| offer RTT avg | 5009.97 ms | 1.99 ms |
+| connected latency avg | 10518.66 ms | 2.00 ms |
+| first frame latency avg | 10583.69 ms | 64.73 ms |
+| stream FPS avg | 16.00 | 16.05 |
+| frames received avg | 319 | 320 |
+| control ack latency avg | 0.70 ms | 0.35 ms |
+| control-to-next-frame latency avg | 25.63 ms | 21.93 ms |
+
+备注：
+
+- 这组 benchmark 不加载任何生成模型，只测 streaming / transport / control path。
+- 两边 steady-state FPS 和 control-to-next-frame 都接近目标帧率下的帧间隔，说明纯流式层不是真实世界模型低 FPS 的主要瓶颈。
+- TeleFuser mock 的首帧和 connected latency 主要受当前 WebRTC SDP/ICE 建连路径影响；它影响首帧，不代表模型推理慢。
+
+### 2026-07-10，纯流式 mock 极限 FPS sweep
+
+运行环境：
+
+- 机器：本地/远端测试环境信息已脱敏
+- 模型：不加载真实模型
+- TeleFuser target：TeleFuser-compatible WebRTC mock service
+- SGLang target：SGLang-style WebSocket + MessagePack mock service
+- benchmark 配置：纯流式 mock 配置，逐次覆盖目标 FPS
+- artifact：已归档，具体路径不在公开文档中暴露
+
+运行口径：
+
+- 单 session sweep，每个 target 单独运行
+- `session_duration_s=6`
+- TeleFuser mock 使用 `320x180` 合成视频帧
+- SGLang mock 每个 `frame_batch` 携带固定大小二进制 payload
+- 两边都不加载 LingBot、Wan 或 SGLang diffusion runtime
+
+结果：
+
+| Target FPS | TeleFuser WebRTC mock 实测 FPS | SGLang WebSocket mock 实测 FPS |
+| ---: | ---: | ---: |
+| `30` | `30.02` | `28.82` |
+| `60` | `60.18` | `54.04` |
+| `120` | `120.05` | `104.58` |
+| `240` | `241.25` | `179.87` |
+| `480` | `355.92` | `260.40` |
+| `960` | `394.97` | `394.82` |
+| `1920` | 未运行 | `350.64` |
+
+补充指标：
+
+| Target | TeleFuser first-frame | TeleFuser control ack | SGLang first-frame | SGLang control ack |
+| ---: | ---: | ---: | ---: | ---: |
+| `30` | `10635.24 ms` | `1.79 ms` | `275.56 ms` | `4.60 ms` |
+| `60` | `10673.16 ms` | `8.73 ms` | `73.53 ms` | `3.56 ms` |
+| `120` | `10990.64 ms` | `5.34 ms` | `52.43 ms` | `2.23 ms` |
+| `240` | `10728.59 ms` | `0.97 ms` | `36.18 ms` | `4.29 ms` |
+| `480` | `10708.52 ms` | `4.53 ms` | `91.68 ms` | `0.66 ms` |
+| `960` | `10768.45 ms` | `2.95 ms` | `48.53 ms` | `3.01 ms` |
+| `1920` | 未运行 | 未运行 | `60.51 ms` | `3.09 ms` |
+
+备注：
+
+- TeleFuser WebRTC mock 在 `240 FPS` 前基本贴住目标，`480/960 FPS` 后开始饱和，本次最高观测约 `395 FPS`。
+- SGLang WebSocket mock 本次最高观测也约 `395 FPS`，出现在 `960 FPS` target；继续提高到 `1920 FPS` 后下降到约 `351 FPS`。
+- TeleFuser first-frame 仍约 `10.6s-11.0s`，主要反映当前 WebRTC SDP/ICE 建连和 harness 等待路径，不是模型耗时。
+- SGLang 这里统计的是 WebSocket + MessagePack `frame_batch`，不是 RTP video frame；这组 sweep 只能解释纯 streaming 层上限。

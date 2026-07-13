@@ -15,7 +15,7 @@ if ! ulimit -n "${NOFILE_LIMIT}" >/dev/null 2>&1; then
 fi
 
 if ! command -v "${AIPERF_BIN}" >/dev/null 2>&1; then
-    echo "aiperf is not installed. Set AIPERF_BIN or run: pip install -e ./benchmarks/aiperf" >&2
+    echo "aiperf is not installed. Set AIPERF_BIN or run: bash scripts/setup_aiperf_repo.sh" >&2
     exit 1
 fi
 

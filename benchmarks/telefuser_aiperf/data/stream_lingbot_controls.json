@@ -1,0 +1,52 @@
+{
+  "events": [
+    {
+      "delay_s": 1.0,
+      "message": {
+        "type": "control",
+        "key": "ArrowUp",
+        "action": "press"
+      }
+    },
+    {
+      "delay_s": 1.8,
+      "message": {
+        "type": "control",
+        "key": "ArrowUp",
+        "action": "release"
+      }
+    },
+    {
+      "delay_s": 2.8,
+      "message": {
+        "type": "control",
+        "key": "ArrowLeft",
+        "action": "press"
+      }
+    },
+    {
+      "delay_s": 3.6,
+      "message": {
+        "type": "control",
+        "key": "ArrowLeft",
+        "action": "release"
+      }
+    },
+    {
+      "delay_s": 4.6,
+      "message": {
+        "type": "control",
+        "key": "ArrowRight",
+        "action": "press"
+      }
+    },
+    {
+      "delay_s": 5.4,
+      "message": {
+        "type": "control",
+        "key": "ArrowRight",
+        "action": "release"
+      }
+    }
+  ]
+}

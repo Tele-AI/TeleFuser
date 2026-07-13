@@ -56,7 +56,7 @@ class TestPipelineP2PCommMethods:
         """Test that send on last stage logs warning and returns None."""
         comm = PipelineP2PComm(None)  # Single GPU, is_last_stage=True
 
-        tensor = torch.randn(1, 10, 512, device="cuda")
+        tensor = torch.randn(1, 10, 512)
         result = comm.send(tensor)
 
         assert result is None
@@ -72,7 +72,7 @@ class TestPipelineP2PCommMethods:
         """Test send_recv on single GPU (no-op)."""
         comm = PipelineP2PComm(None)  # Single GPU
 
-        send_tensor = torch.randn(1, 10, 512, device="cuda")
+        send_tensor = torch.randn(1, 10, 512)
         result = comm.send_recv(send_tensor)
 
         # On single GPU, recv_buffer is None since there's no previous stage
@@ -114,7 +114,7 @@ class TestPipelineP2PCommMethods:
         """Test queue_send on last stage does nothing."""
         comm = PipelineP2PComm(None)  # is_last_stage=True
 
-        tensor = torch.randn(1, 10, 512, device="cuda")
+        tensor = torch.randn(1, 10, 512)
         comm.queue_send(tensor)
 
         assert len(comm._ops) == 0
@@ -123,7 +123,7 @@ class TestPipelineP2PCommMethods:
         """Test queue_recv on first stage does nothing."""
         comm = PipelineP2PComm(None)  # is_first_stage=True
 
-        buffer = torch.randn(1, 10, 512, device="cuda")
+        buffer = torch.randn(1, 10, 512)
         comm.queue_recv(buffer)
 
         assert len(comm._ops) == 0
@@ -152,7 +152,7 @@ class TestPipelineP2PCommLatentMethods:
         """Test send_latent on last stage returns early."""
         comm = PipelineP2PComm(None)  # is_last_stage=True
 
-        tensor = torch.randn(1, 10, 512, device="cuda")
+        tensor = torch.randn(1, 10, 512)
         # Should not raise, just return
         comm.send_latent(tensor)
 
@@ -182,7 +182,7 @@ class TestPipelineP2PCommLatentMethods:
         """Test send_latent_async on last stage returns None."""
         comm = PipelineP2PComm(None)  # is_last_stage=True
 
-        tensor = torch.randn(1, 10, 512, device="cuda")
+        tensor = torch.randn(1, 10, 512)
         result = comm.send_latent_async(tensor)
 
         assert result is None

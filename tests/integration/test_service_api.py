@@ -19,7 +19,16 @@ class TestApiEndpoints:
     @pytest.fixture
     def mock_pipeline_service(self):
         """Create a mock pipeline service."""
-        service = Mock()
+        service = Mock(
+            spec=[
+                "is_running",
+                "process_task",
+                "server_metadata",
+                "start_pipeline",
+                "stop_distributed_inference",
+            ]
+        )
+        service.is_running = True
         service.start_pipeline = Mock(return_value=True)
         service.stop_distributed_inference = Mock(return_value=None)
         service.process_task = Mock(return_value={"status": "success"})

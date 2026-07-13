@@ -1,0 +1,31 @@
+{
+  "contract": "benchmarks/baseline/sglang_lingbot_stream/benchmark_contract.yaml",
+  "server_url": "http://127.0.0.1:30000",
+  "mode": "bidirectional",
+  "task": "bidirectional",
+  "prompt": "walk forward through the scene",
+  "image_path": "examples/data/1.png",
+  "fps": 16,
+  "session_count": 1,
+  "warmup_sessions": 0,
+  "session_duration_s": 12.0,
+  "stagger_s": 0.0,
+  "control_trace_path": "benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json",
+  "request_extra": {
+    "num_frames": 9,
+    "num_inference_steps": 4,
+    "guidance_scale": 1.0,
+    "realtime_output_format": "webp",
+    "output_compression": 95,
+    "max_chunks": 8,
+    "realtime_output_pacing": false
+  },
+  "transport": {
+    "connect_timeout_s": 30.0,
+    "message_timeout_s": 120.0
+  },
+  "server_metrics": {
+    "enabled": false
+  },
+  "artifacts_dir": "artifacts/sglang_lingbot_stream/stream_lingbot_quick"
+}

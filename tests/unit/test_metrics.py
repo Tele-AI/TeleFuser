@@ -238,6 +238,9 @@ class TestHistogram:
         assert "request_duration_bucket" in "".join(lines)
         assert "request_duration_sum" in "".join(lines)
         assert "request_duration_count" in "".join(lines)
+        assert 'request_duration_bucket{le="0.1"} 1' in lines
+        assert 'request_duration_bucket{le="1.0"} 2' in lines
+        assert 'request_duration_bucket{le="+Inf"} 2' in lines
 
 
 class TestSummary:

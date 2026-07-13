@@ -71,6 +71,8 @@ class TaskResponse(BaseModel):
     task_id: str
     task_status: TaskStatus
     output_path: str
+    peak_memory_mb: float | None = Field(default=None, ge=0, description="Peak accelerator memory used by the task.")
+    inference_time_s: float | None = Field(default=None, ge=0, description="Task inference duration in seconds.")
 
 
 class StopTaskResponse(BaseModel):

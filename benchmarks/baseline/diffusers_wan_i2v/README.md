@@ -51,10 +51,10 @@ curl http://127.0.0.1:8010/v1/service/health
 
 ## Run AIPerf
 
-Install the vendored AIPerf first:
+Set up the AIPerf dependency repository first:
 
 ```bash
-pip install -e ./benchmarks/aiperf
+bash scripts/setup_aiperf_repo.sh
 ```
 
 Then run:

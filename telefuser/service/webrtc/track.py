@@ -51,7 +51,7 @@ class AudioGeneratorTrack(MediaStreamTrack):
         self._buffer = bytearray()
         self._buf_offset = 0
         self._frame_count = 0
-        self._start_time: float | None = None
+        self._last_frame_at: float | None = None
         self._finished = False
 
     def feed(self, data: bytes) -> None:
@@ -65,13 +65,10 @@ class AudioGeneratorTrack(MediaStreamTrack):
         self._finished = True
 
     async def recv(self) -> av.AudioFrame:
-        if self._start_time is None:
-            self._start_time = time.time()
-
-        target_time = self._start_time + self._frame_count * self._frame_duration
-        wait = target_time - time.time()
-        if wait > 0:
-            await asyncio.sleep(wait)
+        if self._last_frame_at is not None:
+            wait = self._frame_duration - (time.perf_counter() - self._last_frame_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
 
         buf_avail = len(self._buffer) - self._buf_offset
         while buf_avail < self._bytes_per_frame:
@@ -105,6 +102,7 @@ class AudioGeneratorTrack(MediaStreamTrack):
         frame.pts = self._frame_count * self._samples_per_frame
         frame.time_base = fractions.Fraction(1, self._sample_rate)
         self._frame_count += 1
+        self._last_frame_at = time.perf_counter()
         return frame
 
 
@@ -137,7 +135,7 @@ class FrameGeneratorTrack(MediaStreamTrack):
         self._frame_count = 0
         self._task: asyncio.Task | None = None
         self._finished = False
-        self._start_time: float | None = None
+        self._last_frame_at: float | None = None
         self._last_frame: av.VideoFrame | None = None
         self._placeholder_width = 640
         self._placeholder_height = 360
@@ -190,13 +188,10 @@ class FrameGeneratorTrack(MediaStreamTrack):
         if self._task is None and self._generator is not None:
             self._task = asyncio.create_task(self._consume_generator())
 
-        if self._start_time is None:
-            self._start_time = time.time()
-
-        target_time = self._start_time + self._frame_count * self._frame_interval
-        wait = target_time - time.time()
-        if wait > 0:
-            await asyncio.sleep(wait)
+        if self._last_frame_at is not None:
+            wait = self._frame_interval - (time.perf_counter() - self._last_frame_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
 
         try:
             frame = self._queue.get_nowait()
@@ -224,6 +219,7 @@ class FrameGeneratorTrack(MediaStreamTrack):
         frame.pts = self._frame_count * self._pts_per_frame
         frame.time_base = fractions.Fraction(1, _RTP_CLOCK_RATE)
         self._frame_count += 1
+        self._last_frame_at = time.perf_counter()
         return frame
 
     def stop(self) -> None:

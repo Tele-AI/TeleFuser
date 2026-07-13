@@ -8,11 +8,19 @@ import pytest
 import torch
 import torch.nn as nn
 
-from telefuser.kernel.triton import (
-    fused_add_rms_norm,
-    norm_infer,
-    triton_one_pass_rms_norm,
-)
+try:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+    from telefuser.kernel.triton import (
+        fused_add_rms_norm,
+        norm_infer,
+        triton_one_pass_rms_norm,
+    )
+except (ImportError, RuntimeError) as exc:
+    pytest.skip(
+        f"Skipping Triton RMSNorm tests: {exc}",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Reference Implementations

@@ -1,0 +1,42 @@
+{
+  "contract": "benchmarks/telefuser_aiperf/stream_benchmark_contract.yaml",
+  "server_url": "http://127.0.0.1:8088",
+  "mode": "bidirectional",
+  "task": "bidirectional",
+  "prompt": "walk forward through the scene",
+  "image_path": "examples/data/1.png",
+  "fps": 16,
+  "session_count": 1,
+  "warmup_sessions": 0,
+  "warmup_chunks": 1,
+  "session_duration_s": 90.0,
+  "stagger_s": 0.0,
+  "control_trace_path": "benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json",
+  "request_extra": {
+    "chunk_size": 3,
+    "frame_num": 81,
+    "sample_shift": 5.0,
+    "control_mode": "cam",
+    "show_control_hud": true,
+    "benchmark_metrics": true
+  },
+  "transport": {
+    "connect_timeout_s": 60.0,
+    "frame_timeout_s": 180.0,
+    "ice_gather_timeout_s": 5.0,
+    "shutdown_timeout_s": 5.0,
+    "receive_audio": false
+  },
+  "server_metrics": {
+    "enabled": true,
+    "urls": [
+      "http://127.0.0.1:8088/v1/service/metrics"
+    ],
+    "collection_interval_s": 1.0,
+    "export_raw_jsonl": true
+  },
+  "observability": {
+    "mapping": "builtin:telefuser"
+  },
+  "artifacts_dir": "artifacts/telefuser_aiperf/stream_lingbot_compare"
+}

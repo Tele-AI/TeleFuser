@@ -1,31 +1,21 @@
 # TeleFuser and AIPerf Benchmark
 
-This page describes how to benchmark TeleFuser batch video serving with AIPerf.
+This page describes how to benchmark TeleFuser batch video serving, TeleFuser WebRTC stream serving, and the SGLang-Diffusion LingBot stream baseline through AIPerf.
 
 Current scope:
 
 - `telefuser serve`
 - OpenAI-compatible `/v1/videos` API
-- end-to-end request latency and throughput
+- AIPerf end-to-end request latency and throughput
 - optional HTTP trace and TeleFuser metrics scraping
-
-Not covered yet:
-
 - `telefuser stream-serve`
 - WebRTC / DataChannel world-model sessions
+- SGLang-Diffusion LingBot World WebSocket baseline
 - frame-level and control-latency metrics
 
-For remote stream setup, use:
+Stream sessions are now executed by AIPerf's native `profile --stream-config` path. The TeleFuser and SGLang scripts only select the target config and URL.
 
-```bash
-python3 scripts/remote_bench_sync.py stream-bootstrap
-```
-
-That helper syncs the stream assets, installs WebRTC dependencies, auto-detects a usable `model_zoo` root, and writes a non-destructive `model_zoo` symlink inside the remote repo for later `telefuser stream-serve` startup.
-
-Both `run_stream_bench.sh` and `run_video_bench.sh` raise the open-file limit to `8192` by default to avoid AIPerf/WebRTC startup failures; override with `TELEFUSER_BENCH_NOFILE_LIMIT` if your environment needs a different value.
-
-For stream runs, `run_stream_bench.py` also auto-detects non-loopback local IPs for ICE candidate gathering when no explicit allowlist is provided. Use `--ice-host-ip` or `TELEFUSER_WEBRTC_ICE_HOST_IPS` only when you need to pin a specific address.
+AIPerf defaults to route-based ICE selection (`ice_host_ips: ["auto"]`) so a multi-homed host advertises the source address used to reach the stream target. Set the comma-separated `TELEFUSER_STREAM_BENCH_ICE_HOST_IPS` variable or repeat `--stream-ice-host-ip` only for container, TURN, or special-routing overrides; an empty list restores all aioice-discovered addresses.
 
 ## Assets
 
@@ -33,7 +23,8 @@ The benchmark assets live in:
 
 ```text
 benchmarks/telefuser_aiperf/
-├── README.md
+├── benchmark_contract.yaml
+├── stream_benchmark_contract.yaml
 ├── configs/
 ├── data/
 └── scripts/
@@ -42,7 +33,7 @@ benchmarks/telefuser_aiperf/
 ## Prerequisites
 
 1. Start a TeleFuser batch video server.
-2. Install AIPerf from the vendored clone.
+2. Set up the AIPerf dependency repository.
 
 Example:
 
@@ -52,8 +43,10 @@ telefuser serve \
     --port 8000 \
     --task i2v
 
-pip install -e ./benchmarks/aiperf
+bash scripts/setup_aiperf_repo.sh
 ```
+
+The setup script defaults to the `teleai` branch of `https://github.com/ActivePeter/aiperf`.
 
 ## Quick Start
 
@@ -93,13 +86,110 @@ Reason:
 
 So the helper script uses TeleFuser's `/v1/service/health` instead.
 
-## Limitation
+## Stream Benchmark
 
-This is a **batch video serving benchmark**, not yet a **real-time world-model streaming benchmark**.
+The stream benchmark path uses AIPerf's contract, runner, WebRTC adapter, observability, and artifact layers:
 
-For `stream-serve`, the next layer should add:
+- `benchmarks/aiperf/src/aiperf/streaming/`
+- `benchmarks/aiperf/src/aiperf/streaming/adapters/telefuser_webrtc.py`
+- `benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_compare.json`
+- `benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_quick.json`
+- `benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json`
 
-1. a WebRTC transport
-2. a world-model session endpoint
-3. an interactive trace workload
-4. frame-level latency metrics
+It records offer RTT, connection latency, first-frame latency, stream FPS, control acknowledgement latency, and control-to-next-frame latency. With `benchmark_metrics: true`, it also captures target pipeline/runtime initialization, per-chunk compute and encoding time, allocator peaks, steady-state compute FPS, runtime/cache dimensions, and target environment identity. `warmup_chunks` controls the leading chunks excluded from steady-state aggregates.
+Each completed stream run also writes `target_metadata.json` and a self-contained `stream_report.html` from AIPerf. The same report UI renders TeleFuser, SGLang, and registered third-party adapters without target-specific frontend code.
+
+The thin launcher is equivalent to:
+
+```bash
+uv run --project benchmarks/aiperf --extra streaming-webrtc \
+  aiperf profile \
+  --stream-config benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_quick.json
+```
+
+## SGLang-Diffusion Stream Baseline
+
+This adapter uses the diffusion runtime in the main `sgl-project/sglang`
+package (`sglang.multimodal_gen`); it does not require a separate
+`SGLang-Diffusion` repository.
+
+Start SGLang-Diffusion:
+
+```bash
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_service.sh
+```
+
+Then run:
+
+```bash
+bash benchmarks/baseline/sglang_lingbot_stream/scripts/run_stream_bench.sh
+```
+
+This baseline uses `robbyant/lingbot-world-fast-diffusers`, WebSocket + MessagePack, and the same `stream_lingbot_controls.json` trace as the TeleFuser stream benchmark.
+
+The compare configs use a 90 second session window so the baseline has enough time to emit first frames and control-loop metrics; the `quick` configs remain local smoke checks.
+
+Fairness note: TeleFuser's LingBot world-model service runs in its default 1-GPU GPU-resident configuration. The SGLang-Diffusion performance baseline must therefore use `--performance-mode speed` and disable CPU, DiT layerwise, VAE, and text-encoder offload. SGLang's `auto` mode may enable VAE layerwise offload even when the individual CPU-offload flags are false. If the GPU-resident configuration OOMs, record that failure instead of relabeling an auto-offloaded result.
+
+AIPerf normalizes SGLang's native `chunk_stats` into the shared target chunk
+schema: scheduler compute, request preparation, output encoding/pacing/writes,
+total chunk duration, frame/batch counts, and raw/wire bytes appear in
+`summary.json`, `sessions.jsonl`, and `stream_report.html`. An instrumented SGLang
+endpoint also sends its reset-scoped `OutputBatch.peak_memory_mb`; AIPerf maps
+this only to `chunk_peak_reserved_bytes`, matching SGLang's
+`max_memory_reserved()` source. Initialization phase durations and allocated
+peaks remain unavailable instead of being inferred.
+
+On 2026-07-13, a true 1xH100 GPU-resident run established two separate outcomes.
+The 9-sink / 18-frame cache workload failed with CUDA OOM at approximately
+79.16 GiB process memory. The tuned 6-sink / 9-frame workload completed one
+warmup and one measured session: 93 frames in 8 chunks, 5.1906 target compute
+FPS, 5.6788 client stream FPS, 3076.18 ms first-frame latency, and a maximum
+reset-scoped reserved peak of 76,919,341,056 bytes (73,356 MiB). The host
+required the documented RoPE fallback because its FlashInfer CUDA compiler and
+headers were incompatible. These two cache geometries must not be reported as a
+same-configuration comparison.
+
+## Historical Metrics Service (GreptimeDB)
+
+Cross-run storage, APIs, and visualization are owned by AIPerf. TeleFuser and SGLang
+produce canonical artifacts; neither target repository contains a database client or a
+target-specific history frontend.
+
+With GreptimeDB running, import existing profile and stream artifacts:
+
+```bash
+uv run --project benchmarks/aiperf aiperf history ingest \
+  --greptime-url http://127.0.0.1:4000 \
+  --greptime-database public \
+  --artifact-root artifacts \
+  --artifact-root work_dirs/benchmarks
+```
+
+Then start the API and bundled Vue application:
+
+```bash
+uv run --project benchmarks/aiperf aiperf history serve \
+  --greptime-url http://127.0.0.1:4000 \
+  --greptime-database public \
+  --artifact-root artifacts \
+  --artifact-root work_dirs/benchmarks \
+  --host 127.0.0.1 \
+  --port 8095
+```
+
+Open `http://127.0.0.1:8095/` to browse runs, compare metrics across runs, and inspect
+session, control, phase, chunk, timeslice, GPU, Prometheus, and normalized points. Warmup
+and profiling points retain separate phase values. Client delivery `stream_fps` and
+target `chunk_compute_fps` remain separate metrics.
+
+GreptimeDB is mandatory. A connection or table-creation failure stops startup, query
+failures return HTTP 503, and the API/UI never switch to SQLite, an in-memory index, or
+direct artifact queries. JSON and JSONL artifacts remain replayable inputs only.
+
+See the AIPerf
+[deployment guide](https://github.com/ActivePeter/aiperf/blob/teleai/docs/tutorials/history-dashboard.md), the
+[history service design](https://github.com/ActivePeter/aiperf/blob/teleai/docs/dev/history-service-design.md),
+and the TeleFuser
+[benchmark design](/TeleFuser/zh/benchmark_aiperf_design/) for the complete ownership and
+metric-boundary rules.

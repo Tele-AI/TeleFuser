@@ -282,15 +282,14 @@ class Histogram(Metric):
 
         label_str = self._labels_to_prometheus()
 
-        # Cumulative bucket counts
-        cumulative = 0
+        # Bucket counts are already cumulative because observe() increments every
+        # upper bound containing the value.
         for bucket in self._buckets:
-            cumulative += bucket.count
-            le = "inf" if bucket.upper_bound == float("inf") else str(bucket.upper_bound)
+            le = "+Inf" if bucket.upper_bound == float("inf") else str(bucket.upper_bound)
             bucket_label = f'{{le="{le}"}}'
             if label_str:
                 bucket_label = "{" + f'le="{le}", ' + label_str[1:]
-            lines.append(f"{self.name}_bucket{bucket_label} {cumulative}")
+            lines.append(f"{self.name}_bucket{bucket_label} {bucket.count}")
 
         # Sum and count
         lines.append(f"{self.name}_sum{label_str} {self._sum}")

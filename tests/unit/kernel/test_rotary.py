@@ -7,7 +7,15 @@ Test markers:
 import pytest
 import torch
 
-from telefuser.kernel.triton import apply_rotary_embedding
+try:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+    from telefuser.kernel.triton import apply_rotary_embedding
+except (ImportError, RuntimeError) as exc:
+    pytest.skip(
+        f"Skipping Triton rotary tests: {exc}",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Reference Implementations

@@ -94,8 +94,16 @@ class ImageRoutes:
         """Initialize with ApiServer instance."""
         self.api = api_server
         self.task_manager: TaskManager | None = getattr(api_server, "task_manager", None)
-        self.file_service = getattr(api_server, "file_service", None)
         self.media_service = getattr(api_server, "media_service", None)
+
+    @property
+    def file_service(self) -> Any | None:
+        """Return the current file service from the API server.
+
+        The ApiServer installs routes before initialize_services() wires the
+        file service, so route handlers must not keep the initial None value.
+        """
+        return getattr(self.api, "file_service", None)
 
     async def create_image_generation(self, request: ImageGenerationsRequest) -> ImageResponse:
         """Handle image generation request with synchronous waiting."""
@@ -269,7 +277,7 @@ class ImageRoutes:
             raise HTTPException(status_code=404, detail=f"Image {image_id} has no output path")
 
         path = Path(output_path)
-        if not path.is_absolute():
+        if not path.is_absolute() and not path.exists():
             output_dir = getattr(self.file_service, "output_image_dir", None)
             if output_dir:
                 path = output_dir / path

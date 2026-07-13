@@ -12,6 +12,11 @@ from collections.abc import AsyncGenerator
 import torch
 from PIL import Image, ImageDraw
 
+from telefuser.metrics.runtime import (
+    RuntimeMeasurement,
+    finish_runtime_measurement,
+    start_runtime_measurement,
+)
 from telefuser.utils.logging import logger
 
 from .pipeline import LingBotWorldFastPipeline
@@ -106,6 +111,7 @@ class LingBotWorldFastService:
             control_yaw_step_degrees=float(config.get("control_yaw_step_degrees", 10.0)),
             control_lateral_step=float(config.get("control_lateral_step", 0.12)),
             show_control_hud=bool(config.get("show_control_hud", True)),
+            benchmark_metrics=bool(config.get("benchmark_metrics", False)),
         )
         state = LingBotWorldFastSessionState(
             config=session_config,
@@ -351,17 +357,58 @@ class LingBotWorldFastService:
             payload.update(data)
             self._put_output(state, payload)
 
+        devices = (
+            self.pipeline.device,
+            self.pipeline.vae_device,
+            self.pipeline.text_device,
+        )
+
+        def start_measurement() -> RuntimeMeasurement | None:
+            if not state.config.benchmark_metrics:
+                return None
+            try:
+                return start_runtime_measurement(
+                    devices,
+                    capture_peak_memory=True,
+                )
+            except Exception as exc:
+                logger.warning(f"Could not start LingBot benchmark measurement: {exc}")
+                return None
+
+        def finish_measurement(
+            measurement: RuntimeMeasurement | None,
+        ) -> dict[str, object] | None:
+            if measurement is None:
+                return None
+            try:
+                return finish_runtime_measurement(measurement)
+            except Exception as exc:
+                logger.warning(f"Could not finish LingBot benchmark measurement: {exc}")
+                return None
+
         try:
             self._emit_preview_frame(state)
             emit_status("initializing_runtime")
+            runtime_measurement = start_measurement()
             state.runtime = self.pipeline.create_runtime(state.config, progress_callback=emit_status)
             runtime = state.runtime
+            runtime_facts = finish_measurement(runtime_measurement)
+            runtime_metadata = self._runtime_metadata(runtime)
+            runtime_ready: dict[str, object] = {
+                "width": runtime.width,
+                "height": runtime.height,
+                "latent_frames": runtime.latent_f,
+                "total_chunks": len(runtime.noise_chunks),
+                "runtime": runtime_metadata,
+            }
+            if runtime_facts is not None:
+                runtime_ready["measurement"] = {
+                    "name": "runtime_creation",
+                    **runtime_facts,
+                }
             emit_status(
                 "runtime_ready",
-                width=runtime.width,
-                height=runtime.height,
-                latent_frames=runtime.latent_f,
-                total_chunks=len(runtime.noise_chunks),
+                **runtime_ready,
             )
             chunk_index = 0
             while state.active and runtime.active:
@@ -398,24 +445,41 @@ class LingBotWorldFastService:
                         control_override = self.pipeline.build_control_override(runtime, directional_chunk)
 
                 emit_status("generating_chunk", index=chunk_index)
+                chunk_measurement = start_measurement()
                 frames = self.pipeline.generate_next_chunk(
                     runtime,
                     control_override=control_override,
                     progress_callback=emit_status,
                 )
+                chunk_facts = finish_measurement(chunk_measurement)
                 if not frames:
                     break
                 if state.config.show_control_hud and applied_controls:
                     frames = self._overlay_control_hud(frames, applied_controls)
+                encode_started_at = time.perf_counter()
+                frames_b64 = self.pipeline.encode_frames_to_b64(frames)
+                encode_seconds = time.perf_counter() - encode_started_at
                 payload = {
                     "type": "chunk",
                     "index": chunk_index,
                     "fps": state.config.fps,
                     "timestamp": time.time(),
-                    "frames_b64": self.pipeline.encode_frames_to_b64(frames),
+                    "frames_b64": frames_b64,
                 }
                 self._put_output(state, payload)
-                emit_status("chunk_sent", index=chunk_index, frames=len(frames))
+                chunk_sent: dict[str, object] = {
+                    "index": chunk_index,
+                    "frames": len(frames),
+                }
+                if chunk_facts is not None:
+                    chunk_sent["measurement"] = {
+                        "index": chunk_index,
+                        "frames": len(frames),
+                        "compute_seconds": chunk_facts["seconds"],
+                        "encode_seconds": encode_seconds,
+                        "memory": chunk_facts["memory"],
+                    }
+                emit_status("chunk_sent", **chunk_sent)
                 chunk_index += 1
         except Exception as exc:
             logger.exception(f"LingBotWorld worker failed: session={session_id}, error={exc}")
@@ -432,6 +496,23 @@ class LingBotWorldFastService:
             state.active = False
             self._put_output(state, {"type": "done"})
             self._release_runtime(state)
+
+    def _runtime_metadata(
+        self,
+        runtime: LingBotWorldFastRuntimeState,
+    ) -> dict[str, int]:
+        cache_capacity = int(runtime.self_kv_cache[0]["k"].shape[1])
+        return {
+            "height": int(runtime.height),
+            "width": int(runtime.width),
+            "latent_frames": int(runtime.latent_f),
+            "frame_tokens": int(runtime.frame_tokens),
+            "chunk_size": int(runtime.chunk_size),
+            "max_attention_size": int(runtime.max_attention_size),
+            "kv_local_attn_size": int(self.pipeline.dit.local_attn_size),
+            "kv_sink_size": int(self.pipeline.dit.sink_size),
+            "kv_cache_capacity_tokens": cache_capacity,
+        }
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)

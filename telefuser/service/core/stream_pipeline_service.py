@@ -18,10 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, runtime_checkable
 
+from telefuser.metrics.runtime import (
+    RuntimeMeasurement,
+    collect_runtime_environment,
+    finish_runtime_measurement,
+    start_runtime_measurement,
+    visible_cuda_devices,
+)
 from telefuser.utils.logging import logger
 
 from ..security.security_validator import (
@@ -38,6 +47,7 @@ from .pipeline_loader import load_pipeline_module, unload_pipeline_module, valid
 
 STREAM_MODE_SERVER_PUSH = "server_push"
 STREAM_MODE_BIDIRECTIONAL = "bidirectional"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # ---------------------------------------------------------------------------
 # Service protocols – pipeline authors implement one of these
@@ -84,6 +94,8 @@ class StreamPipelineService:
         self.ppl_file: str | None = None
         self._module: ModuleType | None = None
         self._module_name: str | None = None
+        self._startup_measurement: dict[str, Any] | None = None
+        self._runtime_environment: dict[str, Any] = {}
 
         self.security_level = security_level or getattr(server_config, "security_level", SecurityLevel.STRICT)
         self.security_validator = PipelineSecurityValidator(
@@ -99,6 +111,17 @@ class StreamPipelineService:
         if self.is_running:
             logger.warning("Stream service is already running")
             return True
+
+        devices = visible_cuda_devices()
+        started_at = time.perf_counter()
+        measurement: RuntimeMeasurement | None = None
+        try:
+            measurement = start_runtime_measurement(
+                devices,
+                capture_peak_memory=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Could not initialize stream startup metrics: {exc}")
 
         try:
             if not skip_validation:
@@ -119,6 +142,29 @@ class StreamPipelineService:
             self.stream_mode = self._detect_mode(self.service)
             self.service.start()
             self.is_running = True
+            try:
+                facts = (
+                    finish_runtime_measurement(measurement)
+                    if measurement is not None
+                    else {
+                        "seconds": max(time.perf_counter() - started_at, 0.0),
+                        "memory": [],
+                    }
+                )
+            except Exception as exc:
+                logger.warning(f"Could not finish stream startup metrics: {exc}")
+                facts = {
+                    "seconds": max(time.perf_counter() - started_at, 0.0),
+                    "memory": [],
+                }
+            self._startup_measurement = {"name": "pipeline_init", **facts}
+            try:
+                self._runtime_environment = collect_runtime_environment(
+                    devices,
+                    repo_root=_REPO_ROOT,
+                )
+            except Exception as exc:
+                logger.warning(f"Could not collect stream runtime environment: {exc}")
             logger.info(f"Stream service started: mode={self.stream_mode}, file={ppl_file}")
             return True
 
@@ -238,13 +284,22 @@ class StreamPipelineService:
     # -- metadata ------------------------------------------------------------
 
     def server_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "service_type": "stream",
             "stream_mode": self.stream_mode,
             "pipeline_file": self.ppl_file,
             "security_level": self.security_level.name if self.security_level else "NONE",
             "runner": "StreamPipelineService",
         }
+        startup_measurement = getattr(self, "_startup_measurement", None)
+        if startup_measurement is not None:
+            metadata["performance"] = {
+                "phases": [startup_measurement],
+            }
+        runtime_environment = getattr(self, "_runtime_environment", {})
+        if runtime_environment:
+            metadata["environment"] = runtime_environment
+        return metadata
 
     # -- internals -----------------------------------------------------------
 

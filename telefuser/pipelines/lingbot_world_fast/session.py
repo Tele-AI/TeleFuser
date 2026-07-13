@@ -32,6 +32,7 @@ class LingBotWorldFastSessionConfig:
     control_yaw_step_degrees: float = 10.0
     control_lateral_step: float = 0.12
     show_control_hud: bool = True
+    benchmark_metrics: bool = False
 
 
 @dataclass

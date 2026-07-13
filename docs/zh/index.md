@@ -56,8 +56,9 @@ telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 80
 
 - **[服务指南](service.md)** — 批量服务、任务 API 和 SDK
 - **[流式服务](stream_server.md)** — WebRTC 流式传输和双向控制
-- **[TeleFuser 与 AIPerf Benchmark](benchmark_aiperf.md)** — 批处理视频压测与运行入口
-- **[TeleFuser 与 AIPerf Benchmark 设计](benchmark_aiperf_design.md)** — 对标分层、stream-serve 规划和固定 workload 设计
+- **[TeleFuser 与 AIPerf Benchmark](benchmark_aiperf.md)** — Batch、stream、baseline 与 GreptimeDB 历史服务入口
+- **[当前 Benchmark 对比快照](benchmark_current_comparison.md)** — 当前实测结果、baseline 状态和对比结论
+- **[TeleFuser 与 AIPerf Benchmark 设计](benchmark_aiperf_design.md)** — 对标分层、观测协议、GreptimeDB 历史层和固定 workload 设计
 - **[配置](configuration.md)** — 运行时和模型配置
 - **[并行推理](parallel.md)** — 分布式处理策略
 - **[新增模型](adding_new_model.md)** — 集成新模型

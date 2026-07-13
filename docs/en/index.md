@@ -56,7 +56,7 @@ telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 80
 
 - **[Service Guide](service.md)** — Batch serving, task APIs, and SDK
 - **[Stream Server](stream_server.md)** — WebRTC streaming and bidirectional control
-- **[TeleFuser and AIPerf Benchmark](benchmark_aiperf.md)** — Batch video serving benchmark with AIPerf
+- **[TeleFuser and AIPerf Benchmark](benchmark_aiperf.md)** — Batch, stream, baseline, and GreptimeDB history workflows
 - **[Configuration](configuration.md)** — Runtime and model configuration
 - **[Parallel Inference](parallel.md)** — Distributed processing strategies
 - **[Adding New Model](adding_new_model.md)** — Integrate new models
