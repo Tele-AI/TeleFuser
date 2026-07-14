@@ -12,6 +12,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
@@ -93,9 +94,19 @@ class WebRTCRoutes:
 
     async def _handle_bidirectional(self, svc, request: WebRTCOfferRequest) -> WebRTCOfferResponse:
         session_id = request.session_id
-        config = {**request.model_dump(exclude={"sdp", "type"}), "session_id": session_id}
+        request_config = request.model_dump(
+            exclude={"sdp", "type", "config"},
+            exclude_none=True,
+            exclude_unset=True,
+        )
+        config = {**request.config, **request_config, "session_id": session_id}
 
-        pipeline_session_id = svc.create_session(config)
+        try:
+            pipeline_session_id = svc.create_session(config)
+        except (OSError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Session creation failed: {exc}") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=f"Session creation conflict: {exc}") from exc
 
         try:
             output_gen = svc.pull_chunks(pipeline_session_id)
@@ -106,20 +117,20 @@ class WebRTCRoutes:
                 output_generator=output_gen,
                 on_input=lambda sid, chunk: svc.push_chunk(sid, chunk),
                 on_close=lambda sid: svc.close_session(sid),
-                fps=request.fps or 24,
+                fps=int(config.get("fps") or 24),
             )
         except RuntimeError as exc:
             try:
-                svc.close_session(pipeline_session_id)
+                await asyncio.to_thread(svc.close_session, pipeline_session_id)
             except Exception:
                 pass
-            raise HTTPException(status_code=503, detail=str(exc))
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             try:
-                svc.close_session(pipeline_session_id)
+                await asyncio.to_thread(svc.close_session, pipeline_session_id)
             except Exception:
                 pass
-            raise HTTPException(status_code=400, detail=f"SDP negotiation failed: {exc}")
+            raise HTTPException(status_code=400, detail=f"SDP negotiation failed: {exc}") from exc
 
         return WebRTCOfferResponse(
             session_id=pipeline_session_id,

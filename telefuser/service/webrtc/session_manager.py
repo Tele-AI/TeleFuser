@@ -282,7 +282,7 @@ class WebRTCSessionManager:
                 entry.output_audio_track.stop()
             if notify_pipeline and entry.on_close is not None:
                 try:
-                    entry.on_close(entry.session_id)
+                    await asyncio.to_thread(entry.on_close, entry.session_id)
                 except Exception as exc:
                     logger.warning(f"WebRTC pipeline close callback failed: session={session_id} {exc}")
 

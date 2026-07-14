@@ -9,11 +9,14 @@ from unittest.mock import Mock
 
 import pytest
 from click.testing import CliRunner
+from fastapi import HTTPException
 
 from telefuser.entrypoints.cli.main import main
 from telefuser.service.api.api_server import ApiServer
 from telefuser.service.api.routers.service import ServiceRoutes
 from telefuser.service.api.routers.stream import StreamRoutes
+from telefuser.service.api.routers.webrtc import WebRTCRoutes
+from telefuser.service.api.stream_schema import WebRTCOfferRequest
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.container import ServiceContainer
 from telefuser.service.core.file_service import FileService
@@ -232,8 +235,6 @@ def test_stream_session_alias_closes_webrtc_without_pipeline_notify() -> None:
 
 
 def test_webrtc_delete_uses_session_manager_pipeline_owner() -> None:
-    from telefuser.service.api.routers.webrtc import WebRTCRoutes
-
     class RunningStreamService:
         stream_mode = "bidirectional"
 
@@ -262,6 +263,159 @@ def test_webrtc_delete_uses_session_manager_pipeline_owner() -> None:
     assert result == {"session_id": "session-123", "status": "closed"}
     assert stream_service.closed_sessions == []
     assert webrtc_manager.calls == [{"session_id": "session-123", "reason": "webrtc_session_delete"}]
+
+
+def test_bidirectional_webrtc_offer_flattens_session_config() -> None:
+    class RunningStreamService:
+        def __init__(self) -> None:
+            self.config: dict | None = None
+
+        def create_session(self, config: dict) -> str:
+            self.config = config
+            return "pipeline-session"
+
+        async def pull_chunks(self, session_id: str):
+            if False:
+                yield session_id
+
+        def push_chunk(self, session_id: str, chunk: dict) -> None:
+            pass
+
+        def close_session(self, session_id: str) -> None:
+            pass
+
+    class WebRTCSessionManager:
+        def __init__(self) -> None:
+            self.fps: int | None = None
+
+        async def create_bidirectional_session(self, **kwargs: object) -> tuple[str, str]:
+            self.fps = int(kwargs["fps"])
+            return "answer-sdp", "answer"
+
+    stream_service = RunningStreamService()
+    webrtc_manager = WebRTCSessionManager()
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=stream_service)
+    routes._session_manager = webrtc_manager
+    request = WebRTCOfferRequest(
+        session_id="request-session",
+        sdp="offer-sdp",
+        task="i2v",
+        prompt="test prompt",
+        config={"image_path": "/tmp/input.png", "fps": 16, "frame_num": 81},
+    )
+
+    response = asyncio.run(routes._handle_bidirectional(stream_service, request))
+
+    assert response.session_id == "pipeline-session"
+    assert stream_service.config == {
+        "session_id": "request-session",
+        "task": "i2v",
+        "prompt": "test prompt",
+        "fps": 16,
+        "image_path": "/tmp/input.png",
+        "frame_num": 81,
+    }
+    assert webrtc_manager.fps == 16
+
+
+def test_bidirectional_webrtc_offer_prefers_explicit_top_level_config() -> None:
+    class RunningStreamService:
+        def __init__(self) -> None:
+            self.config: dict | None = None
+
+        def create_session(self, config: dict) -> str:
+            self.config = config
+            return "pipeline-session"
+
+        async def pull_chunks(self, session_id: str):
+            if False:
+                yield session_id
+
+    class WebRTCSessionManager:
+        async def create_bidirectional_session(self, **kwargs: object) -> tuple[str, str]:
+            return "answer-sdp", "answer"
+
+    stream_service = RunningStreamService()
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=stream_service)
+    routes._session_manager = WebRTCSessionManager()
+    request = WebRTCOfferRequest(
+        session_id="request-session",
+        sdp="offer-sdp",
+        task="i2v",
+        fps=30,
+        config={"task": "t2v", "fps": 16},
+    )
+
+    asyncio.run(routes._handle_bidirectional(stream_service, request))
+
+    assert stream_service.config is not None
+    assert stream_service.config["task"] == "i2v"
+    assert stream_service.config["fps"] == 30
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    [
+        (ValueError("image_path is required"), 400, "Session creation failed: image_path is required"),
+        (RuntimeError("active session exists"), 409, "Session creation conflict: active session exists"),
+    ],
+)
+def test_bidirectional_webrtc_offer_maps_session_creation_errors(
+    error: Exception,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    class FailingStreamService:
+        def create_session(self, config: dict) -> str:
+            raise error
+
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=FailingStreamService())
+    routes._session_manager = Mock()
+    request = WebRTCOfferRequest(session_id="request-session", sdp="offer-sdp", task="i2v")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(routes._handle_bidirectional(routes.api.stream_service, request))
+
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.detail == expected_detail
+
+
+def test_bidirectional_webrtc_offer_runs_rollback_outside_event_loop() -> None:
+    callback_threads: list[int] = []
+
+    class RunningStreamService:
+        def create_session(self, config: dict) -> str:
+            return "pipeline-session"
+
+        async def pull_chunks(self, session_id: str):
+            if False:
+                yield session_id
+
+        def close_session(self, session_id: str) -> None:
+            callback_threads.append(threading.get_ident())
+
+    class FailingWebRTCSessionManager:
+        async def create_bidirectional_session(self, **kwargs: object) -> tuple[str, str]:
+            raise ValueError("invalid SDP")
+
+    async def run_offer() -> int:
+        stream_service = RunningStreamService()
+        routes = WebRTCRoutes.__new__(WebRTCRoutes)
+        routes.api = Mock(stream_service=stream_service)
+        routes._session_manager = FailingWebRTCSessionManager()
+        request = WebRTCOfferRequest(session_id="request-session", sdp="invalid-sdp", task="i2v")
+        event_loop_thread = threading.get_ident()
+        with pytest.raises(HTTPException, match="SDP negotiation failed"):
+            await routes._handle_bidirectional(stream_service, request)
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(run_offer())
+
+    assert len(callback_threads) == 1
+    assert callback_threads[0] != event_loop_thread
 
 
 def test_cli_serve_forwards_security_and_skip_validation(monkeypatch: pytest.MonkeyPatch) -> None:
