@@ -308,6 +308,8 @@ def test_cli_stream_serve_does_not_force_skip_validation(monkeypatch: pytest.Mon
         [
             "stream-serve",
             "stream_pipeline.py",
+            "--gpu-num",
+            "3",
             "--security-level",
             "none",
         ],
@@ -315,6 +317,7 @@ def test_cli_stream_serve_does_not_force_skip_validation(monkeypatch: pytest.Mon
 
     assert result.exit_code == 0
     assert captured["validated"] == "stream_pipeline.py"
+    assert captured["gpu_num"] == 3
     assert captured["security_level"] == "none"
     assert captured["skip_validation"] is False
 
@@ -417,6 +420,44 @@ def test_stream_pipeline_service_uses_injected_config() -> None:
     assert service.security_validator.max_file_size == 8192
     assert service.validation_config.allow_unsafe_pipelines is True
     assert service.validation_config.strict_validation is False
+
+
+def test_stream_pipeline_service_passes_gpu_num_to_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeBidirectionalService:
+        def start(self) -> None:
+            captured["started"] = True
+
+        def stop(self) -> None:
+            pass
+
+        def create_session(self, config: dict) -> str:
+            return "session"
+
+        def push_chunk(self, session_id: str, chunk: dict) -> None:
+            pass
+
+        async def pull_chunks(self, session_id: str):
+            if False:
+                yield {}
+
+        def close_session(self, session_id: str) -> None:
+            pass
+
+    def get_service(gpu_num: int) -> FakeBidirectionalService:
+        captured["gpu_num"] = gpu_num
+        return FakeBidirectionalService()
+
+    module = types.SimpleNamespace(get_service=get_service)
+    monkeypatch.setattr(
+        "telefuser.service.core.stream_pipeline_service.load_pipeline_module",
+        lambda *args, **kwargs: (module, "test_stream_module"),
+    )
+    service = StreamPipelineService(config=ServerConfig(security_level=SecurityLevel.NONE))
+
+    assert service.start_service("stream_pipeline.py", gpu_num=3, skip_validation=True)
+    assert captured == {"gpu_num": 3, "started": True}
 
 
 def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) -> None:

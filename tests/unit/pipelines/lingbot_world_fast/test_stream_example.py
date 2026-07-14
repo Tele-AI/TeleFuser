@@ -31,15 +31,25 @@ def test_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
     assert config.parallel_config.enable_fsdp is False
 
 
-def test_stream_get_service_uses_ppl_pipeline_and_fps() -> None:
+def test_stream_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:
+    pipeline = MagicMock()
+
+    with patch.object(stream_example, "get_pipeline", return_value=pipeline) as get_pipeline:
+        service = stream_example.get_service(gpu_num=4)
+
+    get_pipeline.assert_called_once_with(parallelism=4)
+    assert service.pipeline is pipeline
+    assert service.default_fps == stream_example.PPL_CONFIG["target_fps"]
+
+
+def test_stream_get_service_retains_example_default_gpu_num() -> None:
     pipeline = MagicMock()
 
     with patch.object(stream_example, "get_pipeline", return_value=pipeline) as get_pipeline:
         service = stream_example.get_service()
 
-    get_pipeline.assert_called_once_with()
+    get_pipeline.assert_called_once_with(parallelism=stream_example.PPL_CONFIG["parallelism"])
     assert service.pipeline is pipeline
-    assert service.default_fps == stream_example.PPL_CONFIG["target_fps"]
 
 
 def test_stream_get_pipeline_reads_tf_model_zoo_path(monkeypatch) -> None:

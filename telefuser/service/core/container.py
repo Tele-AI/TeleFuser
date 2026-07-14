@@ -250,6 +250,7 @@ class ServiceContainer:
         self,
         pipe_path: str,
         skip_validation: bool = False,
+        gpu_num: int = 1,
     ) -> bool:
         """Initialize stream pipeline service (alternative to initialize_all)."""
         self.stream_pipeline_service = StreamPipelineService(
@@ -258,6 +259,7 @@ class ServiceContainer:
         )
         return self.stream_pipeline_service.start_service(
             ppl_file=pipe_path,
+            gpu_num=gpu_num,
             skip_validation=skip_validation,
         )
 

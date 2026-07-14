@@ -206,6 +206,25 @@ class LingBotWorldFastPipeline(BasePipeline):
         height, width = self.check_resize_height_width(height, width)
         frame_num = session_config.frame_num
         latent_frames = (frame_num - 1) // 4 + 1
+        if session_config.intrinsics is None:
+            focal = float(max(self.config.orig_width, self.config.orig_height))
+            intrinsics = torch.tensor(
+                [focal, focal, self.config.orig_width * 0.5, self.config.orig_height * 0.5],
+                dtype=torch.float32,
+                device=self.device,
+            )
+        else:
+            intrinsics = torch.as_tensor(session_config.intrinsics, dtype=torch.float32, device=self.device)
+            if intrinsics.ndim == 2:
+                if intrinsics.shape[0] < 1 or intrinsics.shape[1] != 4:
+                    raise ValueError(
+                        f"Session intrinsics must have shape (4,) or (frames, 4), got {tuple(intrinsics.shape)}"
+                    )
+                intrinsics = intrinsics[0]
+            if intrinsics.shape != (4,):
+                raise ValueError(
+                    f"Session intrinsics must have shape (4,) or (frames, 4), got {tuple(intrinsics.shape)}"
+                )
         return LingBotWorldFastControlContext(
             control_type=self.config.control_type,
             device=self.device,
@@ -218,6 +237,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             latent_w=width // 8,
             latent_frames=latent_frames,
             chunk_size=session_config.chunk_size,
+            intrinsics=intrinsics,
         )
 
     def _validate_session_config(self, session_config: LingBotWorldFastSessionConfig) -> None:

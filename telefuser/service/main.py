@@ -94,6 +94,7 @@ def run_stream_server(
     enable_rate_limit: bool = True,
     skip_validation: bool = False,
     security_level: str | None = None,
+    gpu_num: int = 1,
 ) -> None:
     """Run the TeleFuser stream server.
 
@@ -109,7 +110,11 @@ def run_stream_server(
 
     container = ServiceContainer.create(config=server_config)
 
-    if not container.initialize_stream_service(pipe_path=pipe_path, skip_validation=skip_validation):
+    if not container.initialize_stream_service(
+        pipe_path=pipe_path,
+        gpu_num=gpu_num,
+        skip_validation=skip_validation,
+    ):
         raise RuntimeError("Failed to initialize stream service")
 
     logger.info("Stream service initialized successfully")

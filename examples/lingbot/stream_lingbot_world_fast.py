@@ -1,8 +1,12 @@
 """LingBot-World-Fast bidirectional streaming service example.
 
 Run the four-GPU stream service:
+    TF_MODEL_ZOO_PATH=/path/to/model_zoo \
     telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-        -p 8088 --skip-validation
+        --gpu-num 4 -p 8088 --skip-validation
+
+Select physical GPUs with CUDA_VISIBLE_DEVICES. For example, use physical GPUs
+2 and 3 with --gpu-num 2 and CUDA_VISIBLE_DEVICES=2,3.
 """
 
 from __future__ import annotations
@@ -69,7 +73,7 @@ def get_pipeline(
     return pipeline
 
 
-def get_service() -> LingBotWorldFastService:
+def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
     """Build the service loaded by the TeleFuser stream server."""
-    pipeline = get_pipeline()
+    pipeline = get_pipeline(parallelism=gpu_num)
     return LingBotWorldFastService(pipeline, default_fps=PPL_CONFIG["target_fps"])

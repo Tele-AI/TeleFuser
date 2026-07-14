@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -28,26 +29,34 @@ from .session import (
 )
 
 _DIRECTION_ALIASES = {
-    "ArrowUp": "up",
-    "ArrowDown": "down",
-    "ArrowLeft": "left",
-    "ArrowRight": "right",
-    "KeyW": "up",
-    "KeyS": "down",
-    "KeyA": "left",
-    "KeyD": "right",
-    "w": "up",
-    "s": "down",
-    "a": "left",
-    "d": "right",
-    "up": "up",
-    "down": "down",
-    "left": "left",
-    "right": "right",
-    "forward": "up",
-    "backward": "down",
+    "ArrowUp": "w",
+    "ArrowDown": "s",
+    "ArrowLeft": "j",
+    "ArrowRight": "l",
+    "KeyW": "w",
+    "KeyA": "a",
+    "KeyS": "s",
+    "KeyD": "d",
+    "KeyI": "i",
+    "KeyJ": "j",
+    "KeyK": "k",
+    "KeyL": "l",
+    "w": "w",
+    "a": "a",
+    "s": "s",
+    "d": "d",
+    "i": "i",
+    "j": "j",
+    "k": "k",
+    "l": "l",
+    "up": "w",
+    "down": "s",
+    "left": "j",
+    "right": "l",
+    "forward": "w",
+    "backward": "s",
 }
-_ACTION_DIRECTIONS = ("up", "down", "left", "right")
+_ACTION_DIRECTIONS = ("w", "a", "s", "d")
 
 
 class LingBotWorldFastService:
@@ -92,6 +101,9 @@ class LingBotWorldFastService:
 
         session_id = config.get("session_id") or str(uuid.uuid4())
         image = self._load_image(config)
+        intrinsics = config.get("intrinsics")
+        if intrinsics is None and config.get("action_path"):
+            intrinsics = np.load(Path(config["action_path"]) / "intrinsics.npy")
 
         session_config = LingBotWorldFastSessionConfig(
             prompt=config.get("prompt", ""),
@@ -104,9 +116,12 @@ class LingBotWorldFastService:
             seed=int(config.get("seed", 42)),
             max_attention_size=config.get("max_attention_size"),
             max_sequence_length=int(config.get("max_sequence_length", 512)),
-            control_move_step=float(config.get("control_move_step", 0.18)),
-            control_yaw_step_degrees=float(config.get("control_yaw_step_degrees", 10.0)),
-            control_lateral_step=float(config.get("control_lateral_step", 0.12)),
+            intrinsics=intrinsics,
+            control_move_step=float(config.get("control_move_step", 0.05)),
+            control_yaw_step_degrees=float(config.get("control_yaw_step_degrees", 2.0)),
+            control_lateral_step=float(config.get("control_lateral_step", 0.05)),
+            control_pitch_step_degrees=float(config.get("control_pitch_step_degrees", 2.0)),
+            control_pitch_limit_degrees=float(config.get("control_pitch_limit_degrees", 85.0)),
             show_control_hud=bool(config.get("show_control_hud", True)),
         )
         control_context = self.pipeline.control_context(session_config)
@@ -177,24 +192,71 @@ class LingBotWorldFastService:
 
     @staticmethod
     def _is_explicit_control_chunk(chunk: dict) -> bool:
-        return "control_tensor" in chunk or (chunk.get("poses") is not None and chunk.get("intrinsics") is not None)
+        return "control_tensor" in chunk or chunk.get("poses") is not None
 
     @staticmethod
-    def _pose_matrix(yaw: float, position: list[float]) -> list[list[float]]:
-        cos_y = math.cos(yaw)
-        sin_y = math.sin(yaw)
-        return [
-            [cos_y, 0.0, sin_y, position[0]],
-            [0.0, 1.0, 0.0, position[1]],
-            [-sin_y, 0.0, cos_y, position[2]],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
+    def _rotation_matrix(axis: str, angle: float) -> np.ndarray:
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        if axis == "x":
+            return np.asarray([[1.0, 0.0, 0.0], [0.0, cos_a, -sin_a], [0.0, sin_a, cos_a]])
+        if axis == "y":
+            return np.asarray([[cos_a, 0.0, sin_a], [0.0, 1.0, 0.0], [-sin_a, 0.0, cos_a]])
+        raise ValueError(f"Unsupported rotation axis: {axis}")
 
-    def _default_intrinsics(self) -> list[list[float]]:
-        width = float(self.pipeline.config.orig_width)
-        height = float(self.pipeline.config.orig_height)
-        focal = max(width, height)
-        return [[focal, focal, width * 0.5, height * 0.5]]
+    @classmethod
+    def _integrate_camera_step(
+        cls,
+        c2w: np.ndarray,
+        pitch: float,
+        controls: set[str],
+        config: LingBotWorldFastSessionConfig,
+    ) -> tuple[np.ndarray, float]:
+        pitch_delta = 0.0
+        pitch_step = math.radians(float(config.control_pitch_step_degrees))
+        if "i" in controls:
+            pitch_delta += pitch_step
+        if "k" in controls:
+            pitch_delta -= pitch_step
+        pitch_limit = math.radians(float(config.control_pitch_limit_degrees))
+        new_pitch = pitch + pitch_delta
+        if -pitch_limit <= new_pitch <= pitch_limit:
+            pitch = new_pitch
+        else:
+            pitch_delta = 0.0
+
+        yaw_delta = 0.0
+        yaw_step = math.radians(float(config.control_yaw_step_degrees))
+        if "j" in controls:
+            yaw_delta -= yaw_step
+        if "l" in controls:
+            yaw_delta += yaw_step
+
+        rotation = c2w[:3, :3]
+        rotation_new = cls._rotation_matrix("y", yaw_delta) @ rotation @ cls._rotation_matrix("x", pitch_delta)
+        forward = np.asarray([rotation_new[0, 2], 0.0, rotation_new[2, 2]])
+        right = np.asarray([rotation_new[0, 0], 0.0, rotation_new[2, 0]])
+        forward_norm = np.linalg.norm(forward)
+        right_norm = np.linalg.norm(right)
+        if forward_norm > 0:
+            forward /= forward_norm + 1e-6
+        if right_norm > 0:
+            right /= right_norm + 1e-6
+
+        movement = np.zeros(3)
+        if "w" in controls:
+            movement += forward * float(config.control_move_step)
+        if "s" in controls:
+            movement -= forward * float(config.control_move_step)
+        if "d" in controls:
+            movement += right * float(config.control_lateral_step)
+        if "a" in controls:
+            movement -= right * float(config.control_lateral_step)
+
+        result = np.eye(4)
+        result[:3, :3] = rotation_new
+        result[:3, 3] = c2w[:3, 3] + movement
+        return result, pitch
 
     @staticmethod
     def _draw_triangle(
@@ -222,7 +284,17 @@ class LingBotWorldFastService:
         if not controls:
             return frames
 
-        active = set(controls)
+        controls_active = set(controls)
+        active = {
+            direction
+            for direction, source_controls in {
+                "up": {"w"},
+                "down": {"s"},
+                "left": {"a", "j"},
+                "right": {"d", "l"},
+            }.items()
+            if controls_active & source_controls
+        }
         out: list[Image.Image] = []
         for frame in frames:
             image = frame.convert("RGB")
@@ -264,52 +336,40 @@ class LingBotWorldFastService:
         with state.control_lock:
             controls = set(state.pressed_controls) | set(state.queued_controls)
             state.queued_controls.clear()
-            yaw = float(state.control_yaw)
-            position = [float(v) for v in state.control_position]
+            c2w = np.asarray(state.control_c2w, dtype=np.float64)
+            pitch = float(state.control_pitch)
+            initialized = state.control_initialized
+
+        if not controls:
+            return None
 
         latent_frames = control_context.chunk_size
-        move_step = float(state.config.control_move_step)
-        yaw_step = math.radians(float(state.config.control_yaw_step_degrees))
-        lateral_step = float(state.config.control_lateral_step)
         poses: list[list[list[float]]] = []
         action_rows: list[list[float]] = []
+        previous_pose = c2w.copy() if initialized else None
 
-        for _ in range(latent_frames):
-            strafe = 0
-            if "left" in controls and "right" not in controls:
-                yaw += yaw_step
-                strafe = -1
-            elif "right" in controls and "left" not in controls:
-                yaw -= yaw_step
-                strafe = 1
-
-            forward_x = math.sin(yaw)
-            forward_z = math.cos(yaw)
-            right_x = math.cos(yaw)
-            right_z = -math.sin(yaw)
-            if "up" in controls and "down" not in controls:
-                position[0] += forward_x * move_step
-                position[2] += forward_z * move_step
-            elif "down" in controls and "up" not in controls:
-                position[0] -= forward_x * move_step
-                position[2] -= forward_z * move_step
-            if strafe:
-                position[0] += right_x * lateral_step * strafe
-                position[2] += right_z * lateral_step * strafe
-
-            poses.append(self._pose_matrix(yaw, position))
+        if not initialized:
+            poses.append(c2w.tolist())
+            action_rows.append([1.0 if name in controls else 0.0 for name in _ACTION_DIRECTIONS])
+        intervals = latent_frames if initialized else latent_frames - 1
+        for _ in range(intervals):
+            for _ in range(4):
+                c2w, pitch = self._integrate_camera_step(c2w, pitch, controls, state.config)
+            poses.append(c2w.tolist())
             action_rows.append([1.0 if name in controls else 0.0 for name in _ACTION_DIRECTIONS])
 
         with state.control_lock:
-            state.control_yaw = yaw
-            state.control_position = position
+            state.control_c2w = c2w.tolist()
+            state.control_pitch = pitch
+            state.control_initialized = True
 
         chunk: dict = {
             "type": "control",
             "poses": poses,
-            "intrinsics": self._default_intrinsics(),
             "controls": sorted(controls),
         }
+        if previous_pose is not None:
+            chunk["previous_pose"] = previous_pose.tolist()
         if control_context.control_type == "act":
             chunk["action"] = action_rows
         return chunk
@@ -326,8 +386,9 @@ class LingBotWorldFastService:
             elif event == "reset":
                 state.pressed_controls.clear()
                 state.queued_controls.clear()
-                state.control_position = [0.0, 0.0, 0.0]
-                state.control_yaw = 0.0
+                state.control_c2w = np.eye(4).tolist()
+                state.control_pitch = 0.0
+                state.control_initialized = False
             else:
                 state.pressed_controls.add(direction)
                 state.queued_controls.add(direction)
@@ -382,7 +443,15 @@ class LingBotWorldFastService:
             )
             chunk_index = 0
             while state.active and runtime.active:
-                incoming = state.pending_inputs.get()
+                with state.control_lock:
+                    controls_held = bool(state.pressed_controls)
+                if controls_held:
+                    try:
+                        incoming = state.pending_inputs.get_nowait()
+                    except queue.Empty:
+                        incoming = {"type": "direction_control"}
+                else:
+                    incoming = state.pending_inputs.get()
                 if incoming.get("type") == "stop":
                     break
 
@@ -406,7 +475,7 @@ class LingBotWorldFastService:
                 else:
                     directional_chunk = self._build_directional_control_chunk(state, control_context)
                     if directional_chunk is None:
-                        raise RuntimeError("Directional action could not be converted into a control chunk")
+                        continue
                     applied_controls = directional_chunk["controls"]
                     emit_status(
                         "applying_direction_control",
@@ -415,6 +484,7 @@ class LingBotWorldFastService:
                         move_step=state.config.control_move_step,
                         yaw_step_degrees=state.config.control_yaw_step_degrees,
                         lateral_step=state.config.control_lateral_step,
+                        pitch_step_degrees=state.config.control_pitch_step_degrees,
                     )
                     control = control_builder.defer(directional_chunk)
 
@@ -465,7 +535,9 @@ class LingBotWorldFastService:
             return
         is_direction_action = chunk.get("type") == "control" and self._update_direction_controls(state, chunk)
         if is_direction_action:
-            state.pending_inputs.put({"type": "direction_control"})
+            event = str(chunk.get("event") or chunk.get("action") or "press").lower()
+            if event not in {"release", "keyup", "end", "reset"}:
+                state.pending_inputs.put({"type": "direction_control"})
             return
         state.pending_inputs.put(chunk)
 

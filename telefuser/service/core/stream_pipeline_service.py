@@ -17,6 +17,7 @@ with its own event loop so the server's main loop stays responsive.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from collections.abc import AsyncGenerator
 from types import ModuleType
@@ -79,7 +80,9 @@ class StreamPipelineService:
     """Loads a stream pipeline module and drives streaming execution.
 
     Pipeline file convention:
-        def get_service() -> ServerPushService | BidirectionalService
+        def get_service(gpu_num: int = 1) -> ServerPushService | BidirectionalService
+
+    Factories without a ``gpu_num`` parameter remain supported.
     """
 
     def __init__(
@@ -109,7 +112,7 @@ class StreamPipelineService:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def start_service(self, ppl_file: str, skip_validation: bool = False) -> bool:
+    def start_service(self, ppl_file: str, skip_validation: bool = False, gpu_num: int = 1) -> bool:
         """Load module, call get_service(), detect mode, and start."""
         if self.is_running:
             logger.warning("Stream service is already running")
@@ -135,7 +138,12 @@ class StreamPipelineService:
                     "returning a ServerPushService or BidirectionalService"
                 )
 
-            self.service = self._module.get_service()
+            get_service = self._module.get_service
+            signature = inspect.signature(get_service)
+            accepts_gpu_num = "gpu_num" in signature.parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+            )
+            self.service = get_service(gpu_num=gpu_num) if accepts_gpu_num else get_service()
             self.stream_mode = self._detect_mode(self.service)
             self.service.start()
             self.is_running = True

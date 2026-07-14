@@ -137,6 +137,13 @@ def serve(
 @click.option("--port", "-p", default=8088, type=int, help="Server port")
 @click.option("--host", default="0.0.0.0", type=str, help="Server host")
 @click.option(
+    "--gpu-num",
+    "-g",
+    default=1,
+    type=click.IntRange(min=1),
+    help="Number of GPUs passed to a stream pipeline get_service(gpu_num=...) factory",
+)
+@click.option(
     "--security-level",
     type=click.Choice(["none", "basic", "strict", "sandbox"], case_sensitive=False),
     default="strict",
@@ -152,6 +159,7 @@ def stream_serve(
     pipe_path: str,
     port: int,
     host: str,
+    gpu_num: int,
     security_level: str,
     skip_validation: bool,
 ) -> None:
@@ -178,7 +186,14 @@ def stream_serve(
 
     from telefuser.service.main import run_stream_server
 
-    run_stream_server(pipe_path, port, host, skip_validation=skip_validation, security_level=security_level)
+    run_stream_server(
+        pipe_path,
+        port,
+        host,
+        gpu_num=gpu_num,
+        skip_validation=skip_validation,
+        security_level=security_level,
+    )
 
 
 @main.command(name="validate")

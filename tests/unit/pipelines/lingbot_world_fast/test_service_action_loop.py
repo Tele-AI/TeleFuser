@@ -1,8 +1,10 @@
 import asyncio
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -84,8 +86,55 @@ def test_direction_action_updates_state_and_wakes_worker() -> None:
         {"type": "control", "direction": "up", "event": "press"},
     )
 
-    assert state.pressed_controls == {"up"}
+    assert state.pressed_controls == {"w"}
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
+
+
+def test_release_stops_control_without_scheduling_stationary_generation() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+    state.pressed_controls.add("w")
+
+    service.push_chunk("session-a", {"type": "control", "key": "ArrowUp", "event": "release"})
+
+    assert state.pressed_controls == set()
+    assert state.pending_inputs.empty()
+
+
+def test_directional_chunks_match_source_video_rate_integration_and_boundary() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.pressed_controls.add("w")
+    context = SimpleNamespace(control_type="cam", chunk_size=3)
+
+    first = service._build_directional_control_chunk(state, context)
+    second = service._build_directional_control_chunk(state, context)
+
+    assert first is not None
+    assert second is not None
+    assert "previous_pose" not in first
+    first_poses = np.asarray(first["poses"])
+    second_poses = np.asarray(second["poses"])
+    np.testing.assert_allclose(first_poses[:, 2, 3], [0.0, 0.2, 0.4], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(second["previous_pose"])[2, 3], 0.4, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(second_poses[:, 2, 3], [0.6, 0.8, 1.0], rtol=0, atol=1e-6)
+
+
+def test_wasd_ijkl_and_arrow_aliases_have_distinct_translation_and_rotation_controls() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    context = SimpleNamespace(control_type="cam", chunk_size=3)
+
+    state.pressed_controls.add("j")
+    yaw_chunk = service._build_directional_control_chunk(state, context)
+
+    assert yaw_chunk is not None
+    expected_yaw = np.deg2rad(-16.0)
+    np.testing.assert_allclose(np.asarray(yaw_chunk["poses"])[-1, 0, 0], np.cos(expected_yaw), atol=1e-6)
+    assert service._direction_from_chunk({"key": "ArrowLeft"}) == "j"
+    assert service._direction_from_chunk({"key": "KeyA"}) == "a"
+    assert service._direction_from_chunk({"key": "KeyI"}) == "i"
 
 
 def test_service_stop_closes_sessions_before_pipeline() -> None:
@@ -112,6 +161,25 @@ def test_create_session_rejects_invalid_pipeline_configuration() -> None:
         service.create_session({"image": Image.new("RGB", (8, 8))})
 
     assert service._sessions == {}
+
+
+def test_create_session_initializes_fixed_intrinsics_from_action_path() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(pipeline)
+    intrinsics = np.asarray([[8.0, 8.0, 4.0, 4.0], [9.0, 9.0, 4.0, 4.0]])
+
+    with patch("telefuser.pipelines.lingbot_world_fast.service.np.load", return_value=intrinsics) as load:
+        session_id = service.create_session(
+            {
+                "image": Image.new("RGB", (8, 8)),
+                "action_path": "/controls",
+            }
+        )
+
+    load.assert_called_once_with(Path("/controls") / "intrinsics.npy")
+    session_config = pipeline.control_context.call_args.args[0]
+    assert session_config.intrinsics is intrinsics
+    assert service._sessions[session_id].control_context is pipeline.control_context.return_value
 
 
 def test_pull_chunks_drains_terminal_messages_after_session_becomes_inactive() -> None:

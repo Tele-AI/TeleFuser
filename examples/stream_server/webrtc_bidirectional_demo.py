@@ -699,10 +699,14 @@ const keyToControl = {
   ArrowDown: "down",
   ArrowLeft: "left",
   ArrowRight: "right",
-  KeyW: "up",
-  KeyS: "down",
-  KeyA: "left",
-  KeyD: "right",
+  KeyW: "w",
+  KeyA: "a",
+  KeyS: "s",
+  KeyD: "d",
+  KeyI: "i",
+  KeyJ: "j",
+  KeyK: "k",
+  KeyL: "l",
 };
 
 function $(id) {
@@ -740,9 +744,9 @@ function fillDefaults() {
   $("seed").value = DEFAULT_OPTIONS.seed ?? 42;
   $("control-mode").value = DEFAULT_OPTIONS.control_mode || "cam";
   $("action-path").value = DEFAULT_OPTIONS.action_path || "";
-  $("control-move-step").value = DEFAULT_OPTIONS.control_move_step ?? 0.18;
-  $("control-yaw-step").value = DEFAULT_OPTIONS.control_yaw_step_degrees ?? 10.0;
-  $("control-lateral-step").value = DEFAULT_OPTIONS.control_lateral_step ?? 0.12;
+  $("control-move-step").value = DEFAULT_OPTIONS.control_move_step ?? 0.05;
+  $("control-yaw-step").value = DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0;
+  $("control-lateral-step").value = DEFAULT_OPTIONS.control_lateral_step ?? 0.05;
   $("show-control-hud").checked = DEFAULT_OPTIONS.show_control_hud ?? true;
 }
 
@@ -790,9 +794,11 @@ function requestOptionsFromForm() {
     sample_shift: numberValue("sample-shift", DEFAULT_OPTIONS.sample_shift ?? 5.0),
     seed: numberValue("seed", DEFAULT_OPTIONS.seed ?? 42),
     control_mode: $("control-mode").value,
-    control_move_step: numberValue("control-move-step", DEFAULT_OPTIONS.control_move_step ?? 0.18),
-    control_yaw_step_degrees: numberValue("control-yaw-step", DEFAULT_OPTIONS.control_yaw_step_degrees ?? 10.0),
-    control_lateral_step: numberValue("control-lateral-step", DEFAULT_OPTIONS.control_lateral_step ?? 0.12),
+    control_move_step: numberValue("control-move-step", DEFAULT_OPTIONS.control_move_step ?? 0.05),
+    control_yaw_step_degrees: numberValue("control-yaw-step", DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0),
+    control_lateral_step: numberValue("control-lateral-step", DEFAULT_OPTIONS.control_lateral_step ?? 0.05),
+    control_pitch_step_degrees: DEFAULT_OPTIONS.control_pitch_step_degrees ?? 2.0,
+    control_pitch_limit_degrees: DEFAULT_OPTIONS.control_pitch_limit_degrees ?? 85.0,
     show_control_hud: $("show-control-hud").checked,
   };
   const actionPath = $("action-path").value.trim();
@@ -1065,19 +1071,31 @@ def main() -> None:
     parser.add_argument("--max-attention-size", type=int, default=None, help="Optional LingBot max attention size")
     parser.add_argument("--max-sequence-length", type=int, default=512, help="LingBot max text sequence length")
     parser.add_argument("--control-mode", default="cam", choices=("cam", "act"), help="LingBot control mode")
-    parser.add_argument("--action-path", default="", help="Optional LingBot camera/action control file")
-    parser.add_argument("--control-move-step", type=float, default=0.18, help="LingBot direction-control move step")
+    parser.add_argument("--action-path", default="", help="Optional LingBot camera/action control directory")
+    parser.add_argument("--control-move-step", type=float, default=0.05, help="LingBot video-frame move step")
     parser.add_argument(
         "--control-yaw-step-degrees",
         type=float,
-        default=10.0,
-        help="LingBot direction-control yaw step per latent frame",
+        default=2.0,
+        help="LingBot yaw step per video frame",
     )
     parser.add_argument(
         "--control-lateral-step",
         type=float,
-        default=0.12,
-        help="LingBot direction-control lateral strafe step",
+        default=0.05,
+        help="LingBot video-frame lateral strafe step",
+    )
+    parser.add_argument(
+        "--control-pitch-step-degrees",
+        type=float,
+        default=2.0,
+        help="LingBot pitch step per video frame",
+    )
+    parser.add_argument(
+        "--control-pitch-limit-degrees",
+        type=float,
+        default=85.0,
+        help="LingBot absolute pitch limit",
     )
     parser.add_argument(
         "--show-control-hud",
@@ -1144,6 +1162,8 @@ def main() -> None:
         "control_move_step": args.control_move_step,
         "control_yaw_step_degrees": args.control_yaw_step_degrees,
         "control_lateral_step": args.control_lateral_step,
+        "control_pitch_step_degrees": args.control_pitch_step_degrees,
+        "control_pitch_limit_degrees": args.control_pitch_limit_degrees,
         "show_control_hud": args.show_control_hud,
     }
     if args.max_attention_size is not None:

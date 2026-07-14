@@ -109,6 +109,7 @@ telefuser stream-serve <pipeline_file> [OPTIONS]
 |------|---------|-------------|
 | `--port`, `-p` | `8088` | Server port |
 | `--host` | `0.0.0.0` | Bind address |
+| `--gpu-num`, `-g` | `1` | GPU count passed to `get_service(gpu_num=...)` when supported |
 | `--security-level` | `strict` | Pipeline validation level (`none`, `basic`, `strict`, `sandbox`). `sandbox` is a best-effort restricted-load check, not runtime isolation. |
 | `--skip-validation` | `false` | Skip pipeline file security checks |
 
@@ -129,7 +130,8 @@ telefuser stream-serve my_pipeline.py -p 8088 --skip-validation
 
 ## Creating a Stream Pipeline
 
-A stream pipeline is a Python file that defines a `get_service()` function returning a service object. The service must implement one of two protocols.
+A stream pipeline is a Python file that defines a `get_service()` function returning a service object. It may accept
+an optional `gpu_num` parameter supplied by `stream-serve --gpu-num`. The service must implement one of two protocols.
 
 ### ServerPushService Protocol
 
@@ -563,7 +565,9 @@ LingBot-World-Fast requires two sets of weights:
 
 #### Start the Server
 
-Set `TF_MODEL_ZOO_PATH` and, if needed, `PPL_CONFIG["parallelism"]` before starting the service. The default configuration uses four GPUs and creates Ulysses workers internally, so the server command does not need `torchrun` or distributed environment variables.
+Set `TF_MODEL_ZOO_PATH` before starting the service and pass the worker count with `--gpu-num`. The service creates
+Ulysses workers internally, so the server command does not need `torchrun` or distributed environment variables.
+Use `CUDA_VISIBLE_DEVICES` to select the physical GPUs.
 
 ```bash
 TF_MODEL_ZOO_PATH=/storage/model_zoo \
@@ -571,7 +575,7 @@ TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=your-turn-password \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-  -p 8088 --host 0.0.0.0 --skip-validation
+  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
 Wait for the following log line before connecting the browser demo:
@@ -595,6 +599,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://localhost:8088 \
   --port 8091 \
   --image-path /tmp/lingbot_test_input.png \
+  --action-path examples/data/lingbot_world_fast \
   --frame-num 81 \
   --chunk-size 3 \
   --fps 16 \
@@ -603,8 +608,6 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --turn-credential your-turn-password \
   --force-turn-relay \
   --ice-gather-timeout-ms 30000 \
-  --control-lateral-step 0.25 \
-  --control-yaw-step-degrees 12 \
   --no-open
 ```
 
@@ -614,7 +617,10 @@ Open in browser:
 http://localhost:8091
 ```
 
-`--image-path` is a server-side file path, not the laptop local path. The demo enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are forwarded by the demo process to `--server-url`.
+`--image-path` and `--action-path` are server-side paths, not laptop-local paths. For real-time keyboard control,
+the service loads only `intrinsics.npy` from `--action-path` and keeps its first row fixed for the session. The demo
+enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are
+forwarded by the demo process to `--server-url`.
 
 #### Without TURN: View on Server Browser
 
@@ -627,7 +633,7 @@ env -u TELEFUSER_TURN_SERVER \
 -u TELEFUSER_TURN_USERNAME \
 -u TELEFUSER_TURN_CREDENTIAL \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-  -p 8088 --host 0.0.0.0 --skip-validation
+  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
 Demo:
@@ -640,11 +646,10 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path /tmp/lingbot_test_input.png \
+  --action-path examples/data/lingbot_world_fast \
   --frame-num 81 \
   --chunk-size 3 \
   --fps 16 \
-  --control-lateral-step 0.25 \
-  --control-yaw-step-degrees 12 \
   --no-open
 ```
 
@@ -656,16 +661,24 @@ http://127.0.0.1:8091
 
 #### Direction Control
 
-The demo supports keyboard arrow keys and a page D-pad:
+The demo supports the page D-pad, arrow keys, and the source-compatible `WASD`/`IJKL` keyboard controls:
 
 | Input | cam mode meaning |
-|-------|-----------------|
-| `↑` | Camera forward |
-| `↓` | Camera backward |
-| `←` | Turn left and strafe left |
-| `→` | Turn right and strafe right |
+|-------|------------------|
+| `↑` / `W` | Move forward |
+| `↓` / `S` | Move backward |
+| `A` / `D` | Strafe left / right |
+| `←` / `J` | Yaw left |
+| `→` / `L` | Yaw right |
+| `I` / `K` | Pitch up / down |
 
-Controls only affect chunks that have not yet started generating; chunks already denoising or decoding are not immediately changed. Therefore, it is recommended to hold a direction key early after connecting, rather than clicking near the end of the video.
+Controls only affect chunks that have not yet started generating; chunks already denoising or decoding are not
+immediately changed. Holding a key continuously generates controlled chunks. After all keys are released, the
+service stops requesting new chunks and WebRTC repeats the most recently emitted frame.
+
+The camera pose starts at identity. Each latent interval integrates four video-frame control steps, matching the
+LingBot source trajectory generator. Camera intrinsics are fixed when the session is created. Absolute pose and
+pitch state are accumulated across chunks, including the relative-pose delta across each chunk boundary.
 
 The following states in the DataChannel log indicate that direction control has been consumed by the server and applied to a generation chunk:
 
@@ -680,12 +693,12 @@ Common control strength parameters:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--control-move-step` | `0.18` | Forward/backward displacement step size |
-| `--control-yaw-step-degrees` | `10.0` | Yaw angle per latent frame |
-| `--control-lateral-step` | `0.12` | Left/right lateral step size |
+| `--control-move-step` | `0.05` | Forward/backward displacement per video frame |
+| `--control-yaw-step-degrees` | `2.0` | Yaw angle per video frame |
+| `--control-lateral-step` | `0.05` | Lateral displacement per video frame |
+| `--control-pitch-step-degrees` | `2.0` | Pitch angle per video frame |
+| `--control-pitch-limit-degrees` | `85.0` | Absolute pitch limit |
 | `--show-control-hud / --no-show-control-hud` | `true` | Whether to overlay direction HUD on controlled chunks |
-
-If left/right effects are subtle, increase `--control-lateral-step`, e.g., `0.25` or `0.3`.
 
 #### `cam` vs `act` Control Modes
 

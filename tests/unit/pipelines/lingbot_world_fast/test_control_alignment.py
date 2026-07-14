@@ -28,6 +28,7 @@ def _builder() -> LingBotWorldFastControlBuilder:
             latent_w=1,
             latent_frames=3,
             chunk_size=3,
+            intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
         )
     )
 
@@ -91,6 +92,7 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
         latent_w=1,
         latent_frames=3,
         chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
     )
     controls = torch.cat(LingBotWorldFastControlBuilder(context).build_sequence(poses, intrinsics), dim=2)
 
@@ -123,16 +125,25 @@ def test_external_builder_matches_legacy_offline_camera_control_math() -> None:
     assert torch.equal(controls, legacy)
 
 
-def test_offline_control_window_rejects_short_action_or_intrinsics() -> None:
+def test_offline_control_window_keeps_first_intrinsics_and_rejects_short_action() -> None:
     poses = np.repeat(np.eye(4, dtype=np.float32)[None], 9, axis=0)
+    intrinsics = np.arange(32, dtype=np.float32).reshape(8, 4)
 
-    with pytest.raises(ValueError, match="Intrinsics sequence"):
-        truncate_control_sequence(poses, np.ones((8, 4), dtype=np.float32), None, frame_num=9)
     with pytest.raises(ValueError, match="Action sequence"):
         truncate_control_sequence(poses, np.ones(4, dtype=np.float32), np.ones((8, 4), dtype=np.float32), frame_num=9)
 
+    _, fixed_intrinsics, _ = truncate_control_sequence(poses, intrinsics, None, frame_num=9)
+    np.testing.assert_array_equal(fixed_intrinsics, intrinsics[0])
 
-def test_action_mode_requires_actions_and_camera_mode_accepts_per_frame_intrinsics() -> None:
+
+def test_offline_control_window_rejects_empty_intrinsics() -> None:
+    poses = np.repeat(np.eye(4, dtype=np.float32)[None], 9, axis=0)
+
+    with pytest.raises(ValueError, match="at least one row"):
+        truncate_control_sequence(poses, np.empty((0, 4), dtype=np.float32), None, frame_num=9)
+
+
+def test_action_mode_requires_actions_and_camera_mode_fixes_per_frame_intrinsics() -> None:
     poses = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
     intrinsics = np.repeat(np.array([[8.0, 8.0, 4.0, 4.0]], dtype=np.float32), 3, axis=0)
 
@@ -151,6 +162,49 @@ def test_action_mode_requires_actions_and_camera_mode_accepts_per_frame_intrinsi
         latent_w=1,
         latent_frames=3,
         chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
     )
     control = LingBotWorldFastControlBuilder(camera_context).build({"poses": poses, "intrinsics": intrinsics})
     assert control.shape == (1, 384, 3, 1, 1)
+
+    resampled = LingBotWorldFastControlBuilder._resample_intrinsics(
+        torch.tensor([[8.0, 8.0, 4.0, 4.0], [9.0, 9.0, 5.0, 5.0]]),
+        target_frames=3,
+    )
+    torch.testing.assert_close(resampled, torch.tensor([[8.0, 8.0, 4.0, 4.0]]).repeat(3, 1))
+
+
+def test_online_builder_uses_session_intrinsics_and_preserves_chunk_boundary_delta() -> None:
+    context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        control_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=6,
+        chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
+    )
+    builder = LingBotWorldFastControlBuilder(context)
+    captured_intrinsics: list[torch.Tensor] = []
+
+    def capture(poses: torch.Tensor, intrinsics: torch.Tensor, action: object | None) -> torch.Tensor:
+        captured_intrinsics.append(intrinsics)
+        return poses
+
+    builder._build_tensor = capture
+    poses = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
+    poses[:, 2, 3] = [0.3, 0.4, 0.5]
+    previous_pose = np.eye(4, dtype=np.float32)
+    previous_pose[2, 3] = 0.2
+
+    relative = builder.build({"poses": poses, "previous_pose": previous_pose})
+
+    assert not torch.equal(relative[0], torch.eye(4))
+    torch.testing.assert_close(relative[:, 2, 3], torch.ones(3))
+    assert len(captured_intrinsics) == 1
+    torch.testing.assert_close(captured_intrinsics[0], context.intrinsics.repeat(3, 1))

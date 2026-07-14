@@ -29,9 +29,12 @@ class LingBotWorldFastSessionConfig:
     max_sequence_length: int = 512
     # Optional CacheSeek world_kv reuse. None preserves baseline behavior.
     world_kv_binding: object | None = None
-    control_move_step: float = 0.18
-    control_yaw_step_degrees: float = 10.0
-    control_lateral_step: float = 0.12
+    intrinsics: object | None = None
+    control_move_step: float = 0.05
+    control_yaw_step_degrees: float = 2.0
+    control_lateral_step: float = 0.05
+    control_pitch_step_degrees: float = 2.0
+    control_pitch_limit_degrees: float = 85.0
     show_control_hud: bool = True
 
 
@@ -113,6 +116,14 @@ class LingBotWorldFastSessionState:
     active: bool = True
     pressed_controls: set[str] = field(default_factory=set)
     queued_controls: set[str] = field(default_factory=set)
-    control_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    control_yaw: float = 0.0
+    control_c2w: list[list[float]] = field(
+        default_factory=lambda: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    control_pitch: float = 0.0
+    control_initialized: bool = False
     control_lock: object = field(default_factory=threading.Lock)

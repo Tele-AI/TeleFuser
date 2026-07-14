@@ -193,7 +193,7 @@ def truncate_control_sequence(
     action: object | None,
     frame_num: int,
 ) -> tuple[object, object, object | None]:
-    """Select the requested complete video-rate control window without shortening it."""
+    """Select a video-rate pose/action window and keep the first camera intrinsics fixed."""
     if frame_num < 1 or (frame_num - 1) % 4:
         raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
     if len(poses) < frame_num:
@@ -202,13 +202,13 @@ def truncate_control_sequence(
     intrinsics_arr = np.asarray(intrinsics)
     if intrinsics_arr.ndim not in (1, 2) or intrinsics_arr.shape[-1] != 4:
         raise ValueError("Intrinsics must have shape (4,) or (frames, 4)")
-    if intrinsics_arr.ndim == 2 and len(intrinsics_arr) not in (1,) and len(intrinsics_arr) < frame_num:
-        raise ValueError(f"Intrinsics sequence has {len(intrinsics_arr)} frames but frame_num requires {frame_num}")
+    if intrinsics_arr.ndim == 2 and len(intrinsics_arr) < 1:
+        raise ValueError("Intrinsics sequence must contain at least one row")
     if action is not None and len(action) < frame_num:
         raise ValueError(f"Action sequence has {len(action)} frames but frame_num requires {frame_num}")
 
     trimmed_poses = poses[:frame_num]
-    trimmed_intrinsics = intrinsics[:frame_num] if intrinsics_arr.ndim > 1 else intrinsics
+    trimmed_intrinsics = intrinsics_arr[0] if intrinsics_arr.ndim == 2 else intrinsics_arr
     trimmed_action = action[:frame_num] if action is not None else None
     return trimmed_poses, trimmed_intrinsics, trimmed_action
 
@@ -228,6 +228,7 @@ class LingBotWorldFastControlContext:
     latent_w: int
     latent_frames: int
     chunk_size: int
+    intrinsics: torch.Tensor
 
 
 class LingBotWorldFastDeferredControl:
@@ -304,16 +305,9 @@ class LingBotWorldFastControlBuilder:
             return intrinsics.unsqueeze(0).repeat(target_frames, 1)
         if intrinsics.ndim != 2 or intrinsics.shape[1] != 4:
             raise ValueError(f"Intrinsics must have shape (4,) or (frames, 4), got {tuple(intrinsics.shape)}")
-        if intrinsics.shape[0] == 1:
-            return intrinsics.repeat(target_frames, 1)
-        if intrinsics.shape[0] == target_frames:
-            return intrinsics
-
-        source_positions = torch.linspace(0, intrinsics.shape[0] - 1, target_frames, device=intrinsics.device)
-        lower = source_positions.floor().long()
-        upper = source_positions.ceil().long()
-        weight = (source_positions - lower).unsqueeze(1)
-        return torch.lerp(intrinsics.index_select(0, lower), intrinsics.index_select(0, upper), weight)
+        if intrinsics.shape[0] < 1:
+            raise ValueError("Intrinsics sequence must contain at least one row")
+        return intrinsics[0:1].repeat(target_frames, 1)
 
     def build(self, action: dict[str, object]) -> torch.Tensor:
         """Build one model control tensor from one external chunk action."""
@@ -324,14 +318,22 @@ class LingBotWorldFastControlBuilder:
                 dtype=self.context.control_dtype,
             )
         poses = action.get("poses")
-        intrinsics = action.get("intrinsics")
-        if poses is None or intrinsics is None:
-            raise ValueError("External action requires poses and intrinsics")
+        intrinsics = action.get("intrinsics", self.context.intrinsics)
+        if poses is None:
+            raise ValueError("External action requires poses")
         poses_t = torch.as_tensor(poses, dtype=torch.float32, device=self.context.device)
         intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.context.device)
         self._validate_poses(poses_t, self.context.chunk_size)
         intrinsics_t = self._transform_intrinsics(self._resample_intrinsics(intrinsics_t, self.context.chunk_size))
-        poses_rel = compute_relative_poses(poses_t, framewise=True)
+        previous_pose = action.get("previous_pose")
+        if previous_pose is None:
+            poses_rel = compute_relative_poses(poses_t, framewise=True)
+        else:
+            previous_pose_t = torch.as_tensor(previous_pose, dtype=torch.float32, device=self.context.device)
+            if previous_pose_t.shape != (4, 4):
+                raise ValueError(f"Previous pose must have shape (4, 4), got {tuple(previous_pose_t.shape)}")
+            poses_with_boundary = torch.cat([previous_pose_t.unsqueeze(0), poses_t], dim=0)
+            poses_rel = compute_relative_poses(poses_with_boundary, framewise=True)[1:]
         return self._build_tensor(poses_rel, intrinsics_t, action.get("action")).to(dtype=torch.float32)
 
     def build_sequence(
