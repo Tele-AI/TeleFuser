@@ -33,7 +33,7 @@ from telefuser.pipelines.lingbot_world_fast.session import (
 )
 from telefuser.utils.video import save_video
 
-TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+TF_MODEL_ZOO_PATH = Path(os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")).expanduser()
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATA_ROOT = _PROJECT_ROOT / "examples" / "data" / "lingbot_world_fast"
