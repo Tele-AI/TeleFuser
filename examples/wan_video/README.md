@@ -203,6 +203,12 @@ python examples/wan_video/wan21_14b_text_to_video_h100.py --gpu_num 2 --prompt "
 python examples/wan_video/wan21_14b_text_to_video_h100.py --resolution 720p --aspect_ratio 16:9
 ```
 
+**Hint:**
+If you encounter error like `RuntimeError: unable to open shared memory object`, `OSError: Too many open files`, solve it with:
+```bash
+ulimit -n 65535
+```
+
 **Features:**
 - 14B parameter model for high-quality generation
 - CFG parallel enabled (cfg_scale=5.0)

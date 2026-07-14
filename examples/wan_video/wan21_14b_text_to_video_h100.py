@@ -44,13 +44,12 @@ PPL_CONFIG = dict(
 def get_dit_path_list(model_root):
     """Generate DiT model paths based on model_root."""
     return [
-        f"{model_root}/diffusion_pytorch_model-00001-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00002-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00003-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00004-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00005-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00006-of-00007.safetensors",
-        f"{model_root}/diffusion_pytorch_model-00007-of-00007.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00001-of-00006.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00002-of-00006.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00003-of-00006.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00004-of-00006.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00005-of-00006.safetensors",
+        f"{model_root}/diffusion_pytorch_model-00006-of-00006.safetensors",
     ]
 
 
@@ -99,6 +98,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
 
         pipe_config.dit_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.enable_denoising_parallel = True
+        pipe_config.dit_config.parallel_config.timeout = 3600
     pipe.init(module_manager, pipe_config)
     return pipe
 
