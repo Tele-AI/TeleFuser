@@ -163,6 +163,30 @@ def test_create_session_rejects_invalid_pipeline_configuration() -> None:
     assert service._sessions == {}
 
 
+def test_create_session_limits_stream_generation_to_20_seconds() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(pipeline)
+
+    session_id = service.create_session(
+        {
+            "image": Image.new("RGB", (8, 8)),
+            "fps": 16,
+            "frame_num": 321,
+        }
+    )
+    assert service._sessions[session_id].config.frame_num == 321
+    service.close_session(session_id)
+
+    with pytest.raises(ValueError, match="must not exceed 20 seconds"):
+        service.create_session(
+            {
+                "image": Image.new("RGB", (8, 8)),
+                "fps": 16,
+                "frame_num": 333,
+            }
+        )
+
+
 def test_create_session_initializes_fixed_intrinsics_from_action_path() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)

@@ -2,8 +2,17 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from examples.lingbot import lingbot_world_fast_image_to_video_h100 as offline_example
 from examples.lingbot import stream_lingbot_world_fast as stream_example
+from examples.stream_server import webrtc_bidirectional_demo as webrtc_demo
 from telefuser.core.config import AttnImplType
+from telefuser.pipelines.lingbot_world_fast.service import MAX_GENERATION_SECONDS
+
+
+def test_webrtc_demo_defaults_match_offline_h100_example() -> None:
+    assert webrtc_demo.DEFAULT_SAMPLE_SHIFT == offline_example.PPL_CONFIG["sample_shift"]
+    assert webrtc_demo.DEFAULT_PROMPT == offline_example.DEFAULT_PROMPT
+    assert webrtc_demo.MAX_GENERATION_SECONDS == MAX_GENERATION_SECONDS
 
 
 def test_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
@@ -25,10 +34,11 @@ def test_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
     assert config.fast_checkpoint_path == "/models/lingbot-world-fast"
     assert config.control_type == "cam"
     assert config.max_area == 480 * 832
+    assert config.local_attn_size == -1
     assert config.attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90
     assert config.parallel_config.device_ids == [0, 1, 2, 3]
     assert config.parallel_config.sp_ulysses_degree == 4
-    assert config.parallel_config.enable_fsdp is False
+    assert config.parallel_config.enable_fsdp is True
 
 
 def test_stream_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:

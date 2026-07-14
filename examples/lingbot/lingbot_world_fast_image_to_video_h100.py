@@ -33,6 +33,8 @@ from telefuser.pipelines.lingbot_world_fast.session import (
 )
 from telefuser.utils.video import save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATA_ROOT = _PROJECT_ROOT / "examples" / "data" / "lingbot_world_fast"
 DEFAULT_IMAGE_PATH = str(_DATA_ROOT / "image.jpg")
@@ -68,9 +70,8 @@ def get_pipeline(
 ) -> LingBotWorldFastPipeline:
     """Load LingBot-World-Fast for offline chunked generation."""
     if model_root is None or fast_model_root is None:
-        model_zoo_path = Path(os.environ["TF_MODEL_ZOO_PATH"]).expanduser()
-        default_model_root = str(model_zoo_path / "Wan2.2-I2V-A14B")
-        default_fast_model_root = str(model_zoo_path / "lingbot" / "lingbot-world-fast")
+        default_model_root = str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B")
+        default_fast_model_root = str(TF_MODEL_ZOO_PATH / "lingbot" / "lingbot-world-fast")
     else:
         default_model_root, default_fast_model_root = model_root, fast_model_root
     if parallelism < 1:

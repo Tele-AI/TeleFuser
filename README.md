@@ -82,19 +82,46 @@ video = pipe(
 TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 
 ```bash
-# Set TF_MODEL_ZOO_PATH and PPL_CONFIG["parallelism"] in:
-# examples/lingbot/stream_lingbot_world_fast.py
-
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
+TELEFUSER_TURN_USERNAME=telefuser \
+TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-  -p 8088 \
-  --skip-validation
+  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 
 python examples/stream_server/webrtc_bidirectional_demo.py \
-  --server-url http://localhost:8088 \
-  --image-path /path/to/input.png
+  --server-url http://127.0.0.1:8088 \
+  --port 8091 \
+  --image-path examples/data/lingbot_world_fast/image.jpg \
+  --action-path examples/data/lingbot_world_fast \
+  --frame-num 321 --chunk-size 3 --sample-shift 10.0 --fps 16 \
+  --turn-url 'turn:localhost:3478?transport=tcp' \
+  --turn-username telefuser --turn-credential telefuser-turn \
+  --force-turn-relay --ice-gather-timeout-ms 30000 --no-open
 ```
 
-This starts a continuous session where the client sends control messages over a WebRTC DataChannel and receives generated video frames over media tracks.
+This starts a continuous session where the client sends control messages over a WebRTC DataChannel and receives
+generated video frames over media tracks. When the browser runs on a laptop through VS Code Remote SSH, configure
+TURN over TCP and forward ports `8091` and `3478`; port `8088` does not need forwarding because the demo proxies
+signaling requests. Keep local port `3478` equal to remote port `3478`; the forwarded 8091 port may use any available
+local port. Without VS Code, run the equivalent tunnel from a terminal on the laptop:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -L 8091:127.0.0.1:8091 \
+  -L 3478:127.0.0.1:3478 \
+  USER@SERVER_HOST
+```
+
+Then open `http://localhost:8091`. The TURN command and credentials above are development examples. See the
+[stream server guide](docs/en/stream_server.md#lingbot-world-fast-streaming) and the
+[LingBot example README](examples/lingbot/README.md) for coturn startup and the tested four-H100 setup.
+
+If the browser runs on the same physical machine as TeleFuser, no SSH tunnel or TURN server is needed. Unset all
+`TELEFUSER_TURN_*` variables, start the service on `127.0.0.1:8088`, run the demo without any `--turn-*` or
+`--force-turn-relay` arguments, and open `http://localhost:8091`. This does not apply when only the shell is on the
+server through SSH but the browser still runs on a laptop.
 
 ### 3. Batch Service Mode
 

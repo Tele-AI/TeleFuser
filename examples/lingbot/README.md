@@ -1,7 +1,7 @@
 # LingBot-World-Fast Examples
 
-Offline image-to-video and online streaming generation with LingBot-World-Fast. This page describes how to run
-the `lingbot_world_fast_image_to_video_h100.py` offline image-to-video example on H100 GPUs.
+Offline image-to-video and interactive WebRTC streaming generation with LingBot-World-Fast. This page describes
+the H100 offline example, the LingBot stream service, and the browser camera controller.
 
 ## Model Directory
 
@@ -30,7 +30,7 @@ export TF_MODEL_ZOO_PATH=/path/to/model_zoo
 | Continuous chunked generation | ✔️ |
 | Single-GPU inference | ✔️ |
 | Ulysses Sequence Parallel | ✔️ |
-| FSDP | Disabled by default in this example |
+| FSDP | Enabled by default for the streaming example; disabled for the offline example |
 | H100 Sage Attention | ✔️ |
 
 ## Files
@@ -139,17 +139,77 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Real-Time Streaming
 
-Start the bidirectional WebRTC service with two physical H100 GPUs (2 and 3):
+The streaming example defaults to camera control, four Ulysses workers, and FSDP. `stream-serve --gpu-num` is
+passed to `get_service(gpu_num=...)`; use `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use
+`torchrun` because TeleFuser creates the workers internally.
+
+### Tested GPU and Duration Limits
+
+The global KV cache grows with the requested frame count even when FSDP is enabled. The following 832x480 limits
+were verified on H100 80 GB GPUs with `chunk_size=3`, `16 FPS`, and `sample_shift=10.0`:
+
+| GPUs | Duration selected in the page | Frame count | Result |
+| --- | --- | --- | --- |
+| 2 H100 | 10 seconds | 153 | Passed |
+| 2 H100 | 20 seconds | 321 | CUDA OOM while allocating KV cache |
+| 4 H100 | 20 seconds | 321 | Passed, 27/27 chunks |
+
+The four-GPU 20-second test used FSDP and Ulysses degree 4. Peak memory was approximately 58.6 GiB on GPU 0 and
+41.6 GiB on GPUs 1-3. These are tested values, not universal limits; other resolutions and concurrent GPU users
+change the available capacity.
+
+### Start a Local TURN Server for VS Code Remote SSH
+
+VS Code forwards TCP ports. For a laptop browser accessing a remote host, use TURN over TCP and force relay mode.
+The following development-only coturn command binds to loopback and uses a small relay range:
+
+```bash
+sudo apt-get install -y coturn
+
+turnserver -n -m 1 \
+    --listening-ip=127.0.0.1 \
+    --relay-ip=127.0.0.1 \
+    --listening-port=3478 \
+    --min-port=49160 --max-port=49200 \
+    --user=telefuser:telefuser-turn \
+    --realm=telefuser.local \
+    --fingerprint --lt-cred-mech \
+    --no-tls --no-dtls --no-cli \
+    --allow-loopback-peers \
+    --simple-log --log-file=/tmp/telefuser-turn.log
+```
+
+Keep this command running in its own terminal. `--allow-loopback-peers` is required here because both TeleFuser and
+coturn run on the same remote host; do not copy this loopback configuration to an internet-facing production TURN
+server. Verify the credentials and TCP allocation locally:
+
+```bash
+turnutils_uclient -t -y -c \
+    -u telefuser -w telefuser-turn -p 3478 127.0.0.1
+```
+
+### Start the Four-GPU LingBot Service
 
 ```bash
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-CUDA_VISIBLE_DEVICES=2,3 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
+TELEFUSER_TURN_USERNAME=telefuser \
+TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-    --gpu-num 2 -p 8088 --host 0.0.0.0 --skip-validation
+    --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
-Run the browser controller on the server. The action directory supplies the same fixed camera intrinsics used by
-the offline example; camera poses are generated from keyboard input in real time.
+Wait for `Starting stream server on 0.0.0.0:8088`, then verify readiness:
+
+```bash
+curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
+```
+
+### Start the Browser Demo
+
+Run the demo on the remote TeleFuser host. It proxies signaling requests to port 8088, so the laptop browser does
+not need direct access to 8088.
 
 ```bash
 python examples/stream_server/webrtc_bidirectional_demo.py \
@@ -157,10 +217,127 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
     --port 8091 \
     --image-path examples/data/lingbot_world_fast/image.jpg \
     --action-path examples/data/lingbot_world_fast \
-    --frame-num 81 \
+    --frame-num 321 \
     --chunk-size 3 \
+    --sample-shift 10.0 \
+    --fps 16 \
+    --turn-url 'turn:localhost:3478?transport=tcp' \
+    --turn-username telefuser \
+    --turn-credential telefuser-turn \
+    --force-turn-relay \
+    --ice-gather-timeout-ms 30000 \
     --no-open
 ```
 
-Use `W/S` to move forward/backward, `A/D` to strafe, `J/L` (or the left/right arrows) to yaw, and `I/K` to
-pitch. Releasing all controls stops new chunk generation, so the WebRTC stream holds the last output frame.
+In the VS Code **Ports** panel, forward these remote TCP ports:
+
+| Remote port | Required local port | Purpose |
+| --- | --- | --- |
+| `8091` | Any available port | Demo page and proxied SDP/session HTTP requests |
+| `3478` | `3478` | Browser TURN-over-TCP connection used by `turn:localhost:3478` |
+
+Do not forward 8088 when proxying is enabled. Port 3478 must keep local port 3478 unless `--turn-url` is changed to
+the alternative local port. Open the forwarded 8091 URL shown by VS Code using `http://`, then hard-refresh the
+page after restarting the demo. Do not forward coturn's `49160-49200` relay range through VS Code: browser relay
+traffic remains inside the forwarded TURN TCP connection, while that range is used remotely between coturn and the
+WebRTC peer.
+
+If you connect with a normal SSH client instead of VS Code Remote SSH, run this command in a separate terminal on
+the laptop. Replace `USER` and `SERVER_HOST` with the SSH login used for the server:
+
+```bash
+ssh -N \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -L 8091:127.0.0.1:8091 \
+    -L 3478:127.0.0.1:3478 \
+    USER@SERVER_HOST
+```
+
+Keep the command running and open `http://localhost:8091`. Add `-p SSH_PORT` or `-i /path/to/private_key` when the
+server requires a non-default SSH port or identity file. To obtain an interactive shell from the same connection,
+omit `-N`. If local port 8091 is occupied, change only the first mapping, for example
+`-L 18091:127.0.0.1:8091`, and open `http://localhost:18091`.
+
+If local port 3478 is occupied, map another local port such as `-L 13478:127.0.0.1:3478` and change the browser demo
+argument to `--turn-url 'turn:localhost:13478?transport=tcp'`. The server-side
+`TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp'` remains unchanged.
+
+### Run the Demo Entirely on One Machine
+
+If both the browser and the GPU service run on the same physical machine, neither coturn nor SSH forwarding is
+needed. This includes a browser opened directly on the workstation or through its remote desktop, VNC, or noVNC
+session. It does not include an SSH shell on the server with the browser still running on a laptop.
+
+Start the service in the first terminal with TURN variables explicitly removed:
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+    -u TELEFUSER_TURN_USERNAME \
+    -u TELEFUSER_TURN_CREDENTIAL \
+    TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+    --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
+```
+
+Start the demo in a second terminal without `--turn-url`, TURN credentials, or `--force-turn-relay`:
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+    -u TELEFUSER_TURN_USERNAME \
+    -u TELEFUSER_TURN_CREDENTIAL \
+    python examples/stream_server/webrtc_bidirectional_demo.py \
+    --server-url http://127.0.0.1:8088 \
+    --port 8091 \
+    --image-path examples/data/lingbot_world_fast/image.jpg \
+    --action-path examples/data/lingbot_world_fast \
+    --frame-num 321 \
+    --chunk-size 3 \
+    --sample-shift 10.0 \
+    --fps 16 \
+    --no-open
+```
+
+Open `http://localhost:8091` in the browser on that machine.
+
+`--image-path` and `--action-path` are paths on the remote host. In real-time `cam` mode, `image.jpg` supplies the
+initial frame, only the first row of `intrinsics.npy` is used as fixed intrinsics, and `poses.npy` is not replayed;
+camera poses are generated from live controls.
+
+### Camera Controls
+
+The page has separate translation and rotation pads:
+
+| Input | Camera operation |
+| --- | --- |
+| `W` or `↑` | Move forward |
+| `S` or `↓` | Move backward |
+| `A` or `←` | Strafe left |
+| `D` or `→` | Strafe right |
+| `J` | Yaw left |
+| `L` | Yaw right |
+| `I` | Pitch up |
+| `K` | Pitch down |
+
+Multiple keys can be held together, for example `W+J`. Move/strafe steps default to `0.05` per video frame;
+yaw/pitch steps default to `2°` per video frame, with pitch limited to `±85°`. Camera pose and pitch accumulate
+across chunks. Controls affect only chunks that have not started inference. Releasing all keys stops requesting new
+chunks, and WebRTC repeats the most recent frame while idle. **Reset Control** returns the accumulated pose to the
+identity pose.
+
+### Troubleshooting
+
+- **Blank 8091 page:** confirm the demo process is listening, open the exact forwarded URL from the VS Code Ports
+  panel using `http://`, and hard-refresh. The demo uses a threaded HTTP server so VS Code probe connections do not
+  block page requests.
+- **No relay candidate:** confirm local port 3478 maps to remote 3478, the TURN credentials match, and the demo log
+  shows `iceTransportPolicy=relay`. Browser logs should report at least one `typ=relay` candidate.
+- **Static preview:** inspect the DataChannel log for `control_state` and `applying_direction_control`. If the server
+  logged CUDA OOM, restart the service because a failed parallel worker cannot process another session.
+- **Session already active:** click **Stop** or delete it with
+  `curl -X DELETE http://127.0.0.1:8088/v1/stream/webrtc/<session_id>`.
+- **Residual workers after a forced exit:** terminate stale `spawn_main` processes before restarting.
+
+For a production/public TURN deployment, TLS, firewall, and relay-port requirements, see the
+[stream server guide](../../docs/en/stream_server.md#public-network-deployment).

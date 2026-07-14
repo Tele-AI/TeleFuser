@@ -563,6 +563,38 @@ LingBot-World-Fast requires two sets of weights:
 | Base model subdirectory | `/storage/model_zoo/Wan2.2-I2V-A14B` | Base Wan2.2 I2V weights containing VAE, T5 text encoder, and tokenizer |
 | Fast model subdirectory | `/storage/model_zoo/lingbot/lingbot-world-fast` | LingBot-World-Fast DiT weights |
 
+#### VS Code Remote SSH: TURN over TCP
+
+When the page is opened by a laptop browser through VS Code Remote SSH, the browser and TeleFuser are not on the
+same network interface even though both URLs use `localhost`. SDP signaling can use the demo's HTTP proxy, but RTP
+media still needs an ICE route. VS Code forwards TCP rather than arbitrary UDP relay ports, so use TURN over TCP.
+
+For development on a trusted host, install coturn and run a loopback-only server in a separate terminal:
+
+```bash
+sudo apt-get install -y coturn
+
+turnserver -n -m 1 \
+  --listening-ip=127.0.0.1 \
+  --relay-ip=127.0.0.1 \
+  --listening-port=3478 \
+  --min-port=49160 --max-port=49200 \
+  --user=telefuser:telefuser-turn \
+  --realm=telefuser.local \
+  --fingerprint --lt-cred-mech \
+  --no-tls --no-dtls --no-cli \
+  --allow-loopback-peers \
+  --simple-log --log-file=/tmp/telefuser-turn.log
+```
+
+`--allow-loopback-peers` is needed only because coturn and TeleFuser are peers on the same host. This command is for
+local development and must not be exposed directly to the internet. Verify the TCP allocation and credentials:
+
+```bash
+turnutils_uclient -t -y -c \
+  -u telefuser -w telefuser-turn -p 3478 127.0.0.1
+```
+
 #### Start the Server
 
 Set `TF_MODEL_ZOO_PATH` before starting the service and pass the worker count with `--gpu-num`. The service creates
@@ -571,12 +603,16 @@ Use `CUDA_VISIBLE_DEVICES` to select the physical GPUs.
 
 ```bash
 TF_MODEL_ZOO_PATH=/storage/model_zoo \
-TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
-TELEFUSER_TURN_CREDENTIAL=your-turn-password \
+TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
   --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
+
+The streaming example enables FSDP and Ulysses sequence parallelism. All four worker logs should show a device mesh
+with `dims=[4]` and `Enabling FSDP for lingbot_world_fast_denoise`.
 
 Wait for the following log line before connecting the browser demo:
 
@@ -592,20 +628,22 @@ curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
 
 #### Start the Browser Demo
 
-When using VS Code Remote SSH to access the server from a laptop browser, browser JavaScript runs locally. In this case, use TURN and forward the remote `3478` port to local `3478`.
+When using VS Code Remote SSH, run the demo on the remote TeleFuser host. The demo proxies signaling and session
+requests to 8088 by default.
 
 ```bash
 python examples/stream_server/webrtc_bidirectional_demo.py \
-  --server-url http://localhost:8088 \
+  --server-url http://127.0.0.1:8088 \
   --port 8091 \
-  --image-path /tmp/lingbot_test_input.png \
+  --image-path examples/data/lingbot_world_fast/image.jpg \
   --action-path examples/data/lingbot_world_fast \
-  --frame-num 81 \
+  --frame-num 321 \
   --chunk-size 3 \
+  --sample-shift 10.0 \
   --fps 16 \
   --turn-url 'turn:localhost:3478?transport=tcp' \
   --turn-username telefuser \
-  --turn-credential your-turn-password \
+  --turn-credential telefuser-turn \
   --force-turn-relay \
   --ice-gather-timeout-ms 30000 \
   --no-open
@@ -617,46 +655,90 @@ Open in browser:
 http://localhost:8091
 ```
 
+In the VS Code **Ports** panel, forward the following remote TCP ports:
+
+| Remote port | Local port | Purpose |
+|-------------|------------|---------|
+| `8091` | Any available port | Demo HTML and proxied `/v1/stream/webrtc/*` requests |
+| `3478` | `3478` | TURN-over-TCP connection referenced by `turn:localhost:3478` |
+
+Port 8088 does not need forwarding while the demo proxy is enabled. Port 3478 must retain local port 3478 unless
+the demo's `--turn-url` is changed to match another local port. Open the exact 8091 URL displayed by VS Code using
+`http://`; `localhost` is a browser secure context, so HTTPS is not needed for this development workflow.
+
+Do not forward the coturn relay range (`49160-49200`) through VS Code. Browser relay traffic stays inside the
+forwarded TURN TCP connection; the relay range is used on the remote host between coturn and the WebRTC peer.
+Internet-facing production TURN is different and must expose its configured relay range through the firewall.
+
+If you use a normal SSH client instead of the VS Code Ports panel, start the tunnel in a separate laptop terminal.
+Replace `USER` and `SERVER_HOST` with the server login:
+
+```bash
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -L 8091:127.0.0.1:8091 \
+  -L 3478:127.0.0.1:3478 \
+  USER@SERVER_HOST
+```
+
+Keep the tunnel running and open `http://localhost:8091`. Add `-p SSH_PORT` for a non-default SSH port or
+`-i /path/to/private_key` for a specific identity file. Omit `-N` if the same connection should also open an
+interactive shell.
+
+If local port 8091 is occupied, use `-L 18091:127.0.0.1:8091` and open `http://localhost:18091`. If local port 3478
+is occupied, use `-L 13478:127.0.0.1:3478` and pass
+`--turn-url 'turn:localhost:13478?transport=tcp'` to the browser demo. Do not change the server-side
+`TELEFUSER_TURN_SERVER`, which still connects to coturn at remote port 3478.
+
 `--image-path` and `--action-path` are server-side paths, not laptop-local paths. For real-time keyboard control,
 the service loads only `intrinsics.npy` from `--action-path` and keeps its first row fixed for the session. The demo
 enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are
 forwarded by the demo process to `--server-url`.
 
-#### Without TURN: View on Server Browser
+#### Run the Browser and Service on the Same Machine
 
-If the browser actually runs on the server side (e.g., Chrome in remote desktop, VNC, or noVNC), you can skip TURN. Do not set `TELEFUSER_TURN_*` and do not pass `--turn-url` to the demo.
+If the browser and GPU service run on the same physical machine, you can skip coturn and SSH forwarding. Examples
+include Chrome opened directly on the workstation or through remote desktop, VNC, or noVNC. An SSH login alone does
+not make the laptop browser local: if the browser still runs on the laptop, use the TURN and port-forwarding setup
+above.
+
+Do not set `TELEFUSER_TURN_*`, and do not pass `--turn-url`, TURN credentials, or `--force-turn-relay` to the demo.
 
 Server:
 
 ```bash
 env -u TELEFUSER_TURN_SERVER \
--u TELEFUSER_TURN_USERNAME \
--u TELEFUSER_TURN_CREDENTIAL \
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
+  -u TELEFUSER_TURN_USERNAME \
+  -u TELEFUSER_TURN_CREDENTIAL \
+  TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+  --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
 ```
 
 Demo:
 
 ```bash
 env -u TELEFUSER_TURN_SERVER \
--u TELEFUSER_TURN_USERNAME \
--u TELEFUSER_TURN_CREDENTIAL \
-python examples/stream_server/webrtc_bidirectional_demo.py \
+  -u TELEFUSER_TURN_USERNAME \
+  -u TELEFUSER_TURN_CREDENTIAL \
+  python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
-  --image-path /tmp/lingbot_test_input.png \
+  --image-path examples/data/lingbot_world_fast/image.jpg \
   --action-path examples/data/lingbot_world_fast \
-  --frame-num 81 \
+  --frame-num 321 \
   --chunk-size 3 \
+  --sample-shift 10.0 \
   --fps 16 \
   --no-open
 ```
 
-Open on server browser:
+Open in the browser on the same machine:
 
 ```text
-http://127.0.0.1:8091
+http://localhost:8091
 ```
 
 #### Direction Control
@@ -667,9 +749,9 @@ The demo supports the page D-pad, arrow keys, and the source-compatible `WASD`/`
 |-------|------------------|
 | `↑` / `W` | Move forward |
 | `↓` / `S` | Move backward |
-| `A` / `D` | Strafe left / right |
-| `←` / `J` | Yaw left |
-| `→` / `L` | Yaw right |
+| `←` / `A` | Strafe left |
+| `→` / `D` | Strafe right |
+| `J` / `L` | Yaw left / right |
 | `I` / `K` | Pitch up / down |
 
 Controls only affect chunks that have not yet started generating; chunks already denoising or decoding are not
@@ -729,8 +811,10 @@ act` to the demo.
 
 LingBot accepts complete latent chunks only. `frame_num` must be `4n + 1`, and
 the resulting latent-frame count must divide evenly by `chunk_size`. With the
-default chunk size of 3, valid output lengths are 9, 21, 33, ..., 81 frames;
-invalid values are rejected rather than rounded down. Offline control files
+default chunk size of 3, valid output lengths are 9, 21, 33, ..., 321 frames.
+The browser accepts a duration and rounds down to the largest complete chunk:
+10 seconds becomes 153 frames and 20 seconds becomes 321 frames at 16 FPS.
+Direct API requests with invalid values are rejected. Offline control files
 must provide enough poses and action samples for the requested video window.
 Intrinsics may be either one static `(4,)` value or one `(frames, 4)` value per
 video frame. Explicit control tensors must match the pipeline's selected mode,
@@ -738,11 +822,22 @@ device, dtype, and full latent-chunk shape.
 
 #### VRAM and Resolution
 
-LingBot's KV cache grows with `frame_num` and output resolution. 832×480 at 81 frames approaches the 80 GB H100 VRAM limit. Start with fewer frames to verify the pipeline:
+LingBot's global KV cache grows with `frame_num` and output resolution. FSDP shards model parameters, while Ulysses
+shards KV heads across workers. More GPUs therefore allow longer sessions, but the scaling is not perfectly linear.
+The following 832x480 configurations were tested with FSDP, `chunk_size=3`, and `sample_shift=10.0`:
+
+| GPUs | Duration | Frames | Result |
+|------|----------|--------|--------|
+| 2 H100 80 GB | 10 seconds | 153 | Passed |
+| 2 H100 80 GB | 20 seconds | 321 | KV-cache CUDA OOM |
+| 4 H100 80 GB | 20 seconds | 321 | Passed, 27/27 chunks |
+
+The four-GPU run peaked at approximately 58.6 GiB on GPU 0 and 41.6 GiB on GPUs 1-3. Start with five seconds to
+verify the pipeline before selecting the maximum duration:
 
 ```bash
 # In the browser demo or session configuration:
---frame-num 21
+--frame-num 81
 ```
 
 Common tuning parameters:
@@ -752,6 +847,9 @@ Common tuning parameters:
 | `PPL_CONFIG["resolution"]` | Select either the 480p or 720p output area |
 | `--frame-num` | Reduce total generated frames and latent chunk count |
 | `--chunk-size` | Affect the latent chunk size per generation step |
+
+An OOM marks the parallel worker as failed. Closing the browser session is not enough; restart the stream service
+before trying another duration.
 
 The service currently allows only one LingBot active session. Before reconnecting, click **Stop** on the demo, or call:
 

@@ -30,6 +30,12 @@ import webbrowser
 
 DEFAULT_SERVER_URL = "http://localhost:8088"
 DEFAULT_PORT = 8091
+DEFAULT_SAMPLE_SHIFT = 10.0
+MAX_GENERATION_SECONDS = 20.0
+DEFAULT_PROMPT = (
+    "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped "
+    "mountains under a bright blue sky with drifting white clouds. Gentle ripples reflect the tree and sky."
+)
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -527,16 +533,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .dpad {
     display: grid;
-    grid-template-columns: 54px 54px 54px;
-    grid-template-rows: 54px 54px 54px;
+    grid-template-columns: 44px 44px 44px;
+    grid-template-rows: 44px 44px 44px;
     gap: 6px;
     justify-content: center;
-    margin: 16px 0 2px;
+    margin: 8px 0 2px;
     user-select: none;
   }
   .dpad button {
-    width: 54px;
-    height: 54px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     border: 1px solid #cbd5e1;
     background: #f8fafc;
@@ -550,8 +556,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     color: var(--blue);
   }
   .dpad .empty {
-    width: 54px;
-    height: 54px;
+    width: 44px;
+    height: 44px;
+  }
+  .control-pads {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .control-pad {
+    padding: 9px 4px 6px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #f8fafc;
+  }
+  .control-pad h3 {
+    margin: 0;
+    color: #475569;
+    font-size: 11px;
+    text-align: center;
+  }
+  .field-help {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 11px;
   }
   #messages {
     height: 210px;
@@ -596,7 +625,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <h2>Inputs</h2>
         <div class="field">
           <label for="prompt">Prompt</label>
-          <textarea id="prompt">a dog running</textarea>
+          <textarea id="prompt"></textarea>
         </div>
         <div class="field">
           <label for="image-path">Server image path</label>
@@ -604,22 +633,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div class="grid">
           <div class="field">
-            <label for="frame-num">Frames</label>
-            <input id="frame-num" type="number" min="5" step="4">
+            <label for="duration-seconds">Duration (seconds)</label>
+            <input id="duration-seconds" type="number" min="0.5" max="20" step="0.5">
           </div>
           <div class="field">
-            <label for="chunk-size">Chunk size</label>
-            <input id="chunk-size" type="number" min="1" step="1">
+            <label for="frame-num">Generated frames</label>
+            <input id="frame-num" type="number" readonly>
           </div>
           <div class="field">
             <label for="fps">FPS</label>
-            <input id="fps" type="number" min="1" step="1">
+            <input id="fps" type="number" min="1" step="1" readonly>
+          </div>
+          <div class="field">
+            <label for="chunk-size">Chunk size</label>
+            <input id="chunk-size" type="number" min="1" step="1" readonly>
           </div>
           <div class="field">
             <label for="seed">Seed</label>
             <input id="seed" type="number" step="1">
           </div>
         </div>
+        <div id="duration-help" class="field-help"></div>
         <div class="grid">
           <div class="field">
             <label for="sample-shift">Sample shift</label>
@@ -661,16 +695,35 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button id="reset-control">Reset Control</button>
         </div>
 
-        <div class="dpad" aria-label="Direction controls">
-          <div class="empty"></div>
-          <button id="ctrl-up" data-control="up" title="Forward">↑</button>
-          <div class="empty"></div>
-          <button id="ctrl-left" data-control="left" title="Turn left">←</button>
-          <div class="empty"></div>
-          <button id="ctrl-right" data-control="right" title="Turn right">→</button>
-          <div class="empty"></div>
-          <button id="ctrl-down" data-control="down" title="Backward">↓</button>
-          <div class="empty"></div>
+        <div class="control-pads">
+          <div class="control-pad">
+            <h3>Move · WASD / Arrows</h3>
+            <div class="dpad" aria-label="Translation controls">
+              <div class="empty"></div>
+              <button id="ctrl-forward" data-control="w" title="Move forward">↑</button>
+              <div class="empty"></div>
+              <button id="ctrl-strafe-left" data-control="a" title="Strafe left">←</button>
+              <div class="empty"></div>
+              <button id="ctrl-strafe-right" data-control="d" title="Strafe right">→</button>
+              <div class="empty"></div>
+              <button id="ctrl-backward" data-control="s" title="Move backward">↓</button>
+              <div class="empty"></div>
+            </div>
+          </div>
+          <div class="control-pad">
+            <h3>Rotate · IJKL</h3>
+            <div class="dpad" aria-label="Rotation controls">
+              <div class="empty"></div>
+              <button id="ctrl-pitch-up" data-control="i" title="Pitch up">↑</button>
+              <div class="empty"></div>
+              <button id="ctrl-yaw-left" data-control="j" title="Yaw left">↶</button>
+              <div class="empty"></div>
+              <button id="ctrl-yaw-right" data-control="l" title="Yaw right">↷</button>
+              <div class="empty"></div>
+              <button id="ctrl-pitch-down" data-control="k" title="Pitch down">↓</button>
+              <div class="empty"></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -686,8 +739,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 const SERVER_URL = __SERVER_URL__;
 const RTC_CONFIG = __RTC_CONFIG__;
 const DEFAULT_IMAGE_PATH = __IMAGE_PATH__;
+const DEFAULT_PROMPT = __PROMPT__;
 const DEFAULT_OPTIONS = __REQUEST_OPTIONS__;
 const ICE_GATHER_TIMEOUT_MS = __ICE_GATHER_TIMEOUT_MS__;
+const MAX_GENERATION_SECONDS = __MAX_GENERATION_SECONDS__;
 
 let pc = null;
 let dc = null;
@@ -695,10 +750,10 @@ let sessionId = null;
 let cleaning = false;
 const pressedControls = new Set();
 const keyToControl = {
-  ArrowUp: "up",
-  ArrowDown: "down",
-  ArrowLeft: "left",
-  ArrowRight: "right",
+  ArrowUp: "w",
+  ArrowDown: "s",
+  ArrowLeft: "a",
+  ArrowRight: "d",
   KeyW: "w",
   KeyA: "a",
   KeyS: "s",
@@ -735,12 +790,37 @@ function numberValue(id, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function frameNumForDuration(durationSeconds, fps, chunkSize) {
+  const duration = Math.min(MAX_GENERATION_SECONDS, Math.max(0.5, durationSeconds));
+  const targetFrames = Math.floor(duration * fps) + 1;
+  const targetLatentFrames = Math.floor((targetFrames - 1) / 4) + 1;
+  const completeLatentFrames = Math.max(chunkSize, Math.floor(targetLatentFrames / chunkSize) * chunkSize);
+  return 4 * (completeLatentFrames - 1) + 1;
+}
+
+function updateFrameNum() {
+  const fps = Math.max(1, numberValue("fps", DEFAULT_OPTIONS.fps ?? 16));
+  const chunkSize = Math.max(1, numberValue("chunk-size", DEFAULT_OPTIONS.chunk_size ?? 3));
+  const duration = Math.min(
+    MAX_GENERATION_SECONDS,
+    Math.max(0.5, numberValue("duration-seconds", 5.0)),
+  );
+  $("duration-seconds").value = duration;
+  const frameNum = frameNumForDuration(duration, fps, chunkSize);
+  $("frame-num").value = frameNum;
+  const actualDuration = (frameNum - 1) / fps;
+  $("duration-help").textContent =
+    "Actual duration: " + actualDuration.toFixed(2) + " s · maximum: " + MAX_GENERATION_SECONDS + " s";
+}
+
 function fillDefaults() {
+  $("prompt").value = DEFAULT_PROMPT;
   $("image-path").value = DEFAULT_IMAGE_PATH || "";
   $("fps").value = DEFAULT_OPTIONS.fps ?? 16;
-  $("frame-num").value = DEFAULT_OPTIONS.frame_num ?? 81;
   $("chunk-size").value = DEFAULT_OPTIONS.chunk_size ?? 3;
-  $("sample-shift").value = DEFAULT_OPTIONS.sample_shift ?? 5.0;
+  $("duration-seconds").max = MAX_GENERATION_SECONDS;
+  $("duration-seconds").value = ((DEFAULT_OPTIONS.frame_num ?? 81) - 1) / (DEFAULT_OPTIONS.fps ?? 16);
+  $("sample-shift").value = DEFAULT_OPTIONS.sample_shift ?? 10.0;
   $("seed").value = DEFAULT_OPTIONS.seed ?? 42;
   $("control-mode").value = DEFAULT_OPTIONS.control_mode || "cam";
   $("action-path").value = DEFAULT_OPTIONS.action_path || "";
@@ -748,6 +828,7 @@ function fillDefaults() {
   $("control-yaw-step").value = DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0;
   $("control-lateral-step").value = DEFAULT_OPTIONS.control_lateral_step ?? 0.05;
   $("show-control-hud").checked = DEFAULT_OPTIONS.show_control_hud ?? true;
+  updateFrameNum();
 }
 
 async function fetchJsonWithTimeout(url, options, timeoutMs) {
@@ -786,12 +867,13 @@ async function waitForIceGathering(peer, timeoutMs) {
 }
 
 function requestOptionsFromForm() {
+  updateFrameNum();
   const options = {
     ...DEFAULT_OPTIONS,
     fps: numberValue("fps", DEFAULT_OPTIONS.fps ?? 16),
     frame_num: numberValue("frame-num", DEFAULT_OPTIONS.frame_num ?? 81),
     chunk_size: numberValue("chunk-size", DEFAULT_OPTIONS.chunk_size ?? 3),
-    sample_shift: numberValue("sample-shift", DEFAULT_OPTIONS.sample_shift ?? 5.0),
+    sample_shift: numberValue("sample-shift", DEFAULT_OPTIONS.sample_shift ?? 10.0),
     seed: numberValue("seed", DEFAULT_OPTIONS.seed ?? 42),
     control_mode: $("control-mode").value,
     control_move_step: numberValue("control-move-step", DEFAULT_OPTIONS.control_move_step ?? 0.05),
@@ -809,6 +891,10 @@ function requestOptionsFromForm() {
   }
   return options;
 }
+
+$("duration-seconds").addEventListener("input", updateFrameNum);
+$("fps").addEventListener("input", updateFrameNum);
+$("chunk-size").addEventListener("input", updateFrameNum);
 
 function setControlActive(control, active) {
   const btn = document.querySelector('[data-control="' + control + '"]');
@@ -1066,7 +1152,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=16, help="Output WebRTC FPS and pipeline FPS")
     parser.add_argument("--frame-num", type=int, default=81, help="Requested LingBot frame count")
     parser.add_argument("--chunk-size", type=int, default=3, help="LingBot latent chunk size")
-    parser.add_argument("--sample-shift", type=float, default=5.0, help="LingBot sampler shift")
+    parser.add_argument("--sample-shift", type=float, default=DEFAULT_SAMPLE_SHIFT, help="LingBot sampler shift")
     parser.add_argument("--seed", type=int, default=42, help="LingBot random seed")
     parser.add_argument("--max-attention-size", type=int, default=None, help="Optional LingBot max attention size")
     parser.add_argument("--max-sequence-length", type=int, default=512, help="LingBot max text sequence length")
@@ -1178,8 +1264,10 @@ def main() -> None:
         HTML_TEMPLATE.replace("__SERVER_URL__", json.dumps(server_url_for_browser))
         .replace("__RTC_CONFIG__", json.dumps(rtc_config))
         .replace("__IMAGE_PATH__", json.dumps(args.image_path))
+        .replace("__PROMPT__", json.dumps(DEFAULT_PROMPT))
         .replace("__REQUEST_OPTIONS__", json.dumps(request_options))
         .replace("__ICE_GATHER_TIMEOUT_MS__", str(args.ice_gather_timeout_ms))
+        .replace("__MAX_GENERATION_SECONDS__", str(MAX_GENERATION_SECONDS))
     )
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -1228,10 +1316,12 @@ def main() -> None:
             self.wfile.write(resp_body)
 
         def do_GET(self) -> None:
+            body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(html.encode("utf-8"))
+            self.wfile.write(body)
 
         def do_POST(self) -> None:
             if self._proxy_backend():
@@ -1248,7 +1338,7 @@ def main() -> None:
         def log_message(self, format: str, *_args: object) -> None:
             pass
 
-    server = http.server.HTTPServer(("0.0.0.0", args.port), Handler)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     url = f"http://localhost:{args.port}"
     print(f"Serving LingBot-World-Fast WebRTC demo at {url}")
     print(f"Stream server: {args.server_url}")

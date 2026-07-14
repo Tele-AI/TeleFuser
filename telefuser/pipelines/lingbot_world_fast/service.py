@@ -57,6 +57,7 @@ _DIRECTION_ALIASES = {
     "backward": "s",
 }
 _ACTION_DIRECTIONS = ("w", "a", "s", "d")
+MAX_GENERATION_SECONDS = 20.0
 
 
 class LingBotWorldFastService:
@@ -105,13 +106,24 @@ class LingBotWorldFastService:
         if intrinsics is None and config.get("action_path"):
             intrinsics = np.load(Path(config["action_path"]) / "intrinsics.npy")
 
+        fps = int(config.get("fps") or self.default_fps)
+        frame_num = int(config.get("frame_num", 81))
+        if fps <= 0:
+            raise ValueError(f"fps must be positive, got {fps}")
+        duration_seconds = (frame_num - 1) / fps
+        if duration_seconds > MAX_GENERATION_SECONDS:
+            raise ValueError(
+                f"LingBot streaming duration must not exceed {MAX_GENERATION_SECONDS:g} seconds, "
+                f"got {duration_seconds:g} seconds"
+            )
+
         session_config = LingBotWorldFastSessionConfig(
             prompt=config.get("prompt", ""),
             image=image,
             control_mode=config.get("control_mode", "cam"),
-            fps=int(config.get("fps") or self.default_fps),
+            fps=fps,
             chunk_size=int(config.get("chunk_size", 3)),
-            frame_num=int(config.get("frame_num", 81)),
+            frame_num=frame_num,
             sample_shift=float(config.get("sample_shift", 10.0)),
             seed=int(config.get("seed", 42)),
             max_attention_size=config.get("max_attention_size"),
