@@ -82,24 +82,51 @@ video = pipe(
 TeleFuser 当前提供了 `LingBot-World-Fast` 的双向 WebRTC Demo。
 
 ```bash
-export TF_MODEL_ZOO_PATH=/path/to/model_zoo
-# 预期子目录：Wan2.2-I2V-A14B 和 lingbot-world-fast
-
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
+TELEFUSER_TURN_USERNAME=telefuser \
+TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
-  -p 8088 \
-  --skip-validation
+  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 
 python examples/stream_server/webrtc_bidirectional_demo.py \
-  --server-url http://localhost:8088 \
-  --image-path /path/to/input.png
+  --server-url http://127.0.0.1:8088 \
+  --port 8091 \
+  --image-path examples/data/lingbot_world_fast/image.jpg \
+  --action-path examples/data/lingbot_world_fast \
+  --frame-num 321 --chunk-size 3 --sample-shift 10.0 --fps 16 \
+  --turn-url 'turn:localhost:3478?transport=tcp' \
+  --turn-username telefuser --turn-credential telefuser-turn \
+  --force-turn-relay --ice-gather-timeout-ms 30000 --no-open
 ```
 
-该流程会启动一个持续运行的会话：客户端通过 WebRTC DataChannel 发送控制消息，服务端通过媒体轨道持续回传生成视频。
+该流程会启动一个持续运行的会话：客户端通过 WebRTC DataChannel 发送控制消息，服务端通过媒体轨道
+持续回传生成视频。当浏览器运行在笔记本上，并通过 VS Code Remote SSH 访问远端服务器时，需要配置
+TCP TURN，并转发 `8091` 和 `3478` 端口。由于 demo 会代理信令请求，因此不需要转发 `8088`。本地
+`3478` 应保持映射到远端 `3478`；8091 可以映射到任意可用的本地端口。不使用 VS Code 时，可以在
+笔记本终端中建立等效的 OpenSSH 隧道：
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -L 8091:127.0.0.1:8091 \
+  -L 3478:127.0.0.1:3478 \
+  USER@SERVER_HOST
+```
+
+然后打开 `http://localhost:8091`。上面的 TURN 账号密码仅作为开发配置示例。coturn 启动方式、生产环境
+注意事项及四张 H100 的实测配置见 [流服务文档](docs/zh/stream_server.md#lingbot-world-fast-流式生成)
+和 [LingBot example README](examples/lingbot/README.md)。
+
+如果浏览器和 TeleFuser 服务运行在同一台物理机器上，则不需要 SSH 隧道或 TURN 服务。清除所有
+`TELEFUSER_TURN_*` 环境变量，让服务监听 `127.0.0.1:8088`，启动 demo 时不要传入任何 `--turn-*`
+或 `--force-turn-relay` 参数，然后打开 `http://localhost:8091`。如果只是通过 SSH 登录服务器、浏览器
+仍然运行在笔记本上，则不属于本机访问，仍需使用上述端口转发和 TURN 配置。
 
 ### 3. 批处理服务模式
 
 ```bash
-telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --task t2v --port 8000
+telefuser serve examples/wan_video/wan22_14b_text_to_video_h100.py --task t2v --port 8000
 ```
 
 TeleFuser 对外提供：
@@ -115,8 +142,9 @@ TeleFuser 对外提供：
 TeleFuser 采用分层运行时架构，并与仓库目录结构保持一致：
 
 1. **接入层**：FastAPI 任务接口与 WebRTC 流式入口。
-2. **服务与调度层**：请求路由、任务管理、流式会话和整体编排。
-3. **Pipeline 抽象层**：基于 Stage 的 Pipeline，支持异步执行、请求隔离和资源锁。
+2. **服务层**：请求路由、任务管理、流式会话、副本池，以及与 Pipeline 执行过程的集成。
+3. **Pipeline 抽象层**：模型相关的 `BasePipeline` / `BaseStage` 组件；可选用 orchestrator 实现异步
+   Stage 执行、请求状态跟踪和资源锁。
 4. **模型与优化层**：模型加载、注意力选择、量化、offload、LoRA、cache 集成。
 5. **执行后端层**：优化算子、Triton Kernel 和设备相关实现。
 
