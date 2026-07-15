@@ -229,6 +229,26 @@ def test_create_session_limits_stream_generation_to_20_seconds() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("fps", 0, "fps must be positive"),
+        ("chunk_size", 0, "chunk_size must be positive"),
+        ("chunk_size", -1, "chunk_size must be positive"),
+        ("max_duration_seconds", 0, "max_duration_seconds must be positive"),
+        ("max_duration_seconds", -1, "max_duration_seconds must be positive"),
+    ],
+)
+def test_create_session_rejects_non_positive_stream_parameters(field: str, value: int, message: str) -> None:
+    service = LingBotWorldFastService(MagicMock())
+
+    request = {"image": Image.new("RGB", (8, 8)), field: value}
+    if field == "max_duration_seconds":
+        request["frame_num"] = 9
+    with pytest.raises(ValueError, match=message):
+        service.create_session(request)
+
+
 def test_create_session_initializes_fixed_intrinsics_from_intrinsics_path() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)

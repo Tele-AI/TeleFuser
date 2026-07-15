@@ -104,6 +104,10 @@ class LingBotWorldFastService:
     @staticmethod
     def _frame_num_for_duration(max_duration_seconds: float, fps: int, chunk_size: int) -> int:
         """Return the longest 4n+1 output length with complete latent chunks."""
+        if fps <= 0:
+            raise ValueError(f"fps must be positive, got {fps}")
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
         if max_duration_seconds <= 0:
             raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
         max_latent_frames = int(math.floor(max_duration_seconds * fps / 4)) + 1
@@ -130,13 +134,28 @@ class LingBotWorldFastService:
         if intrinsics is None and config.get("intrinsics_path"):
             intrinsics = np.load(Path(config["intrinsics_path"]))
 
-        fps = int(config.get("fps") or defaults.get("fps") or self.default_fps)
-        chunk_size = int(config.get("chunk_size", defaults.get("chunk_size", 3)))
-        max_duration_seconds = float(
-            config.get("max_duration_seconds", defaults.get("max_duration_seconds", self.max_generation_seconds))
+        fps_value = config.get("fps", defaults.get("fps", self.default_fps))
+        if fps_value is None:
+            fps_value = self.default_fps
+        chunk_size_value = config.get("chunk_size", defaults.get("chunk_size", 3))
+        if chunk_size_value is None:
+            chunk_size_value = 3
+        max_duration_value = config.get(
+            "max_duration_seconds",
+            defaults.get("max_duration_seconds", self.max_generation_seconds),
         )
+        if max_duration_value is None:
+            max_duration_value = self.max_generation_seconds
+
+        fps = int(fps_value)
+        chunk_size = int(chunk_size_value)
+        max_duration_seconds = float(max_duration_value)
         if fps <= 0:
             raise ValueError(f"fps must be positive, got {fps}")
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if max_duration_seconds <= 0:
+            raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
         if max_duration_seconds > self.max_generation_seconds:
             raise ValueError(f"max_duration_seconds must not exceed {self.max_generation_seconds:g}")
         requested_frame_num = config.get("frame_num")
