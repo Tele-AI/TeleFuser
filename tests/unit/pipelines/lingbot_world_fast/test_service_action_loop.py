@@ -229,6 +229,25 @@ def test_create_session_limits_stream_generation_to_20_seconds() -> None:
         )
 
 
+def test_create_session_uses_truncated_frame_count_for_duration_validation() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(pipeline)
+
+    session_id = service.create_session(
+        {
+            "image": Image.new("RGB", (8, 8)),
+            "fps": 16,
+            "chunk_size": 3,
+            "frame_num": 13,
+            "max_duration_seconds": 0.5,
+        }
+    )
+
+    assert service._sessions[session_id].config.frame_num == 9
+    assert pipeline.control_context.call_args.args[0].frame_num == 9
+    service.close_session(session_id)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

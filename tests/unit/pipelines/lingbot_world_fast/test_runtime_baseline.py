@@ -222,6 +222,7 @@ def test_runtime_truncates_non_aligned_latent_frame_count() -> None:
     _, runtime = _create_runtime(frame_num=13)
 
     assert runtime.latent_f == 3
+    assert runtime.config.frame_num == 9
     assert runtime.chunk_count == 1
 
 
