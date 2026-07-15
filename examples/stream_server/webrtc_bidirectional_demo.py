@@ -606,6 +606,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     #status { text-align: left; }
     .video-head { align-items: flex-start; flex-direction: column; }
   }
+  .field:has(#duration-seconds),
+  .field:has(#frame-num),
+  .field:has(#fps),
+  .field:has(#chunk-size),
+  .field:has(#seed),
+  .field:has(#sample-shift),
+  .field:has(#control-mode),
+  .field:has(#intrinsics-path),
+  .field:has(#control-move-step),
+  .field:has(#control-yaw-step),
+  .field:has(#control-lateral-step),
+  .field:has(#show-control-hud),
+  #duration-help {
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -867,34 +882,8 @@ async function waitForIceGathering(peer, timeoutMs) {
 }
 
 function requestOptionsFromForm() {
-  updateFrameNum();
-  const options = {
-    ...DEFAULT_OPTIONS,
-    fps: numberValue("fps", DEFAULT_OPTIONS.fps ?? 16),
-    frame_num: numberValue("frame-num", DEFAULT_OPTIONS.frame_num ?? 81),
-    chunk_size: numberValue("chunk-size", DEFAULT_OPTIONS.chunk_size ?? 3),
-    sample_shift: numberValue("sample-shift", DEFAULT_OPTIONS.sample_shift ?? 10.0),
-    seed: numberValue("seed", DEFAULT_OPTIONS.seed ?? 42),
-    control_mode: $("control-mode").value,
-    control_move_step: numberValue("control-move-step", DEFAULT_OPTIONS.control_move_step ?? 0.05),
-    control_yaw_step_degrees: numberValue("control-yaw-step", DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0),
-    control_lateral_step: numberValue("control-lateral-step", DEFAULT_OPTIONS.control_lateral_step ?? 0.05),
-    control_pitch_step_degrees: DEFAULT_OPTIONS.control_pitch_step_degrees ?? 2.0,
-    control_pitch_limit_degrees: DEFAULT_OPTIONS.control_pitch_limit_degrees ?? 85.0,
-    show_control_hud: $("show-control-hud").checked,
-  };
-  const intrinsicsPath = $("intrinsics-path").value.trim();
-  if (intrinsicsPath) {
-    options.intrinsics_path = intrinsicsPath;
-  } else {
-    delete options.intrinsics_path;
-  }
-  return options;
+  return { ...DEFAULT_OPTIONS };
 }
-
-$("duration-seconds").addEventListener("input", updateFrameNum);
-$("fps").addEventListener("input", updateFrameNum);
-$("chunk-size").addEventListener("input", updateFrameNum);
 
 function setControlActive(control, active) {
   const btn = document.querySelector('[data-control="' + control + '"]');
@@ -1066,11 +1055,13 @@ $("connect").onclick = async () => {
       type: pc.localDescription.type,
       task: "bidirectional",
       prompt,
-      fps: requestOptions.fps,
       image_path: imagePath,
       config: { ...requestOptions },
       ...requestOptions,
     };
+    if (requestOptions.fps !== undefined) {
+      requestBody.fps = requestOptions.fps;
+    }
     const resp = await fetchJsonWithTimeout(
       SERVER_URL + "/v1/stream/webrtc/offer",
       {
@@ -1237,25 +1228,7 @@ def main() -> None:
     if args.force_turn_relay:
         rtc_config["iceTransportPolicy"] = "relay"
 
-    request_options: dict[str, object] = {
-        "fps": args.fps,
-        "frame_num": args.frame_num,
-        "chunk_size": args.chunk_size,
-        "sample_shift": args.sample_shift,
-        "seed": args.seed,
-        "max_sequence_length": args.max_sequence_length,
-        "control_mode": args.control_mode,
-        "control_move_step": args.control_move_step,
-        "control_yaw_step_degrees": args.control_yaw_step_degrees,
-        "control_lateral_step": args.control_lateral_step,
-        "control_pitch_step_degrees": args.control_pitch_step_degrees,
-        "control_pitch_limit_degrees": args.control_pitch_limit_degrees,
-        "show_control_hud": args.show_control_hud,
-    }
-    if args.max_attention_size is not None:
-        request_options["max_attention_size"] = args.max_attention_size
-    if args.intrinsics_path:
-        request_options["intrinsics_path"] = args.intrinsics_path
+    request_options: dict[str, object] = {}
 
     # When proxying, the browser should call the demo origin (no separate port forward needed for --server-url).
     server_url_for_browser = "" if args.proxy_backend else args.server_url
