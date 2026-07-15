@@ -1,18 +1,18 @@
-# LingBot-World-Fast Examples
+# LingBot-World Examples
 
-Offline image-to-video and interactive WebRTC streaming generation with LingBot-World-Fast. This page describes
-the H100 offline example, the LingBot stream service, and the browser camera controller.
+Offline image-to-video and interactive WebRTC streaming generation for LingBot-World-Fast (v1) and LingBot-World
+v2. Both variants use the shared causal-fast streaming engine; their checkpoint layout and PPL defaults differ.
 
 ## Model Directory
 
-The offline example requires the Wan2.2 I2V base model and the LingBot-World-Fast model. The recommended directory
-layout is:
+Both offline examples require the Wan2.2 I2V base model. v1 and v2 use separate LingBot checkpoint directories:
 
 ```text
 ${TF_MODEL_ZOO_PATH}/
 ├── Wan2.2-I2V-A14B/
 └── lingbot/
-    └── lingbot-world-fast/
+    ├── lingbot-world-fast/
+    └── lingbot-world-v2-14b-causal-fast/
 ```
 
 Set the model root before running the example:
@@ -52,6 +52,20 @@ Default configuration:
 - Default control directory: `examples/data/lingbot_world_fast/`
 - Default output: `work_dirs/lingbot_world_fast_i2v_<gpu_num>gpu.mp4`
 
+### lingbot_world_v2_image_to_video_h100.py
+
+Offline camera-controlled v2 generation. The default is 77 frames at 16 FPS: 20 latent frames, exactly five
+complete chunks of four. With complete chunk streaming, 81 output frames cannot be represented by `chunk_size=4`.
+The v2 checkpoint only supports camera control and uses its PPL-configured Torch SDPA, local attention, sink size,
+and timesteps.
+
+```bash
+python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --gpu_num 4 \
+    --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast"
+```
+
 ## Usage
 
 ### Four H100 GPUs
@@ -88,7 +102,6 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
     --action_path /path/to/camera_control \
     --prompt "A cinematic scene with smooth camera motion" \
     --resolution 720p \
-    --frame_num 81 \
     --fps 16 \
     --seed 42 \
     --output work_dirs/lingbot_world_fast_custom.mp4
@@ -117,7 +130,6 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
 | `--action_path` | Bundled control directory | Directory containing `poses.npy` and `intrinsics.npy` |
 | `--prompt` | Bundled English prompt | Positive guidance prompt |
 | `--resolution` | `480p` | Output resolution; available values are `480p` and `720p` |
-| `--frame_num` | `81` | Number of output video frames |
 | `--fps` | `16` | Output video frame rate |
 | `--seed` | `42` | Random seed |
 | `--output` | `work_dirs/lingbot_world_fast_i2v_<gpu_num>gpu.mp4` | Output MP4 path |
@@ -130,8 +142,8 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Notes
 
-- `frame_num` must satisfy the pipeline's complete latent-chunk constraint. The default 81 frames correspond to
-  21 latent frames, which are split into seven complete chunks.
+- Offline frame counts are fixed in each example's `PPL_CONFIG`: v1 uses 81 frames (seven complete chunks of
+  three latent frames) and v2 uses 77 frames (five complete chunks of four latent frames).
 - `--gpu_num` must not exceed the number of GPUs visible to the process. For example, set
   `CUDA_VISIBLE_DEVICES=0,1,2,3` to select four devices.
 - The example explicitly closes its parallel workers on exit. If the process is forcibly terminated, check for

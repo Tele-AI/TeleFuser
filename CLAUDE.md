@@ -6,7 +6,7 @@ TeleFuser is a high-performance framework for efficient multimodal generation mo
 
 **Tech Stack:** Python 3.10-3.13, PyTorch 2.6+, CUDA 12.8+, FastAPI, Ray
 
-**Supported Models:** WanVideo (Wan2.1/2.2), Qwen-Image, Z-Image, FlashVSR, HunyuanVideo, Flux2 Klein, LTX Video, LiveAct, LongCat-Video
+**Supported Models:** WanVideo (Wan2.1/2.2), Qwen-Image, Z-Image, FlashVSR, HunyuanVideo, Flux2 Klein, LTX Video, LiveAct, LongCat-Video, LingBot-World
 
 ## Commands
 
@@ -41,6 +41,8 @@ telefuser/
 │   ├── ltx_video/    # LTX Video: I2V + Audio
 │   ├── liveact/      # LiveAct: S2V (speech-to-video)
 │   ├── longcat_video/ # LongCat-Video: T2V, I2V
+│   ├── lingbot_world_fast/  # LingBot shared causal-fast engine
+│   ├── lingbot_world_v2/    # LingBot-World v2 causal-fast facade
 │   └── common/       # Shared pipeline utilities
 ├── models/           # Model architectures: DiT, VAE, text encoders
 ├── ops/              # Custom operations: attention, FFN, normalization
@@ -65,6 +67,11 @@ telefuser/
 ├── service/          # FastAPI service
 └── client/           # Python SDK
 ```
+
+### LingBot Streaming State
+
+- Long-running LingBot sessions generate noise and VAE condition latents per chunk; do not retain duration-sized chunk lists.
+- Incremental VAE encoder and decoder feature caches must be session-owned so concurrent sessions remain isolated.
 
 ### Layer Architecture Principles For Models
 
