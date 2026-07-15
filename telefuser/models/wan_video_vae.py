@@ -24,6 +24,14 @@ class WanVideoVAEStreamingDecodeState:
     feat_idx: list[int] = field(default_factory=lambda: [0])
 
 
+@dataclass
+class WanVideoVAEStreamingEncodeState:
+    """Session-owned temporal feature cache for incremental VAE encoding."""
+
+    feat_cache: list[object] = field(default_factory=list)
+    feat_idx: list[int] = field(default_factory=lambda: [0])
+
+
 def _count_conv3d(model: nn.Module) -> int:
     """Count Conv3d layers in a model (for feat_cache initialization)."""
     count = 0
@@ -1337,6 +1345,62 @@ class WanVideoVAE(BaseModel):
             hidden_states.append(hidden_state)
         hidden_states = torch.stack(hidden_states)
         return hidden_states
+
+    def cached_encode_withflag(
+        self,
+        video: torch.Tensor,
+        device: torch.device,
+        is_first_clip: bool,
+        is_last_clip: bool,
+        encode_state: WanVideoVAEStreamingEncodeState,
+    ) -> torch.Tensor:
+        """Encode one pixel-space chunk with a session-owned temporal cache."""
+        if video.dim() == 4:
+            video = video.unsqueeze(0)
+        if video.dim() != 5:
+            raise ValueError(f"Expected video with four or five dimensions, got shape {tuple(video.shape)}")
+
+        video = video.to(device)
+        frame_count = video.shape[2]
+        if is_first_clip:
+            if frame_count < 1 or (frame_count - 1) % 4:
+                raise ValueError(f"First VAE encode chunk must contain 4n+1 frames, got {frame_count}")
+            encode_state.feat_cache = [None] * _count_conv3d(self.model.encoder)
+            encode_state.feat_idx = [0]
+            segments = [video[:, :, :1]]
+            segments.extend(video[:, :, start : start + 4] for start in range(1, frame_count, 4))
+        else:
+            if frame_count < 4 or frame_count % 4:
+                raise ValueError(f"Subsequent VAE encode chunks must contain 4n frames, got {frame_count}")
+            if not encode_state.feat_cache:
+                raise RuntimeError("VAE encode cache must be initialized by the first chunk")
+            segments = [video[:, :, start : start + 4] for start in range(0, frame_count, 4)]
+
+        encoded_segments = []
+        for segment in segments:
+            encode_state.feat_idx[0] = 0
+            encoded_segments.append(
+                self.model.encoder(
+                    segment,
+                    feat_cache=encode_state.feat_cache,
+                    feat_idx=encode_state.feat_idx,
+                )
+            )
+        encoded = torch.cat(encoded_segments, dim=2)
+        mu, _ = self.model.conv1(encoded).chunk(2, dim=1)
+
+        scale = self.scale
+        if isinstance(scale[0], torch.Tensor):
+            scale = [value.to(dtype=mu.dtype, device=mu.device) for value in scale]
+            mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(1, self.z_dim, 1, 1, 1)
+        else:
+            scale = scale.to(dtype=mu.dtype, device=mu.device)
+            mu = (mu - scale[0]) * scale[1]
+
+        if is_last_clip:
+            encode_state.feat_cache = []
+            encode_state.feat_idx = [0]
+        return mu.squeeze(0) if mu.shape[0] == 1 else mu
 
     def decode(
         self,
