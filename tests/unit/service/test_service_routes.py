@@ -319,6 +319,75 @@ def test_bidirectional_webrtc_offer_flattens_session_config() -> None:
     assert webrtc_manager.fps == 16
 
 
+def test_bidirectional_webrtc_offer_uses_service_default_fps_when_omitted() -> None:
+    class RunningStreamService:
+        def __init__(self) -> None:
+            self.config: dict | None = None
+            self.service = types.SimpleNamespace(default_fps=16)
+
+        def create_session(self, config: dict) -> str:
+            self.config = config
+            return "pipeline-session"
+
+        async def pull_chunks(self, session_id: str):
+            if False:
+                yield session_id
+
+        def push_chunk(self, session_id: str, chunk: dict) -> None:
+            pass
+
+        def close_session(self, session_id: str) -> None:
+            pass
+
+    class WebRTCSessionManager:
+        def __init__(self) -> None:
+            self.fps: int | None = None
+
+        async def create_bidirectional_session(self, **kwargs: object) -> tuple[str, str]:
+            self.fps = int(kwargs["fps"])
+            return "answer-sdp", "answer"
+
+    stream_service = RunningStreamService()
+    webrtc_manager = WebRTCSessionManager()
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=stream_service)
+    routes._session_manager = webrtc_manager
+    request = WebRTCOfferRequest(session_id="request-session", sdp="offer-sdp", task="i2v")
+
+    asyncio.run(routes._handle_bidirectional(stream_service, request))
+
+    assert stream_service.config == {"session_id": "request-session", "task": "i2v"}
+    assert webrtc_manager.fps == 16
+
+
+def test_server_push_webrtc_offer_uses_service_default_fps_when_omitted() -> None:
+    class RunningStreamService:
+        service = types.SimpleNamespace(default_fps=16)
+
+        async def stream_task(self, task_data: dict):
+            if False:
+                yield task_data
+
+    class WebRTCSessionManager:
+        def __init__(self) -> None:
+            self.fps: int | None = None
+
+        async def create_session(self, **kwargs: object) -> tuple[str, str]:
+            self.fps = int(kwargs["fps"])
+            return "answer-sdp", "answer"
+
+    stream_service = RunningStreamService()
+    webrtc_manager = WebRTCSessionManager()
+    routes = WebRTCRoutes.__new__(WebRTCRoutes)
+    routes.api = Mock(stream_service=stream_service)
+    routes._session_manager = webrtc_manager
+    request = WebRTCOfferRequest(session_id="request-session", sdp="offer-sdp", task="i2v")
+
+    asyncio.run(routes._handle_server_push(stream_service, request))
+
+    assert webrtc_manager.fps == 16
+
+
 def test_bidirectional_webrtc_offer_prefers_explicit_top_level_config() -> None:
     class RunningStreamService:
         def __init__(self) -> None:

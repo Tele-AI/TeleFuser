@@ -54,6 +54,18 @@ class WebRTCRoutes:
             configuration=configuration,
         )
 
+    @staticmethod
+    def _resolve_fps(svc: object, requested_fps: int | None) -> int:
+        """Use an explicit request FPS or the underlying service default."""
+        if requested_fps is not None:
+            return requested_fps
+
+        service = getattr(svc, "service", svc)
+        default_fps = getattr(service, "default_fps", None)
+        if default_fps is not None:
+            return int(default_fps)
+        return 24
+
     async def handle_offer(self, request: WebRTCOfferRequest) -> WebRTCOfferResponse:
         svc = self.api.stream_service
         if svc is None or not svc.is_running:
@@ -68,7 +80,7 @@ class WebRTCRoutes:
 
     async def _handle_server_push(self, svc, request: WebRTCOfferRequest) -> WebRTCOfferResponse:
         session_id = request.session_id
-        task_data = request.model_dump(exclude={"sdp", "type"})
+        task_data = request.model_dump(exclude={"sdp", "type"}, exclude_none=True)
         task_data["task_id"] = session_id
 
         generator = svc.stream_task(task_data)
@@ -79,7 +91,7 @@ class WebRTCRoutes:
                 offer_sdp=request.sdp,
                 offer_type=request.type,
                 generator=generator,
-                fps=request.fps or 24,
+                fps=self._resolve_fps(svc, request.fps),
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
@@ -117,7 +129,7 @@ class WebRTCRoutes:
                 output_generator=output_gen,
                 on_input=lambda sid, chunk: svc.push_chunk(sid, chunk),
                 on_close=lambda sid: svc.close_session(sid),
-                fps=int(config.get("fps") or 24),
+                fps=self._resolve_fps(svc, request.fps if request.fps is not None else config.get("fps")),
             )
         except RuntimeError as exc:
             try:
