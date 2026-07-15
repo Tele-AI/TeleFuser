@@ -231,16 +231,6 @@ class LingBotWorldFastControlContext:
     intrinsics: torch.Tensor
 
 
-class LingBotWorldFastDeferredControl:
-    """Lazily materialize a control tensor at the pipeline's legacy execution point."""
-
-    def __init__(self, factory: Callable[[], torch.Tensor]) -> None:
-        self._factory = factory
-
-    def __call__(self) -> torch.Tensor:
-        return self._factory()
-
-
 class LingBotWorldFastOfflineControlSource:
     """Keep offline action data outside the generation session and materialize it once."""
 
@@ -257,10 +247,10 @@ class LingBotWorldFastOfflineControlSource:
         self._action = action
         self._controls: list[torch.Tensor] | None = None
 
-    def control_at(self, chunk_index: int) -> LingBotWorldFastDeferredControl:
+    def control_at(self, chunk_index: int) -> Callable[[], torch.Tensor]:
         if chunk_index < 0:
             raise ValueError(f"chunk_index must be non-negative, got {chunk_index}")
-        return LingBotWorldFastDeferredControl(lambda: self._materialize()[chunk_index])
+        return lambda: self._materialize()[chunk_index]
 
     def _materialize(self) -> list[torch.Tensor]:
         if self._controls is None:
@@ -274,9 +264,9 @@ class LingBotWorldFastControlBuilder:
     def __init__(self, context: LingBotWorldFastControlContext) -> None:
         self.context = context
 
-    def defer(self, action: dict[str, object]) -> LingBotWorldFastDeferredControl:
+    def defer(self, action: dict[str, object]) -> Callable[[], torch.Tensor]:
         """Return a control factory for materialization within the pipeline call."""
-        return LingBotWorldFastDeferredControl(lambda: self.build(action))
+        return lambda: self.build(action)
 
     @staticmethod
     def _align_action_frames(action: torch.Tensor, target_frames: int) -> torch.Tensor:

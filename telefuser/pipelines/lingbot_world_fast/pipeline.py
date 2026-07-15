@@ -28,6 +28,7 @@ from .session import (
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionStatus,
+    resolve_lingbot_frame_count,
 )
 
 
@@ -35,7 +36,7 @@ from .session import (
 class LingBotWorldFastPipelineConfig:
     checkpoint_dir: str = ""
     fast_checkpoint_path: str = "lingbot_world_fast"
-    vae_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
+    vae_config: ModelRuntimeConfig = field(default_factory=lambda: ModelRuntimeConfig(torch_dtype=torch.float32))
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     dit_torch_dtype: torch.dtype = torch.bfloat16
     control_type: str = "cam"
@@ -44,6 +45,7 @@ class LingBotWorldFastPipelineConfig:
     max_area: int = 480 * 832
     local_attn_size: int = -1
     sink_size: int = 0
+    timestep_indices: tuple[int, ...] = (0, 179, 358, 679)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     attention_config: AttentionConfig = field(default_factory=AttentionConfig)
 
@@ -92,7 +94,9 @@ class LingBotWorldFastPipeline(BasePipeline):
 
         self.text_encoder = WanTextEncoder()
         self.text_encoder.load_state_dict(load_state_dict(str(checkpoint_root / "models_t5_umt5-xxl-enc-bf16.pth")))
-        self.text_encoder = self.text_encoder.to(device=self.text_device, dtype=self.torch_dtype).eval()
+        self.text_encoder = self.text_encoder.to(
+            device=self.text_device, dtype=config.text_encoding_config.torch_dtype
+        ).eval()
         tokenizer_path = checkpoint_root / "google" / "umt5-xxl"
         self.tokenizer = HuggingfaceTokenizer(str(tokenizer_path), 512, "whitespace")
 
@@ -101,7 +105,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         )
         self.vae = WanVideoVAE(**vae_cfg)
         self.vae.load_state_dict(vae_state_dict, strict=False)
-        self.vae = self.vae.to(device=self.vae_device, dtype=self.torch_dtype).eval()
+        self.vae = self.vae.to(device=self.vae_device, dtype=config.vae_config.torch_dtype).eval()
 
         fast_path = checkpoint_root / config.fast_checkpoint_path
         dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
@@ -175,25 +179,11 @@ class LingBotWorldFastPipeline(BasePipeline):
 
     @staticmethod
     def _best_output_size(w: int, h: int, expected_area: int, dw: int = 16, dh: int = 16) -> tuple[int, int]:
-        ratio = w / h
-        ow = math.sqrt(expected_area * ratio)
-        oh = expected_area / ow
-
-        ow1 = int(ow // dw * dw)
-        oh1 = int(expected_area / max(ow1, 1) // dh * dh)
-        oh2 = int(oh // dh * dh)
-        ow2 = int(expected_area / max(oh2, 1) // dw * dw)
-
-        if ow1 <= 0 or oh1 <= 0:
-            return max(dw, ow2), max(dh, oh2)
-        if ow2 <= 0 or oh2 <= 0:
-            return max(dw, ow1), max(dh, oh1)
-
-        ratio1 = ow1 / oh1
-        ratio2 = ow2 / oh2
-        if max(ratio / ratio1, ratio1 / ratio) < max(ratio / ratio2, ratio2 / ratio):
-            return ow1, oh1
-        return ow2, oh2
+        """Match the LingBot source by independently flooring both dimensions."""
+        aspect_ratio = h / w
+        output_height = int(math.sqrt(expected_area * aspect_ratio) // dh * dh)
+        output_width = int(math.sqrt(expected_area / aspect_ratio) // dw * dw)
+        return output_width, output_height
 
     def control_context(self, session_config: LingBotWorldFastSessionConfig) -> LingBotWorldFastControlContext:
         """Return control geometry without allocating a generation runtime."""
@@ -204,8 +194,11 @@ class LingBotWorldFastPipeline(BasePipeline):
             self.config.max_area,
         )
         height, width = self.check_resize_height_width(height, width)
-        frame_num = session_config.frame_num
-        latent_frames = (frame_num - 1) // 4 + 1
+        _, latent_frames = resolve_lingbot_frame_count(
+            session_config.frame_num,
+            session_config.chunk_size,
+            session_config.frame_policy,
+        )
         if session_config.intrinsics is None:
             focal = float(max(self.config.orig_width, self.config.orig_height))
             intrinsics = torch.tensor(
@@ -250,17 +243,11 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size!r}")
         if session_config.chunk_size < 1:
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size}")
-        if not isinstance(session_config.frame_num, int) or isinstance(session_config.frame_num, bool):
-            raise ValueError(f"frame_num must be an integer, got {session_config.frame_num!r}")
-        frame_num = session_config.frame_num
-        if frame_num < 1 or (frame_num - 1) % 4:
-            raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
-        latent_frames = (frame_num - 1) // 4 + 1
-        if latent_frames < session_config.chunk_size or latent_frames % session_config.chunk_size:
-            raise ValueError(
-                f"frame_num {frame_num} does not contain a whole number of latent chunks of size "
-                f"{session_config.chunk_size}"
-            )
+        resolve_lingbot_frame_count(
+            session_config.frame_num,
+            session_config.chunk_size,
+            session_config.frame_policy,
+        )
 
     def _validate_control(self, session: LingBotWorldFastGenerationSession, control: torch.Tensor) -> None:
         expected_device = torch.device(self.device)
@@ -279,31 +266,49 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise ValueError(f"Control shape must be {expected_shape}, got {tuple(control.shape)}")
 
     def _prepare_image_tensor(self, image: Image.Image, height: int, width: int) -> torch.Tensor:
-        image = image.convert("RGB").resize((width, height), Image.BICUBIC)
-        array = np.asarray(image, dtype=np.float32) / 255.0
-        tensor = (
-            torch.from_numpy(array).permute(2, 0, 1).sub_(0.5).div_(0.5).to(self.vae_device, dtype=self.torch_dtype)
-        )
-        return tensor
+        """Normalize before applying the source tensor-space bicubic resize."""
+        array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+        tensor = torch.from_numpy(array).permute(2, 0, 1).sub(0.5).div(0.5)
+        tensor = torch.nn.functional.interpolate(tensor.unsqueeze(0), size=(height, width), mode="bicubic").squeeze(0)
+        return tensor.to(self.vae_device, dtype=self.config.vae_config.torch_dtype)
 
-    def _encode_condition_video(self, image_tensor: torch.Tensor, frame_num: int) -> torch.Tensor:
-        h, w = image_tensor.shape[1:]
-        video = torch.cat(
-            [
-                image_tensor.unsqueeze(1),
-                torch.zeros(3, frame_num - 1, h, w, device=image_tensor.device, dtype=image_tensor.dtype),
-            ],
-            dim=1,
+    def _encode_condition_chunk(self, session: LingBotWorldFastGenerationSession) -> torch.Tensor:
+        """Encode only the current image-conditioning chunk with a persistent VAE cache."""
+        chunk_index = session.current_chunk_index
+        is_first_chunk = chunk_index == 0
+        is_last_chunk = chunk_index == session.chunk_count - 1
+        pixel_frames = 1 + 4 * (session.chunk_size - 1) if is_first_chunk else 4 * session.chunk_size
+        video = torch.zeros(
+            (3, pixel_frames, session.height, session.width),
+            device=self.vae_device,
+            dtype=self.config.vae_config.torch_dtype,
         )
-        latent = self.vae.encode([video], device=self.vae_device, tiled=False)[0].to(self.device)
+        if is_first_chunk:
+            if session.condition_image is None:
+                raise RuntimeError("The first condition chunk requires the session image tensor")
+            video[:, 0] = session.condition_image
 
-        latent_h = latent.shape[2]
-        latent_w = latent.shape[3]
-        mask = torch.ones(1, frame_num, latent_h, latent_w, device=self.device, dtype=latent.dtype)
-        mask[:, 1:] = 0
-        mask = torch.cat([torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1), mask[:, 1:]], dim=1)
-        mask = mask.view(1, mask.shape[1] // 4, 4, latent_h, latent_w).transpose(1, 2)[0]
-        return torch.cat([mask, latent], dim=0)
+        latent = self.vae.cached_encode_withflag(
+            video,
+            device=self.vae_device,
+            is_first_clip=is_first_chunk,
+            is_last_clip=is_last_chunk,
+            encode_state=session.encoder_state,
+        ).to(self.device)
+        if latent.shape[1] != session.chunk_size:
+            raise RuntimeError(
+                f"VAE condition chunk has {latent.shape[1]} latent frames, expected {session.chunk_size}"
+            )
+
+        mask = torch.zeros(
+            (4, session.chunk_size, latent.shape[2], latent.shape[3]),
+            device=latent.device,
+            dtype=latent.dtype,
+        )
+        if is_first_chunk:
+            mask[:, 0] = 1
+            session.condition_image = None
+        return torch.cat([mask, latent], dim=0).unsqueeze(0)
 
     def _release_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
         cache_handle = session.cache_handle
@@ -326,7 +331,10 @@ class LingBotWorldFastPipeline(BasePipeline):
             cache_released = self._release_session_cache(session)
             session.decoder_state.feat_cache = []
             session.decoder_state.feat_idx = [0]
-            session.active = False
+            session.encoder_state.feat_cache = []
+            session.encoder_state.feat_idx = [0]
+            session.condition_image = None
+            session.noise_generator = None
             if not cache_released:
                 session.status = LingBotWorldFastSessionStatus.POISONED
                 session.poisoned_reason = f"Failed to release cache handle {session.cache_handle}"
@@ -395,7 +403,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise RuntimeError(f"Cannot continue poisoned LingBot session: {session.poisoned_reason}")
         if session.status == LingBotWorldFastSessionStatus.RUNNING:
             raise RuntimeError("LingBot session already has a chunk in progress")
-        if not session.active or session.status == LingBotWorldFastSessionStatus.RELEASED:
+        if session.status == LingBotWorldFastSessionStatus.RELEASED:
             raise RuntimeError("Cannot generate a chunk from an inactive LingBot session")
         if request.chunk_index != session.current_chunk_index:
             raise ValueError(
@@ -427,23 +435,23 @@ class LingBotWorldFastPipeline(BasePipeline):
         except Exception as exc:
             session.status = LingBotWorldFastSessionStatus.POISONED
             session.poisoned_reason = f"{type(exc).__name__}: {exc}"
-            session.active = False
             self.release_session(session)
             raise
 
         session.status = LingBotWorldFastSessionStatus.COMMITTED
-        if not session.active:
+        done = session.current_chunk_index >= session.chunk_count
+        if done:
             self.release_session(session)
             if session.status == LingBotWorldFastSessionStatus.POISONED:
                 raise RuntimeError(session.poisoned_reason or "Final chunk cleanup failed")
         logger.info(
-            f"Generated LingBot chunk {request.chunk_index + 1}/{len(session.noise_chunks)}: {len(chunk_frames)} frames"
+            f"Generated LingBot chunk {request.chunk_index + 1}/{session.chunk_count}: {len(chunk_frames)} frames"
         )
         return LingBotWorldFastChunkResult(
             chunk_index=request.chunk_index,
             frames=chunk_frames,
             emitted_frames=session.emitted_frames,
-            done=not session.active,
+            done=done,
             session_id=request.session_id,
         )
 
@@ -457,6 +465,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         """Drain externally prepared controls through the single-chunk API."""
         session = LingBotWorldFastGenerationSession(config=session_config)
         frames: list[Image.Image] = []
+        completed = False
         try:
             for chunk_index, control in enumerate(controls):
                 result = self(
@@ -468,7 +477,10 @@ class LingBotWorldFastPipeline(BasePipeline):
                     progress_callback=progress_callback,
                 )
                 frames.extend(result.frames)
-            if session.active:
+                if result.done:
+                    completed = True
+                    break
+            if not completed and session.status != LingBotWorldFastSessionStatus.RELEASED:
                 raise ValueError("Control sequence ended before the generation session completed")
         finally:
             self.release_session(session)
@@ -494,16 +506,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         self._notify_progress(progress_callback, "preparing_image", width=width, height=height)
         image_tensor = self._prepare_image_tensor(session_config.image, height, width)
 
-        frame_num = session_config.frame_num
-        self._notify_progress(
-            progress_callback,
-            "encoding_condition_video",
-            frame_num=frame_num,
-            device=str(self.vae_device),
-        )
-        latent_condition = self._encode_condition_video(image_tensor, frame_num)
-        self._notify_progress(progress_callback, "condition_video_encoded")
-
         lat_h = control_context.latent_h
         lat_w = control_context.latent_w
         lat_f = control_context.latent_frames
@@ -524,18 +526,13 @@ class LingBotWorldFastPipeline(BasePipeline):
             latent_frames=lat_f,
             latent_height=lat_h,
             latent_width=lat_w,
-            total_chunks=math.ceil(lat_f / session_config.chunk_size),
+            total_chunks=lat_f // session_config.chunk_size,
         )
-        generator = torch.Generator(device=self.device)
-        generator.manual_seed(int(session_config.seed))
-        noise = torch.randn(
-            (1, 16, lat_f, lat_h, lat_w),
-            generator=generator,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        noise_chunks = list(noise.split(session_config.chunk_size, dim=2))
-        condition_chunks = list(latent_condition.unsqueeze(0).split(session_config.chunk_size, dim=2))
+        noise_generator = torch.Generator(device=self.device)
+        noise_generator.manual_seed(int(session_config.seed))
+        denoise_generator = torch.Generator(device=self.device)
+        denoise_seed = (int(session_config.seed) ^ 0x51A7E5EED) & 0x7FFF_FFFF_FFFF_FFFF
+        denoise_generator.manual_seed(denoise_seed)
         if before_cache is not None:
             before_cache()
         cache_handle = self._next_cache_handle
@@ -543,8 +540,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         session = LingBotWorldFastGenerationSession(
             prompt_emb=prompt_emb,
             config=session_config,
-            noise_chunks=noise_chunks,
-            condition_chunks=condition_chunks,
+            condition_image=image_tensor,
+            noise_generator=noise_generator,
             latent_h=lat_h,
             latent_w=lat_w,
             latent_f=lat_f,
@@ -562,7 +559,8 @@ class LingBotWorldFastPipeline(BasePipeline):
                 kv_size=kv_size,
                 max_sequence_length=session_config.max_sequence_length,
                 sample_shift=session_config.sample_shift,
-                generator_state=generator.get_state().tolist(),
+                generator_state=denoise_generator.get_state().tolist(),
+                timestep_indices=getattr(self.config, "timestep_indices", (0, 179, 358, 679)),
             )
             if isinstance(self.denoise_stage, ParallelWorker):
                 self.denoise_stage.initialize_cache(**initialize_cache_kwargs, sync=True)
@@ -585,6 +583,16 @@ class LingBotWorldFastPipeline(BasePipeline):
         session.status = LingBotWorldFastSessionStatus.READY
         return session
 
+    def _next_noise_chunk(self, session: LingBotWorldFastGenerationSession) -> torch.Tensor:
+        if session.noise_generator is None:
+            raise RuntimeError("The session noise generator has already been released")
+        return torch.randn(
+            (1, 16, session.chunk_size, session.latent_h, session.latent_w),
+            generator=session.noise_generator,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
     @torch.inference_mode()
     def generate_next_chunk(
         self,
@@ -592,14 +600,15 @@ class LingBotWorldFastPipeline(BasePipeline):
         control: torch.Tensor,
         progress_callback: Callable[..., None] | None = None,
     ) -> list[Image.Image]:
-        if runtime.current_chunk_index >= len(runtime.noise_chunks):
-            runtime.active = False
+        if runtime.current_chunk_index >= runtime.chunk_count:
             return []
 
         with ProfilingContext4Debug("generate_next_chunk"):
             idx = runtime.current_chunk_index
-            latent_chunk = runtime.noise_chunks[idx]
-            condition_chunk = runtime.condition_chunks[idx]
+            latent_chunk = self._next_noise_chunk(runtime)
+            self._notify_progress(progress_callback, "encoding_condition_chunk", index=idx)
+            condition_chunk = self._encode_condition_chunk(runtime)
+            self._notify_progress(progress_callback, "condition_chunk_encoded", index=idx)
             control_chunk = control
 
             self._notify_progress(progress_callback, "denoising_chunk", index=idx)
@@ -638,12 +647,10 @@ class LingBotWorldFastPipeline(BasePipeline):
                     runtime,
                     denoised,
                     is_first_clip=(idx == 0),
-                    is_last_clip=(idx == len(runtime.noise_chunks) - 1),
+                    is_last_clip=(idx == runtime.chunk_count - 1),
                 )
                 images = self.tensor2video(frames)
             self._notify_progress(progress_callback, "chunk_decoded", index=idx, frames=len(images))
             runtime.current_chunk_index += 1
             runtime.emitted_frames += len(images)
-            if runtime.current_chunk_index >= len(runtime.noise_chunks):
-                runtime.active = False
             return images

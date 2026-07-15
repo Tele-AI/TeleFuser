@@ -46,8 +46,7 @@ def test_online_worker_waits_for_external_action_before_generating() -> None:
 
     def generate_chunk(runtime, request, progress_callback=None):
         assert request.control is deferred_control
-        runtime.active = False
-        return SimpleNamespace(frames=[Image.new("RGB", (8, 8))])
+        return SimpleNamespace(frames=[Image.new("RGB", (8, 8))], done=True)
 
     pipeline.control_context.side_effect = control_context
     pipeline.side_effect = generate_chunk

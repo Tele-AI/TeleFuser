@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from pathlib import Path
 
 import cv2
@@ -63,9 +63,19 @@ MAX_GENERATION_SECONDS = 20.0
 class LingBotWorldFastService:
     """Bidirectional WebRTC service for LingBot-World-Fast."""
 
-    def __init__(self, pipeline: LingBotWorldFastPipeline, default_fps: int = 16) -> None:
+    def __init__(
+        self,
+        pipeline: LingBotWorldFastPipeline,
+        default_fps: int = 16,
+        default_session_config: Mapping[str, object] | None = None,
+        max_generation_seconds: float = MAX_GENERATION_SECONDS,
+    ) -> None:
         self.pipeline = pipeline
         self.default_fps = default_fps
+        self.default_session_config = dict(default_session_config or {})
+        if max_generation_seconds <= 0:
+            raise ValueError(f"max_generation_seconds must be positive, got {max_generation_seconds}")
+        self.max_generation_seconds = float(max_generation_seconds)
         self._sessions: dict[str, LingBotWorldFastSessionState] = {}
 
     def start(self) -> None:
@@ -91,6 +101,19 @@ class LingBotWorldFastService:
             return Image.open(image_path).convert("RGB")
         raise ValueError("LingBotWorldFastService requires 'image' or 'image_path'")
 
+    @staticmethod
+    def _frame_num_for_duration(max_duration_seconds: float, fps: int, chunk_size: int) -> int:
+        """Return the longest 4n+1 output length with complete latent chunks."""
+        if max_duration_seconds <= 0:
+            raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
+        max_latent_frames = int(math.floor(max_duration_seconds * fps / 4)) + 1
+        latent_frames = (max_latent_frames // chunk_size) * chunk_size
+        if latent_frames < chunk_size:
+            raise ValueError(
+                f"max_duration_seconds={max_duration_seconds} is too short for chunk_size={chunk_size} at fps={fps}"
+            )
+        return 4 * (latent_frames - 1) + 1
+
     def create_session(self, config: dict) -> str:
         for stale_session_id, stale_state in list(self._sessions.items()):
             if not stale_state.active:
@@ -99,6 +122,7 @@ class LingBotWorldFastService:
             raise RuntimeError(
                 "LingBotWorldFastService supports one active session at a time; stop it before reconnecting"
             )
+        defaults = self.default_session_config
 
         session_id = config.get("session_id") or str(uuid.uuid4())
         image = self._load_image(config)
@@ -106,42 +130,68 @@ class LingBotWorldFastService:
         if intrinsics is None and config.get("intrinsics_path"):
             intrinsics = np.load(Path(config["intrinsics_path"]))
 
-        fps = int(config.get("fps") or self.default_fps)
-        frame_num = int(config.get("frame_num", 81))
+        fps = int(config.get("fps") or defaults.get("fps") or self.default_fps)
+        chunk_size = int(config.get("chunk_size", defaults.get("chunk_size", 3)))
+        max_duration_seconds = float(
+            config.get("max_duration_seconds", defaults.get("max_duration_seconds", self.max_generation_seconds))
+        )
         if fps <= 0:
             raise ValueError(f"fps must be positive, got {fps}")
+        if max_duration_seconds > self.max_generation_seconds:
+            raise ValueError(f"max_duration_seconds must not exceed {self.max_generation_seconds:g}")
+        requested_frame_num = config.get("frame_num")
+        frame_num = (
+            int(requested_frame_num)
+            if requested_frame_num is not None
+            else self._frame_num_for_duration(max_duration_seconds, fps, chunk_size)
+        )
         duration_seconds = (frame_num - 1) / fps
-        if duration_seconds > MAX_GENERATION_SECONDS:
+        if duration_seconds > max_duration_seconds:
             raise ValueError(
-                f"LingBot streaming duration must not exceed {MAX_GENERATION_SECONDS:g} seconds, "
+                f"LingBot streaming duration must not exceed {max_duration_seconds:g} seconds, "
                 f"got {duration_seconds:g} seconds"
             )
 
         session_config = LingBotWorldFastSessionConfig(
-            prompt=config.get("prompt", ""),
+            prompt=config.get("prompt", defaults.get("prompt", "")),
             image=image,
-            control_mode=config.get("control_mode", "cam"),
+            control_mode=config.get("control_mode", defaults.get("control_mode", "cam")),
             fps=fps,
-            chunk_size=int(config.get("chunk_size", 3)),
+            chunk_size=chunk_size,
             frame_num=frame_num,
-            sample_shift=float(config.get("sample_shift", 10.0)),
-            seed=int(config.get("seed", 42)),
-            max_attention_size=config.get("max_attention_size"),
-            max_sequence_length=int(config.get("max_sequence_length", 512)),
+            frame_policy=str(config.get("frame_policy", defaults.get("frame_policy", "truncate"))),
+            sample_shift=float(config.get("sample_shift", defaults.get("sample_shift", 10.0))),
+            seed=int(config.get("seed", defaults.get("seed", 42))),
+            max_attention_size=config.get("max_attention_size", defaults.get("max_attention_size")),
+            max_sequence_length=int(config.get("max_sequence_length", defaults.get("max_sequence_length", 512))),
             intrinsics=intrinsics,
-            control_move_step=float(config.get("control_move_step", 0.05)),
-            control_yaw_step_degrees=float(config.get("control_yaw_step_degrees", 2.0)),
-            control_lateral_step=float(config.get("control_lateral_step", 0.05)),
-            control_pitch_step_degrees=float(config.get("control_pitch_step_degrees", 2.0)),
-            control_pitch_limit_degrees=float(config.get("control_pitch_limit_degrees", 85.0)),
-            show_control_hud=bool(config.get("show_control_hud", True)),
+            control_move_step=float(config.get("control_move_step", defaults.get("control_move_step", 0.05))),
+            control_yaw_step_degrees=float(
+                config.get(
+                    "control_yaw_step_degrees",
+                    defaults.get("control_yaw_step_degrees", 2.0),
+                )
+            ),
+            control_lateral_step=float(config.get("control_lateral_step", defaults.get("control_lateral_step", 0.05))),
+            control_pitch_step_degrees=float(
+                config.get(
+                    "control_pitch_step_degrees",
+                    defaults.get("control_pitch_step_degrees", 2.0),
+                )
+            ),
+            control_pitch_limit_degrees=float(
+                config.get(
+                    "control_pitch_limit_degrees",
+                    defaults.get("control_pitch_limit_degrees", 85.0),
+                )
+            ),
+            show_control_hud=bool(config.get("show_control_hud", defaults.get("show_control_hud", True))),
         )
         control_context = self.pipeline.control_context(session_config)
         state = LingBotWorldFastSessionState(
             config=session_config,
             control_context=control_context,
             output_queue=asyncio.Queue(),
-            loop=None,
         )
         self._sessions[session_id] = state
         logger.info(f"LingBotWorld session created: {session_id}")
@@ -491,7 +541,7 @@ class LingBotWorldFastService:
                 total_chunks=control_context.latent_frames // control_context.chunk_size,
             )
             chunk_index = 0
-            while state.active and runtime.active:
+            while state.active:
                 with state.control_lock:
                     controls_held = bool(state.pressed_controls)
                 if controls_held:
@@ -562,6 +612,9 @@ class LingBotWorldFastService:
                 self._put_output(state, payload)
                 emit_status("chunk_sent", index=chunk_index, frames=len(frames))
                 chunk_index += 1
+                if result.done:
+                    break
+
         except Exception as exc:
             logger.exception(f"LingBotWorld worker failed: session={session_id}, error={exc}")
             self._put_output(

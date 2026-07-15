@@ -13,14 +13,25 @@ from telefuser.schedulers.unipc import FlowUniPCMultistepScheduler
 from telefuser.utils.logging import logger
 
 
-@dataclass(frozen=True)
-class LingBotWorldFastTimesteps:
-    indices: tuple[int, ...] = (0, 179, 358, 679)
-    num_train_timesteps: int = 1000
+def _select_timesteps(
+    scheduler: FlowUniPCMultistepScheduler,
+    indices: tuple[int, ...],
+    shift: float,
+    num_train_timesteps: int = 1000,
+) -> torch.Tensor:
+    if not indices:
+        raise ValueError("timestep indices must not be empty")
+    if any(not isinstance(index, int) or isinstance(index, bool) for index in indices):
+        raise ValueError(f"timestep indices must be integers, got {indices!r}")
+    if any(index < 0 or index >= num_train_timesteps for index in indices):
+        raise ValueError(f"timestep indices must be in [0, {num_train_timesteps}), got {indices!r}")
+    if tuple(sorted(indices)) != indices or len(set(indices)) != len(indices):
+        raise ValueError(f"timestep indices must be strictly increasing, got {indices!r}")
 
-    def select(self, scheduler: FlowUniPCMultistepScheduler, shift: float) -> torch.Tensor:
-        scheduler.set_timesteps(self.num_train_timesteps, shift=shift)
-        return scheduler.timesteps[list(self.indices)].clone()
+    scheduler.set_timesteps(num_train_timesteps, shift=shift)
+    if max(indices) >= len(scheduler.timesteps):
+        raise ValueError(f"timestep index exceeds scheduler output: {indices!r}")
+    return scheduler.timesteps[list(indices)].clone()
 
 
 @dataclass
@@ -112,13 +123,14 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         max_sequence_length: int,
         sample_shift: float,
         generator_state: list[int],
+        timestep_indices: tuple[int, ...] = (0, 179, 358, 679),
     ) -> bool:
         """Atomically register session-scoped KV, scheduler, and RNG state."""
         if cache_handle in self._cache_registry:
             raise ValueError(f"Cache handle {cache_handle} is already registered")
 
         scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False)
-        timesteps = LingBotWorldFastTimesteps().select(scheduler, sample_shift)
+        timesteps = _select_timesteps(scheduler, tuple(timestep_indices), sample_shift)
         generator = torch.Generator(device=self.device)
         generator.set_state(torch.tensor(generator_state, dtype=torch.uint8))
         state = _DenoisingCacheState(
@@ -168,17 +180,22 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         for timestep_idx in range(len(timesteps)):
             schedule_timestep = timesteps[timestep_idx].view(1).to(device=current_latent.device)
             model_timestep = schedule_timestep.to(dtype=torch.float32)
-            noise_pred = self.dit(
-                x=current_latent.to(dtype=self.torch_dtype),
-                timestep=model_timestep,
-                context=prompt_emb,
-                y=condition_chunk,
-                control_tensor=control_chunk,
-                kv_cache=self_kv_cache,
-                crossattn_cache=crossattn_cache,
-                current_start=current_start,
-                max_attention_size=max_attention_size,
-            )
+            with torch.amp.autocast(
+                current_latent.device.type,
+                dtype=self.torch_dtype,
+                enabled=current_latent.device.type == "cuda",
+            ):
+                noise_pred = self.dit(
+                    x=current_latent.to(dtype=self.torch_dtype),
+                    timestep=model_timestep,
+                    context=prompt_emb,
+                    y=condition_chunk,
+                    control_tensor=control_chunk,
+                    kv_cache=self_kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    current_start=current_start,
+                    max_attention_size=max_attention_size,
+                )
             x0 = self._convert_flow_pred_to_x0(noise_pred, current_latent, schedule_timestep[0], scheduler)
             if timestep_idx < len(timesteps) - 1:
                 next_timestep = timesteps[timestep_idx + 1].view(1).to(device=x0.device)
@@ -219,17 +236,22 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             max_attention_size=max_attention_size,
             generator=state.generator,
         )
-        self.dit(
-            x=denoised.to(dtype=self.torch_dtype),
-            timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
-            context=prompt_emb,
-            y=condition_chunk,
-            control_tensor=control_chunk,
-            kv_cache=state.self_kv_cache,
-            crossattn_cache=state.crossattn_cache,
-            current_start=current_start,
-            max_attention_size=max_attention_size,
-        )
+        with torch.amp.autocast(
+            self.device.type,
+            dtype=self.torch_dtype,
+            enabled=self.device.type == "cuda",
+        ):
+            self.dit(
+                x=denoised.to(dtype=self.torch_dtype),
+                timestep=torch.zeros((1,), dtype=torch.float32, device=self.device),
+                context=prompt_emb,
+                y=condition_chunk,
+                control_tensor=control_chunk,
+                kv_cache=state.self_kv_cache,
+                crossattn_cache=state.crossattn_cache,
+                current_start=current_start,
+                max_attention_size=max_attention_size,
+            )
         return denoised
 
     def has_cache(self, cache_handle: int) -> bool:

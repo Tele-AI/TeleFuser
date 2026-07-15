@@ -18,17 +18,15 @@ from telefuser.worker.parallel_worker import ParallelWorker
 
 def _session(
     *,
-    active: bool = True,
+    status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.READY,
     current_chunk_index: int = 0,
     chunk_count: int = 2,
 ) -> LingBotWorldFastGenerationSession:
     empty = torch.empty(0)
     return LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
-        status=LingBotWorldFastSessionStatus.READY,
+        status=status,
         prompt_emb=empty,
-        noise_chunks=[empty for _ in range(chunk_count)],
-        condition_chunks=[empty for _ in range(chunk_count)],
         latent_h=1,
         latent_w=1,
         latent_f=chunk_count,
@@ -38,7 +36,6 @@ def _session(
         chunk_size=1,
         max_attention_size=1,
         cache_handle=7,
-        active=active,
         current_chunk_index=current_chunk_index,
     )
 
@@ -99,9 +96,9 @@ def test_chunk_request_rejects_invalid_inputs() -> None:
         LingBotWorldFastChunkRequest(chunk_index=0, control=object())
 
 
-def test_pipeline_call_rejects_inactive_runtime() -> None:
+def test_pipeline_call_rejects_released_runtime() -> None:
     pipeline = _pipeline()
-    runtime = _session(active=False)
+    runtime = _session(status=LingBotWorldFastSessionStatus.RELEASED)
     pipeline.generate_next_chunk = MagicMock()
 
     with pytest.raises(RuntimeError, match="inactive"):
@@ -177,7 +174,6 @@ def test_pipeline_call_releases_runtime_when_generation_fails() -> None:
     with pytest.raises(RuntimeError, match="generation failed"):
         pipeline(runtime, LingBotWorldFastChunkRequest(chunk_index=0, control=_control()))
 
-    assert runtime.active is False
     assert runtime.status == LingBotWorldFastSessionStatus.POISONED
     assert runtime.poisoned_reason == "RuntimeError: generation failed"
     pipeline.denoise_stage.release_cache.assert_called_once_with(7)
@@ -206,7 +202,6 @@ def test_final_chunk_releases_decoder_state_and_cache() -> None:
 
     def generate_next_chunk(session, control, progress_callback=None):
         session.current_chunk_index = 1
-        session.active = False
         return []
 
     pipeline.generate_next_chunk = MagicMock(side_effect=generate_next_chunk)
@@ -268,15 +263,13 @@ def test_concurrent_chunk_on_same_session_is_rejected() -> None:
 
 def test_generate_video_drains_runtime_and_releases_it() -> None:
     pipeline = LingBotWorldFastPipeline(device="cpu")
-    pipeline.release_session = MagicMock(side_effect=lambda state: setattr(state, "active", False))
+    pipeline.release_session = MagicMock()
     frame = Image.new("RGB", (8, 8))
 
     def generate(runtime_state, request, progress_callback=None):
         runtime_state.current_chunk_index += 1
         runtime_state.emitted_frames += 1
-        if runtime_state.current_chunk_index == 2:
-            runtime_state.active = False
-        return SimpleNamespace(frames=[frame])
+        return SimpleNamespace(frames=[frame], done=runtime_state.current_chunk_index == 2)
 
     config = LingBotWorldFastSessionConfig(prompt="test", image=frame)
 

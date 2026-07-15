@@ -1,13 +1,18 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
 
-from telefuser.pipelines.lingbot_world_fast.denoising import LingBotWorldFastDenoisingStage, LingBotWorldFastTimesteps
-from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline
+from telefuser.pipelines.lingbot_world_fast.denoising import LingBotWorldFastDenoisingStage
+from telefuser.pipelines.lingbot_world_fast.pipeline import (
+    LingBotWorldFastPipeline,
+    LingBotWorldFastPipelineConfig,
+)
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig
+from telefuser.pipelines.lingbot_world_v2 import LingBotWorldV2Pipeline, LingBotWorldV2PipelineConfig
 
 
 def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
@@ -21,6 +26,7 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
         orig_width=16,
         local_attn_size=-1,
         sink_size=0,
+        vae_config=SimpleNamespace(torch_dtype=torch.float32),
     )
     pipeline.dit = SimpleNamespace(
         patch_size=(1, 2, 2),
@@ -30,12 +36,8 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
     )
     pipeline.denoise_stage = MagicMock()
     pipeline._next_cache_handle = 0
-    pipeline.timesteps = LingBotWorldFastTimesteps()
     pipeline.encode_prompt = MagicMock(return_value=torch.zeros(1, 4, 8))
     pipeline._prepare_image_tensor = MagicMock(return_value=torch.zeros(3, 16, 16))
-    pipeline._encode_condition_video = MagicMock(
-        side_effect=lambda _image, frame_num: torch.zeros(17, (frame_num - 1) // 4 + 1, 2, 2)
-    )
     return pipeline
 
 
@@ -53,18 +55,46 @@ def _create_runtime(frame_num: int, seed: int = 42):
     return pipeline, runtime
 
 
+def test_v1_and_v2_defaults_match_the_shared_source_contract() -> None:
+    image = Image.new("RGB", (16, 16))
+
+    assert LingBotWorldFastPipelineConfig().vae_config.torch_dtype == torch.float32
+    assert LingBotWorldV2PipelineConfig().vae_config.torch_dtype == torch.float32
+    assert LingBotWorldFastSessionConfig(prompt="v1", image=image).frame_policy == "truncate"
+
+
+def test_v1_and_v2_share_source_image_geometry_and_preprocessing() -> None:
+    pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
+    pipeline.vae_device = torch.device("cpu")
+    pipeline.config = SimpleNamespace(vae_config=SimpleNamespace(torch_dtype=torch.float32))
+    image = Image.fromarray(np.arange(5 * 7 * 3, dtype=np.uint8).reshape(5, 7, 3), mode="RGB")
+
+    actual = pipeline._prepare_image_tensor(image, height=6, width=8)
+    source_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).permute(2, 0, 1)
+    expected = torch.nn.functional.interpolate(
+        source_tensor.sub(0.5).div(0.5).unsqueeze(0),
+        size=(6, 8),
+        mode="bicubic",
+    ).squeeze(0)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert LingBotWorldFastPipeline._best_output_size(1024, 768, 480 * 832) == (720, 544)
+    assert LingBotWorldV2Pipeline._best_output_size is LingBotWorldFastPipeline._best_output_size
+    assert LingBotWorldV2Pipeline._prepare_image_tensor is LingBotWorldFastPipeline._prepare_image_tensor
+
+
 def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
     pipeline, runtime = _create_runtime(frame_num=81)
 
     assert runtime.latent_f == 21
-    assert len(runtime.noise_chunks) == 7
-    assert len(runtime.condition_chunks) == 7
-    assert all(chunk.shape[2] == 3 for chunk in runtime.noise_chunks)
-    assert all(chunk.shape[2] == 3 for chunk in runtime.condition_chunks)
+    assert runtime.chunk_count == 7
+    assert runtime.noise_generator is not None
+    assert runtime.condition_image is not None
+    assert not hasattr(runtime, "noise_chunks")
+    assert not hasattr(runtime, "condition_chunks")
     assert runtime.cache_handle == 0
     assert not hasattr(runtime, "self_kv_cache")
     pipeline.denoise_stage.initialize_cache.assert_called_once()
-    pipeline._encode_condition_video.assert_called_once()
 
 
 def test_generation_sessions_receive_isolated_cache_and_decoder_handles() -> None:
@@ -102,13 +132,17 @@ def test_cache_initialization_failure_triggers_global_cleanup() -> None:
 
 
 def test_runtime_noise_is_reproducible_and_seed_dependent() -> None:
-    _, first = _create_runtime(frame_num=21, seed=7)
-    _, repeated = _create_runtime(frame_num=21, seed=7)
-    _, different = _create_runtime(frame_num=21, seed=8)
+    first_pipeline, first = _create_runtime(frame_num=21, seed=7)
+    repeated_pipeline, repeated = _create_runtime(frame_num=21, seed=7)
+    different_pipeline, different = _create_runtime(frame_num=21, seed=8)
 
-    first_noise = torch.cat(first.noise_chunks, dim=2)
-    repeated_noise = torch.cat(repeated.noise_chunks, dim=2)
-    different_noise = torch.cat(different.noise_chunks, dim=2)
+    first_noise = torch.cat([first_pipeline._next_noise_chunk(first) for _ in range(first.chunk_count)], dim=2)
+    repeated_noise = torch.cat(
+        [repeated_pipeline._next_noise_chunk(repeated) for _ in range(repeated.chunk_count)], dim=2
+    )
+    different_noise = torch.cat(
+        [different_pipeline._next_noise_chunk(different) for _ in range(different.chunk_count)], dim=2
+    )
 
     torch.testing.assert_close(first_noise, repeated_noise)
     assert not torch.equal(first_noise, different_noise)
@@ -153,7 +187,7 @@ def test_denoising_generator_state_advances_between_chunks() -> None:
     assert not torch.equal(first, second)
 
 
-def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None:
+def test_final_chunk_reaches_derived_chunk_boundary() -> None:
     pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
     pipeline.vae_device = torch.device("cpu")
     pipeline.denoise_stage = object()
@@ -161,16 +195,18 @@ def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None
     expected_frames = [Image.new("RGB", (8, 8)) for _ in range(9)]
     pipeline.tensor2video = MagicMock(return_value=expected_frames)
     cached_latent = torch.zeros(1, 1, 3, 2, 2)
+    pipeline._encode_condition_chunk = MagicMock(return_value=torch.zeros_like(cached_latent))
     runtime = SimpleNamespace(
         current_chunk_index=0,
-        noise_chunks=[torch.zeros_like(cached_latent)],
-        condition_chunks=[torch.zeros_like(cached_latent)],
+        chunk_count=1,
+        noise_generator=torch.Generator(device="cpu").manual_seed(42),
+        latent_h=2,
+        latent_w=2,
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
         chunk_size=3,
         frame_tokens=1,
         world_kv_cached_latents={0: cached_latent},
         world_kv_binding=None,
-        active=True,
         emitted_frames=0,
     )
 
@@ -179,12 +215,28 @@ def test_final_chunk_marks_runtime_inactive_and_releases_denoise_state() -> None
     assert frames == expected_frames
     assert runtime.current_chunk_index == 1
     assert runtime.emitted_frames == 9
-    assert runtime.active is False
+    assert runtime.current_chunk_index == runtime.chunk_count
 
 
-def test_runtime_rejects_non_aligned_frame_count() -> None:
+def test_runtime_truncates_non_aligned_latent_frame_count() -> None:
+    _, runtime = _create_runtime(frame_num=13)
+
+    assert runtime.latent_f == 3
+    assert runtime.chunk_count == 1
+
+
+def test_strict_frame_policy_rejects_non_aligned_latent_frame_count() -> None:
+    pipeline = _build_runtime_pipeline()
     with pytest.raises(ValueError, match="frame_num"):
-        _create_runtime(frame_num=13)
+        pipeline._create_initialized_session(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                frame_num=13,
+                chunk_size=3,
+                frame_policy="strict",
+            )
+        )
 
 
 def test_runtime_rejects_frame_count_smaller_than_first_chunk() -> None:

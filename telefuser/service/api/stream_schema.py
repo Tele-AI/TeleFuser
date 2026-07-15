@@ -44,7 +44,7 @@ class WebRTCOfferRequest(BaseModel):
     type: str = Field(default="offer", description="SDP type")
     task: str = Field(description="Task type, e.g. t2v, i2v")
     prompt: str | None = None
-    fps: int | None = Field(default=24, description="Target video FPS")
+    fps: int | None = Field(default=None, description="Target video FPS")
     config: dict = Field(default_factory=dict, description="Session configuration (bidirectional mode)")
 
     model_config = {"extra": "allow"}

@@ -383,7 +383,6 @@ class LingBotWorldFastDiT(BaseModel):
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
         self.control_type = control_type
-        self.dtype = torch.bfloat16
         self.layer_name_list = ["blocks"]
 
         control_dim = 6 if control_type == "cam" else 7
@@ -449,19 +448,19 @@ class LingBotWorldFastDiT(BaseModel):
             nn.init.zeros_(self.head.head.bias)
 
     def _build_timestep_embeddings(self, t: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-        time_dtype = self.time_embedding[0].weight.dtype
-        if t.dim() == 1:
-            emb_input = sinusoidal_embedding_1d(self.freq_dim, t).to(dtype=time_dtype)
-            emb = self.time_embedding(emb_input)
-            t_mod = self.time_projection(emb).unflatten(1, (6, self.dim)).unsqueeze(1).expand(-1, seq_len, -1, -1)
-            return emb.unsqueeze(1).to(self.dtype), t_mod.to(self.dtype)
+        with torch.amp.autocast(t.device.type, dtype=torch.float32, enabled=t.device.type == "cuda"):
+            if t.dim() == 1:
+                emb_input = sinusoidal_embedding_1d(self.freq_dim, t).float()
+                emb = self.time_embedding(emb_input)
+                t_mod = self.time_projection(emb).unflatten(1, (6, self.dim)).unsqueeze(1).expand(-1, seq_len, -1, -1)
+                return emb.unsqueeze(1).float(), t_mod.float()
 
-        flat = t.flatten()
-        emb_input = sinusoidal_embedding_1d(self.freq_dim, flat).to(dtype=time_dtype)
-        emb = self.time_embedding(emb_input)
-        emb = emb.unflatten(0, (t.shape[0], seq_len))
-        t_mod = self.time_projection(emb).unflatten(2, (6, self.dim))
-        return emb.to(self.dtype), t_mod.to(self.dtype)
+            flat = t.flatten()
+            emb_input = sinusoidal_embedding_1d(self.freq_dim, flat).float()
+            emb = self.time_embedding(emb_input)
+            emb = emb.unflatten(0, (t.shape[0], seq_len))
+            t_mod = self.time_projection(emb).unflatten(2, (6, self.dim))
+            return emb.float(), t_mod.float()
 
     def _prepare_control_tokens(self, control_tensor: torch.Tensor | None) -> torch.Tensor | None:
         if control_tensor is None:
@@ -513,6 +512,7 @@ class LingBotWorldFastDiT(BaseModel):
         max_attention_size: int = 1_000_000,
     ) -> torch.Tensor:
         if y is not None:
+            y = y.to(device=x.device, dtype=x.dtype)
             x = torch.cat([x, y], dim=1)
 
         x, grid_size = self.patchify(x)
@@ -555,7 +555,8 @@ class LingBotWorldFastDiT(BaseModel):
         x = self.head(x, t_head)
         if self.usp_flag:
             (x,) = sequence_parallel_unshard(self.device_mesh, [x], [1], [full_seq_len])
-        return self.unpatchify(x, grid_size)
+        output = self.unpatchify(x, grid_size)
+        return output.float()
 
     def enable_usp(self, device_mesh: DeviceMesh | None = None) -> None:
         """Enable Ulysses sequence parallelism for LingBot-World-Fast DiT."""
@@ -621,11 +622,16 @@ class LingBotWorldFastDiT(BaseModel):
         if inferred_control_dim not in (6, 7):
             raise ValueError(f"Unexpected control patch dim: {inferred_control_dim}")
         inferred_config["control_type"] = "cam" if inferred_control_dim == 6 else "act"
+        if inferred_config["control_type"] != control_type:
+            raise ValueError(
+                f"Checkpoint control projection is {inferred_control_dim}-channel "
+                f"({inferred_config['control_type']}), not requested {control_type!r}"
+            )
 
         with init_weights_on_device("meta"):
             model = cls(**inferred_config)
 
-        model.load_state_dict(state_dict, strict=False, assign=True)
+        model.load_state_dict(state_dict, strict=True, assign=True)
         model = model.to(dtype=torch_dtype)
         return model
 

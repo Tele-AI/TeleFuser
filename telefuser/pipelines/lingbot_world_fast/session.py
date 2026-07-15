@@ -10,9 +10,32 @@ from enum import Enum
 import torch
 from PIL import Image
 
-from telefuser.models.wan_video_vae import WanVideoVAEStreamingDecodeState
+from telefuser.models.wan_video_vae import (
+    WanVideoVAEStreamingDecodeState,
+    WanVideoVAEStreamingEncodeState,
+)
 
 from .control import LingBotWorldFastControlContext
+
+
+def resolve_lingbot_frame_count(frame_num: int, chunk_size: int, frame_policy: str) -> tuple[int, int]:
+    """Return the effective video and latent frame counts for a session."""
+    if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size < 1:
+        raise ValueError(f"chunk_size must be a positive integer, got {chunk_size!r}")
+    if not isinstance(frame_num, int) or isinstance(frame_num, bool):
+        raise ValueError(f"frame_num must be an integer, got {frame_num!r}")
+    if frame_num < 1 or (frame_num - 1) % 4:
+        raise ValueError(f"frame_num must be 4n+1, got {frame_num}")
+    if frame_policy not in {"strict", "truncate"}:
+        raise ValueError(f"frame_policy must be 'strict' or 'truncate', got {frame_policy!r}")
+
+    latent_frames = (frame_num - 1) // 4 + 1
+    if frame_policy == "truncate":
+        latent_frames -= latent_frames % chunk_size
+    if latent_frames < chunk_size or latent_frames % chunk_size:
+        raise ValueError(f"frame_num {frame_num} does not contain a whole number of latent chunks of size {chunk_size}")
+    effective_frame_num = 4 * (latent_frames - 1) + 1
+    return effective_frame_num, latent_frames
 
 
 @dataclass
@@ -23,6 +46,7 @@ class LingBotWorldFastSessionConfig:
     fps: int = 16
     chunk_size: int = 3
     frame_num: int = 81
+    frame_policy: str = "truncate"
     sample_shift: float = 10.0
     seed: int = 42
     max_attention_size: int | None = None
@@ -81,8 +105,9 @@ class LingBotWorldFastGenerationSession:
 
     config: LingBotWorldFastSessionConfig
     prompt_emb: torch.Tensor | None = field(default=None, repr=False)
-    noise_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
-    condition_chunks: list[torch.Tensor] = field(default_factory=list, repr=False)
+    condition_image: torch.Tensor | None = field(default=None, repr=False)
+    noise_generator: torch.Generator | None = field(default=None, repr=False)
+    encoder_state: WanVideoVAEStreamingEncodeState = field(default_factory=WanVideoVAEStreamingEncodeState)
     latent_h: int = 0
     latent_w: int = 0
     latent_f: int = 0
@@ -95,13 +120,18 @@ class LingBotWorldFastGenerationSession:
     decoder_state: WanVideoVAEStreamingDecodeState = field(default_factory=WanVideoVAEStreamingDecodeState)
     current_chunk_index: int = 0
     emitted_frames: int = 0
-    active: bool = True
     status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.NEW
     poisoned_reason: str | None = None
     transaction_lock: object = field(default_factory=threading.RLock, repr=False)
     # CacheSeek world_kv binding and decode-only latents for fast-forward hits.
     world_kv_binding: object | None = None
     world_kv_cached_latents: dict[int, torch.Tensor] = field(default_factory=dict)
+
+    @property
+    def chunk_count(self) -> int:
+        if self.chunk_size < 1:
+            raise RuntimeError("LingBot generation session has not been initialized")
+        return self.latent_f // self.chunk_size
 
 
 @dataclass
