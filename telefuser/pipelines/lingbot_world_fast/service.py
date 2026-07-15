@@ -26,6 +26,7 @@ from .session import (
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionState,
+    resolve_lingbot_frame_count,
 )
 
 _DIRECTION_ALIASES = {
@@ -158,12 +159,15 @@ class LingBotWorldFastService:
             raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
         if max_duration_seconds > self.max_generation_seconds:
             raise ValueError(f"max_duration_seconds must not exceed {self.max_generation_seconds:g}")
+
+        frame_policy = str(config.get("frame_policy", defaults.get("frame_policy", "truncate")))
         requested_frame_num = config.get("frame_num")
         frame_num = (
             int(requested_frame_num)
             if requested_frame_num is not None
             else self._frame_num_for_duration(max_duration_seconds, fps, chunk_size)
         )
+        frame_num, _ = resolve_lingbot_frame_count(frame_num, chunk_size, frame_policy)
         duration_seconds = (frame_num - 1) / fps
         if duration_seconds > max_duration_seconds:
             raise ValueError(
@@ -178,7 +182,7 @@ class LingBotWorldFastService:
             fps=fps,
             chunk_size=chunk_size,
             frame_num=frame_num,
-            frame_policy=str(config.get("frame_policy", defaults.get("frame_policy", "truncate"))),
+            frame_policy=frame_policy,
             sample_shift=float(config.get("sample_shift", defaults.get("sample_shift", 10.0))),
             seed=int(config.get("seed", defaults.get("seed", 42))),
             max_attention_size=config.get("max_attention_size", defaults.get("max_attention_size")),

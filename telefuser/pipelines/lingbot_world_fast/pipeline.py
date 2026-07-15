@@ -243,11 +243,12 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size!r}")
         if session_config.chunk_size < 1:
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size}")
-        resolve_lingbot_frame_count(
+        effective_frame_num, _ = resolve_lingbot_frame_count(
             session_config.frame_num,
             session_config.chunk_size,
             session_config.frame_policy,
         )
+        session_config.frame_num = effective_frame_num
 
     def _validate_control(self, session: LingBotWorldFastGenerationSession, control: torch.Tensor) -> None:
         expected_device = torch.device(self.device)
