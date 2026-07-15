@@ -17,6 +17,8 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
+- ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
+
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
 
 ## Why TeleFuser
@@ -79,7 +81,9 @@ video = pipe(
 
 ### 2. Real-Time World Model Demo
 
-TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
+TeleFuser includes a bidirectional WebRTC demo for `LingBot-World v2`.
+LingBot-World v2 uses camera control and its v2 PPL defaults; its streaming example caps a session at two minutes.
+
 
 For a laptop browser connected through VS Code Remote SSH, coturn is the only additional system package required;
 no extra Python package is needed. On Debian or Ubuntu, install it with:
@@ -98,15 +102,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/stream_lingbot_world_v2.py \
   --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 
 python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
-  --frame-num 321 --chunk-size 3 --sample-shift 10.0 --fps 16 \
   --turn-url 'turn:localhost:3478?transport=tcp' \
   --turn-username telefuser --turn-credential telefuser-turn \
   --force-turn-relay --ice-gather-timeout-ms 30000 --no-open
@@ -126,7 +128,7 @@ ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
 ```
 
 Then open `http://localhost:8091`. The TURN command and credentials above are development examples. See the
-[stream server guide](docs/en/stream_server.md#lingbot-world-fast-streaming) and the
+[stream server guide](docs/en/stream_server.md) and the
 [LingBot example README](examples/lingbot/README.md) for coturn startup and the tested four-H100 setup.
 
 If the browser runs on the same physical machine as TeleFuser, no SSH tunnel or TURN server is needed. Unset all
@@ -178,7 +180,7 @@ telefuser/
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
-| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/stream_lingbot_world_fast.py](examples/lingbot/stream_lingbot_world_fast.py) |
+| `LingBot-World v2` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/stream_lingbot_world_v2.py](examples/lingbot/stream_lingbot_world_v2.py) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 
@@ -219,7 +221,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - `AdaTaylorCache` is only calibrated for selected model families.
 - `torch.compile` support is still experimental in parts of the stack.
 - Some optimized paths require specific GPU architectures and CUDA versions.
-- World-model examples such as `LingBot-World-Fast` require external checkpoints and environment setup.
+- World-model examples such as `LingBot-World v2` require external checkpoints and environment setup.
 - Multi-machine deployment exists in the architecture but may require project-specific integration and validation.
 
 ## Development
