@@ -47,10 +47,12 @@ DEFAULT_PROMPT = (
 RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
+    parallelism=1,
     control_mode="cam",
     resolution="480p",
     frame_num=81,
     chunk_size=3,
+    frame_policy="truncate",
     sample_shift=10.0,
     seed=42,
     target_fps=16,
@@ -58,13 +60,15 @@ PPL_CONFIG = dict(
     enable_fsdp=False,
     local_attn_size=-1,
     sink_size=0,
+    timestep_indices=(0, 179, 358, 679),
     max_attention_size=None,
+    vae_torch_dtype=torch.float32,
     torch_dtype=torch.bfloat16,
 )
 
 
 def get_pipeline(
-    parallelism: int = 1,
+    parallelism: int = PPL_CONFIG["parallelism"],
     model_root: str | None = None,
     fast_model_root: str | None = None,
 ) -> LingBotWorldFastPipeline:
@@ -82,13 +86,14 @@ def get_pipeline(
         LingBotWorldFastPipelineConfig(
             checkpoint_dir=model_root or default_model_root,
             fast_checkpoint_path=fast_model_root or default_fast_model_root,
-            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
+            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=PPL_CONFIG["vae_torch_dtype"]),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
             dit_torch_dtype=dtype,
             control_type=PPL_CONFIG["control_mode"],
             max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]],
             local_attn_size=PPL_CONFIG["local_attn_size"],
             sink_size=PPL_CONFIG["sink_size"],
+            timestep_indices=PPL_CONFIG["timestep_indices"],
             attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
             parallel_config=ParallelConfig(
                 device_ids=list(range(parallelism)) if parallelism > 1 else None,
@@ -107,14 +112,12 @@ def run(
     seed: int = PPL_CONFIG["seed"],
     resolution: str = PPL_CONFIG["resolution"],
     action_path: str = DEFAULT_ACTION_PATH,
-    frame_num: int | None = None,
     fps: int | None = None,
 ) -> list[Image.Image]:
     """Generate a complete offline video through the pipeline core API."""
     if resolution not in RESOLUTION_AREAS:
         raise ValueError(f"Unsupported resolution: {resolution}")
     pipeline.config.max_area = RESOLUTION_AREAS[resolution]
-    frame_num = PPL_CONFIG["frame_num"] if frame_num is None else frame_num
     fps = PPL_CONFIG["target_fps"] if fps is None else fps
 
     session_config = LingBotWorldFastSessionConfig(
@@ -123,7 +126,8 @@ def run(
         control_mode=PPL_CONFIG["control_mode"],
         fps=fps,
         chunk_size=PPL_CONFIG["chunk_size"],
-        frame_num=frame_num,
+        frame_policy=PPL_CONFIG["frame_policy"],
+        frame_num=PPL_CONFIG["frame_num"],
         sample_shift=PPL_CONFIG["sample_shift"],
         seed=seed,
         max_attention_size=PPL_CONFIG["max_attention_size"],
@@ -157,7 +161,7 @@ def run(
 @click.command()
 @click.option(
     "--gpu_num",
-    default=1,
+    default=PPL_CONFIG["parallelism"],
     type=int,
     help="Number of GPUs used for Ulysses sequence parallelism",
 )
@@ -166,7 +170,6 @@ def run(
 @click.option("--prompt", default=DEFAULT_PROMPT, help="Positive guidance prompt")
 @click.option("--seed", default=PPL_CONFIG["seed"], type=int)
 @click.option("--resolution", default=PPL_CONFIG["resolution"], type=click.Choice(list(RESOLUTION_AREAS)))
-@click.option("--frame_num", default=PPL_CONFIG["frame_num"], type=int, help="Number of output frames")
 @click.option("--fps", default=PPL_CONFIG["target_fps"], type=int, help="Output video frame rate")
 @click.option("--model_root", default=None, type=click.Path(exists=True, file_okay=False))
 @click.option(
@@ -182,7 +185,6 @@ def main(
     prompt: str,
     seed: int,
     resolution: str,
-    frame_num: int,
     fps: int,
     model_root: str,
     fast_model_root: str,
@@ -201,7 +203,6 @@ def main(
             seed=seed,
             resolution=resolution,
             action_path=action_path,
-            frame_num=frame_num,
             fps=fps,
         )
         elapsed = time.perf_counter() - start

@@ -27,10 +27,17 @@ PPL_CONFIG = dict(
     control_mode="cam",
     resolution="480p",
     target_fps=16,
+    max_duration_seconds=5.0,
+    chunk_size=3,
+    frame_policy="truncate",
+    sample_shift=10.0,
+    max_attention_size=None,
     attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
     enable_fsdp=True,
     local_attn_size=-1,
     sink_size=0,
+    timestep_indices=(0, 179, 358, 679),
+    vae_torch_dtype=torch.float32,
     torch_dtype=torch.bfloat16,
 )
 
@@ -55,13 +62,14 @@ def get_pipeline(
         LingBotWorldFastPipelineConfig(
             checkpoint_dir=model_root or default_model_root,
             fast_checkpoint_path=fast_model_root or default_fast_model_root,
-            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
+            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=PPL_CONFIG["vae_torch_dtype"]),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
             dit_torch_dtype=dtype,
             control_type=PPL_CONFIG["control_mode"],
             max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]],
             local_attn_size=PPL_CONFIG["local_attn_size"],
             sink_size=PPL_CONFIG["sink_size"],
+            timestep_indices=PPL_CONFIG["timestep_indices"],
             attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
             parallel_config=ParallelConfig(
                 device_ids=list(range(parallelism)) if parallelism > 1 else None,
@@ -76,4 +84,15 @@ def get_pipeline(
 def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
     """Build the service loaded by the TeleFuser stream server."""
     pipeline = get_pipeline(parallelism=gpu_num)
-    return LingBotWorldFastService(pipeline, default_fps=PPL_CONFIG["target_fps"])
+    return LingBotWorldFastService(
+        pipeline,
+        default_fps=PPL_CONFIG["target_fps"],
+        default_session_config={
+            "control_mode": PPL_CONFIG["control_mode"],
+            "max_duration_seconds": PPL_CONFIG["max_duration_seconds"],
+            "chunk_size": PPL_CONFIG["chunk_size"],
+            "frame_policy": PPL_CONFIG["frame_policy"],
+            "sample_shift": PPL_CONFIG["sample_shift"],
+            "max_attention_size": PPL_CONFIG["max_attention_size"],
+        },
+    )

@@ -4,7 +4,7 @@ from .control import (
     load_action_control_inputs,
     load_camera_control_inputs,
 )
-from .denoising import LingBotWorldFastDenoisingStage, LingBotWorldFastTimesteps
+from .denoising import LingBotWorldFastDenoisingStage
 from .pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from .service import LingBotWorldFastService
 from .session import (
@@ -27,7 +27,6 @@ __all__ = [
     "LingBotWorldFastSessionConfig",
     "LingBotWorldFastSessionState",
     "LingBotWorldFastSessionStatus",
-    "LingBotWorldFastTimesteps",
     "build_action_control_chunk",
     "build_camera_control_chunk",
     "load_action_control_inputs",
