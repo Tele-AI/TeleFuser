@@ -142,7 +142,12 @@ class AsyncTaskProcessor:
                 )
 
                 if result:
-                    self.task_manager.complete_task(task_id, result.output_path)
+                    self.task_manager.complete_task(
+                        task_id,
+                        result.output_path,
+                        peak_memory_mb=result.peak_memory_mb,
+                        inference_time_s=result.inference_time_s,
+                    )
                     logger.info(f"Task {task_id} completed successfully")
                 else:
                     if task_info.stop_event.is_set():

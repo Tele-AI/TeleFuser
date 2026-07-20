@@ -28,6 +28,8 @@ class TaskInfo:
     end_time: datetime | None = None
     error: str | None = None
     output_path: str | None = None
+    peak_memory_mb: float | None = None
+    inference_time_s: float | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
 
@@ -118,7 +120,14 @@ class TaskManager:
             self._tasks.move_to_end(task_id)
             return task
 
-    def complete_task(self, task_id: str, output_path: str | None = None) -> None:
+    def complete_task(
+        self,
+        task_id: str,
+        output_path: str | None = None,
+        *,
+        peak_memory_mb: float | None = None,
+        inference_time_s: float | None = None,
+    ) -> None:
         """Mark task as completed with metrics."""
         with self._lock:
             if task_id not in self._tasks:
@@ -139,7 +148,9 @@ class TaskManager:
 
             if task.start_time:
                 duration = (task.end_time - task.start_time).total_seconds()
+                task.inference_time_s = inference_time_s if inference_time_s is not None else duration
                 get_service_metrics().record_task_completed(duration)
+            task.peak_memory_mb = peak_memory_mb
 
     def fail_task(self, task_id: str, error: str) -> None:
         """Mark task as failed with metrics."""
@@ -213,6 +224,8 @@ class TaskManager:
             "end_time": task.end_time,
             "error": task.error,
             "output_path": task.output_path,
+            "peak_memory_mb": task.peak_memory_mb,
+            "inference_time_s": task.inference_time_s,
         }
         status.update(self._serialize_task_message(task.message))
         return status

@@ -50,6 +50,14 @@ from .registry import (
     get_metrics_registry,
     reset_global_registry,
 )
+from .runtime import (
+    RuntimeMeasurement,
+    canonical_cuda_devices,
+    collect_runtime_environment,
+    finish_runtime_measurement,
+    start_runtime_measurement,
+    visible_cuda_devices,
+)
 from .service_metrics import (
     ServiceMetrics,
     get_service_metrics,
@@ -90,6 +98,13 @@ __all__ = [
     "ServiceMetrics",
     "get_service_metrics",
     "reset_service_metrics",
+    # Runtime benchmark facts
+    "RuntimeMeasurement",
+    "canonical_cuda_devices",
+    "visible_cuda_devices",
+    "start_runtime_measurement",
+    "finish_runtime_measurement",
+    "collect_runtime_environment",
     # Configuration
     "MetricsConfig",
     "default_metrics_config",

@@ -20,6 +20,7 @@ from telefuser.service.api.openai.protocol import (
     validate_image_size,
 )
 from telefuser.service.api.schema import TaskRequest
+from telefuser.service_types import AspectRatio
 from telefuser.utils.logging import logger
 
 VIDEO_REFERENCE_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -153,6 +154,19 @@ class OpenAIRequestAdapter:
         target_video_length = req.seconds or 4
         aspect_ratio = ASPECT_RATIOS.get(req.size, "16:9")
         ref_path = req.input_reference or req.reference_url or ""
+        extra_fields: dict[str, Any] = {"model": req.model}
+        if req.size:
+            extra_fields["openai_video_size"] = req.size
+            try:
+                width, height = validate_image_size(req.size)
+            except ValueError:
+                pass
+            else:
+                extra_fields["width"] = width
+                extra_fields["height"] = height
+                inferred_aspect_ratio = infer_aspect_ratio(width, height)
+                if inferred_aspect_ratio in AspectRatio.values():
+                    aspect_ratio = inferred_aspect_ratio
 
         base_fields = {
             "task": task,
@@ -169,8 +183,6 @@ class OpenAIRequestAdapter:
             base_fields["ref_video_path"] = ref_path
         else:
             base_fields["first_image_path"] = ref_path
-
-        extra_fields = {"model": req.model}
 
         return create_extended_task_request(base_fields, extra_fields)
 

@@ -117,6 +117,8 @@ def make_stream_svc(service, stream_mode: str):
     svc.ppl_file = "mock.py"
     svc._module = None
     svc._module_name = None
+    svc._startup_measurement = None
+    svc._runtime_environment = {}
     svc.security_level = None
     svc.security_validator = None
     return svc

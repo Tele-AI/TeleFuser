@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
+import time
 from types import ModuleType
 from typing import Any
 
 import torch.multiprocessing as mp
 
+from telefuser.platforms import current_platform
 from telefuser.service_types import TaskType
 from telefuser.utils.logging import logger
 
@@ -29,6 +32,74 @@ from .pipeline_loader import (
 from .pipeline_runner import PipelineRunner
 
 mp.set_start_method("spawn", force=True)
+
+_BYTES_PER_MIB = 1024 * 1024
+
+
+def _nonnegative_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _accelerator_available() -> bool:
+    try:
+        return bool(current_platform.is_accelerator_available())
+    except Exception:
+        return False
+
+
+def _synchronize_accelerator() -> None:
+    if not _accelerator_available():
+        return
+    try:
+        current_platform.synchronize()
+    except Exception:
+        pass
+
+
+def _reset_peak_memory_stats() -> None:
+    if not _accelerator_available():
+        return
+    try:
+        _synchronize_accelerator()
+        current_platform.reset_peak_memory_stats()
+    except Exception:
+        pass
+
+
+def _peak_memory_mb() -> float | None:
+    if not _accelerator_available():
+        return None
+    try:
+        peak_bytes = current_platform.max_memory_allocated()
+    except Exception:
+        return None
+    peak_memory_bytes = _nonnegative_finite_float(peak_bytes)
+    return peak_memory_bytes / _BYTES_PER_MIB if peak_memory_bytes is not None else None
+
+
+def _raw_runtime_metrics(raw: Any) -> tuple[float | None, float | None]:
+    if not isinstance(raw, dict):
+        return None, None
+    metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+    inference_time_s = _nonnegative_finite_float(raw.get("inference_time_s"))
+    if inference_time_s is None:
+        inference_time_s = _nonnegative_finite_float(metrics.get("inference_time_s"))
+    peak_memory_mb = _nonnegative_finite_float(raw.get("peak_memory_mb"))
+    if peak_memory_mb is None:
+        peak_memory_mb = _nonnegative_finite_float(metrics.get("peak_memory_mb"))
+    if peak_memory_mb is None:
+        peak_memory_gb = _nonnegative_finite_float(raw.get("peak_memory_gb"))
+        if peak_memory_gb is None:
+            peak_memory_gb = _nonnegative_finite_float(metrics.get("peak_memory_gb"))
+        if peak_memory_gb is not None:
+            peak_memory_mb = peak_memory_gb * 1024.0
+    return inference_time_s, peak_memory_mb
 
 
 class PipelineService:
@@ -195,12 +266,17 @@ class PipelineService:
 
         timeout_s = timeout_s if timeout_s is not None else float(self.server_config.task_timeout)
 
+        _reset_peak_memory_stats()
+        inference_started_at = time.perf_counter()
         result = await self._runner.run(
             task_data=task_data,
             stop_event=stop_event,
             timeout_s=timeout_s,
             output_root=output_root,
         )
+        _synchronize_accelerator()
+        measured_inference_time_s = time.perf_counter() - inference_started_at
+        raw_inference_time_s, raw_peak_memory_mb = _raw_runtime_metrics(result.raw)
 
         return {
             "task_id": task_data.get("task_id", ""),
@@ -208,6 +284,10 @@ class PipelineService:
             "output_path": result.output_path or "",
             "message": result.message,
             "raw": result.raw,
+            "inference_time_s": (
+                raw_inference_time_s if raw_inference_time_s is not None else measured_inference_time_s
+            ),
+            "peak_memory_mb": raw_peak_memory_mb if raw_peak_memory_mb is not None else _peak_memory_mb(),
         }
 
     def server_metadata(self) -> dict:

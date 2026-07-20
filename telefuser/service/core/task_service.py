@@ -182,6 +182,8 @@ class MediaGenerationService:
                 task_id=message.task_id,
                 task_status=TaskStatus.COMPLETED,
                 output_path=str(output_path),
+                peak_memory_mb=result.get("peak_memory_mb"),
+                inference_time_s=result.get("inference_time_s"),
             )
         else:
             raise RuntimeError(result.get("message") or "Inference failed")
