@@ -4,19 +4,27 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from PIL import Image
 
+from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
+from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from telefuser.pipelines.lingbot_world_fast.session import (
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
+    LingBotWorldFastSessionStatus,
 )
 from telefuser.pipelines.lingbot_world_fast.streaming import LingBotWorldFastStreamingRuntime
 
 
 class _Worker:
-    def __init__(self):
+    def __init__(self, name: str, release_order: list[str]):
+        self.name = name
+        self.release_order = release_order
         self.calls: list[dict[str, object]] = []
+        self.release_calls: list[int] = []
+        self.release_failures = 0
         self.closed = False
 
     def encode_condition_chunk(self, **kwargs):
@@ -27,19 +35,38 @@ class _Worker:
         self.calls.append(kwargs)
         return lambda: torch.tensor([2.0])
 
+    def release_cache(self, cache_handle: int, sync: bool = False):
+        assert sync
+        if self.release_failures:
+            self.release_failures -= 1
+            raise RuntimeError(f"{self.name} release failed")
+        self.release_calls.append(cache_handle)
+        self.release_order.append(self.name)
+        return True
+
     def close(self):
         self.closed = True
 
 
 class _Denoise:
-    def __init__(self):
+    def __init__(self, release_order: list[str]):
+        self.release_order = release_order
         self.advance_calls: list[int] = []
+        self.release_calls: list[int] = []
+        self.fail_denoise = False
 
     def denoise_and_update_cache(self, **kwargs):
+        if self.fail_denoise:
+            raise RuntimeError("injected denoise failure")
         return kwargs["condition_chunk"]
 
     def advance_noise(self, cache_handle: int):
         self.advance_calls.append(cache_handle)
+
+    def release_cache(self, cache_handle: int):
+        self.release_calls.append(cache_handle)
+        self.release_order.append("denoise")
+        return True
 
 
 class _Pipeline:
@@ -48,9 +75,10 @@ class _Pipeline:
     torch_dtype = torch.float32
 
     def __init__(self):
-        self.vae_encode_worker = _Worker()
-        self.vae_decode_worker = _Worker()
-        self.denoise_stage = _Denoise()
+        self.release_order: list[str] = []
+        self.vae_encode_worker = _Worker("encode", self.release_order)
+        self.vae_decode_worker = _Worker("decode", self.release_order)
+        self.denoise_stage = _Denoise(self.release_order)
         self.released: list[int | None] = []
 
     @staticmethod
@@ -64,6 +92,32 @@ class _Pipeline:
 
     def release_session(self, runtime: LingBotWorldFastGenerationSession) -> None:
         self.released.append(runtime.cache_handle)
+
+
+def test_independent_vae_stage_configs_preserve_legacy_defaults() -> None:
+    legacy = LingBotWorldFastPipelineConfig(
+        vae_config=ModelRuntimeConfig(device_type="cuda", device_id=3, torch_dtype=torch.float32),
+        vae_parallel_config=ParallelConfig(device_ids=[3]),
+    )
+    assert LingBotWorldFastPipeline._vae_stage_runtime_config(legacy, "encode").device_id == 3
+    assert LingBotWorldFastPipeline._vae_stage_runtime_config(legacy, "decode").device_id == 3
+
+    independent = LingBotWorldFastPipelineConfig(
+        vae_encode_config=ModelRuntimeConfig(
+            device_type="cuda",
+            device_id=0,
+            torch_dtype=torch.float32,
+            parallel_config=ParallelConfig(device_ids=[0]),
+        ),
+        vae_decode_config=ModelRuntimeConfig(
+            device_type="cuda",
+            device_id=1,
+            torch_dtype=torch.float32,
+            parallel_config=ParallelConfig(device_ids=[1]),
+        ),
+    )
+    assert LingBotWorldFastPipeline._vae_stage_runtime_config(independent, "encode").device_id == 0
+    assert LingBotWorldFastPipeline._vae_stage_runtime_config(independent, "decode").device_id == 1
 
 
 def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
@@ -82,6 +136,8 @@ def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
         cache_handle=9,
     )
     streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    assert streaming_runtime.orchestrator.spec.resource_groups == ()
+    assert all(stage.resource_group is None for stage in streaming_runtime.orchestrator.spec.stages)
     session = streaming_runtime.create_session(runtime)
     try:
         streaming_runtime.submit_chunk(session, 0, torch.tensor([4.0]))
@@ -100,7 +156,12 @@ def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
     assert pipeline.vae_decode_worker.calls[0]["is_last_clip"] is True
     assert pipeline.vae_encode_worker.closed is False
     assert pipeline.vae_decode_worker.closed is False
-    assert pipeline.released == [9]
+    assert pipeline.vae_encode_worker.release_calls == [9]
+    assert pipeline.vae_decode_worker.release_calls == [9]
+    assert pipeline.denoise_stage.release_calls == [9]
+    assert pipeline.release_order == ["decode", "denoise", "encode"]
+    assert pipeline.released == []
+    assert runtime.cache_handle is None
 
 
 def test_streaming_runtime_shares_one_actor_graph_across_sessions() -> None:
@@ -138,7 +199,11 @@ def test_streaming_runtime_shares_one_actor_graph_across_sessions() -> None:
     assert [index for index, _ in outputs] == [0, 0]
     assert {call["cache_handle"] for call in pipeline.vae_encode_worker.calls} == {10, 11}
     assert {call["cache_handle"] for call in pipeline.vae_decode_worker.calls} == {10, 11}
-    assert pipeline.released == [10, 11]
+    assert pipeline.vae_encode_worker.release_calls == [10, 11]
+    assert pipeline.vae_decode_worker.release_calls == [10, 11]
+    assert pipeline.denoise_stage.release_calls == [10, 11]
+    assert pipeline.release_order == ["decode", "denoise", "encode"] * 2
+    assert pipeline.released == []
 
 
 def test_streaming_runtime_preserves_world_kv_decode_only_hits() -> None:
@@ -175,3 +240,71 @@ def test_streaming_runtime_preserves_world_kv_decode_only_hits() -> None:
     decode_call = pipeline.vae_decode_worker.calls[0]
     torch.testing.assert_close(decode_call["latents"], cached_latent)
     binding.on_chunk_finalized.assert_called_once()
+
+
+def test_streaming_session_cleanup_failure_is_poisoned_and_retryable() -> None:
+    pipeline = _Pipeline()
+    pipeline.vae_decode_worker.release_failures = 1
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=1,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=13,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    try:
+        with pytest.raises(RuntimeError, match="Failed to clean streaming session"):
+            streaming_runtime.close_session(session, timeout=1)
+        assert runtime.status == LingBotWorldFastSessionStatus.POISONED
+        assert runtime.cache_handle == 13
+        assert pipeline.release_order == ["denoise", "encode"]
+
+        streaming_runtime.close_session(session, timeout=1)
+        assert pipeline.release_order == ["denoise", "encode", "decode"]
+        assert runtime.status == LingBotWorldFastSessionStatus.RELEASED
+        assert runtime.cache_handle is None
+    finally:
+        streaming_runtime.close()
+
+
+def test_streaming_stage_failure_automatically_releases_lingbot_caches() -> None:
+    pipeline = _Pipeline()
+    pipeline.denoise_stage.fail_denoise = True
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=1,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=14,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    try:
+        streaming_runtime.submit_chunk(session, 0, torch.tensor([4.0]))
+        assert streaming_runtime.wait_until_idle(session, timeout=1)
+        assert str(streaming_runtime.error(session)) == "injected denoise failure"
+        assert pipeline.release_order == ["decode", "denoise", "encode"]
+        assert pipeline.vae_encode_worker.release_calls == [14]
+        assert pipeline.vae_decode_worker.release_calls == [14]
+        assert pipeline.denoise_stage.release_calls == [14]
+
+        streaming_runtime.close_session(session)
+        assert pipeline.release_order == ["decode", "denoise", "encode"]
+        assert runtime.status == LingBotWorldFastSessionStatus.RELEASED
+        assert runtime.cache_handle is None
+    finally:
+        streaming_runtime.close()

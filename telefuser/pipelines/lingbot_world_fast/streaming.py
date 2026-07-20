@@ -16,14 +16,18 @@ from telefuser.orchestrator import (
     StreamingEdgeSpec,
     StreamingPipelineOrchestrator,
     StreamingPipelineSpec,
+    StreamingSessionCloseReason,
+    StreamingSessionContext,
+    StreamingSessionMetrics,
     StreamingSessionStatus,
     StreamingStageIdleInterval,
     StreamingStageInvocation,
     StreamingStageSpec,
 )
 from telefuser.utils.logging import logger
+from telefuser.worker.parallel_worker import ParallelWorker
 
-from .session import LingBotWorldFastGenerationSession
+from .session import LingBotWorldFastGenerationSession, LingBotWorldFastSessionStatus
 
 if TYPE_CHECKING:
     from .pipeline import LingBotWorldFastPipeline
@@ -60,6 +64,7 @@ class LingBotWorldFastStreamingRuntime:
                 self._encode_inputs,
                 self._encode_outputs,
                 close_worker=False,
+                session_closer=self._release_encode_session,
             ),
             "denoise": self._denoise_actor(),
             "decode": ParallelWorkerStageActor(
@@ -68,6 +73,7 @@ class LingBotWorldFastStreamingRuntime:
                 self._decode_inputs,
                 self._decode_outputs,
                 close_worker=False,
+                session_closer=self._release_decode_session,
             ),
         }
         spec = StreamingPipelineSpec(
@@ -171,6 +177,11 @@ class LingBotWorldFastStreamingRuntime:
         self._require_session(session)
         return self.orchestrator.stage_idle_intervals(session.session_id, stage_id)
 
+    def session_metrics(self, session: LingBotWorldFastStreamingSession) -> StreamingSessionMetrics:
+        """Return scheduler-observed end-to-end latency metrics for one session."""
+        self._require_session(session)
+        return self.orchestrator.session_metrics(session.session_id)
+
     def wait_until_idle(self, session: LingBotWorldFastStreamingSession, timeout: float = 5.0) -> bool:
         """Wait until the session has no admitted or immediately admissible work."""
         self._require_session(session)
@@ -183,10 +194,16 @@ class LingBotWorldFastStreamingRuntime:
             if entry is None:
                 return
             self._validate_handle(session, entry)
-        self.orchestrator.close_session(session.session_id, timeout=timeout)
+        try:
+            self.orchestrator.close_session(session.session_id, timeout=timeout)
+        except BaseException as exc:
+            with entry.runtime.lifecycle_lock:
+                entry.runtime.status = LingBotWorldFastSessionStatus.POISONED
+                entry.runtime.poisoned_reason = f"Streaming session cleanup failed: {exc}"
+            raise
         with self._lock:
             self._sessions.pop(session.session_id, None)
-        self.pipeline.release_session(entry.runtime)
+        self._finalize_session_release(entry)
 
     def close(self) -> None:
         """Drain the shared actor graph and release every remaining session."""
@@ -194,12 +211,18 @@ class LingBotWorldFastStreamingRuntime:
             if self._closed:
                 return
             self._closed = True
-        self.orchestrator.close()
+        close_error: BaseException | None = None
+        try:
+            self.orchestrator.close()
+        except BaseException as exc:
+            close_error = exc
         with self._lock:
             entries = tuple(self._sessions.values())
             self._sessions.clear()
         for entry in entries:
-            self.pipeline.release_session(entry.runtime)
+            self._finalize_session_release(entry, close_error)
+        if close_error is not None:
+            raise RuntimeError("Failed to close LingBot streaming runtime cleanly") from close_error
 
     def _require_session(self, session: LingBotWorldFastStreamingSession) -> _LingBotStreamingSessionEntry:
         with self._lock:
@@ -228,8 +251,85 @@ class LingBotWorldFastStreamingRuntime:
                 raise RuntimeError(f"Stale LingBot streaming invocation for {invocation.key.session_id!r}")
             return entry
 
-    def _denoise_actor(self):
-        return LocalStageActor(self._denoise, name="lingbot-denoise-actor")
+    def _denoise_actor(self) -> LocalStageActor:
+        return LocalStageActor(
+            self._denoise,
+            name="lingbot-denoise-actor",
+            session_closer=self._release_denoise_session,
+        )
+
+    def _entry_for_context(self, context: StreamingSessionContext) -> _LingBotStreamingSessionEntry:
+        with self._lock:
+            try:
+                entry = self._sessions[context.session_id]
+            except KeyError as exc:
+                raise KeyError(f"Unknown LingBot streaming session {context.session_id!r}") from exc
+            if entry.epoch != context.session_epoch:
+                raise RuntimeError(f"Stale LingBot streaming session cleanup for {context.session_id!r}")
+            return entry
+
+    def _release_encode_session(
+        self,
+        context: StreamingSessionContext,
+        reason: StreamingSessionCloseReason,
+    ) -> None:
+        del reason
+        entry = self._entry_for_context(context)
+        cache_handle = entry.runtime.cache_handle
+        if cache_handle is None:
+            return
+        result = self.pipeline.vae_encode_worker.release_cache(cache_handle, sync=True)
+        if callable(result):
+            result()
+
+    def _release_decode_session(
+        self,
+        context: StreamingSessionContext,
+        reason: StreamingSessionCloseReason,
+    ) -> None:
+        del reason
+        entry = self._entry_for_context(context)
+        cache_handle = entry.runtime.cache_handle
+        if cache_handle is None:
+            return
+        result = self.pipeline.vae_decode_worker.release_cache(cache_handle, sync=True)
+        if callable(result):
+            result()
+
+    def _release_denoise_session(
+        self,
+        context: StreamingSessionContext,
+        reason: StreamingSessionCloseReason,
+    ) -> None:
+        del reason
+        entry = self._entry_for_context(context)
+        cache_handle = entry.runtime.cache_handle
+        if cache_handle is None:
+            return
+        if isinstance(self.pipeline.denoise_stage, ParallelWorker):
+            result = self.pipeline.denoise_stage.release_cache(cache_handle, sync=True)
+        else:
+            result = self.pipeline.denoise_stage.release_cache(cache_handle)
+        if callable(result):
+            result()
+
+    @staticmethod
+    def _finalize_session_release(
+        entry: _LingBotStreamingSessionEntry,
+        error: BaseException | None = None,
+    ) -> None:
+        runtime = entry.runtime
+        with runtime.lifecycle_lock:
+            runtime.prompt_emb = None
+            runtime.condition_image = None
+            runtime.world_kv_cached_latents.clear()
+            if error is None:
+                runtime.cache_handle = None
+                runtime.status = LingBotWorldFastSessionStatus.RELEASED
+                runtime.poisoned_reason = None
+            else:
+                runtime.status = LingBotWorldFastSessionStatus.POISONED
+                runtime.poisoned_reason = f"Streaming session cleanup failed: {error}"
 
     def _encode_inputs(self, invocation: StreamingStageInvocation) -> tuple[tuple[object, ...], dict[str, object]]:
         entry = self._entry_for_invocation(invocation)

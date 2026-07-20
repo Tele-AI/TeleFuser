@@ -53,6 +53,8 @@ class LingBotWorldFastPipelineConfig:
     timestep_indices: tuple[int, ...] = (0, 179, 358, 679)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     vae_parallel_config: ParallelConfig = field(default_factory=lambda: ParallelConfig(device_ids=[0]))
+    vae_encode_config: ModelRuntimeConfig | None = None
+    vae_decode_config: ModelRuntimeConfig | None = None
     attention_config: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -100,7 +102,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         checkpoint_root = Path(config.checkpoint_dir).expanduser().resolve()
         self._model_info = [{"name": "lingbot_world_fast", "path": str(checkpoint_root)}]
         self.text_device = self._runtime_device(config.text_encoding_config)
-        self.vae_device = self._runtime_device(config.vae_config)
 
         self.text_encoder = WanTextEncoder()
         self.text_encoder.load_state_dict(load_state_dict(str(checkpoint_root / "models_t5_umt5-xxl-enc-bf16.pth")))
@@ -116,15 +117,14 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae = WanVideoVAE(**vae_cfg)
         self.vae.load_state_dict(vae_state_dict, strict=False)
         self.vae.eval()
-        self._validate_vae_parallel_config(config.vae_parallel_config)
-        vae_runtime_config = ModelRuntimeConfig(
-            device_type=config.vae_config.device_type,
-            device_id=config.vae_config.device_id,
-            torch_dtype=config.vae_config.torch_dtype,
-            parallel_config=config.vae_parallel_config,
-        )
-        vae_encode_stage = LingBotWorldFastVAEEncodeStage("lingbot_world_fast_vae_encode", self.vae, vae_runtime_config)
-        vae_decode_stage = LingBotWorldFastVAEDecodeStage("lingbot_world_fast_vae_decode", self.vae, vae_runtime_config)
+        vae_encode_config = self._vae_stage_runtime_config(config, "encode")
+        vae_decode_config = self._vae_stage_runtime_config(config, "decode")
+        self.vae_encode_device = self._runtime_device(vae_encode_config)
+        self.vae_decode_device = self._runtime_device(vae_decode_config)
+        self.vae_encode_torch_dtype = vae_encode_config.torch_dtype
+        self.vae_device = self.vae_decode_device
+        vae_encode_stage = LingBotWorldFastVAEEncodeStage("lingbot_world_fast_vae_encode", self.vae, vae_encode_config)
+        vae_decode_stage = LingBotWorldFastVAEDecodeStage("lingbot_world_fast_vae_decode", self.vae, vae_decode_config)
         self.vae_encode_worker = ParallelWorker(vae_encode_stage)
         self.vae_decode_worker = ParallelWorker(vae_decode_stage)
 
@@ -165,6 +165,28 @@ class LingBotWorldFastPipeline(BasePipeline):
         parallel_config.validate()
         if parallel_config.world_size != 1:
             raise ValueError("LingBot VAE stage currently requires exactly one GPU")
+
+    @classmethod
+    def _vae_stage_runtime_config(
+        cls,
+        config: LingBotWorldFastPipelineConfig,
+        stage: str,
+    ) -> ModelRuntimeConfig:
+        """Resolve an independently placed VAE stage while preserving legacy configuration."""
+        explicit = config.vae_encode_config if stage == "encode" else config.vae_decode_config
+        if explicit is None:
+            source = config.vae_config
+            parallel_config = config.vae_parallel_config
+        else:
+            source = explicit
+            parallel_config = source.parallel_config
+        cls._validate_vae_parallel_config(parallel_config)
+        return ModelRuntimeConfig(
+            device_type=source.device_type,
+            device_id=source.device_id,
+            torch_dtype=source.torch_dtype,
+            parallel_config=parallel_config,
+        )
 
     @staticmethod
     def _resolve_self_kv_size(
@@ -282,7 +304,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
         tensor = torch.from_numpy(array).permute(2, 0, 1).sub(0.5).div(0.5)
         tensor = torch.nn.functional.interpolate(tensor.unsqueeze(0), size=(height, width), mode="bicubic").squeeze(0)
-        return tensor.to("cpu", dtype=self.config.vae_config.torch_dtype)
+        encode_dtype = getattr(self, "vae_encode_torch_dtype", self.config.vae_config.torch_dtype)
+        return tensor.to("cpu", dtype=encode_dtype)
 
     def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> None:
         """Register session-owned VAE caches in the dedicated worker."""

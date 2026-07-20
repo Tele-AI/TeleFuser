@@ -8,7 +8,14 @@ from typing import Any
 
 from telefuser.worker.parallel_worker import ParallelWorker
 
-from .streaming_pipeline_orchestrator import LocalStageActor, StreamingStageInvocation
+from .streaming_pipeline_orchestrator import (
+    LocalStageActor,
+    StreamingActorHealth,
+    StreamingActorState,
+    StreamingSessionCloseReason,
+    StreamingSessionContext,
+    StreamingStageInvocation,
+)
 
 
 class ParallelWorkerStageActor:
@@ -31,6 +38,7 @@ class ParallelWorkerStageActor:
         output_builder: Callable[[Any, StreamingStageInvocation], Mapping[str, object]],
         mailbox_capacity: int = 1,
         close_worker: bool = True,
+        session_closer: Callable[[StreamingSessionContext, StreamingSessionCloseReason], None] | None = None,
     ) -> None:
         self.worker = worker
         self.method_name = method_name
@@ -41,11 +49,42 @@ class ParallelWorkerStageActor:
             self._invoke,
             mailbox_capacity=mailbox_capacity,
             name=f"parallel-worker-actor-{method_name}",
+            session_closer=session_closer,
         )
 
     def submit(self, invocation: StreamingStageInvocation) -> Future[Mapping[str, object]]:
         """Submit one invocation and retain its scheduler-owned Future."""
         return self._actor.submit(invocation)
+
+    def health(self) -> StreamingActorHealth:
+        """Combine adapter state with the exclusively owned worker state."""
+        actor_health = self._actor.health()
+        if getattr(self.worker, "failed", False):
+            return StreamingActorHealth(
+                StreamingActorState.FAILED,
+                actor_health.pending_invocations,
+                getattr(self.worker, "failure_reason", None),
+            )
+        if getattr(self.worker, "closed", False):
+            return StreamingActorHealth(
+                StreamingActorState.CLOSED,
+                actor_health.pending_invocations,
+                actor_health.failure_reason,
+            )
+        return actor_health
+
+    def barrier(self, timeout: float = 5.0) -> None:
+        """Wait for every worker invocation accepted by this adapter."""
+        self._actor.barrier(timeout)
+
+    def close_session(
+        self,
+        context: StreamingSessionContext,
+        reason: StreamingSessionCloseReason,
+        timeout: float = 5.0,
+    ) -> None:
+        """Release worker-local state in the owning actor loop."""
+        self._actor.close_session(context, reason, timeout)
 
     def close(self) -> None:
         """Drain the adapter before deterministically closing its worker."""

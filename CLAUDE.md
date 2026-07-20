@@ -72,6 +72,13 @@ telefuser/
 
 - Long-running LingBot sessions generate noise and VAE condition latents per chunk; do not retain duration-sized chunk lists.
 - Incremental VAE encoder and decoder feature caches must be session-owned so concurrent sessions remain isolated.
+- A streaming stage worker is owned by exactly one actor. Drain session work and release
+  stage caches through that actor in reverse topological order; session facades must not
+  call actor-owned workers directly.
+- LingBot VAE encode, decode, and DiT stages may overlap on the same GPU. Do not infer
+  resource groups from device placement; resolve memory pressure by moving stages.
+  Use scheduler session metrics and bounded-attention long replays to validate latency
+  and memory without retaining duration-sized tensor lists.
 
 ### Layer Architecture Principles For Models
 
