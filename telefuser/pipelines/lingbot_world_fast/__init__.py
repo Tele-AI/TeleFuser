@@ -8,8 +8,6 @@ from .denoising import LingBotWorldFastDenoisingStage
 from .pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from .service import LingBotWorldFastService
 from .session import (
-    LingBotWorldFastChunkRequest,
-    LingBotWorldFastChunkResult,
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionState,
@@ -18,8 +16,6 @@ from .session import (
 from .streaming import LingBotWorldFastStreamingRuntime, LingBotWorldFastStreamingSession
 
 __all__ = [
-    "LingBotWorldFastChunkRequest",
-    "LingBotWorldFastChunkResult",
     "LingBotWorldFastDenoisingStage",
     "LingBotWorldFastGenerationSession",
     "LingBotWorldFastPipeline",

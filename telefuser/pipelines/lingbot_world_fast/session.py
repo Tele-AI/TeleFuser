@@ -4,14 +4,17 @@ import asyncio
 import queue
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 from PIL import Image
 
 from .control import LingBotWorldFastControlContext
+
+if TYPE_CHECKING:
+    from .streaming import LingBotWorldFastStreamingSession
 
 
 def resolve_lingbot_frame_count(frame_num: int, chunk_size: int, frame_policy: str) -> tuple[int, int]:
@@ -58,39 +61,10 @@ class LingBotWorldFastSessionConfig:
     show_control_hud: bool = True
 
 
-@dataclass
-class LingBotWorldFastChunkRequest:
-    """Inputs for one explicitly indexed LingBot video chunk."""
-
-    chunk_index: int
-    control: torch.Tensor | Callable[[], torch.Tensor] = field(repr=False)
-    session_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.chunk_index < 0:
-            raise ValueError(f"chunk_index must be non-negative, got {self.chunk_index}")
-        if not isinstance(self.control, torch.Tensor) and not callable(self.control):
-            raise TypeError("Each chunk request requires a model control tensor or deferred control factory")
-
-
-@dataclass
-class LingBotWorldFastChunkResult:
-    """Output and progress metadata for one generated LingBot chunk."""
-
-    chunk_index: int
-    frames: list[Image.Image] = field(repr=False)
-    emitted_frames: int = 0
-    done: bool = False
-    session_id: str | None = None
-
-
 class LingBotWorldFastSessionStatus(str, Enum):
-    """Transaction and lifecycle state for one generation session."""
+    """Cache lifecycle state for one generation session."""
 
     READY = "ready"
-    RUNNING = "running"
-    NEW = "new"
-    COMMITTED = "committed"
     POISONED = "poisoned"
     RELEASED = "released"
 
@@ -113,9 +87,9 @@ class LingBotWorldFastGenerationSession:
     cache_handle: int | None = None
     current_chunk_index: int = 0
     emitted_frames: int = 0
-    status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.NEW
+    status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.READY
     poisoned_reason: str | None = None
-    transaction_lock: object = field(default_factory=threading.RLock, repr=False)
+    lifecycle_lock: object = field(default_factory=threading.RLock, repr=False)
     # CacheSeek world_kv binding and decode-only latents for fast-forward hits.
     world_kv_binding: object | None = None
     world_kv_cached_latents: dict[int, torch.Tensor] = field(default_factory=dict)
@@ -132,6 +106,7 @@ class LingBotWorldFastSessionState:
     config: LingBotWorldFastSessionConfig
     control_context: LingBotWorldFastControlContext | None = None
     generation_session: LingBotWorldFastGenerationSession | None = None
+    streaming_session: LingBotWorldFastStreamingSession | None = None
     pending_inputs: "queue.Queue[dict]" = field(default_factory=queue.Queue)
     output_queue: asyncio.Queue | None = None
     worker_thread: threading.Thread | None = None

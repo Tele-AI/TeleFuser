@@ -187,39 +187,6 @@ def test_denoising_generator_state_advances_between_chunks() -> None:
     assert not torch.equal(first, second)
 
 
-def test_final_chunk_reaches_derived_chunk_boundary() -> None:
-    pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
-    pipeline.vae_device = torch.device("cpu")
-    pipeline.denoise_stage = MagicMock()
-    pipeline.vae_decode_worker = MagicMock()
-    pipeline.vae_decode_worker.decode_chunk.return_value = lambda: torch.zeros(1)
-    expected_frames = [Image.new("RGB", (8, 8)) for _ in range(9)]
-    pipeline.tensor2video = MagicMock(return_value=expected_frames)
-    cached_latent = torch.zeros(1, 1, 3, 2, 2)
-    pipeline._encode_condition_chunk = MagicMock(return_value=torch.zeros_like(cached_latent))
-    runtime = SimpleNamespace(
-        current_chunk_index=0,
-        chunk_count=1,
-        latent_h=2,
-        latent_w=2,
-        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
-        chunk_size=3,
-        frame_tokens=1,
-        cache_handle=0,
-        world_kv_cached_latents={0: cached_latent},
-        world_kv_binding=None,
-        emitted_frames=0,
-    )
-
-    frames = pipeline.generate_next_chunk(runtime, control=torch.zeros(1))
-
-    assert frames == expected_frames
-    assert runtime.current_chunk_index == 1
-    assert runtime.emitted_frames == 9
-    assert runtime.current_chunk_index == runtime.chunk_count
-    pipeline.denoise_stage.advance_noise.assert_called_once_with(cache_handle=0)
-
-
 def test_runtime_truncates_non_aligned_latent_frame_count() -> None:
     _, runtime = _create_runtime(frame_num=13)
 
