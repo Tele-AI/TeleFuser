@@ -199,14 +199,15 @@ def main(
 
     # Run inference
     start = time.time()
-    video = run(
-        pipe,
-        image,
-        prompt,
-        negative_prompt,
-        seed=seed,
-        resolution=resolution,
-    )
+    while True:
+        video = run(
+            pipe,
+            image,
+            prompt,
+            negative_prompt,
+            seed=seed,
+            resolution=resolution,
+        )
     elapsed_time = time.time() - start
 
     print(f"Video generation time: {elapsed_time:.2f} seconds")

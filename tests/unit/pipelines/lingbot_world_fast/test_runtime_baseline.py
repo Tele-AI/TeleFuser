@@ -35,6 +35,8 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
         num_layers=1,
     )
     pipeline.denoise_stage = MagicMock()
+    pipeline.vae_encode_worker = MagicMock()
+    pipeline.vae_decode_worker = MagicMock()
     pipeline._next_cache_handle = 0
     pipeline.encode_prompt = MagicMock(return_value=torch.zeros(1, 4, 8))
     pipeline._prepare_image_tensor = MagicMock(return_value=torch.zeros(3, 16, 16))
@@ -88,7 +90,7 @@ def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
 
     assert runtime.latent_f == 21
     assert runtime.chunk_count == 7
-    assert runtime.noise_generator is not None
+    assert not hasattr(runtime, "noise_generator")
     assert runtime.condition_image is not None
     assert not hasattr(runtime, "noise_chunks")
     assert not hasattr(runtime, "condition_chunks")
@@ -97,7 +99,7 @@ def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
     pipeline.denoise_stage.initialize_cache.assert_called_once()
 
 
-def test_generation_sessions_receive_isolated_cache_and_decoder_handles() -> None:
+def test_generation_sessions_receive_isolated_worker_cache_handles() -> None:
     pipeline = _build_runtime_pipeline()
     config = LingBotWorldFastSessionConfig(
         prompt="baseline",
@@ -111,8 +113,9 @@ def test_generation_sessions_receive_isolated_cache_and_decoder_handles() -> Non
 
     assert first.cache_handle == 0
     assert second.cache_handle == 1
-    assert first.decoder_state is not second.decoder_state
     assert pipeline.denoise_stage.initialize_cache.call_count == 2
+    assert pipeline.vae_encode_worker.initialize_cache.call_count == 2
+    assert pipeline.vae_decode_worker.initialize_cache.call_count == 2
 
 
 def test_cache_initialization_failure_triggers_global_cleanup() -> None:
@@ -131,21 +134,18 @@ def test_cache_initialization_failure_triggers_global_cleanup() -> None:
     pipeline.denoise_stage.release_cache.assert_called_once_with(0)
 
 
-def test_runtime_noise_is_reproducible_and_seed_dependent() -> None:
+def test_runtime_passes_reproducible_noise_rng_state_to_denoise_actor() -> None:
     first_pipeline, first = _create_runtime(frame_num=21, seed=7)
     repeated_pipeline, repeated = _create_runtime(frame_num=21, seed=7)
     different_pipeline, different = _create_runtime(frame_num=21, seed=8)
 
-    first_noise = torch.cat([first_pipeline._next_noise_chunk(first) for _ in range(first.chunk_count)], dim=2)
-    repeated_noise = torch.cat(
-        [repeated_pipeline._next_noise_chunk(repeated) for _ in range(repeated.chunk_count)], dim=2
-    )
-    different_noise = torch.cat(
-        [different_pipeline._next_noise_chunk(different) for _ in range(different.chunk_count)], dim=2
-    )
+    first_state = first_pipeline.denoise_stage.initialize_cache.call_args.kwargs["noise_generator_state"]
+    repeated_state = repeated_pipeline.denoise_stage.initialize_cache.call_args.kwargs["noise_generator_state"]
+    different_state = different_pipeline.denoise_stage.initialize_cache.call_args.kwargs["noise_generator_state"]
 
-    torch.testing.assert_close(first_noise, repeated_noise)
-    assert not torch.equal(first_noise, different_noise)
+    assert first_state == repeated_state
+    assert first_state != different_state
+    assert first.cache_handle == repeated.cache_handle == different.cache_handle == 0
 
 
 def test_denoising_generator_state_advances_between_chunks() -> None:
@@ -190,8 +190,9 @@ def test_denoising_generator_state_advances_between_chunks() -> None:
 def test_final_chunk_reaches_derived_chunk_boundary() -> None:
     pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
     pipeline.vae_device = torch.device("cpu")
-    pipeline.denoise_stage = object()
-    pipeline.decode_video_cached = MagicMock(return_value=torch.zeros(1))
+    pipeline.denoise_stage = MagicMock()
+    pipeline.vae_decode_worker = MagicMock()
+    pipeline.vae_decode_worker.decode_chunk.return_value = lambda: torch.zeros(1)
     expected_frames = [Image.new("RGB", (8, 8)) for _ in range(9)]
     pipeline.tensor2video = MagicMock(return_value=expected_frames)
     cached_latent = torch.zeros(1, 1, 3, 2, 2)
@@ -199,12 +200,12 @@ def test_final_chunk_reaches_derived_chunk_boundary() -> None:
     runtime = SimpleNamespace(
         current_chunk_index=0,
         chunk_count=1,
-        noise_generator=torch.Generator(device="cpu").manual_seed(42),
         latent_h=2,
         latent_w=2,
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
         chunk_size=3,
         frame_tokens=1,
+        cache_handle=0,
         world_kv_cached_latents={0: cached_latent},
         world_kv_binding=None,
         emitted_frames=0,
@@ -216,6 +217,7 @@ def test_final_chunk_reaches_derived_chunk_boundary() -> None:
     assert runtime.current_chunk_index == 1
     assert runtime.emitted_frames == 9
     assert runtime.current_chunk_index == runtime.chunk_count
+    pipeline.denoise_stage.advance_noise.assert_called_once_with(cache_handle=0)
 
 
 def test_runtime_truncates_non_aligned_latent_frame_count() -> None:

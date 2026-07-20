@@ -15,6 +15,7 @@ from .session import (
     LingBotWorldFastSessionState,
     LingBotWorldFastSessionStatus,
 )
+from .streaming import LingBotWorldFastStreamingRuntime, LingBotWorldFastStreamingSession
 
 __all__ = [
     "LingBotWorldFastChunkRequest",
@@ -24,6 +25,8 @@ __all__ = [
     "LingBotWorldFastPipeline",
     "LingBotWorldFastPipelineConfig",
     "LingBotWorldFastService",
+    "LingBotWorldFastStreamingSession",
+    "LingBotWorldFastStreamingRuntime",
     "LingBotWorldFastSessionConfig",
     "LingBotWorldFastSessionState",
     "LingBotWorldFastSessionStatus",

@@ -582,6 +582,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     color: var(--muted);
     font-size: 11px;
   }
+  .telemetry-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .telemetry-item {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px;
+    background: var(--panel-soft);
+  }
+  .telemetry-item span {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .telemetry-item output {
+    display: block;
+    margin-top: 3px;
+    color: var(--ink);
+    font-size: 14px;
+    font-weight: 650;
+  }
   #messages {
     height: 210px;
     overflow-y: auto;
@@ -633,6 +659,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div id="status">Ready.</div>
       </div>
       <video id="output-video" autoplay playsinline muted></video>
+      <div class="telemetry-grid" aria-label="LingBot server telemetry">
+        <div class="telemetry-item"><span>Server limit</span><output id="telemetry-service-limit">--</output></div>
+        <div class="telemetry-item"><span>Target video</span><output id="telemetry-target-duration">--</output></div>
+        <div class="telemetry-item"><span>Generated video</span><output id="telemetry-generated-duration">--</output></div>
+        <div class="telemetry-item"><span>Frames / chunks</span><output id="telemetry-progress">--</output></div>
+        <div class="telemetry-item"><span>Chunk / control latency</span><output id="telemetry-latency">--</output></div>
+        <div class="telemetry-item"><span>Queue / dropped video</span><output id="telemetry-queue">--</output></div>
+      </div>
     </section>
 
     <aside class="side">
@@ -785,6 +819,37 @@ function $(id) {
 
 function setStatus(text) {
   $("status").textContent = text;
+}
+
+function formatSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? seconds.toFixed(2) + " s" : "--";
+}
+
+function setTelemetry(id, text) {
+  const el = $(id);
+  if (el) el.textContent = text;
+}
+
+function updateTelemetry(progress, metrics) {
+  if (progress) {
+    setTelemetry("telemetry-service-limit", formatSeconds(progress.service_max_duration_seconds));
+    setTelemetry("telemetry-target-duration", formatSeconds(progress.target_duration_seconds));
+    setTelemetry("telemetry-generated-duration", formatSeconds(progress.generated_duration_seconds));
+    const frames = progress.generated_frames ?? 0;
+    const targetFrames = progress.target_frames ?? "--";
+    const chunks = progress.completed_chunks ?? 0;
+    const totalChunks = progress.total_chunks ?? "--";
+    setTelemetry("telemetry-progress", frames + "/" + targetFrames + " · " + chunks + "/" + totalChunks);
+  }
+  if (metrics) {
+    const chunk = formatSeconds(metrics.chunk_elapsed_seconds);
+    const control = formatSeconds(metrics.control_to_chunk_seconds);
+    setTelemetry("telemetry-latency", chunk + " / " + control);
+    const depth = metrics.output_queue_high_watermark ?? 0;
+    const dropped = metrics.dropped_video_payloads ?? 0;
+    setTelemetry("telemetry-queue", depth + " high-water · " + dropped + " dropped");
+  }
 }
 
 function log(dir, text) {
@@ -1009,6 +1074,11 @@ $("connect").onclick = async () => {
       try {
         const msg = JSON.parse(evt.data);
         const data = msg.data || msg;
+        updateTelemetry(data.stream_progress, {
+          ...(data.runtime_metrics || {}),
+          chunk_elapsed_seconds: data.chunk_elapsed_seconds,
+          control_to_chunk_seconds: data.control_to_chunk_seconds,
+        });
         if (data.error) {
           setStatus("Server error: " + data.error);
         } else if (data.stage) {

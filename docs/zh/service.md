@@ -45,9 +45,9 @@ telefuser serve \
     --parallelism 1
 
 # 实时世界模型流式推理（默认安装已包含 WebRTC 支持）
-# 在 examples/lingbot/stream_lingbot_world_fast.py 中设置
+# 在 examples/lingbot/lingbot_world_fast_image_to_video_h100.py 中设置
 # TF_MODEL_ZOO_PATH 和 PPL_CONFIG["parallelism"]
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088 --skip-validation
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088 --skip-validation
 ```
 
 ### 3. 创建任务

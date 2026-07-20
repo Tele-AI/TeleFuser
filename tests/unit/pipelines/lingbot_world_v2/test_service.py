@@ -5,16 +5,14 @@ from PIL import Image
 from click.testing import CliRunner
 
 from examples.lingbot import lingbot_world_v2_image_to_video_h100 as offline_example
-from examples.lingbot import stream_lingbot_world_v2 as stream_example
-from telefuser.core.config import AttnImplType
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig
 
 
-def test_v2_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
+def test_v2_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
     pipeline = MagicMock()
 
-    with patch.object(stream_example, "LingBotWorldV2Pipeline", return_value=pipeline) as pipeline_cls:
-        result = stream_example.get_pipeline(
+    with patch.object(offline_example, "LingBotWorldV2Pipeline", return_value=pipeline) as pipeline_cls:
+        result = offline_example.get_pipeline(
             parallelism=4,
             model_root="/models/Wan2.2-I2V-A14B",
             v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
@@ -28,15 +26,53 @@ def test_v2_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
     assert config.local_attn_size == 18
     assert config.sink_size == 6
     assert config.timestep_indices == (0, 250, 500, 750)
-    assert config.attention_config.attn_impl == AttnImplType.TORCH_SDPA
+    assert config.attention_config.attn_impl == offline_example.PPL_CONFIG["attn_impl"]
     assert config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.vae_config.device_id == 0
+    assert config.vae_parallel_config.device_ids == [0]
 
 
-def test_v2_stream_service_constructs_v2_session_from_ppl_config() -> None:
+def test_v2_offline_multi_gpu_defaults_to_the_shared_vae_worker() -> None:
     pipeline = MagicMock()
 
-    with patch.object(stream_example, "get_pipeline", return_value=pipeline) as get_pipeline:
-        service = stream_example.get_service(gpu_num=4)
+    with patch.object(offline_example, "LingBotWorldV2Pipeline", return_value=pipeline):
+        offline_example.get_pipeline(
+            parallelism=4,
+            model_root="/models/Wan2.2-I2V-A14B",
+            v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
+        )
+
+    config = pipeline.init.call_args.args[0]
+    assert config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.parallel_config.sp_ulysses_degree == 4
+    assert config.vae_config.device_id == 0
+    assert config.vae_parallel_config.device_ids == [0]
+
+
+def test_v2_unified_example_uses_ppl_configured_vae_device_independently() -> None:
+    pipeline = MagicMock()
+
+    with (
+        patch.dict(offline_example.PPL_CONFIG, {"vae_device_id": 6}),
+        patch.object(offline_example, "LingBotWorldV2Pipeline", return_value=pipeline),
+    ):
+        offline_example.get_pipeline(
+            parallelism=4,
+            model_root="/models/Wan2.2-I2V-A14B",
+            v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
+        )
+
+    config = pipeline.init.call_args.args[0]
+    assert config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.vae_config.device_id == 6
+    assert config.vae_parallel_config.device_ids == [6]
+
+
+def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> None:
+    pipeline = MagicMock()
+
+    with patch.object(offline_example, "get_pipeline", return_value=pipeline) as get_pipeline:
+        service = offline_example.get_service(gpu_num=4)
 
     get_pipeline.assert_called_once_with(parallelism=4)
     session_id = service.create_session({"image": Image.new("RGB", (8, 8))})

@@ -11,6 +11,7 @@ from PIL import Image
 
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 from telefuser.pipelines.lingbot_world_fast.session import (
+    LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionState,
 )
@@ -26,53 +27,21 @@ def _state() -> LingBotWorldFastSessionState:
     )
 
 
-def test_online_worker_waits_for_external_action_before_generating() -> None:
+def test_online_worker_delegates_to_the_wavefront_scheduler() -> None:
     pipeline = MagicMock()
     pipeline._best_output_size.return_value = (8, 8)
     pipeline.check_resize_height_width.return_value = (8, 8)
+    pipeline.control_context.return_value = SimpleNamespace(
+        control_type="cam", chunk_size=3, width=8, height=8, latent_frames=3
+    )
     service = LingBotWorldFastService(pipeline)
     state = _state()
-    runtime_ready = threading.Event()
+    state.active = False
 
-    def control_context(*args, **kwargs):
-        runtime_ready.set()
-        return SimpleNamespace(
-            control_type="cam",
-            chunk_size=3,
-            width=8,
-            height=8,
-            latent_frames=3,
-        )
+    with patch.object(service, "_run_realtime_worker_loop") as run_realtime:
+        service._run_worker_loop("session-a", state, MagicMock())
 
-    def generate_chunk(runtime, request, progress_callback=None):
-        assert request.control is deferred_control
-        return SimpleNamespace(frames=[Image.new("RGB", (8, 8))], done=True)
-
-    pipeline.control_context.side_effect = control_context
-    pipeline.side_effect = generate_chunk
-    builder = MagicMock()
-    control = torch.ones(1)
-    deferred_control = MagicMock(return_value=control)
-    builder.defer.return_value = deferred_control
-
-    with patch("telefuser.pipelines.lingbot_world_fast.service.LingBotWorldFastControlBuilder", return_value=builder):
-        worker = threading.Thread(
-            target=service._run_worker_loop,
-            args=("session-a", state, MagicMock()),
-            daemon=True,
-        )
-        worker.start()
-
-        assert runtime_ready.wait(timeout=1.0)
-        assert pipeline.call_count == 0
-
-        state.pending_inputs.put({"type": "control", "control_tensor": control})
-        worker.join(timeout=2.0)
-
-    assert not worker.is_alive()
-    assert pipeline.call_count == 1
-    builder.defer.assert_called_once_with({"type": "control", "control_tensor": control})
-    pipeline.release_session.assert_called_once()
+    run_realtime.assert_called_once()
 
 
 def test_direction_action_updates_state_and_wakes_worker() -> None:
@@ -303,6 +272,56 @@ def test_pull_chunks_drains_terminal_messages_after_session_becomes_inactive() -
         return [chunk async for chunk in service.pull_chunks("session-a")]
 
     assert asyncio.run(collect()) == [{"type": "preview"}, {"type": "error"}]
+
+
+def test_output_queue_discards_stale_video_and_records_runtime_metrics() -> None:
+    state = _state()
+    state.output_queue = asyncio.Queue(maxsize=2)
+
+    LingBotWorldFastService._enqueue_output(state, {"type": "chunk", "index": 0})
+    LingBotWorldFastService._enqueue_output(state, {"type": "status", "stage": "generating_chunk"})
+    LingBotWorldFastService._enqueue_output(state, {"type": "chunk", "index": 1})
+
+    assert list(state.output_queue._queue) == [
+        {"type": "status", "stage": "generating_chunk"},
+        {"type": "chunk", "index": 1},
+    ]
+    assert LingBotWorldFastService._runtime_metrics(state)["dropped_video_payloads"] == 1
+    assert LingBotWorldFastService._runtime_metrics(state)["output_queue_high_watermark"] == 2
+
+
+def test_stream_progress_reports_duration_frames_and_chunks() -> None:
+    service = LingBotWorldFastService(MagicMock(), max_generation_seconds=20.0)
+    state = _state()
+    runtime = LingBotWorldFastGenerationSession(config=state.config, emitted_frames=8, current_chunk_index=1)
+
+    progress = service._stream_progress(state, runtime)
+
+    assert progress == {
+        "service_max_duration_seconds": 20.0,
+        "target_duration_seconds": 0.5,
+        "generated_duration_seconds": 0.5,
+        "target_frames": 9,
+        "generated_frames": 8,
+        "fps": 16,
+        "total_chunks": 1,
+        "completed_chunks": 1,
+    }
+
+
+def test_close_session_waits_for_worker_to_release_generation_state() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.generation_session = MagicMock()
+    state.worker_thread = MagicMock()
+    state.worker_thread.is_alive.return_value = True
+    service._sessions["session-a"] = state
+
+    service.close_session("session-a")
+
+    assert "session-a" in service._sessions
+    service.pipeline.release_session.assert_not_called()
+    assert state.pending_inputs.get_nowait() == {"type": "stop"}
 
 
 def test_service_start_warms_the_pipeline_with_its_default_shape() -> None:

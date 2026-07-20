@@ -3,17 +3,13 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
 from PIL import Image
-
-from telefuser.models.wan_video_vae import (
-    WanVideoVAEStreamingDecodeState,
-    WanVideoVAEStreamingEncodeState,
-)
 
 from .control import LingBotWorldFastControlContext
 
@@ -106,8 +102,6 @@ class LingBotWorldFastGenerationSession:
     config: LingBotWorldFastSessionConfig
     prompt_emb: torch.Tensor | None = field(default=None, repr=False)
     condition_image: torch.Tensor | None = field(default=None, repr=False)
-    noise_generator: torch.Generator | None = field(default=None, repr=False)
-    encoder_state: WanVideoVAEStreamingEncodeState = field(default_factory=WanVideoVAEStreamingEncodeState)
     latent_h: int = 0
     latent_w: int = 0
     latent_f: int = 0
@@ -117,7 +111,6 @@ class LingBotWorldFastGenerationSession:
     chunk_size: int = 0
     max_attention_size: int = 0
     cache_handle: int | None = None
-    decoder_state: WanVideoVAEStreamingDecodeState = field(default_factory=WanVideoVAEStreamingDecodeState)
     current_chunk_index: int = 0
     emitted_frames: int = 0
     status: LingBotWorldFastSessionStatus = LingBotWorldFastSessionStatus.NEW
@@ -144,6 +137,15 @@ class LingBotWorldFastSessionState:
     worker_thread: threading.Thread | None = None
     loop: asyncio.AbstractEventLoop | None = None
     active: bool = True
+    created_at_monotonic: float = field(default_factory=time.monotonic)
+    worker_started_at_monotonic: float | None = None
+    last_control_at_monotonic: float | None = None
+    first_chunk_sent_at_monotonic: float | None = None
+    chunk_started_at_monotonic: dict[int, float] = field(default_factory=dict)
+    output_queue_high_watermark: int = 0
+    dropped_video_payloads: int = 0
+    dropped_status_payloads: int = 0
+    metrics_lock: object = field(default_factory=threading.Lock, repr=False)
     pressed_controls: set[str] = field(default_factory=set)
     queued_controls: set[str] = field(default_factory=set)
     control_c2w: list[list[float]] = field(

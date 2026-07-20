@@ -20,6 +20,7 @@ def _cache_stage() -> LingBotWorldFastDenoisingStage:
 
 def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) -> None:
     generator_state = torch.Generator(device="cpu").manual_seed(cache_handle).get_state().tolist()
+    noise_generator_state = torch.Generator(device="cpu").manual_seed(cache_handle + 100).get_state().tolist()
     LingBotWorldFastDenoisingStage.initialize_cache.__wrapped__(
         stage,
         cache_handle=cache_handle,
@@ -28,6 +29,8 @@ def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) 
         max_sequence_length=8,
         sample_shift=10.0,
         generator_state=generator_state,
+        noise_generator_state=noise_generator_state,
+        noise_shape=(1, 16, 1, 1, 1),
     )
 
 
@@ -58,13 +61,38 @@ def test_worker_rejects_unknown_cache_handle() -> None:
         LingBotWorldFastDenoisingStage.denoise_and_update_cache.__wrapped__(
             stage,
             cache_handle=99,
-            latent_chunk=latent,
             condition_chunk=latent,
             prompt_emb=torch.zeros(1, 1, 1),
             control_chunk=None,
             current_start=0,
             max_attention_size=1,
         )
+
+
+def test_worker_owned_noise_rng_advances_deterministically() -> None:
+    first_stage = _cache_stage()
+    second_stage = _cache_stage()
+    _initialize_cache(first_stage, 11)
+    _initialize_cache(second_stage, 11)
+    state = first_stage._cache_registry[11]
+    expected_generator = torch.Generator(device="cpu")
+    expected_generator.set_state(state.noise_generator.get_state())
+    expected_first = torch.randn(state.noise_shape, generator=expected_generator, dtype=torch.float32)
+    expected_second = torch.randn(state.noise_shape, generator=expected_generator, dtype=torch.float32)
+    expected_third = torch.randn(state.noise_shape, generator=expected_generator, dtype=torch.float32)
+
+    actual_first = first_stage._next_noise_chunk(state)
+    replicated_first = second_stage._next_noise_chunk(second_stage._cache_registry[11])
+    assert first_stage.advance_noise(11) is True
+    assert second_stage.advance_noise(11) is True
+    actual_third = first_stage._next_noise_chunk(state)
+    replicated_third = second_stage._next_noise_chunk(second_stage._cache_registry[11])
+
+    torch.testing.assert_close(actual_first, expected_first)
+    torch.testing.assert_close(replicated_first, expected_first)
+    assert not torch.equal(actual_third, expected_second)
+    torch.testing.assert_close(actual_third, expected_third)
+    torch.testing.assert_close(replicated_third, expected_third)
 
 
 class _RecordingDecoder(nn.Module):

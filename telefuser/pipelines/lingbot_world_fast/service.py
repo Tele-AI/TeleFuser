@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.worker.parallel_worker import ParallelWorker
 
 from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
 from .pipeline import LingBotWorldFastPipeline
@@ -59,6 +60,9 @@ _DIRECTION_ALIASES = {
 }
 _ACTION_DIRECTIONS = ("w", "a", "s", "d")
 MAX_GENERATION_SECONDS = 20.0
+DEFAULT_OUTPUT_QUEUE_SIZE = 4
+_VIDEO_OUTPUT_TYPES = frozenset({"chunk", "preview"})
+_TERMINAL_OUTPUT_TYPES = frozenset({"done", "error"})
 
 
 class LingBotWorldFastService:
@@ -70,13 +74,17 @@ class LingBotWorldFastService:
         default_fps: int = 16,
         default_session_config: Mapping[str, object] | None = None,
         max_generation_seconds: float = MAX_GENERATION_SECONDS,
+        output_queue_size: int = DEFAULT_OUTPUT_QUEUE_SIZE,
     ) -> None:
         self.pipeline = pipeline
         self.default_fps = default_fps
         self.default_session_config = dict(default_session_config or {})
         if max_generation_seconds <= 0:
             raise ValueError(f"max_generation_seconds must be positive, got {max_generation_seconds}")
+        if output_queue_size <= 0:
+            raise ValueError(f"output_queue_size must be positive, got {output_queue_size}")
         self.max_generation_seconds = float(max_generation_seconds)
+        self.output_queue_size = int(output_queue_size)
         self._sessions: dict[str, LingBotWorldFastSessionState] = {}
 
     def start(self) -> None:
@@ -236,7 +244,7 @@ class LingBotWorldFastService:
         state = LingBotWorldFastSessionState(
             config=session_config,
             control_context=control_context,
-            output_queue=asyncio.Queue(),
+            output_queue=asyncio.Queue(maxsize=self.output_queue_size),
         )
         self._sessions[session_id] = state
         logger.info(f"LingBotWorld session created: {session_id}")
@@ -247,9 +255,105 @@ class LingBotWorldFastService:
         if state.output_queue is None or state.loop is None:
             return
         try:
-            state.loop.call_soon_threadsafe(state.output_queue.put_nowait, payload)
+            state.loop.call_soon_threadsafe(LingBotWorldFastService._enqueue_output, state, payload)
         except Exception as exc:
             logger.warning(f"Failed to enqueue LingBotWorld output: {exc}")
+
+    @staticmethod
+    def _enqueue_output(state: LingBotWorldFastSessionState, payload: dict) -> None:
+        """Enqueue output without allowing a slow client to retain stale video."""
+        output_queue = state.output_queue
+        if output_queue is None:
+            return
+
+        payload_type = str(payload.get("type", ""))
+        queued = output_queue._queue
+
+        def discard_first(predicate: Callable[[dict], bool]) -> bool:
+            for item in queued:
+                if predicate(item):
+                    queued.remove(item)
+                    return True
+            return False
+
+        if output_queue.full():
+            discarded = False
+            if payload_type in _VIDEO_OUTPUT_TYPES:
+                discarded = discard_first(lambda item: item.get("type") in _VIDEO_OUTPUT_TYPES)
+                if not discarded:
+                    with state.metrics_lock:
+                        state.dropped_video_payloads += 1
+                    return
+            elif payload_type == "status":
+                stage = payload.get("stage")
+                discarded = discard_first(lambda item: item.get("type") == "status" and item.get("stage") == stage)
+                if not discarded:
+                    with state.metrics_lock:
+                        state.dropped_status_payloads += 1
+                    return
+            elif payload_type in _TERMINAL_OUTPUT_TYPES:
+                discarded = discard_first(lambda item: item.get("type") in _VIDEO_OUTPUT_TYPES)
+                if not discarded:
+                    discarded = discard_first(lambda item: item.get("type") == "status")
+                if not discarded:
+                    discarded = discard_first(lambda _item: True)
+                if not discarded:
+                    logger.warning("LingBot output queue is full; unable to enqueue terminal output")
+                    return
+
+            if discarded:
+                with state.metrics_lock:
+                    if payload_type in _VIDEO_OUTPUT_TYPES:
+                        state.dropped_video_payloads += 1
+                    else:
+                        state.dropped_status_payloads += 1
+
+        output_queue.put_nowait(payload)
+        with state.metrics_lock:
+            state.output_queue_high_watermark = max(state.output_queue_high_watermark, output_queue.qsize())
+
+    @staticmethod
+    def _runtime_metrics(state: LingBotWorldFastSessionState) -> dict[str, float | int]:
+        """Return a stable runtime snapshot suitable for status messages and benchmarks."""
+        now = time.monotonic()
+        with state.metrics_lock:
+            metrics: dict[str, float | int] = {
+                "session_age_seconds": round(now - state.created_at_monotonic, 6),
+                "output_queue_high_watermark": state.output_queue_high_watermark,
+                "dropped_video_payloads": state.dropped_video_payloads,
+                "dropped_status_payloads": state.dropped_status_payloads,
+            }
+            if state.worker_started_at_monotonic is not None:
+                metrics["worker_start_seconds"] = round(
+                    state.worker_started_at_monotonic - state.created_at_monotonic, 6
+                )
+            if state.first_chunk_sent_at_monotonic is not None:
+                metrics["first_chunk_seconds"] = round(
+                    state.first_chunk_sent_at_monotonic - state.created_at_monotonic, 6
+                )
+            return metrics
+
+    def _stream_progress(
+        self,
+        state: LingBotWorldFastSessionState,
+        runtime: LingBotWorldFastGenerationSession,
+    ) -> dict[str, float | int]:
+        """Build client-facing generation progress for WebRTC telemetry."""
+        target_frames = state.config.frame_num
+        fps = state.config.fps
+        generated_frames = min(runtime.emitted_frames, target_frames)
+        target_duration_seconds = (target_frames - 1) / fps
+        generated_duration_seconds = min(generated_frames / fps, target_duration_seconds)
+        return {
+            "service_max_duration_seconds": self.max_generation_seconds,
+            "target_duration_seconds": round(target_duration_seconds, 3),
+            "generated_duration_seconds": round(generated_duration_seconds, 3),
+            "target_frames": target_frames,
+            "generated_frames": generated_frames,
+            "fps": fps,
+            "total_chunks": (((target_frames - 1) // 4 + 1) // state.config.chunk_size),
+            "completed_chunks": runtime.current_chunk_index,
+        }
 
     @staticmethod
     def _encode_frames_to_b64(frames: list[Image.Image], quality: int = 85) -> list[str]:
@@ -549,6 +653,158 @@ class LingBotWorldFastService:
         )
         return True
 
+    def _next_realtime_control(
+        self,
+        state: LingBotWorldFastSessionState,
+        control_context: LingBotWorldFastControlContext,
+        control_builder: LingBotWorldFastControlBuilder,
+        chunk_index: int,
+        emit_status: Callable[..., None],
+        block: bool,
+    ) -> tuple[object, list[str] | None] | None:
+        """Get one control without delaying an already runnable VAE decode."""
+        while state.active:
+            with state.control_lock:
+                controls_held = bool(state.pressed_controls)
+            if controls_held:
+                try:
+                    incoming = state.pending_inputs.get_nowait()
+                except queue.Empty:
+                    incoming = {"type": "direction_control"}
+            else:
+                try:
+                    incoming = state.pending_inputs.get(block=block)
+                except queue.Empty:
+                    return None
+            if incoming.get("type") == "stop":
+                state.active = False
+                return None
+
+            explicit_control = incoming if self._is_explicit_control_chunk(incoming) else None
+            while True:
+                try:
+                    next_item = state.pending_inputs.get_nowait()
+                except queue.Empty:
+                    break
+                if next_item.get("type") == "stop":
+                    state.active = False
+                    return None
+                if self._is_explicit_control_chunk(next_item):
+                    explicit_control = next_item
+
+            if explicit_control is not None:
+                return control_builder.defer(explicit_control), None
+            directional_chunk = self._build_directional_control_chunk(state, control_context)
+            if directional_chunk is None:
+                if not block:
+                    return None
+                continue
+            applied_controls = directional_chunk["controls"]
+            emit_status(
+                "applying_direction_control",
+                index=chunk_index,
+                controls=applied_controls,
+                move_step=state.config.control_move_step,
+                yaw_step_degrees=state.config.control_yaw_step_degrees,
+                lateral_step=state.config.control_lateral_step,
+                pitch_step_degrees=state.config.control_pitch_step_degrees,
+            )
+            return control_builder.defer(directional_chunk), applied_controls
+        return None
+
+    def _run_realtime_worker_loop(
+        self,
+        session_id: str,
+        state: LingBotWorldFastSessionState,
+        control_context: LingBotWorldFastControlContext,
+        control_builder: LingBotWorldFastControlBuilder,
+        emit_status: Callable[..., None],
+    ) -> None:
+        """Run WebRTC chunks with one-control lookahead when VAE has its own worker."""
+        next_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
+        if next_item is None:
+            return
+        runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
+        state.generation_session = runtime
+        control, applied_controls = next_item
+        in_flight = self.pipeline._submit_chunk(runtime, 0, control, progress_callback=emit_status)
+        current_controls = applied_controls
+        current_started_at = time.monotonic()
+        while state.active and in_flight is not None:
+            chunk_index = in_flight.chunk_index
+            emit_status("generating_chunk", index=chunk_index)
+            with state.metrics_lock:
+                state.chunk_started_at_monotonic[chunk_index] = current_started_at
+
+            result_index, denoised = self.pipeline._wait_for_chunk(runtime, in_flight)
+            lookahead = self._next_realtime_control(
+                state, control_context, control_builder, chunk_index + 1, emit_status, block=False
+            )
+            next_control = lookahead[0] if lookahead is not None else None
+            next_controls = lookahead[1] if lookahead is not None else None
+            if lookahead is not None and chunk_index + 1 < runtime.chunk_count:
+                emit_status("generating_chunk", index=chunk_index + 1, prefetched=True)
+            in_flight, frames, done = self.pipeline._complete_chunk(
+                runtime,
+                in_flight,
+                denoised,
+                next_control,
+                progress_callback=emit_status,
+            )
+            if not frames:
+                break
+            if state.config.show_control_hud:
+                frames = self._overlay_control_hud(frames, current_controls)
+            self._put_output(
+                state,
+                {
+                    "type": "chunk",
+                    "index": result_index,
+                    "fps": state.config.fps,
+                    "timestamp": time.time(),
+                    "frames_b64": self._encode_frames_to_b64(frames),
+                },
+            )
+            chunk_elapsed = time.monotonic() - current_started_at
+            with state.metrics_lock:
+                if state.first_chunk_sent_at_monotonic is None:
+                    state.first_chunk_sent_at_monotonic = time.monotonic()
+                state.chunk_started_at_monotonic.pop(result_index, None)
+                control_to_chunk_seconds = (
+                    time.monotonic() - state.last_control_at_monotonic
+                    if state.last_control_at_monotonic is not None
+                    else None
+                )
+            emit_status(
+                "chunk_sent",
+                index=result_index,
+                frames=len(frames),
+                chunk_elapsed_seconds=round(chunk_elapsed, 6),
+                control_to_chunk_seconds=(
+                    round(control_to_chunk_seconds, 6) if control_to_chunk_seconds is not None else None
+                ),
+                runtime_metrics=self._runtime_metrics(state),
+                stream_progress=self._stream_progress(state, runtime),
+            )
+            if done or not state.active:
+                break
+            if lookahead is None:
+                next_item = self._next_realtime_control(
+                    state, control_context, control_builder, runtime.current_chunk_index, emit_status, block=True
+                )
+                if next_item is None:
+                    break
+                control, current_controls = next_item
+                in_flight = self.pipeline._submit_chunk(
+                    runtime,
+                    runtime.current_chunk_index,
+                    control,
+                    progress_callback=emit_status,
+                )
+            else:
+                current_controls = next_controls
+            current_started_at = time.monotonic()
+
     def _worker_loop(self, session_id: str) -> None:
         state = self._sessions.get(session_id)
         if state is None or state.output_queue is None or state.loop is None:
@@ -572,94 +828,24 @@ class LingBotWorldFastService:
         state: LingBotWorldFastSessionState,
         emit_status: Callable[..., None],
     ) -> None:
+        """Run the only supported LingBot worker topology: VAE worker plus wavefront scheduler."""
         try:
+            with state.metrics_lock:
+                state.worker_started_at_monotonic = time.monotonic()
             self._emit_preview_frame(state)
             control_context = state.control_context or self.pipeline.control_context(state.config)
             control_builder = LingBotWorldFastControlBuilder(control_context)
-            state.generation_session = LingBotWorldFastGenerationSession(config=state.config)
-            runtime = state.generation_session
+            runtime = LingBotWorldFastGenerationSession(config=state.config)
+            state.generation_session = runtime
             emit_status(
                 "runtime_ready",
                 width=control_context.width,
                 height=control_context.height,
                 latent_frames=control_context.latent_frames,
                 total_chunks=control_context.latent_frames // control_context.chunk_size,
+                stream_progress=self._stream_progress(state, runtime),
             )
-            chunk_index = 0
-            while state.active:
-                with state.control_lock:
-                    controls_held = bool(state.pressed_controls)
-                if controls_held:
-                    try:
-                        incoming = state.pending_inputs.get_nowait()
-                    except queue.Empty:
-                        incoming = {"type": "direction_control"}
-                else:
-                    incoming = state.pending_inputs.get()
-                if incoming.get("type") == "stop":
-                    break
-
-                explicit_control = incoming if self._is_explicit_control_chunk(incoming) else None
-                applied_controls = None
-                while True:
-                    try:
-                        next_item = state.pending_inputs.get_nowait()
-                    except queue.Empty:
-                        break
-                    if next_item.get("type") == "stop":
-                        incoming = next_item
-                        break
-                    if self._is_explicit_control_chunk(next_item):
-                        explicit_control = next_item
-
-                if incoming and incoming.get("type") == "stop":
-                    break
-                if explicit_control is not None:
-                    control = control_builder.defer(explicit_control)
-                else:
-                    directional_chunk = self._build_directional_control_chunk(state, control_context)
-                    if directional_chunk is None:
-                        continue
-                    applied_controls = directional_chunk["controls"]
-                    emit_status(
-                        "applying_direction_control",
-                        index=chunk_index,
-                        controls=applied_controls,
-                        move_step=state.config.control_move_step,
-                        yaw_step_degrees=state.config.control_yaw_step_degrees,
-                        lateral_step=state.config.control_lateral_step,
-                        pitch_step_degrees=state.config.control_pitch_step_degrees,
-                    )
-                    control = control_builder.defer(directional_chunk)
-
-                emit_status("generating_chunk", index=chunk_index)
-                result = self.pipeline(
-                    runtime,
-                    LingBotWorldFastChunkRequest(
-                        chunk_index=runtime.current_chunk_index,
-                        session_id=session_id,
-                        control=control,
-                    ),
-                    progress_callback=emit_status,
-                )
-                frames = result.frames
-                if not frames:
-                    break
-                if state.config.show_control_hud:
-                    frames = self._overlay_control_hud(frames, applied_controls)
-                payload = {
-                    "type": "chunk",
-                    "index": chunk_index,
-                    "fps": state.config.fps,
-                    "timestamp": time.time(),
-                    "frames_b64": self._encode_frames_to_b64(frames),
-                }
-                self._put_output(state, payload)
-                emit_status("chunk_sent", index=chunk_index, frames=len(frames))
-                chunk_index += 1
-                if result.done:
-                    break
-
+            self._run_realtime_worker_loop(session_id, state, control_context, control_builder, emit_status)
         except Exception as exc:
             logger.exception(f"LingBotWorld worker failed: session={session_id}, error={exc}")
             self._put_output(
@@ -673,13 +859,21 @@ class LingBotWorldFastService:
             )
         finally:
             state.active = False
-            self._put_output(state, {"type": "done"})
             self._release_generation_session(state)
+            self._put_output(
+                state,
+                {"type": "status", "stage": "runtime_summary", "runtime_metrics": self._runtime_metrics(state)},
+            )
+            self._put_output(state, {"type": "done"})
+            if self._sessions.get(session_id) is state:
+                self._sessions.pop(session_id, None)
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)
-        if state is None:
+        if state is None or not state.active:
             return
+        with state.metrics_lock:
+            state.last_control_at_monotonic = time.monotonic()
         is_direction_action = chunk.get("type") == "control" and self._update_direction_controls(state, chunk)
         if is_direction_action:
             event = str(chunk.get("event") or chunk.get("action") or "press").lower()
@@ -704,17 +898,25 @@ class LingBotWorldFastService:
             )
             state.worker_thread.start()
 
-        while True:
-            chunk = await state.output_queue.get()
-            if chunk.get("type") == "done":
-                break
-            yield chunk
+        completed = False
+        try:
+            while True:
+                chunk = await state.output_queue.get()
+                if chunk.get("type") == "done":
+                    completed = True
+                    break
+                yield chunk
+        finally:
+            if not completed:
+                self.close_session(session_id)
 
     def close_session(self, session_id: str) -> None:
-        state = self._sessions.pop(session_id, None)
+        state = self._sessions.get(session_id)
         if state is None:
             return
         state.active = False
         state.pending_inputs.put({"type": "stop"})
-        self._release_generation_session(state)
+        if state.worker_thread is None or not state.worker_thread.is_alive():
+            self._release_generation_session(state)
+            self._sessions.pop(session_id, None)
         logger.info(f"LingBotWorld session closed: {session_id}")

@@ -1,10 +1,15 @@
-"""LingBot-World v2 offline image-to-video example.
+"""LingBot-World v2 offline and streaming example.
 
 Single GPU:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4
+Multi-GPU runs configure the VAE worker and DiT SP group independently in PPL_CONFIG.
+WebRTC streaming service:
+    telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+        --gpu-num 4 -p 8088 --skip-validation
+
 """
 
 from __future__ import annotations
@@ -24,12 +29,8 @@ from telefuser.pipelines.lingbot_world_fast.control import (
     load_camera_control_inputs,
     truncate_control_sequence,
 )
-from telefuser.pipelines.lingbot_world_fast.session import (
-    LingBotWorldFastChunkRequest,
-    LingBotWorldFastGenerationSession,
-    LingBotWorldFastSessionConfig,
-    resolve_lingbot_frame_count,
-)
+from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
+from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig, resolve_lingbot_frame_count
 from telefuser.pipelines.lingbot_world_v2 import (
     LingBotWorldV2Pipeline,
     LingBotWorldV2PipelineConfig,
@@ -51,6 +52,7 @@ RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
     parallelism=1,
+    vae_device_id=0,
     control_mode="cam",
     resolution="480p",
     frame_num=77,
@@ -59,7 +61,8 @@ PPL_CONFIG = dict(
     sample_shift=10.0,
     seed=42,
     target_fps=16,
-    attn_impl=AttnImplType.TORCH_SDPA,
+    max_duration_seconds=120.0,
+    attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
     enable_fsdp=False,
     local_attn_size=18,
     sink_size=6,
@@ -83,14 +86,19 @@ def get_pipeline(
         default_model_root, default_v2_model_root = model_root, v2_model_root
     if parallelism < 1:
         raise ValueError(f"parallelism must be positive, got {parallelism}")
+
+    vae_device = int(PPL_CONFIG["vae_device_id"])
+    dit_device_ids = list(range(parallelism))
     dtype = PPL_CONFIG["torch_dtype"]
     pipeline = LingBotWorldV2Pipeline(device="cuda", torch_dtype=dtype)
     pipeline.init(
         LingBotWorldV2PipelineConfig(
             checkpoint_dir=model_root or default_model_root,
             fast_checkpoint_path=v2_model_root or default_v2_model_root,
-            vae_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=PPL_CONFIG["vae_torch_dtype"]),
-            text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
+            vae_config=ModelRuntimeConfig(
+                device_type="cuda", device_id=vae_device, torch_dtype=PPL_CONFIG["vae_torch_dtype"]
+            ),
+            text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=dit_device_ids[0], torch_dtype=dtype),
             dit_torch_dtype=dtype,
             control_type=PPL_CONFIG["control_mode"],
             max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]],
@@ -99,13 +107,32 @@ def get_pipeline(
             timestep_indices=PPL_CONFIG["timestep_indices"],
             attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
             parallel_config=ParallelConfig(
-                device_ids=list(range(parallelism)) if parallelism > 1 else None,
-                sp_ulysses_degree=parallelism,
+                device_ids=dit_device_ids if len(dit_device_ids) > 1 else None,
+                sp_ulysses_degree=len(dit_device_ids),
                 enable_fsdp=PPL_CONFIG["enable_fsdp"],
             ),
+            vae_parallel_config=ParallelConfig(device_ids=[vae_device]),
         ),
     )
     return pipeline
+
+
+def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
+    """Build the service loaded by the TeleFuser stream server."""
+    pipeline = get_pipeline(parallelism=gpu_num)
+    return LingBotWorldFastService(
+        pipeline,
+        default_fps=PPL_CONFIG["target_fps"],
+        max_generation_seconds=PPL_CONFIG["max_duration_seconds"],
+        default_session_config={
+            "control_mode": PPL_CONFIG["control_mode"],
+            "max_duration_seconds": PPL_CONFIG["max_duration_seconds"],
+            "chunk_size": PPL_CONFIG["chunk_size"],
+            "frame_policy": PPL_CONFIG["frame_policy"],
+            "sample_shift": PPL_CONFIG["sample_shift"],
+            "max_attention_size": PPL_CONFIG["max_attention_size"],
+        },
+    )
 
 
 def run(
@@ -142,21 +169,11 @@ def run(
     action = None
     poses, intrinsics, action = truncate_control_sequence(poses, intrinsics, action, session_config.frame_num)
     control_source = LingBotWorldFastOfflineControlSource(control_builder, poses, intrinsics, action)
-    session = LingBotWorldFastGenerationSession(config=session_config)
-    frames: list[Image.Image] = []
-    try:
-        for chunk_index in range(control_context.latent_frames // control_context.chunk_size):
-            result = pipeline(
-                session,
-                LingBotWorldFastChunkRequest(
-                    chunk_index=chunk_index,
-                    control=control_source.control_at(chunk_index),
-                ),
-            )
-            frames.extend(result.frames)
-    finally:
-        pipeline.release_session(session)
-    return frames
+    controls = [
+        control_source.control_at(chunk_index)
+        for chunk_index in range(control_context.latent_frames // control_context.chunk_size)
+    ]
+    return pipeline.generate_video(session_config, controls)
 
 
 @click.command()

@@ -31,14 +31,14 @@ export TF_MODEL_ZOO_PATH=/path/to/model_zoo
 | Continuous chunked generation | ✔️ |
 | Single-GPU inference | ✔️ |
 | Ulysses Sequence Parallel | ✔️ |
-| FSDP | Enabled by default for the streaming example; disabled for the offline example |
+| FSDP | Configurable through PPL_CONFIG |
 | H100 Sage Attention | ✔️ |
 
 ## Files
 
 ### lingbot_world_fast_image_to_video_h100.py
 
-Offline video generation on H100 GPUs using LingBot-World-Fast with camera control.
+Offline generation and stream-server entry point for LingBot-World-Fast with camera control.
 
 Default configuration:
 
@@ -55,9 +55,9 @@ Default configuration:
 
 ### lingbot_world_v2_image_to_video_h100.py
 
-Offline camera-controlled v2 generation. The default is 77 frames at 16 FPS: 20 latent frames, exactly five
+Offline generation and stream-server entry point for camera-controlled v2. The default is 77 frames at 16 FPS: 20 latent frames, exactly five
 complete chunks of four. With complete chunk streaming, 81 output frames cannot be represented by `chunk_size=4`.
-The v2 checkpoint only supports camera control and uses its PPL-configured Torch SDPA, local attention, sink size,
+The v2 checkpoint only supports camera control and uses its PPL-configured SageAttention SM90 backend, local attention, sink size,
 and timesteps.
 
 ```bash
@@ -152,9 +152,9 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Real-Time Streaming
 
-The streaming example defaults to camera control, four Ulysses workers, and FSDP. `stream-serve --gpu-num` is
-passed to `get_service(gpu_num=...)`; use `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use
-`torchrun` because TeleFuser creates the workers internally.
+The same examples expose both offline generation and a stream-server `get_service()` entry point. Configure topology
+through `PPL_CONFIG`; `stream-serve --gpu-num` is passed to `get_service(gpu_num=...)`. Use
+`CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because TeleFuser creates workers internally.
 
 ### Tested GPU and Duration Limits
 
@@ -209,7 +209,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
     --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
@@ -290,7 +290,7 @@ env -u TELEFUSER_TURN_SERVER \
     -u TELEFUSER_TURN_CREDENTIAL \
     TF_MODEL_ZOO_PATH=/path/to/model_zoo \
     CUDA_VISIBLE_DEVICES=0,1,2,3 \
-    telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+    telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
     --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
 ```
 

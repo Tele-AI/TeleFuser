@@ -1,5 +1,7 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from telefuser.core.config import AttentionConfig, ModelRuntimeConfig, ParallelConfig
@@ -74,3 +76,19 @@ def test_denoising_stage_parallel_models_without_fsdp_keeps_model() -> None:
     dit.enable_usp.assert_called_once_with(device_mesh)
     shard.assert_not_called()
     assert stage.dit is dit
+
+
+def test_denoising_stage_rejects_uneven_ulysses_head_partition() -> None:
+    stage = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    stage.device = torch.device("cpu")
+    stage.torch_dtype = torch.float32
+    stage.dit = SimpleNamespace(dim=80, num_heads=40, num_layers=1, device_mesh=MagicMock())
+
+    with (
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.denoising.get_ulysses_world_size",
+            return_value=3,
+        ),
+        pytest.raises(ValueError, match="divisible"),
+    ):
+        stage._init_self_kv_cache(batch_size=1, kv_size=1)

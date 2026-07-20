@@ -87,7 +87,7 @@ pip install telefuser
 telefuser serve /path/to/pipeline.py --port 8000
 
 # Stream serving (WebRTC support is included in the default install)
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py -p 8088
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088
 ```
 
 ## Documentation Sections

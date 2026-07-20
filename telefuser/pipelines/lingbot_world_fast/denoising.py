@@ -41,6 +41,8 @@ class _DenoisingCacheState:
     self_kv_cache: list[dict[str, torch.Tensor | int]]
     crossattn_cache: list[dict[str, torch.Tensor | bool]]
     generator: torch.Generator
+    noise_generator: torch.Generator
+    noise_shape: tuple[int, int, int, int, int]
 
 
 class LingBotWorldFastDenoisingStage(BaseStage):
@@ -83,10 +85,17 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         kv_size: int,
     ) -> list[dict[str, torch.Tensor | int]]:
         head_dim = self.dit.dim // self.dit.num_heads
-        ulysses_world_size = get_ulysses_world_size(getattr(self.dit, "device_mesh", None))
+        device_mesh = getattr(self.dit, "device_mesh", None)
+        ulysses_world_size = get_ulysses_world_size(device_mesh)
         num_heads = self.dit.num_heads
         if ulysses_world_size > 1:
-            num_heads = (num_heads + ulysses_world_size - 1) // ulysses_world_size
+            if num_heads % ulysses_world_size:
+                raise ValueError(
+                    f"LingBot Ulysses SP requires {num_heads} attention heads to be divisible "
+                    f"by degree {ulysses_world_size}"
+                )
+            num_heads //= ulysses_world_size
+
         shape = (batch_size, kv_size, num_heads, head_dim)
         return [
             {
@@ -123,6 +132,8 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         max_sequence_length: int,
         sample_shift: float,
         generator_state: list[int],
+        noise_generator_state: list[int],
+        noise_shape: tuple[int, int, int, int, int],
         timestep_indices: tuple[int, ...] = (0, 179, 358, 679),
     ) -> bool:
         """Atomically register session-scoped KV, scheduler, and RNG state."""
@@ -133,12 +144,16 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         timesteps = _select_timesteps(scheduler, tuple(timestep_indices), sample_shift)
         generator = torch.Generator(device=self.device)
         generator.set_state(torch.tensor(generator_state, dtype=torch.uint8))
+        noise_generator = torch.Generator(device=self.device)
+        noise_generator.set_state(torch.tensor(noise_generator_state, dtype=torch.uint8))
         state = _DenoisingCacheState(
             scheduler=scheduler,
             timesteps=timesteps,
             self_kv_cache=self._init_self_kv_cache(batch_size, kv_size),
             crossattn_cache=self._init_crossattn_cache(batch_size, max_sequence_length),
             generator=generator,
+            noise_generator=noise_generator,
+            noise_shape=noise_shape,
         )
         self._cache_registry[cache_handle] = state
         return True
@@ -207,11 +222,19 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         logger.debug("LingBotWorldFast chunk denoised")
         return current_latent
 
+    def _next_noise_chunk(self, state: _DenoisingCacheState) -> torch.Tensor:
+        """Generate the replicated pre-Ulysses input noise for one causal chunk."""
+        return torch.randn(
+            state.noise_shape,
+            generator=state.noise_generator,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
     @with_model_offload(["dit"])
     def denoise_and_update_cache(
         self,
         cache_handle: int,
-        latent_chunk: torch.Tensor,
         condition_chunk: torch.Tensor,
         prompt_emb: torch.Tensor,
         control_chunk: torch.Tensor | None,
@@ -224,7 +247,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         except KeyError as exc:
             raise KeyError(f"Unknown cache handle {cache_handle}") from exc
         denoised = self.denoise_chunk(
-            latent_chunk=latent_chunk,
+            latent_chunk=self._next_noise_chunk(state),
             condition_chunk=condition_chunk,
             prompt_emb=prompt_emb,
             timesteps=state.timesteps,
@@ -253,6 +276,15 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 max_attention_size=max_attention_size,
             )
         return denoised
+
+    def advance_noise(self, cache_handle: int) -> bool:
+        """Advance the actor-owned noise RNG for a decode-only cache hit."""
+        try:
+            state = self._cache_registry[cache_handle]
+        except KeyError as exc:
+            raise KeyError(f"Unknown cache handle {cache_handle}") from exc
+        self._next_noise_chunk(state)
+        return True
 
     def has_cache(self, cache_handle: int) -> bool:
         """Return whether this worker owns the requested cache handle."""

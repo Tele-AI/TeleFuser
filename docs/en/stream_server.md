@@ -551,7 +551,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://l
 
 ### LingBot-World-Fast Streaming
 
-`examples/lingbot/stream_lingbot_world_fast.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
+`examples/lingbot/lingbot_world_fast_image_to_video_h100.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
 
 #### Model Files
 
@@ -607,7 +607,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
-telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
   --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
@@ -713,7 +713,7 @@ env -u TELEFUSER_TURN_SERVER \
   -u TELEFUSER_TURN_CREDENTIAL \
   TF_MODEL_ZOO_PATH=/path/to/model_zoo \
   CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  telefuser stream-serve examples/lingbot/stream_lingbot_world_fast.py \
+  telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
   --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
 ```
 
@@ -802,7 +802,7 @@ Only switch to `act` when using action-control weights:
 ```
 
 The service example sets `PPL_CONFIG["control_mode"]="cam"` inside
-`examples/lingbot/stream_lingbot_world_fast.py`. A session's control mode must
+`examples/lingbot/lingbot_world_fast_image_to_video_h100.py`. A session's control mode must
 match the mode used to initialize the pipeline. To use action-control weights,
 set that value to `"act"` before starting the service and pass `--control-mode
 act` to the demo.

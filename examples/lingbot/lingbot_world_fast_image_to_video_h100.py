@@ -1,10 +1,14 @@
-"""LingBot-World-Fast offline image-to-video example.
+"""LingBot-World-Fast offline and streaming example.
 
 Single GPU:
     python examples/lingbot/lingbot_world_fast_image_to_video_h100.py
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --gpu_num 4
+WebRTC streaming service:
+    telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+        --gpu-num 4 -p 8088 --skip-validation
+
 """
 
 from __future__ import annotations
@@ -26,11 +30,8 @@ from telefuser.pipelines.lingbot_world_fast.control import (
     truncate_control_sequence,
 )
 from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
-from telefuser.pipelines.lingbot_world_fast.session import (
-    LingBotWorldFastChunkRequest,
-    LingBotWorldFastGenerationSession,
-    LingBotWorldFastSessionConfig,
-)
+from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
+from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig
 from telefuser.utils.video import save_video
 
 TF_MODEL_ZOO_PATH = Path(os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")).expanduser()
@@ -56,6 +57,7 @@ PPL_CONFIG = dict(
     sample_shift=10.0,
     seed=42,
     target_fps=16,
+    max_duration_seconds=5.0,
     attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
     enable_fsdp=False,
     local_attn_size=-1,
@@ -100,9 +102,27 @@ def get_pipeline(
                 sp_ulysses_degree=parallelism,
                 enable_fsdp=PPL_CONFIG["enable_fsdp"],
             ),
+            vae_parallel_config=ParallelConfig(device_ids=[0]),
         ),
     )
     return pipeline
+
+
+def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
+    """Build the service loaded by the TeleFuser stream server."""
+    pipeline = get_pipeline(parallelism=gpu_num)
+    return LingBotWorldFastService(
+        pipeline,
+        default_fps=PPL_CONFIG["target_fps"],
+        default_session_config={
+            "control_mode": PPL_CONFIG["control_mode"],
+            "max_duration_seconds": PPL_CONFIG["max_duration_seconds"],
+            "chunk_size": PPL_CONFIG["chunk_size"],
+            "frame_policy": PPL_CONFIG["frame_policy"],
+            "sample_shift": PPL_CONFIG["sample_shift"],
+            "max_attention_size": PPL_CONFIG["max_attention_size"],
+        },
+    )
 
 
 def run(
@@ -141,21 +161,10 @@ def run(
         action = None
     poses, intrinsics, action = truncate_control_sequence(poses, intrinsics, action, session_config.frame_num)
     control_source = LingBotWorldFastOfflineControlSource(control_builder, poses, intrinsics, action)
-    session = LingBotWorldFastGenerationSession(config=session_config)
-    frames: list[Image.Image] = []
-    try:
-        for chunk_index in range(control_context.latent_frames // control_context.chunk_size):
-            result = pipeline(
-                session,
-                LingBotWorldFastChunkRequest(
-                    chunk_index=chunk_index,
-                    control=control_source.control_at(chunk_index),
-                ),
-            )
-            frames.extend(result.frames)
-    finally:
-        pipeline.release_session(session)
-    return frames
+    controls = [
+        control_source.control_at(index) for index in range(control_context.latent_frames // control_context.chunk_size)
+    ]
+    return pipeline.generate_video_streaming(session_config, controls)
 
 
 @click.command()

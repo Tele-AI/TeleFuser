@@ -193,12 +193,10 @@ def test_pipeline_call_rejects_control_with_wrong_shape() -> None:
     pipeline.denoise_stage.release_cache.assert_not_called()
 
 
-def test_final_chunk_releases_decoder_state_and_cache() -> None:
+def test_final_chunk_releases_worker_caches() -> None:
     pipeline = _pipeline()
     pipeline.denoise_stage = MagicMock()
     runtime = _session(chunk_count=1)
-    runtime.decoder_state.feat_cache = [torch.ones(1)]
-    runtime.decoder_state.feat_idx = [1]
 
     def generate_next_chunk(session, control, progress_callback=None):
         session.current_chunk_index = 1
@@ -210,8 +208,6 @@ def test_final_chunk_releases_decoder_state_and_cache() -> None:
 
     assert result.done is True
     assert runtime.cache_handle is None
-    assert runtime.decoder_state.feat_cache == []
-    assert runtime.decoder_state.feat_idx == [0]
     assert runtime.status == LingBotWorldFastSessionStatus.RELEASED
     pipeline.denoise_stage.release_cache.assert_called_once_with(7)
 
@@ -261,24 +257,62 @@ def test_concurrent_chunk_on_same_session_is_rejected() -> None:
     assert session.status == LingBotWorldFastSessionStatus.READY
 
 
-def test_generate_video_drains_runtime_and_releases_it() -> None:
+def test_generate_video_uses_the_default_lookahead_scheduler() -> None:
     pipeline = LingBotWorldFastPipeline(device="cpu")
     pipeline.release_session = MagicMock()
     frame = Image.new("RGB", (8, 8))
+    runtime = _session(chunk_count=2)
+    pipeline._create_initialized_session = MagicMock(return_value=runtime)
+    pipeline._validate_control = MagicMock()
+    events: list[str] = []
 
-    def generate(runtime_state, request, progress_callback=None):
-        runtime_state.current_chunk_index += 1
-        runtime_state.emitted_frames += 1
-        return SimpleNamespace(frames=[frame], done=runtime_state.current_chunk_index == 2)
+    def submit_denoise(runtime_state, chunk_index, control, progress_callback=None):
+        del runtime_state, control, progress_callback
+        events.append(f"submit_dit:{chunk_index}")
 
+        def wait():
+            events.append(f"wait_dit:{chunk_index}")
+            return torch.tensor([chunk_index])
+
+        return wait
+
+    def complete_denoise(runtime_state, chunk_index, wait_for_denoise):
+        del runtime_state
+        events.append(f"complete_dit:{chunk_index}")
+        return wait_for_denoise()
+
+    def submit_decode(runtime_state, chunk_index, denoised, progress_callback=None):
+        del runtime_state, denoised, progress_callback
+        events.append(f"submit_decode:{chunk_index}")
+
+        def wait():
+            events.append(f"wait_decode:{chunk_index}")
+            return [frame]
+
+        return wait
+
+    pipeline._submit_denoise_chunk = MagicMock(side_effect=submit_denoise)
+    pipeline._complete_denoise_chunk = MagicMock(side_effect=complete_denoise)
+    pipeline._submit_decode_chunk = MagicMock(side_effect=submit_decode)
     config = LingBotWorldFastSessionConfig(prompt="test", image=frame)
 
-    with patch.object(LingBotWorldFastPipeline, "__call__", side_effect=generate) as generate_chunk:
-        frames = pipeline.generate_video(config, controls=[torch.tensor([1]), torch.tensor([2])])
+    frames = pipeline.generate_video(config, controls=[torch.tensor([1.0]), torch.tensor([2.0])])
 
     assert frames == [frame, frame]
-    assert generate_chunk.call_count == 2
-    pipeline.release_session.assert_called_once()
+    assert [call.args[1] for call in pipeline._submit_denoise_chunk.call_args_list] == [0, 1]
+    assert events == [
+        "submit_dit:0",
+        "complete_dit:0",
+        "wait_dit:0",
+        "submit_dit:1",
+        "submit_decode:0",
+        "wait_decode:0",
+        "complete_dit:1",
+        "wait_dit:1",
+        "submit_decode:1",
+        "wait_decode:1",
+    ]
+    pipeline.release_session.assert_called_once_with(runtime)
 
 
 def test_pipeline_close_delegates_to_parallel_worker() -> None:

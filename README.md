@@ -102,7 +102,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
-telefuser stream-serve examples/lingbot/stream_lingbot_world_v2.py \
+telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
   --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 
 python examples/stream_server/webrtc_bidirectional_demo.py \
@@ -180,7 +180,7 @@ telefuser/
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
-| `LingBot-World v2` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/stream_lingbot_world_v2.py](examples/lingbot/stream_lingbot_world_v2.py) |
+| `LingBot-World v2` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 
