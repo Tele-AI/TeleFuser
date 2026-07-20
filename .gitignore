@@ -111,6 +111,8 @@ uv.lock
 .mypy_cache/
 
 # custom
+/artifacts/
+/benchmarks/aiperf/
 /models
 /data
 .vscode
@@ -141,6 +143,11 @@ docs/**/modelzoo.md
 *.jpg
 *.MP3
 *.mp3
+
+# Source-controlled AIPerf benchmark profiles use JSON despite the global rule.
+!benchmarks/telefuser_aiperf/configs/*.json
+!benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+!benchmarks/baseline/sglang_lingbot_stream/configs/*.json
 
 project
 output

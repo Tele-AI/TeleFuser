@@ -1,0 +1,104 @@
+# Benchmark contract example for a WebSocket stream-world baseline.
+# Enum comments use "one-of". List comments use "one-or-more".
+contract_version: v1  # one-of: v1. Bump only when the contract schema changes.
+name: sglang_lingbot_world_stream  # Stable benchmark target id used in reports and automation.
+mode: stream_world  # one-of: batch_video, stream_world.
+implementation: sglang_diffusion  # Example values: telefuser, diffusers, sglang_diffusion.
+model_family: lingbot_world_fast  # Example values: wan_video, lingbot_world_fast, hunyuan_video, ltx_video.
+model: robbyant/lingbot-world-fast-diffusers  # Concrete model or service profile under test.
+supported_tasks:  # one-or-more: t2v, i2v, ti2v, bidirectional.
+  - bidirectional
+transport: websocket  # one-of: http, http_polling, websocket, sse, webrtc.
+adapter: sglang_websocket  # Built-in AIPerf adapter; target repository owns no transport implementation.
+endpoint:
+  health_path: /health  # Service readiness path.
+  metadata_path: /v1/models  # Optional SGLang model and pipeline identity snapshot.
+  websocket_path: /v1/realtime_video/generate  # WebSocket path for realtime video sessions.
+  models_path: /v1/models  # Optional model metadata path.
+request_encoding:
+  message_format: msgpack  # one-of for this baseline: msgpack.
+  init_required_fields:  # one-or-more. Required fields in the first WebSocket message.
+    - type
+    - prompt
+    - first_frame
+    - size
+    - fps
+    - num_frames
+  init_parameters:  # Mapping from benchmark parameter names to SGLang init payload fields.
+    model: model
+    prompt: prompt
+    image_path: first_frame
+    size: size
+    fps: fps
+    num_frames: num_frames
+  control_channel:
+    transport: websocket_message  # one-of for WebSocket: websocket_message.
+    message_type: event  # Runtime control messages use type=event.
+    kind: camera_actions  # one-of for LingBot realtime controls: camera_actions, prompt.
+    payload_mode: state  # one-of for camera_actions: script, state.
+    action_tokens:  # one-or-more. SGLang LingBot camera action tokens.
+      - w
+      - a
+      - s
+      - d
+      - i
+      - j
+      - k
+      - l
+    key_mapping:
+      ArrowUp: w
+      ArrowDown: s
+      ArrowLeft: a
+      ArrowRight: d
+result_delivery:
+  media: websocket_frame_batch  # one-of for this baseline: websocket_frame_batch.
+  metadata: websocket_chunk_stats  # one-of for this baseline: websocket_chunk_stats.
+  session_log: sessions.jsonl  # Per-session result records.
+  event_log: events/{phase}_{logical_session_index}_{session_id}.jsonl  # Per-session event trace template.
+workload:
+  mode: bidirectional  # one-of: server_push, bidirectional.
+  task: bidirectional  # one-of for this service: bidirectional.
+  size: 832x480
+  fps: 16
+  session_count: 1
+  warmup_sessions: 1
+  session_duration_s: 90.0
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json  # Timed control-event workload.
+  request_extra:  # Service-specific request config passed through to SGLang.
+    num_frames: 9
+    num_inference_steps: 4
+    guidance_scale: 1.0
+    realtime_causal_sink_size: 6
+    realtime_causal_kv_cache_num_frames: 9
+    realtime_output_format: webp  # one-of: webp, jpeg, raw.
+    output_compression: 95
+    max_chunks: 8
+metrics:  # one-or-more. Choose all metrics emitted by this benchmark mode.
+  - connected_latency_ms
+  - first_frame_latency_ms
+  - first_metadata_latency_ms
+  - stream_fps
+  - session_runtime_s
+  - frames_received
+  - control_ack_latency_ms
+  - control_to_next_frame_latency_ms
+  - chunk_request_prepare_seconds
+  - chunk_compute_seconds
+  - chunk_encode_seconds
+  - chunk_output_pacing_seconds
+  - chunk_output_header_write_seconds
+  - chunk_output_payload_write_seconds
+  - chunk_output_write_seconds
+  - chunk_total_seconds
+  - chunk_compute_fps
+  - chunk_raw_output_bytes
+  - chunk_wire_output_bytes
+  - chunk_output_batches
+  - chunk_peak_reserved_bytes
+  - success_rate
+limits:
+  active_sessions: 1  # Current SGLang realtime endpoint accepts one active session for this target.
+artifacts:  # Paths consumed by automation and documentation.
+  config: benchmarks/baseline/sglang_lingbot_stream/configs/stream_lingbot_world_fast_compare.json
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  runner: aiperf profile --stream-config

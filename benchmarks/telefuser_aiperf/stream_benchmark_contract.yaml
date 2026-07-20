@@ -1,0 +1,79 @@
+# Benchmark contract example for a WebRTC stream-world target.
+# Enum comments use "one-of". List comments use "one-or-more".
+contract_version: v1  # one-of: v1. Bump only when the contract schema changes.
+name: telefuser_lingbot_world_fast_stream  # Stable benchmark target id used in reports and automation.
+mode: stream_world  # one-of: batch_video, stream_world.
+implementation: telefuser  # Example values: telefuser, diffusers, sglang_diffusion.
+model_family: lingbot_world_fast  # Example values: wan_video, lingbot_world_fast, hunyuan_video, ltx_video.
+model: LingBot-World-Fast  # Concrete model or service profile under test.
+supported_tasks:  # one-or-more: t2v, i2v, ti2v, bidirectional.
+  - bidirectional
+transport: webrtc  # one-of: http, http_polling, websocket, sse, webrtc.
+adapter: telefuser_webrtc  # Built-in AIPerf adapter; target repository owns no transport implementation.
+endpoint:
+  health_path: /v1/service/health  # Service readiness path.
+  metadata_path: /v1/service/metadata  # Optional target environment and startup phase facts.
+  offer_path: /v1/stream/webrtc/offer  # WebRTC SDP offer/answer path.
+  delete_path_template: /v1/stream/webrtc/{session_id}  # Session cleanup path template.
+request_encoding:
+  offer_content_type: application/json  # one-of: application/json.
+  offer_required_fields:  # one-or-more. Required JSON fields in the offer payload.
+    - sdp
+    - type
+    - task
+  offer_parameters:  # Mapping from benchmark parameter names to wire payload fields.
+    session_id: session_id
+    prompt: prompt
+    fps: fps
+    image_path: image_path
+    config: config
+  control_channel:
+    transport: datachannel  # one-of for WebRTC: datachannel.
+    label: telefuser  # DataChannel label expected by the service.
+    message_types:  # one-or-more. Message types understood by the stream benchmark semantics.
+      - control
+      - status
+      - chunk
+      - done
+      - error
+result_delivery:
+  media: rtp_video_track  # one-of for WebRTC: rtp_video_track.
+  metadata: datachannel  # one-of for WebRTC: datachannel.
+  session_log: sessions.jsonl  # Per-session result records.
+  event_log: events/{phase}_{logical_session_index}_{session_id}.jsonl  # Per-session event trace template.
+workload:
+  mode: bidirectional  # one-of: server_push, bidirectional.
+  task: bidirectional  # one-of for this service: bidirectional.
+  fps: 16
+  session_count: 1
+  warmup_sessions: 1
+  session_duration_s: 90.0
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json  # Timed control-event workload.
+  request_extra:  # Service-specific request config passed through to the stream service.
+    chunk_size: 3
+    frame_num: 81
+    sample_shift: 5.0
+    control_mode: cam  # one-of for LingBotWorldFast: cam.
+    show_control_hud: false
+    benchmark_metrics: true  # Emit synchronized runtime/chunk facts for AIPerf aggregation.
+metrics:  # one-or-more. Choose all metrics emitted by this benchmark mode.
+  - offer_rtt_ms
+  - connected_latency_ms
+  - first_frame_latency_ms
+  - first_metadata_latency_ms
+  - stream_fps
+  - session_runtime_s
+  - frames_received
+  - control_ack_latency_ms
+  - control_to_next_frame_latency_ms
+  - pipeline_init_seconds
+  - runtime_creation_seconds
+  - chunk_compute_seconds
+  - chunk_compute_fps
+  - success_rate
+limits:
+  active_sessions: 1  # Service limit for this target. The harness still exposes session_count.
+artifacts:  # Paths consumed by automation and documentation.
+  config: benchmarks/telefuser_aiperf/configs/stream_lingbot_world_fast_compare.json
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  runner: aiperf profile --stream-config

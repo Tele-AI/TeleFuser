@@ -8,7 +8,7 @@ Demonstrates the LingBot-World-Fast bidirectional WebRTC protocol:
 
 Usage:
     # 1. Start the LingBot stream server:
-    telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
+    telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088 --skip-validation
 
     # 2. Start this client (opens browser):
     python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088

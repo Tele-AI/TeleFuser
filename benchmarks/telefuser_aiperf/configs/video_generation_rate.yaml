@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=../../aiperf/src/aiperf/config/schema/aiperf-config.schema.json
+
+schemaVersion: "2.0"
+
+randomSeed: 42
+
+benchmark:
+  model: telefuser-video
+
+  endpoint:
+    url: ${TELEFUSER_AIPERF_URL:http://127.0.0.1:8000}
+    type: video_generation
+    timeout: 3600.0
+    extra:
+      size: ${TELEFUSER_AIPERF_SIZE:1024x576}
+      seconds: ${TELEFUSER_AIPERF_SECONDS:4}
+
+  tokenizer:
+    name: builtin
+
+  dataset:
+    type: file
+    path: ./benchmarks/telefuser_aiperf/data/video_prompts.jsonl
+    format: single_turn
+    sampling: sequential
+
+  profiling:
+    type: poisson
+    rate: ${TELEFUSER_AIPERF_RATE:0.2}
+    concurrency: ${TELEFUSER_AIPERF_MAX_CONCURRENCY:4}
+    requests: ${TELEFUSER_AIPERF_REQUESTS:10}
+    gracePeriod: 300
+
+  artifacts:
+    dir: ./artifacts/telefuser_aiperf/video_rate
+    summary: [json]
+    records: [jsonl]
+    showTraceTiming: true

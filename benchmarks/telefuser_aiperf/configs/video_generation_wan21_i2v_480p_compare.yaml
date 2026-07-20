@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../../aiperf/src/aiperf/config/schema/aiperf-config.schema.json
+
+schemaVersion: "2.0"
+
+randomSeed: 42
+
+benchmark:
+  model: telefuser-wan21-i2v-480p
+
+  endpoint:
+    url: ${TELEFUSER_AIPERF_URL:http://127.0.0.1:8000}
+    type: video_generation
+    timeout: 7200.0
+    downloadVideoContent: true
+    extra:
+      size: ${TELEFUSER_AIPERF_SIZE:832x480}
+      seconds: ${TELEFUSER_AIPERF_SECONDS:5}
+      seed: ${TELEFUSER_AIPERF_SEED:42}
+
+  tokenizer:
+    name: builtin
+
+  dataset:
+    type: file
+    path: ./benchmarks/telefuser_aiperf/data/video_prompts.jsonl
+    format: single_turn
+    sampling: sequential
+
+  warmup:
+    type: concurrency
+    concurrency: 1
+    requests: 1
+    excludeFromResults: true
+
+  profiling:
+    type: concurrency
+    concurrency: ${TELEFUSER_AIPERF_CONCURRENCY:1}
+    requests: ${TELEFUSER_AIPERF_REQUESTS:2}
+    duration: ${TELEFUSER_AIPERF_DURATION:7200}
+    gracePeriod: ${TELEFUSER_AIPERF_GRACE_PERIOD:900}
+
+  artifacts:
+    dir: ./artifacts/telefuser_aiperf/wan21_i2v_480p_compare
+    summary: [json]
+    records: [jsonl]
+    showTraceTiming: true
+    trace: true
+
+  serverMetrics:
+    enabled: ${TELEFUSER_AIPERF_SERVER_METRICS:false}
+    urls:
+      - ${TELEFUSER_AIPERF_METRICS_URL:http://127.0.0.1:8000/v1/service/metrics}
+    formats: [json, csv]

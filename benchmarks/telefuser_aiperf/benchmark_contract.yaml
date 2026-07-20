@@ -1,0 +1,42 @@
+# Benchmark contract example for a batch-video target.
+# Enum comments use "one-of". List comments use "one-or-more".
+contract_version: v1  # one-of: v1. Bump only when the contract schema changes.
+name: telefuser_aiperf_video  # Stable benchmark target id used in reports and automation.
+mode: batch_video  # one-of: batch_video, stream_world.
+implementation: telefuser  # Example values: telefuser, diffusers, sglang_diffusion.
+model_family: wan_video  # Example values: wan_video, lingbot_world_fast, hunyuan_video, ltx_video.
+model: Wan2.1-I2V-14B-480P  # Concrete model or service profile under test.
+supported_tasks:  # one-or-more: t2v, i2v, ti2v, bidirectional.
+  - i2v
+transport: http  # one-of: http, http_polling, websocket, sse, webrtc.
+endpoint:
+  path: /v1/videos  # HTTP path used by the benchmark runner.
+  protocol: openai_video_generation  # one-of for batch video: openai_video_generation.
+request_encoding:
+  content_type: multipart/form-data  # one-of: application/json, multipart/form-data.
+  media_inputs:  # Mapping from dataset field to request field.
+    first_image_path: input_reference  # Example: local image path becomes multipart input_reference.
+  parameters:  # Mapping from benchmark parameter names to wire payload fields.
+    prompt: prompt
+    negative_prompt: negative_prompt
+    seed: seed
+    size: size
+    seconds: seconds
+result_delivery:
+  polling_path: /v1/videos/{id}  # Async status polling path.
+  content_path: /v1/videos/{id}/content  # Generated media download path.
+workload:
+  resolution: 832x480  # Example WxH string. Keep aligned across compared targets.
+  frames: 81
+  inference_steps: 40
+  fps: 16
+  guidance_scale: 5.0
+metrics:  # one-or-more. Choose all metrics emitted by this benchmark mode.
+  - request_latency
+  - completion_latency
+  - download_latency
+  - request_throughput
+  - success_rate
+artifacts:  # Paths consumed by automation and documentation.
+  config: benchmarks/telefuser_aiperf/configs/video_generation_wan21_i2v_480p_compare.yaml
+  dataset: benchmarks/telefuser_aiperf/data/video_prompts.jsonl
