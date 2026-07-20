@@ -55,7 +55,9 @@ Client                          Server
   │──────────────────────────────►│  cleanup
 ```
 
-The pipeline's `serve()` method yields chunks containing JPEG-encoded frames. The WebRTC layer decodes them into `av.VideoFrame` objects and streams them to the browser via RTP at the target frame rate.
+Server-push services currently emit `frames_b64` JPEG payloads. The WebRTC layer decodes them into `av.VideoFrame`
+objects and streams them to the browser via RTP at the target frame rate. Bidirectional services should instead emit
+in-process `frames` (PIL images or `av.VideoFrame` objects), avoiding a JPEG/base64 round trip.
 
 ### Bidirectional (WebRTC)
 
@@ -83,7 +85,7 @@ Client                          Server
   │                               │  → push_chunk(session_id, frames)
   │                               │
   │  {"type": "stop"}             │
-  │  or DELETE /v1/stream/webrtc/{}│
+  │  or DELETE /v1/stream/webrtc/{session_id}
   │──────────────────────────────►│  close_session + cleanup
 ```
 
@@ -205,13 +207,15 @@ def get_service() -> MyBidirectionalService:
 
 ### Chunk Format
 
-Server-push chunks should contain the following fields:
+Server-push chunks use `frames_b64`; bidirectional chunks should use `frames`. `frames` is not copied to the
+DataChannel: it is converted to RTP video locally, while serialisable metadata is sent separately.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | `str` | Yes | Always `"chunk"` |
 | `index` | `int` | Yes | Chunk sequence number |
-| `frames_b64` | `list[str]` | Yes | Base64-encoded JPEG frames |
+| `frames` | `list[PIL.Image.Image \| av.VideoFrame]` | Bidirectional | Preferred in-process video frames, sent through RTP only |
+| `frames_b64` | `list[str]` | Server-push | Base64-encoded JPEG frames; bidirectional compatibility fallback |
 | `fps` | `int` | Yes | Target frame rate |
 | `num_frames` | `int` | No | Number of frames in this chunk |
 | `resolution` | `str` | No | Frame resolution (e.g., `"1920x1080"`) |
@@ -267,7 +271,7 @@ Request:
 | `session_id` | `str` | No | Custom session ID (auto-generated if omitted) |
 | `task` | `str` | Yes | Task type (e.g. `t2v`, `i2v`, `bidirectional`) |
 | `prompt` | `str` | No | Input prompt |
-| `fps` | `int` | No | Target video FPS (default: 24) |
+| `fps` | `int` | No | Target video FPS. Defaults to the service's `default_fps`, or 24 when unavailable. |
 | `config` | `dict` | No | Extra config passed to `BidirectionalService.create_session()` |
 
 > Additional fields are allowed (`"extra": "allow"`) and forwarded to the pipeline.
@@ -287,6 +291,7 @@ Error responses:
 | Status | Condition |
 |--------|-----------|
 | `400` | Invalid SDP or negotiation failure |
+| `409` | Bidirectional pipeline session creation conflict |
 | `503` | Stream service not running or max sessions reached |
 
 ### WebRTC: Close Session
@@ -313,8 +318,8 @@ In bidirectional mode, the client-created `"telefuser"` DataChannel carries JSON
 **Client → Server messages:**
 
 ```json
-// Control input (e.g., keyboard, prompt)
-{"type": "control", "key": "ArrowUp", "action": "press"}
+// Canonical LingBot keyboard state. Controls may be combined.
+{"type": "control_state", "controls": ["w", "j"]}
 {"type": "control", "prompt": "new prompt text"}
 
 // Stop session
@@ -342,7 +347,8 @@ In bidirectional mode, the client-created `"telefuser"` DataChannel carries JSON
 }
 ```
 
-> The control message format is pipeline-defined. The examples above show the convention used by `ArrowOverlayService`. Your pipeline's `push_chunk()` receives whatever JSON the client sends.
+> The control message format is pipeline-defined. LingBot uses canonical `w/a/s/d/i/j/k/l` control-state snapshots;
+> the browser maps arrow keys to `w/a/s/d`. Your pipeline's `push_chunk()` receives whatever JSON the client sends.
 
 ### Stream-Specific Health Fields
 
@@ -556,19 +562,25 @@ Press arrow keys in the browser to see the D-pad overlay respond in real time.
 python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
 ```
 
-### LingBot-World-Fast Streaming
+### LingBot-World v2 Streaming
 
-`examples/lingbot/lingbot_world_fast_image_to_video_h100.py` provides a bidirectional streaming service for LingBot-World-Fast. The service generates video over WebRTC RTP and receives prompts and direction control messages over DataChannel. The current demo page does not capture the browser camera or microphone; LingBot currently outputs video only, no audio.
+`examples/lingbot/lingbot_world_v2_image_to_video_h100.py` provides a bidirectional streaming service for
+LingBot-World v2. The service generates video over WebRTC RTP and receives prompts and direction-control messages
+over DataChannel. It emits native PIL frames to the `ChunkRouter`; generated frames are never placed in a
+`frames_b64` payload. The current demo page does not capture the browser camera or microphone; LingBot currently
+outputs video only, with no audio output.
+
+LingBot offline and service paths share the actor-based streaming scheduler. Its bounded edges, session lifecycle, metrics, and GPU placement rules are documented in the [Streaming Pipeline Scheduler guide](stream_scheduler.md). Device overlap does not create an implicit resource group: VAE encode, DiT, and VAE decode may run concurrently on the same GPU.
 
 #### Model Files
 
-LingBot-World-Fast requires two sets of weights:
+LingBot-World v2 requires two sets of weights:
 
 | Setting | Example | Description |
 |---------|---------|-------------|
 | `TF_MODEL_ZOO_PATH` | `/storage/model_zoo` | Required environment variable that locates both model trees |
 | Base model subdirectory | `/storage/model_zoo/Wan2.2-I2V-A14B` | Base Wan2.2 I2V weights containing VAE, T5 text encoder, and tokenizer |
-| Fast model subdirectory | `/storage/model_zoo/lingbot/lingbot-world-fast` | LingBot-World-Fast DiT weights |
+| v2 fast model subdirectory | `/storage/model_zoo/lingbot/lingbot-world-v2-14b-causal-fast/transformers` | LingBot-World v2 causal-fast DiT weights |
 
 #### VS Code Remote SSH: TURN over TCP
 
@@ -614,20 +626,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
 TELEFUSER_TURN_USERNAME=telefuser \
 TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
   --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
 ```
 
 The streaming example enables FSDP and Ulysses sequence parallelism. All four worker logs should show a device mesh
 with `dims=[4]` and `Enabling FSDP for lingbot_world_fast_denoise`.
 
-Wait for the following log line before connecting the browser demo:
-
-```text
-Starting stream server on 0.0.0.0:8088
-```
-
-Verify the service is ready:
+Verify the service is ready before connecting the browser demo:
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
@@ -692,9 +698,11 @@ is occupied, use `-L 13478:127.0.0.1:3478` and pass
 `--turn-url 'turn:localhost:13478?transport=tcp'` to the browser demo. Do not change the server-side
 `TELEFUSER_TURN_SERVER`, which still connects to coturn at remote port 3478.
 
-Select the initial image in the browser before connecting. The browser sends it with the WebRTC offer, so the image
-does not need to exist on the remote host. Generation settings and default camera intrinsics come from the stream
-service configuration. The demo enables proxying by default; the browser only needs to access the demo port.
+You can select an initial image in the browser before connecting. The browser sends it with the WebRTC offer, so the
+image does not need to exist on the remote host. If no image is selected, the demo uses its server-side default image.
+Generation settings come from the stream service configuration. Unless explicit intrinsics are supplied, LingBot
+derives centered camera intrinsics from the selected image: `fx = fy = image_width`, `cx = image_width / 2`, and
+`cy = image_height / 2`. The demo enables proxying by default; the browser only needs to access the demo port.
 Requests to `/v1/stream/webrtc/*` are forwarded by the demo process to `--server-url`.
 
 #### Run the Browser and Service on the Same Machine
@@ -714,7 +722,7 @@ env -u TELEFUSER_TURN_SERVER \
   -u TELEFUSER_TURN_CREDENTIAL \
   TF_MODEL_ZOO_PATH=/path/to/model_zoo \
   CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+  telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
   --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
 ```
 
@@ -753,6 +761,10 @@ Controls only affect chunks that have not yet started generating; chunks already
 immediately changed. Holding a key continuously generates controlled chunks. After all keys are released, the
 service stops requesting new chunks and WebRTC repeats the most recently emitted frame.
 
+Each emitted chunk carries the immutable `applied_controls` snapshot submitted to the model for that chunk. The
+`MOVE`/`ROTATE` HUD and the corresponding DataChannel status use this same snapshot, rather than live browser input,
+so their indicators always match the motion represented by the displayed frames.
+
 The camera pose starts at identity. Each latent interval integrates four video-frame control steps, matching the
 LingBot source trajectory generator. Camera intrinsics are fixed when the session is created. Absolute pose and
 pitch state are accumulated across chunks, including the relative-pose delta across each chunk boundary.
@@ -764,52 +776,38 @@ The following states in the DataChannel log indicate that direction control has 
 "stage":"applying_direction_control"
 ```
 
-The demo enables `Control HUD` by default. The HUD overlay appears in the top-left corner of output chunks that received direction control, confirming the control pipeline is active. Once confirmed, you can uncheck the HUD on the page to observe pure model output.
+The service enables `Control HUD` by default. Controlled output chunks show the `MOVE` panel in the bottom-left corner
+and the `ROTATE` panel in the bottom-right corner, confirming that the control pipeline is active. The current demo
+does not expose a HUD checkbox; set `show_control_hud=false` in session configuration to disable it.
 
 Common control strength parameters:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--control-move-step` | `0.05` | Forward/backward displacement per video frame |
-| `--control-yaw-step-degrees` | `2.0` | Yaw angle per video frame |
-| `--control-lateral-step` | `0.05` | Lateral displacement per video frame |
-| `--control-pitch-step-degrees` | `2.0` | Pitch angle per video frame |
-| `--control-pitch-limit-degrees` | `85.0` | Absolute pitch limit |
-| `--show-control-hud / --no-show-control-hud` | `true` | Whether to overlay direction HUD on controlled chunks |
+| Session configuration field | Default | Description |
+|-----------------------------|---------|-------------|
+| `control_move_step` | `0.10` | Forward/backward displacement per video frame |
+| `control_lateral_step` | `0.10` | Lateral displacement per video frame |
+| `control_translation_scale` | `3.0` | Multiplier applied after per-chunk relative-translation normalization |
+| `control_yaw_step_degrees` | `0.5` | Yaw angle per video frame |
+| `control_pitch_step_degrees` | `0.5` | Pitch angle per video frame |
+| `control_pitch_limit_degrees` | `85.0` | Absolute pitch limit |
+| `show_control_hud` | `true` | Whether to overlay direction HUD on controlled chunks |
 
-#### `cam` vs `act` Control Modes
+These are fields in the WebRTC offer's `config` object or in the service's `default_session_config`; they are not
+command-line options of `webrtc_bidirectional_demo.py` or `telefuser stream-serve`.
 
-| Mode | Input | Description |
-|------|-------|-------------|
-| `cam` | `poses + intrinsics` | Camera trajectory control. The server converts arrow keys into camera poses, then builds a 6-channel camera control tensor. |
-| `act` | `poses + intrinsics + action` | Action control. Requires 7-channel action-control weights. |
+#### Camera Control Mode
 
-The current demo defaults to `cam`. If the model weights are camera-control weights, keep:
-
-```bash
---control-mode cam
-```
-
-Only switch to `act` when using action-control weights:
-
-```bash
---control-mode act
-```
-
-The service example sets `PPL_CONFIG["control_mode"]="cam"` inside
-`examples/lingbot/lingbot_world_fast_image_to_video_h100.py`. A session's control mode must
-match the mode used to initialize the pipeline. To use action-control weights,
-set that value to `"act"` before starting the service and pass `--control-mode
-act` to the demo.
+LingBot-World v2 causal-fast supports `cam` control only. The server converts movement and rotation keys into camera
+poses, then builds a six-channel Plücker camera-control tensor from poses and intrinsics. `act` control is not
+available in this v2 streaming example, and clients must not override `control_mode`.
 
 #### Frame and Control Contract
 
-LingBot accepts complete latent chunks only. `frame_num` must be `4n + 1`, and
-the resulting latent-frame count must divide evenly by `chunk_size`. With the
-default chunk size of 3, valid output lengths are 9, 21, 33, ..., 321 frames.
-The browser accepts a duration and rounds down to the largest complete chunk:
-10 seconds becomes 153 frames and 20 seconds becomes 321 frames at 16 FPS.
-Direct API requests with invalid values are rejected. Offline control files
+LingBot accepts complete latent chunks only. `frame_num` must be `4n + 1`, and the resulting latent-frame count must
+divide evenly by `chunk_size`. The v2 example uses `chunk_size=4`; valid output lengths are 13, 29, 45, 61, 77, ...
+frames. `PPL_CONFIG["frame_num"]=77` is the offline-run default. When an offer omits `frame_num`, the stream service
+selects the longest valid length within `max_duration_seconds`; set either `max_duration_seconds` or `frame_num`
+explicitly in the WebRTC offer's `config` object to control a browser session. Invalid values are rejected. Offline control files
 must provide enough poses and action samples for the requested video window.
 Intrinsics may be either one static `(4,)` value or one `(frames, 4)` value per
 video frame. Explicit control tensors must match the pipeline's selected mode,
@@ -818,30 +816,17 @@ device, dtype, and full latent-chunk shape.
 #### VRAM and Resolution
 
 LingBot's global KV cache grows with `frame_num` and output resolution. FSDP shards model parameters, while Ulysses
-shards KV heads across workers. More GPUs therefore allow longer sessions, but the scaling is not perfectly linear.
-The following 832x480 configurations were tested with FSDP, `chunk_size=3`, and `sample_shift=10.0`:
-
-| GPUs | Duration | Frames | Result |
-|------|----------|--------|--------|
-| 2 H100 80 GB | 10 seconds | 153 | Passed |
-| 2 H100 80 GB | 20 seconds | 321 | KV-cache CUDA OOM |
-| 4 H100 80 GB | 20 seconds | 321 | Passed, 27/27 chunks |
-
-The four-GPU run peaked at approximately 58.6 GiB on GPU 0 and 41.6 GiB on GPUs 1-3. Start with five seconds to
-verify the pipeline before selecting the maximum duration:
-
-```bash
-# In the browser demo or session configuration:
---frame-num 81
-```
+shards KV heads across workers. More GPUs therefore allow longer sessions, but scaling is not perfectly linear. The
+old fast-model memory figures are not applicable to the v2 causal-fast example; begin with an explicit short
+`frame_num` and increase it after validating the target GPU topology.
 
 Common tuning parameters:
 
 | Parameter | Effect |
 |-----------|--------|
 | `PPL_CONFIG["resolution"]` | Select either the 480p or 720p output area |
-| `--frame-num` | Reduce total generated frames and latent chunk count |
-| `--chunk-size` | Affect the latent chunk size per generation step |
+| Session `frame_num` | Reduce total generated frames and latent chunk count |
+| Session `chunk_size` | Affect the latent chunk size per generation step |
 
 An OOM marks the parallel worker as failed. Closing the browser session is not enough; restart the stream service
 before trying another duration.
@@ -867,6 +852,10 @@ nvidia-smi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEFUSER_WEBRTC_MAX_SESSIONS` | `10` | Maximum concurrent WebRTC sessions (1-100) |
+| `TELEFUSER_WEBRTC_VIDEO_CODEC` | `H264` | Preferred outgoing video codec (`H264` or `VP8`) |
+| `TELEFUSER_WEBRTC_VIDEO_BITRATE` | `8000000` | Target outgoing video bitrate in bits per second |
+| `TELEFUSER_WEBRTC_DATA_CHANNEL_TIMEOUT_SECONDS` | `10` | Required bidirectional DataChannel open timeout |
+| `TELEFUSER_WEBRTC_DISCONNECTED_GRACE_SECONDS` | `5` | Grace period for transient WebRTC disconnects |
 | `TELEFUSER_STUN_SERVERS` | `["stun:stun.l.google.com:19302"]` | STUN server URLs (JSON array) |
 | `TELEFUSER_TURN_SERVER` | `None` | TURN server URL (e.g. `turn:your-domain.com:3478`) |
 | `TELEFUSER_TURN_USERNAME` | `None` | TURN server username |

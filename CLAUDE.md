@@ -61,7 +61,7 @@ telefuser/
 ├── cache/            # General cache management
 ├── offload/          # CPU offload strategies
 ├── metrics/          # Metrics collection and monitoring
-├── orchestrator/     # Pipeline orchestration
+├── orchestrator/     # Request orchestration and actor-based streaming scheduler
 ├── worker/           # Distributed worker management
 ├── entrypoints/      # CLI entry points
 ├── service/          # FastAPI service
@@ -79,6 +79,8 @@ telefuser/
   resource groups from device placement; resolve memory pressure by moving stages.
   Use scheduler session metrics and bounded-attention long replays to validate latency
   and memory without retaining duration-sized tensor lists.
+- Interpret chunk period as output cadence: real-time operation requires p95 to stay
+  below the media duration represented by one chunk, with margin for transport and encoding.
 
 ### Layer Architecture Principles For Models
 
@@ -150,6 +152,7 @@ TeleFuser's model follows a strict layered architecture for operations:
 | Service | [docs/en/service.md](docs/en/service.md) | [docs/zh/service.md](docs/zh/service.md) |
 | Service Metadata | [docs/en/service_metadata.md](docs/en/service_metadata.md) | [docs/zh/service_metadata.md](docs/zh/service_metadata.md) |
 | Stream Server | [docs/en/stream_server.md](docs/en/stream_server.md) | [docs/zh/stream_server.md](docs/zh/stream_server.md) |
+| Stream Scheduler | [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md) | [docs/zh/stream_scheduler.md](docs/zh/stream_scheduler.md) |
 | Testing | [docs/en/testing.md](docs/en/testing.md) | [docs/zh/testing.md](docs/zh/testing.md) |
 | torch.compile Compatibility | [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md) | [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md) |
 

@@ -17,6 +17,8 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
+- ✨ **2026-07-19**: Added the actor-based streaming pipeline scheduler with bounded backpressure, per-session metrics, deterministic actor-owned cleanup, and independent LingBot VAE placement. See [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md).
+
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
@@ -37,7 +39,7 @@ The project treats a world model as more than a function that returns a single c
 
 - **World-model-oriented runtime**: Support for continuous video generation, interactive sessions, and bidirectional control loops.
 - **ADF (AI Dev First)**: Repository layers, pipeline contracts, examples, and docs are structured for coding agents to discover capabilities, follow project conventions, and extend pipelines efficiently.
-- **Asynchronous pipeline orchestration**: Optional stage-based execution with request state tracking, resource locks, and parallel stage groups.
+- **Streaming pipeline scheduler**: Actor-owned stateful stages, bounded artifact edges, per-session ordering, backpressure, lifecycle cleanup, and explicit resource groups.
 - **Streaming transport**: WebRTC-based streaming with media tracks plus DataChannel control for real-time inference.
 - **Scalable GPU runtime**: Multi-GPU execution with tensor parallelism, sequence parallelism, optional Ray workers, and distributed service replicas.
 - **Inference optimization stack**: Triton kernels, optimized attention backends, quantization, offload, feature caching, and CacheSeek latent cache integration.
@@ -84,6 +86,9 @@ video = pipe(
 TeleFuser includes a bidirectional WebRTC demo for `LingBot-World v2`.
 LingBot-World v2 uses camera control and its v2 PPL defaults; its streaming example caps a session at two minutes.
 
+LingBot streaming uses the actor-based scheduler for both offline and service execution. Encode, DiT, and decode may
+overlap even on the same GPU; move stages only when memory placement requires it. See the
+[streaming scheduler guide](docs/en/stream_scheduler.md).
 
 For a laptop browser connected through VS Code Remote SSH, coturn is the only additional system package required;
 no extra Python package is needed. On Debian or Ubuntu, install it with:
@@ -156,7 +161,7 @@ TeleFuser uses a layered runtime architecture that maps cleanly to the repositor
 
 1. **Access layer**: FastAPI task APIs and WebRTC streaming entrypoints.
 2. **Service layer**: request routing, task management, stream sessions, replica pools, and integration with pipeline execution.
-3. **Pipeline abstraction layer**: model-specific `BasePipeline` / `BaseStage` components, with optional orchestrator support for async stage execution, request state tracking, and resource locks.
+3. **Pipeline abstraction layer**: model-specific `BasePipeline` / `BaseStage` components, with an actor-based streaming orchestrator for bounded dataflow, session ordering, metrics, and cleanup.
 4. **Model and optimization layer**: model loading, attention selection, quantization, offload, LoRA, and cache integration.
 5. **Execution backend layer**: optimized ops, Triton kernels, and device-specific implementations.
 
@@ -165,7 +170,7 @@ Relevant directories:
 ```text
 telefuser/
 ├── service/         # REST APIs, streaming APIs, WebRTC integration
-├── orchestrator/    # Pipeline orchestration
+├── orchestrator/    # Request orchestration and actor-based streaming scheduler
 ├── pipelines/       # Model-specific pipelines
 ├── distributed/     # TP / SP / FSDP / Ray utilities
 ├── feature_cache/   # AdaTaylorCache
@@ -207,6 +212,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 
 - [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
 - [docs/en/stream_server.md](docs/en/stream_server.md): continuous streaming and WebRTC protocols
+- [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
 - [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
 - [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`

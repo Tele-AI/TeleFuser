@@ -164,6 +164,19 @@ The same examples expose both offline generation and a stream-server `get_servic
 through `PPL_CONFIG`; `stream-serve --gpu-num` is passed to `get_service(gpu_num=...)`. Use
 `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because TeleFuser creates workers internally.
 
+### Scheduler and Stage Placement
+
+LingBot offline and stream-server execution share the actor-based streaming scheduler.
+The bundled examples place VAE encode and decode on GPU 0, while direct
+`LingBotWorldFastPipelineConfig` users may set `vae_encode_config` and
+`vae_decode_config` independently. The scheduler does not infer a resource
+group from overlapping device IDs, so VAE encode, DiT, and VAE decode may
+overlap on one GPU. If a topology runs out of memory, move stages to different
+devices.
+
+See the [streaming scheduler guide](../../docs/en/stream_scheduler.md) for
+architecture, metric definitions, and lifecycle guarantees.
+
 ### Tested GPU and Duration Limits
 
 The global KV cache grows with the requested frame count even when FSDP is enabled. The following 832x480 limits
@@ -324,8 +337,8 @@ The page has separate translation and rotation pads:
 | --- | --- |
 | `W` or `↑` | Move forward |
 | `S` or `↓` | Move backward |
-| `A` or `←` | Strafe left |
-| `D` or `→` | Strafe right |
+| `A` | Strafe left |
+| `D` | Strafe right |
 | `J` | Yaw left |
 | `L` | Yaw right |
 | `I` | Pitch up |
@@ -333,9 +346,58 @@ The page has separate translation and rotation pads:
 
 Multiple keys can be held together, for example `W+J`. Move/strafe steps default to `0.05` per video frame;
 yaw/pitch steps default to `2°` per video frame, with pitch limited to `±85°`. Camera pose and pitch accumulate
-across chunks. Controls affect only chunks that have not started inference. Releasing all keys stops requesting new
-chunks, and WebRTC repeats the most recent frame while idle. **Reset Control** returns the accumulated pose to the
-identity pose.
+across chunks. The browser sends the complete held-key snapshot; the service retains only the newest pending
+short-press snapshot, so stale taps cannot override newer input. Releasing all keys stops requesting new chunks, and
+WebRTC repeats the most recent frame while idle. **Release Controls** clears held and pending keys without changing
+the accumulated pose; **Reset Camera Pose** explicitly clears keys and returns the pose to identity.
+
+Every output chunk includes its immutable `applied_controls` snapshot. Its `MOVE`/`ROTATE` HUD is rendered from that
+same snapshot, so the indicators describe the translation and rotation that actually generated the displayed frames.
+
+#### Camera Motion Integration
+
+The service maintains a camera-to-world matrix and a scalar accumulated pitch for each session. Every video-frame
+integration step first updates yaw and pitch, then derives horizontal movement directions from the new camera
+rotation:
+
+```text
+R_new   = Ry(yaw_delta) @ R_old @ Rx(pitch_delta)
+forward = normalize([R_new[0, 2], 0, R_new[2, 2]])
+right   = normalize([R_new[0, 0], 0, R_new[2, 0]])
+t_new   = t_old + forward_or_backward + left_or_right
+```
+
+Yaw is applied around the world Y axis, pitch around the local camera X axis, and translation is projected onto the
+world XZ plane. Pitch therefore changes the viewing direction without making forward motion fly upward. Simultaneous
+translation keys are added directly, so diagonal motion is faster than a single-axis move.
+
+The Wan VAE has a temporal compression factor of four. The service consequently performs four video-frame camera
+steps between adjacent latent poses. With the default `chunk_size=3`, holding `W` produces the following positions
+for the first two chunks:
+
+```text
+first chunk:  z = [0.0, 0.2, 0.4]
+next chunk:   previous z = 0.4, current z = [0.6, 0.8, 1.0]
+```
+
+The previous chunk's final pose is carried across the boundary before framewise relative poses are computed. This
+keeps the first motion in every subsequent chunk continuous instead of resetting it to the identity pose. Control is
+sampled when a chunk is submitted; releasing or changing a key does not alter control chunks that were already
+submitted or prefetched.
+
+#### From Camera Poses to DiT Control
+
+The accumulated absolute poses are converted into frame-to-frame relative poses. Relative translation is normalized
+by the largest translation norm in that control chunk, matching the current LingBot preprocessing. As a result,
+`control_move_step` controls the accumulated camera path but does not necessarily scale the model-visible translation
+strength proportionally for constant-speed motion. Real-time control then multiplies the normalized translation by
+`control_translation_scale` (default `3.0`), so a non-zero single-direction step has model-visible magnitude `3`
+rather than `1`. Rotation deltas are not normalized in this way.
+
+The relative poses and transformed camera intrinsics define a ray origin and ray direction for every output pixel.
+Camera-control mode concatenates them into six-channel Plücker ray features, rearranges each spatial VAE-stride block
+onto the latent grid, and sends the resulting tensor through the DiT camera-control embedding. Camera control does
+not pass through the VAE; only the reference image and generated video use the VAE encode/decode paths.
 
 ### Troubleshooting
 

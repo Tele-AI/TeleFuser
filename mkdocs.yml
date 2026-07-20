@@ -126,6 +126,7 @@ plugins:
             Tools: 工具
             Service: 服务指南
             Stream Server: 流式服务
+            Stream Scheduler: 流式调度器
             Service Metadata: 服务元数据
             Adding New Example: 新增示例
             Model Loading: 模型加载
@@ -156,6 +157,7 @@ nav:
   - User Guides:
       - service.md
       - stream_server.md
+      - stream_scheduler.md
       - service_metadata.md
       - adding_new_example.md
       - model_loading.md
