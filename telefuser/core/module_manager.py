@@ -26,6 +26,7 @@ def load_model_from_single_file(
     device: str | torch.device,
     low_cpu_mem_usage: bool = False,
     converter_kwargs: dict[str, Any] | None = None,
+    strict: bool = True,
 ) -> tuple[list[str], list[nn.Module]]:
     """Load models from state dict with format conversion.
 
@@ -38,6 +39,7 @@ def load_model_from_single_file(
         device: Target device for model
         low_cpu_mem_usage: If True, keep weights in CPU memory until moved to device
         converter_kwargs: Extra kwargs passed to state_dict_converter()
+        strict: Whether checkpoint keys must exactly match the model.
 
     Returns:
         Tuple of (model_names, loaded_models)
@@ -76,7 +78,7 @@ def load_model_from_single_file(
             model_state_dict = {k: v.to("cpu").clone() for k, v in model_state_dict.items()}
 
         # Load weights and move to target device/dtype
-        model.load_state_dict(model_state_dict, assign=True)
+        model.load_state_dict(model_state_dict, strict=strict, assign=True)
         if torch_dtype != torch.float8_e4m3fn:
             model = model.to(dtype=torch_dtype)
         model = model.to(device)
@@ -201,6 +203,7 @@ class ModuleManager:
         model_class: type[nn.Module] | None = None,
         model_resource: str = "official",
         converter_kwargs: dict[str, Any] | None = None,
+        strict: bool = True,
     ) -> None:
         """Load model from file path with automatic type detection.
 
@@ -217,6 +220,8 @@ class ModuleManager:
             converter_kwargs: Extra kwargs passed to model_class.state_dict_converter().
                 Used to provide explicit config overrides when hash-based config detection
                 may not work (e.g., MoE distilled checkpoints).
+            strict: Whether checkpoint keys must exactly match the model when an
+                explicit ``model_class`` is supplied.
         """
         device = device or self.device
         torch_dtype = torch_dtype or self.torch_dtype
@@ -254,6 +259,7 @@ class ModuleManager:
                 device,
                 low_cpu_mem_usage,
                 converter_kwargs,
+                strict,
             )
             for mn, model in zip(model_names, models):
                 self.modules.append(model)

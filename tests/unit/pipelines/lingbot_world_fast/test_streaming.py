@@ -94,15 +94,8 @@ class _Pipeline:
         self.released.append(runtime.cache_handle)
 
 
-def test_independent_vae_stage_configs_preserve_legacy_defaults() -> None:
-    legacy = LingBotWorldFastPipelineConfig(
-        vae_config=ModelRuntimeConfig(device_type="cuda", device_id=3, torch_dtype=torch.float32),
-        vae_parallel_config=ParallelConfig(device_ids=[3]),
-    )
-    assert LingBotWorldFastPipeline._vae_stage_runtime_config(legacy, "encode").device_id == 3
-    assert LingBotWorldFastPipeline._vae_stage_runtime_config(legacy, "decode").device_id == 3
-
-    independent = LingBotWorldFastPipelineConfig(
+def test_independent_vae_stage_configs_are_resolved_independently() -> None:
+    config = LingBotWorldFastPipelineConfig(
         vae_encode_config=ModelRuntimeConfig(
             device_type="cuda",
             device_id=0,
@@ -116,8 +109,12 @@ def test_independent_vae_stage_configs_preserve_legacy_defaults() -> None:
             parallel_config=ParallelConfig(device_ids=[1]),
         ),
     )
-    assert LingBotWorldFastPipeline._vae_stage_runtime_config(independent, "encode").device_id == 0
-    assert LingBotWorldFastPipeline._vae_stage_runtime_config(independent, "decode").device_id == 1
+    assert config.vae_encode_config.device_id == 0
+    assert config.vae_encode_config.parallel_config.device_ids == [0]
+    assert config.vae_decode_config.device_id == 1
+    assert config.vae_decode_config.parallel_config.device_ids == [1]
+    LingBotWorldFastPipeline._validate_vae_stage_runtime_config(config.vae_encode_config)
+    LingBotWorldFastPipeline._validate_vae_stage_runtime_config(config.vae_decode_config)
 
 
 def test_streaming_session_routes_one_chunk_through_three_stages() -> None:

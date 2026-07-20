@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -14,12 +15,10 @@ from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
 from telefuser.core.config import AttentionConfig, ModelRuntimeConfig, ParallelConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
 from telefuser.models.t5_tokenizer import HuggingfaceTokenizer
-from telefuser.models.wan_video_text_encoder import WanTextEncoder
-from telefuser.models.wan_video_vae import WanVideoVAE
 from telefuser.utils.logging import logger
-from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
 
@@ -44,11 +43,15 @@ if TYPE_CHECKING:
     from .streaming import LingBotWorldFastStreamingRuntime
 
 
+def _default_vae_stage_runtime_config() -> ModelRuntimeConfig:
+    """Create an independent default runtime configuration for one VAE stage."""
+    return ModelRuntimeConfig(torch_dtype=torch.float32, parallel_config=ParallelConfig(device_ids=[0]))
+
+
 @dataclass
 class LingBotWorldFastPipelineConfig:
-    checkpoint_dir: str = ""
-    fast_checkpoint_path: str = "lingbot_world_fast"
-    vae_config: ModelRuntimeConfig = field(default_factory=lambda: ModelRuntimeConfig(torch_dtype=torch.float32))
+    vae_encode_config: ModelRuntimeConfig = field(default_factory=_default_vae_stage_runtime_config)
+    vae_decode_config: ModelRuntimeConfig = field(default_factory=_default_vae_stage_runtime_config)
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     dit_torch_dtype: torch.dtype = torch.bfloat16
     control_type: str = "cam"
@@ -59,9 +62,6 @@ class LingBotWorldFastPipelineConfig:
     sink_size: int = 0
     timestep_indices: tuple[int, ...] = (0, 179, 358, 679)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
-    vae_parallel_config: ParallelConfig = field(default_factory=lambda: ParallelConfig(device_ids=[0]))
-    vae_encode_config: ModelRuntimeConfig | None = None
-    vae_decode_config: ModelRuntimeConfig | None = None
     attention_config: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -102,48 +102,51 @@ class LingBotWorldFastPipeline(BasePipeline):
             return torch.device(f"cuda:{runtime_config.device_id}")
         return torch.device(runtime_config.device_type)
 
-    def init(self, config: LingBotWorldFastPipelineConfig) -> None:
+    def init(self, module_manager: ModuleManager, config: LingBotWorldFastPipelineConfig) -> None:
         if config.control_type not in {"cam", "act"}:
             raise ValueError(f"Unsupported LingBot control_type: {config.control_type!r}")
         self.config = config
-        checkpoint_root = Path(config.checkpoint_dir).expanduser().resolve()
-        self._model_info = [{"name": "lingbot_world_fast", "path": str(checkpoint_root)}]
+        self._model_info = module_manager.get_model_info()
         self.text_device = self._runtime_device(config.text_encoding_config)
 
-        self.text_encoder = WanTextEncoder()
-        self.text_encoder.load_state_dict(load_state_dict(str(checkpoint_root / "models_t5_umt5-xxl-enc-bf16.pth")))
+        text_encoder_and_path = module_manager.fetch_module("wan_video_text_encoder", require_model_path=True)
+        if text_encoder_and_path is None:
+            raise ValueError("LingBot requires a loaded wan_video_text_encoder module")
+        self.text_encoder, text_encoder_path = text_encoder_and_path
+        if self.text_encoder is None:
+            raise ValueError("LingBot requires a loaded wan_video_text_encoder module")
         self.text_encoder = self.text_encoder.to(
             device=self.text_device, dtype=config.text_encoding_config.torch_dtype
         ).eval()
-        tokenizer_path = checkpoint_root / "google" / "umt5-xxl"
-        self.tokenizer = HuggingfaceTokenizer(str(tokenizer_path), 512, "whitespace")
-
-        vae_state_dict, vae_cfg = WanVideoVAE.state_dict_converter().from_official(
-            load_state_dict(str(checkpoint_root / "Wan2.1_VAE.pth"))
-        )
-        self.vae = WanVideoVAE(**vae_cfg)
-        self.vae.load_state_dict(vae_state_dict, strict=False)
-        self.vae.eval()
-        vae_encode_config = self._vae_stage_runtime_config(config, "encode")
-        vae_decode_config = self._vae_stage_runtime_config(config, "decode")
+        tokenizer_path = os.path.join(os.path.dirname(text_encoder_path), "google", "umt5-xxl")
+        self.tokenizer = HuggingfaceTokenizer(tokenizer_path, 512, "whitespace")
+        vae_encode_config = config.vae_encode_config
+        vae_decode_config = config.vae_decode_config
+        self._validate_vae_stage_runtime_config(vae_encode_config)
+        self._validate_vae_stage_runtime_config(vae_decode_config)
         self.vae_encode_device = self._runtime_device(vae_encode_config)
         self.vae_decode_device = self._runtime_device(vae_decode_config)
         self.vae_encode_torch_dtype = vae_encode_config.torch_dtype
         self.vae_device = self.vae_decode_device
-        vae_encode_stage = LingBotWorldFastVAEEncodeStage("lingbot_world_fast_vae_encode", self.vae, vae_encode_config)
-        vae_decode_stage = LingBotWorldFastVAEDecodeStage("lingbot_world_fast_vae_decode", self.vae, vae_decode_config)
+        vae_encode_stage = LingBotWorldFastVAEEncodeStage(
+            "lingbot_world_fast_vae_encode", module_manager, vae_encode_config
+        )
+        vae_decode_stage = LingBotWorldFastVAEDecodeStage(
+            "lingbot_world_fast_vae_decode", module_manager, vae_decode_config
+        )
         self.vae_encode_worker = ParallelWorker(vae_encode_stage)
         self.vae_decode_worker = ParallelWorker(vae_decode_stage)
 
-        fast_path = checkpoint_root / config.fast_checkpoint_path
         dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
-        self.dit = LingBotWorldFastDiT.from_pretrained(
-            str(fast_path),
-            torch_dtype=config.dit_torch_dtype,
-            control_type=config.control_type,
-            config=self._build_dit_config(config),
-        ).to(dit_device)
-        self.dit.eval().requires_grad_(False)
+        self.dit = module_manager.fetch_module("lingbot_world_fast_dit")
+        if self.dit is None:
+            raise ValueError("LingBot requires a loaded lingbot_world_fast_dit module")
+        self.dit = self.dit.to(dit_device, dtype=config.dit_torch_dtype).eval().requires_grad_(False)
+        if self.dit.control_type != config.control_type:
+            raise ValueError(
+                f"DiT checkpoint control type is {self.dit.control_type!r}, not requested {config.control_type!r}"
+            )
+        self.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
         pipeline_device = torch.device(self.device)
         dit_runtime_config = ModelRuntimeConfig(
@@ -153,47 +156,15 @@ class LingBotWorldFastPipeline(BasePipeline):
             attention_config=config.attention_config,
             parallel_config=config.parallel_config,
         )
-        denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", self.dit, dit_runtime_config)
+        denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", module_manager, dit_runtime_config)
         self.denoise_stage = ParallelWorker(denoise_stage) if config.parallel_config.world_size > 1 else denoise_stage
 
     @staticmethod
-    def _build_dit_config(config: LingBotWorldFastPipelineConfig) -> dict[str, object]:
-        return {
-            "patch_size": (1, 2, 2),
-            "text_len": 512,
-            "control_type": config.control_type,
-            "local_attn_size": int(config.local_attn_size),
-            "sink_size": int(config.sink_size),
-        }
-
-    @staticmethod
-    def _validate_vae_parallel_config(parallel_config: ParallelConfig) -> None:
+    def _validate_vae_stage_runtime_config(runtime_config: ModelRuntimeConfig) -> None:
         """Restrict the VAE stage to one configured GPU until VAE model parallelism exists."""
-        parallel_config.validate()
-        if parallel_config.world_size != 1:
+        runtime_config.parallel_config.validate()
+        if runtime_config.parallel_config.world_size != 1:
             raise ValueError("LingBot VAE stage currently requires exactly one GPU")
-
-    @classmethod
-    def _vae_stage_runtime_config(
-        cls,
-        config: LingBotWorldFastPipelineConfig,
-        stage: str,
-    ) -> ModelRuntimeConfig:
-        """Resolve an independently placed VAE stage while preserving legacy configuration."""
-        explicit = config.vae_encode_config if stage == "encode" else config.vae_decode_config
-        if explicit is None:
-            source = config.vae_config
-            parallel_config = config.vae_parallel_config
-        else:
-            source = explicit
-            parallel_config = source.parallel_config
-        cls._validate_vae_parallel_config(parallel_config)
-        return ModelRuntimeConfig(
-            device_type=source.device_type,
-            device_id=source.device_id,
-            torch_dtype=source.torch_dtype,
-            parallel_config=parallel_config,
-        )
 
     @staticmethod
     def _resolve_self_kv_size(
@@ -371,7 +342,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
         tensor = torch.from_numpy(array).permute(2, 0, 1).sub(0.5).div(0.5)
         tensor = torch.nn.functional.interpolate(tensor.unsqueeze(0), size=(height, width), mode="bicubic").squeeze(0)
-        encode_dtype = getattr(self, "vae_encode_torch_dtype", self.config.vae_config.torch_dtype)
+        encode_dtype = getattr(self, "vae_encode_torch_dtype", self.config.vae_encode_config.torch_dtype)
         return tensor.to("cpu", dtype=encode_dtype)
 
     def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> None:

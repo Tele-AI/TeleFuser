@@ -599,42 +599,10 @@ class LingBotWorldFastDiT(BaseModel):
 
         logger.info(f"Loading LingBot-World-Fast DiT from {state_path}")
         state_dict = load_state_dict(state_path)
-        config = dict(config or {})
-        config.setdefault("control_type", control_type)
-
-        patch_weight = state_dict["patch_embedding.weight"]
-        out_dim = int(state_dict["head.head.bias"].shape[0] // math.prod(config.get("patch_size", (1, 2, 2))))
-        control_patch_weight = state_dict["patch_embedding_wancamctrl.weight"]
-        dim = int(patch_weight.shape[0])
-        patch_size = tuple(config.get("patch_size", (1, 2, 2)))
-        control_patch_volume = math.prod(patch_size) * 64
-
-        inferred_config = {
-            "patch_size": patch_size,
-            "text_len": int(config.get("text_len", 512)),
-            "in_dim": int(patch_weight.shape[1]),
-            "dim": dim,
-            "ffn_dim": int(state_dict["blocks.0.ffn.0.weight"].shape[0]),
-            "freq_dim": int(config.get("freq_dim", 256)),
-            "text_dim": int(state_dict["text_embedding.0.weight"].shape[1]),
-            "out_dim": out_dim,
-            "num_heads": int(config.get("num_heads", 40)),
-            "num_layers": len({k.split(".")[1] for k in state_dict if k.startswith("blocks.")}),
-            "local_attn_size": int(config.get("local_attn_size", -1)),
-            "sink_size": int(config.get("sink_size", 0)),
-            "qk_norm": bool(config.get("qk_norm", True)),
-            "cross_attn_norm": bool(config.get("cross_attn_norm", True)),
-            "eps": float(config.get("eps", 1e-6)),
-            "control_type": control_type,
-        }
-        inferred_control_dim = int(control_patch_weight.shape[1] // control_patch_volume)
-        if inferred_control_dim not in (6, 7):
-            raise ValueError(f"Unexpected control patch dim: {inferred_control_dim}")
-        inferred_config["control_type"] = "cam" if inferred_control_dim == 6 else "act"
+        state_dict, inferred_config = cls.state_dict_converter().from_official(state_dict)
         if inferred_config["control_type"] != control_type:
             raise ValueError(
-                f"Checkpoint control projection is {inferred_control_dim}-channel "
-                f"({inferred_config['control_type']}), not requested {control_type!r}"
+                f"Checkpoint control projection is {inferred_config['control_type']!r}, not requested {control_type!r}"
             )
 
         with init_weights_on_device("meta"):
@@ -642,14 +610,68 @@ class LingBotWorldFastDiT(BaseModel):
 
         model.load_state_dict(state_dict, strict=True, assign=True)
         model = model.to(dtype=torch_dtype)
+        runtime_config = config or {}
+        model.set_causal_attention_window(
+            local_attn_size=int(runtime_config.get("local_attn_size", -1)),
+            sink_size=int(runtime_config.get("sink_size", 0)),
+        )
         return model
 
     @staticmethod
-    def state_dict_converter():
-        raise NotImplementedError("LingBotWorldFastDiT uses from_pretrained() for now")
+    def state_dict_converter() -> "LingBotWorldFastDiTStateDictConverter":
+        """Return the native LingBot checkpoint converter."""
+        return LingBotWorldFastDiTStateDictConverter()
+
+    def set_causal_attention_window(self, local_attn_size: int, sink_size: int) -> None:
+        """Configure shape-independent streaming attention policy after loading weights."""
+        self.local_attn_size = local_attn_size
+        self.sink_size = sink_size
+        for block in self.blocks:
+            block.self_attn.local_attn_size = local_attn_size
+            block.self_attn.sink_size = sink_size
 
     def get_fsdp_module_names(self) -> list[str]:
         return ["blocks"]
+
+
+class LingBotWorldFastDiTStateDictConverter:
+    """Build a LingBot causal DiT directly from its native checkpoint tensors."""
+
+    def from_official(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Return native weights and infer constructor arguments from their shapes."""
+        patch_size = (1, 2, 2)
+        patch_weight = state_dict["patch_embedding.weight"]
+        control_patch_weight = state_dict["patch_embedding_wancamctrl.weight"]
+        control_patch_volume = math.prod(patch_size) * 64
+        inferred_control_dim = int(control_patch_weight.shape[1] // control_patch_volume)
+        if inferred_control_dim not in (6, 7):
+            raise ValueError(f"Unexpected control patch dim: {inferred_control_dim}")
+
+        checkpoint_control_type = "cam" if inferred_control_dim == 6 else "act"
+
+        inferred_config = {
+            "patch_size": patch_size,
+            "text_len": 512,
+            "in_dim": int(patch_weight.shape[1]),
+            "dim": int(patch_weight.shape[0]),
+            "ffn_dim": int(state_dict["blocks.0.ffn.0.weight"].shape[0]),
+            "freq_dim": 256,
+            "text_dim": int(state_dict["text_embedding.0.weight"].shape[1]),
+            "out_dim": int(state_dict["head.head.bias"].shape[0] // math.prod(patch_size)),
+            "num_heads": 40,
+            "num_layers": len({key.split(".")[1] for key in state_dict if key.startswith("blocks.")}),
+            "local_attn_size": -1,
+            "sink_size": 0,
+            "qk_norm": True,
+            "cross_attn_norm": True,
+            "eps": 1e-6,
+            "control_type": checkpoint_control_type,
+        }
+        return state_dict, inferred_config
+
+    def from_diffusers(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Reject unsupported Diffusers-formatted LingBot checkpoints."""
+        raise ValueError("LingBot-World-Fast supports native checkpoints only")
 
     def get_tp_plan(self) -> dict[str, Any]:
         return {}
