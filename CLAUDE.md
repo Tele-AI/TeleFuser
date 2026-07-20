@@ -60,7 +60,7 @@ telefuser/
 ├── feature_cache/    # Feature caching: AdaTaylorCache
 ├── cache/            # General cache management
 ├── offload/          # CPU offload strategies
-├── metrics/          # Metrics collection and monitoring
+├── metrics/          # Metrics collection, monitoring, and raw runtime facts
 ├── orchestrator/     # Request orchestration and actor-based streaming scheduler
 ├── worker/           # Distributed worker management
 ├── entrypoints/      # CLI entry points
@@ -124,6 +124,13 @@ TeleFuser's model follows a strict layered architecture for operations:
    - May use `torch.library.custom_op` for torch.compile compatibility
    - Only used by ops/ layer, never directly by models/
 
+### Benchmark Metrics Boundary
+
+- `telefuser/metrics/runtime.py` measures synchronized target-side phase duration and allocator peaks.
+- Target services emit only raw, bounded phase, chunk, and runtime facts. AIPerf owns warmup exclusion,
+  aggregation, semantic mapping, artifacts, and visualization.
+- Client delivery and target compute metrics remain distinct (`stream_fps` versus `chunk_compute_fps`).
+
 ## Code Style
 
 - PEP8 with ruff (line length: 120)
@@ -135,6 +142,7 @@ TeleFuser's model follows a strict layered architecture for operations:
 
 | Topic | English | Chinese |
 |-------|---------|---------|
+| AIPerf Benchmark | [docs/en/benchmark_aiperf.md](docs/en/benchmark_aiperf.md) | [docs/zh/benchmark_aiperf.md](docs/zh/benchmark_aiperf.md) |
 | Adding New Example | [docs/en/adding_new_example.md](docs/en/adding_new_example.md) | [docs/zh/adding_new_example.md](docs/zh/adding_new_example.md) |
 | Adding New Model | [docs/en/adding_new_model.md](docs/en/adding_new_model.md) | [docs/zh/adding_new_model.md](docs/zh/adding_new_model.md) |
 | Adding New Stage | [docs/en/adding_new_stage.md](docs/en/adding_new_stage.md) | [docs/zh/adding_new_stage.md](docs/zh/adding_new_stage.md) |

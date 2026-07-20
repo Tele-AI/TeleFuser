@@ -95,6 +95,7 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 <a href="service/"><strong>服务指南</strong><span>批量服务、任务 API 和 SDK。</span></a>
 <a href="stream_server/"><strong>流式服务</strong><span>WebRTC 流式传输和双向控制。</span></a>
 <a href="stream_scheduler/"><strong>流式调度器</strong><span>Actor 所有权、有界数据流、生命周期、指标和 GPU 卡位。</span></a>
+<a href="benchmark_aiperf/"><strong>AIPerf 基准测试</strong><span>Batch、stream、baseline 与历史指标工作流。</span></a>
 <a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
 <a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>
 <a href="adding_new_model/"><strong>新增模型</strong><span>集成新的模型架构和阶段。</span></a>

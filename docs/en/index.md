@@ -96,6 +96,7 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 <a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
 <a href="stream_server/"><strong>Stream Server</strong><span>WebRTC streaming and bidirectional control.</span></a>
 <a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
+<a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch, stream, baseline, and history workflows.</span></a>
 <a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
 <a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
 <a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
