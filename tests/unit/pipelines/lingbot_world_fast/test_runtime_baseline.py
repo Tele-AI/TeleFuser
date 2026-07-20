@@ -6,6 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
+from telefuser.models.lingbot_world_fast_dit import _set_cache_index
 from telefuser.pipelines.lingbot_world_fast.denoising import LingBotWorldFastDenoisingStage
 from telefuser.pipelines.lingbot_world_fast.pipeline import (
     LingBotWorldFastPipeline,
@@ -63,6 +64,27 @@ def test_v1_and_v2_defaults_match_the_shared_source_contract() -> None:
     assert LingBotWorldFastPipelineConfig().vae_config.torch_dtype == torch.float32
     assert LingBotWorldV2PipelineConfig().vae_config.torch_dtype == torch.float32
     assert LingBotWorldFastSessionConfig(prompt="v1", image=image).frame_policy == "truncate"
+
+
+def test_denoising_cache_cursors_use_mutable_scalar_tensors() -> None:
+    stage = object.__new__(LingBotWorldFastDenoisingStage)
+    stage.dit = SimpleNamespace(dim=8, num_heads=2, num_layers=1, device_mesh=None)
+    stage.device = torch.device("cpu")
+    stage.torch_dtype = torch.float32
+
+    cache = stage._init_self_kv_cache(batch_size=1, kv_size=4)[0]
+
+    assert cache["global_end_index"].shape == ()
+    assert cache["local_end_index"].shape == ()
+    assert cache["global_end_index"].dtype == torch.int64
+    assert cache["local_end_index"].dtype == torch.int64
+
+    copied_cache = cache.copy()
+    _set_cache_index(copied_cache, "global_end_index", 7)
+    _set_cache_index(copied_cache, "local_end_index", 11)
+
+    assert cache["global_end_index"].item() == 7
+    assert cache["local_end_index"].item() == 11
 
 
 def test_v1_and_v2_share_source_image_geometry_and_preprocessing() -> None:

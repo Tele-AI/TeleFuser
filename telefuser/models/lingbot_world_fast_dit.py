@@ -29,6 +29,15 @@ def _cache_index_to_int(value: int | torch.Tensor) -> int:
     return int(value.item())
 
 
+def _set_cache_index(cache: dict[str, torch.Tensor | int], name: str, value: int) -> None:
+    """Update an eager cursor in place when its storage is a scalar tensor."""
+    cursor = cache[name]
+    if isinstance(cursor, torch.Tensor):
+        cursor.fill_(value)
+    else:
+        cache[name] = value
+
+
 class CausalSelfAttention(nn.Module):
     """Causal self-attention with rolling KV cache support."""
 
@@ -172,8 +181,8 @@ class CausalSelfAttention(nn.Module):
             output_layout="BSND",
         )
 
-        kv_cache["global_end_index"] = current_end
-        kv_cache["local_end_index"] = local_end
+        _set_cache_index(kv_cache, "global_end_index", current_end)
+        _set_cache_index(kv_cache, "local_end_index", local_end)
 
         if ulysses_enabled:
             pad_len = padded_seq_len - num_new_tokens
