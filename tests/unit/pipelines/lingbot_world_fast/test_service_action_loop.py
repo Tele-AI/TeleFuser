@@ -27,7 +27,7 @@ def _state() -> LingBotWorldFastSessionState:
     )
 
 
-def test_online_worker_delegates_to_the_wavefront_scheduler() -> None:
+def test_online_worker_delegates_to_the_actor_scheduler() -> None:
     pipeline = MagicMock()
     pipeline._best_output_size.return_value = (8, 8)
     pipeline.check_resize_height_width.return_value = (8, 8)
@@ -38,10 +38,78 @@ def test_online_worker_delegates_to_the_wavefront_scheduler() -> None:
     state = _state()
     state.active = False
 
-    with patch.object(service, "_run_realtime_worker_loop") as run_realtime:
+    with patch.object(service, "_run_actor_worker_loop") as run_realtime:
         service._run_worker_loop("session-a", state, MagicMock())
 
     run_realtime.assert_called_once()
+
+
+def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
+    pipeline = MagicMock()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(
+            prompt="test",
+            image=Image.new("RGB", (8, 8)),
+            chunk_size=1,
+            frame_num=1,
+            show_control_hud=False,
+        ),
+        latent_f=1,
+        chunk_size=1,
+        width=8,
+        height=8,
+        cache_handle=7,
+    )
+    pipeline._create_initialized_session.return_value = runtime
+    pipeline._resolve_control.return_value = torch.zeros(1)
+    streaming_runtime = MagicMock()
+    streaming_session = SimpleNamespace(session_id="actor-session")
+    streaming_runtime.create_session.return_value = streaming_session
+    streaming_runtime.error.return_value = None
+    streaming_runtime.try_submit_chunk.return_value = True
+    streaming_runtime.poll_frames.return_value = [(0, [Image.new("RGB", (8, 8))])]
+    pipeline._get_streaming_runtime.return_value = streaming_runtime
+
+    service = LingBotWorldFastService(pipeline)
+    state = LingBotWorldFastSessionState(config=runtime.config)
+    state.control_context = SimpleNamespace()
+    control_builder = MagicMock()
+    emit_status = MagicMock()
+    first_control = (object(), ["w"])
+
+    with (
+        patch.object(service, "_next_realtime_control", return_value=first_control),
+        patch.object(service, "_put_output") as put_output,
+        patch.object(service, "_encode_frames_to_b64", return_value=["encoded"]),
+    ):
+        service._run_actor_worker_loop(state, state.control_context, control_builder, emit_status)
+
+    streaming_runtime.create_session.assert_called_once_with(runtime, progress_callback=emit_status)
+    streaming_runtime.try_submit_chunk.assert_called_once_with(
+        streaming_session, 0, pipeline._resolve_control.return_value
+    )
+    assert put_output.call_args.args[1]["index"] == 0
+    assert runtime.current_chunk_index == 1
+    assert runtime.emitted_frames == 1
+    assert state.streaming_session is streaming_session
+
+
+def test_actor_worker_does_not_submit_after_close_during_initialization() -> None:
+    pipeline = MagicMock()
+    runtime = LingBotWorldFastGenerationSession(config=_state().config, cache_handle=7)
+    service = LingBotWorldFastService(pipeline)
+    state = _state()
+
+    def initialize(*_args: object, **_kwargs: object) -> LingBotWorldFastGenerationSession:
+        state.active = False
+        return runtime
+
+    pipeline._create_initialized_session.side_effect = initialize
+    with patch.object(service, "_next_realtime_control", return_value=(object(), None)):
+        service._run_actor_worker_loop(state, MagicMock(), MagicMock(), MagicMock())
+
+    pipeline._get_streaming_runtime.assert_not_called()
+    assert state.generation_session is runtime
 
 
 def test_direction_action_updates_state_and_wakes_worker() -> None:
@@ -322,6 +390,41 @@ def test_close_session_waits_for_worker_to_release_generation_state() -> None:
     assert "session-a" in service._sessions
     service.pipeline.release_session.assert_not_called()
     assert state.pending_inputs.get_nowait() == {"type": "stop"}
+
+
+def test_release_generation_session_closes_actor_session_once() -> None:
+    pipeline = MagicMock()
+    streaming_runtime = MagicMock()
+    pipeline._get_streaming_runtime.return_value = streaming_runtime
+    service = LingBotWorldFastService(pipeline)
+    state = _state()
+    state.generation_session = MagicMock()
+    state.streaming_session = SimpleNamespace(session_id="actor-session")
+
+    service._release_generation_session(state)
+    service._release_generation_session(state)
+
+    streaming_runtime.close_session.assert_called_once()
+    pipeline.release_session.assert_not_called()
+    assert state.streaming_session is None
+    assert state.generation_session is None
+
+
+def test_release_generation_session_retains_handles_when_drain_fails() -> None:
+    pipeline = MagicMock()
+    pipeline._get_streaming_runtime.return_value.close_session.side_effect = TimeoutError("drain failed")
+    service = LingBotWorldFastService(pipeline)
+    state = _state()
+    generation_session = MagicMock()
+    streaming_session = SimpleNamespace(session_id="actor-session")
+    state.generation_session = generation_session
+    state.streaming_session = streaming_session
+
+    with pytest.raises(TimeoutError, match="drain failed"):
+        service._release_generation_session(state)
+
+    assert state.streaming_session is streaming_session
+    assert state.generation_session is generation_session
 
 
 def test_service_start_warms_the_pipeline_with_its_default_shape() -> None:

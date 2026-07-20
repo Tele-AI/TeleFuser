@@ -18,12 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.worker.parallel_worker import ParallelWorker
 
 from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
 from .pipeline import LingBotWorldFastPipeline
 from .session import (
-    LingBotWorldFastChunkRequest,
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionState,
@@ -368,7 +366,12 @@ class LingBotWorldFastService:
         return encoded
 
     def _release_generation_session(self, state: LingBotWorldFastSessionState) -> None:
-        if state.generation_session is not None:
+        if state.streaming_session is not None:
+            streaming_session = state.streaming_session
+            self.pipeline._get_streaming_runtime().close_session(streaming_session)
+            state.streaming_session = None
+            state.generation_session = None
+        elif state.generation_session is not None:
             self.pipeline.release_session(state.generation_session)
             state.generation_session = None
         with state.control_lock:
@@ -712,98 +715,133 @@ class LingBotWorldFastService:
             return control_builder.defer(directional_chunk), applied_controls
         return None
 
-    def _run_realtime_worker_loop(
+    def _run_actor_worker_loop(
         self,
-        session_id: str,
         state: LingBotWorldFastSessionState,
         control_context: LingBotWorldFastControlContext,
         control_builder: LingBotWorldFastControlBuilder,
         emit_status: Callable[..., None],
     ) -> None:
-        """Run WebRTC chunks with one-control lookahead when VAE has its own worker."""
-        next_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
-        if next_item is None:
+        """Drive dynamic control ingress and ordered output through the shared actor graph."""
+        first_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
+        if first_item is None:
             return
         runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
         state.generation_session = runtime
-        control, applied_controls = next_item
-        in_flight = self.pipeline._submit_chunk(runtime, 0, control, progress_callback=emit_status)
-        current_controls = applied_controls
-        current_started_at = time.monotonic()
-        while state.active and in_flight is not None:
-            chunk_index = in_flight.chunk_index
-            emit_status("generating_chunk", index=chunk_index)
-            with state.metrics_lock:
-                state.chunk_started_at_monotonic[chunk_index] = current_started_at
+        if not state.active:
+            return
+        streaming_runtime = self.pipeline._get_streaming_runtime()
+        streaming_session = streaming_runtime.create_session(runtime, progress_callback=emit_status)
+        state.streaming_session = streaming_session
+        if not state.active:
+            return
+        emit_status(
+            "runtime_ready",
+            width=runtime.width,
+            height=runtime.height,
+            latent_frames=runtime.latent_f,
+            total_chunks=runtime.chunk_count,
+            stream_progress=self._stream_progress(state, runtime),
+        )
 
-            result_index, denoised = self.pipeline._wait_for_chunk(runtime, in_flight)
-            lookahead = self._next_realtime_control(
-                state, control_context, control_builder, chunk_index + 1, emit_status, block=False
-            )
-            next_control = lookahead[0] if lookahead is not None else None
-            next_controls = lookahead[1] if lookahead is not None else None
-            if lookahead is not None and chunk_index + 1 < runtime.chunk_count:
-                emit_status("generating_chunk", index=chunk_index + 1, prefetched=True)
-            in_flight, frames, done = self.pipeline._complete_chunk(
-                runtime,
-                in_flight,
-                denoised,
-                next_control,
-                progress_callback=emit_status,
-            )
-            if not frames:
-                break
-            if state.config.show_control_hud:
-                frames = self._overlay_control_hud(frames, current_controls)
-            self._put_output(
-                state,
-                {
-                    "type": "chunk",
-                    "index": result_index,
-                    "fps": state.config.fps,
-                    "timestamp": time.time(),
-                    "frames_b64": self._encode_frames_to_b64(frames),
-                },
-            )
-            chunk_elapsed = time.monotonic() - current_started_at
+        submitted = 0
+        controls_by_chunk: dict[int, list[str] | None] = {}
+
+        def raise_scheduler_error() -> None:
+            error = streaming_runtime.error(streaming_session)
+            if error is not None:
+                raise RuntimeError("LingBot streaming scheduler failed") from error
+
+        def submit_chunk(item: tuple[object, list[str] | None]) -> None:
+            nonlocal submitted
+            deferred_control, applied_controls = item
+            control = self.pipeline._resolve_control(deferred_control)
+            self.pipeline._validate_control(runtime, control)
+            if not streaming_runtime.try_submit_chunk(streaming_session, submitted, control):
+                raise RuntimeError("LingBot streaming ingress became unavailable after capacity check")
+            controls_by_chunk[submitted] = applied_controls
+            emit_status("generating_chunk", index=submitted, prefetched=submitted > runtime.current_chunk_index)
             with state.metrics_lock:
-                if state.first_chunk_sent_at_monotonic is None:
-                    state.first_chunk_sent_at_monotonic = time.monotonic()
-                state.chunk_started_at_monotonic.pop(result_index, None)
-                control_to_chunk_seconds = (
-                    time.monotonic() - state.last_control_at_monotonic
-                    if state.last_control_at_monotonic is not None
-                    else None
+                state.chunk_started_at_monotonic[submitted] = time.monotonic()
+            submitted += 1
+
+        submit_chunk(first_item)
+        while state.active and runtime.current_chunk_index < runtime.chunk_count:
+            raise_scheduler_error()
+            while submitted < runtime.chunk_count and streaming_runtime.can_submit_chunk(streaming_session):
+                item = self._next_realtime_control(
+                    state,
+                    control_context,
+                    control_builder,
+                    submitted,
+                    emit_status,
+                    block=False,
                 )
-            emit_status(
-                "chunk_sent",
-                index=result_index,
-                frames=len(frames),
-                chunk_elapsed_seconds=round(chunk_elapsed, 6),
-                control_to_chunk_seconds=(
-                    round(control_to_chunk_seconds, 6) if control_to_chunk_seconds is not None else None
-                ),
-                runtime_metrics=self._runtime_metrics(state),
-                stream_progress=self._stream_progress(state, runtime),
-            )
-            if done or not state.active:
-                break
-            if lookahead is None:
-                next_item = self._next_realtime_control(
-                    state, control_context, control_builder, runtime.current_chunk_index, emit_status, block=True
-                )
-                if next_item is None:
+                if item is None:
                     break
-                control, current_controls = next_item
-                in_flight = self.pipeline._submit_chunk(
-                    runtime,
-                    runtime.current_chunk_index,
-                    control,
-                    progress_callback=emit_status,
+                submit_chunk(item)
+
+            outputs = streaming_runtime.poll_frames(streaming_session)
+            for result_index, frames in outputs:
+                if result_index != runtime.current_chunk_index:
+                    raise RuntimeError(
+                        f"LingBot actor output index {result_index} does not match {runtime.current_chunk_index}"
+                    )
+                if not frames:
+                    raise RuntimeError(f"LingBot actor emitted no frames for chunk {result_index}")
+                applied_controls = controls_by_chunk.pop(result_index, None)
+                if state.config.show_control_hud:
+                    frames = self._overlay_control_hud(frames, applied_controls)
+                self._put_output(
+                    state,
+                    {
+                        "type": "chunk",
+                        "index": result_index,
+                        "fps": state.config.fps,
+                        "timestamp": time.time(),
+                        "frames_b64": self._encode_frames_to_b64(frames),
+                    },
                 )
-            else:
-                current_controls = next_controls
-            current_started_at = time.monotonic()
+                now = time.monotonic()
+                with state.metrics_lock:
+                    started_at = state.chunk_started_at_monotonic.pop(result_index, now)
+                    if state.first_chunk_sent_at_monotonic is None:
+                        state.first_chunk_sent_at_monotonic = now
+                    control_to_chunk_seconds = (
+                        now - state.last_control_at_monotonic if state.last_control_at_monotonic is not None else None
+                    )
+                runtime.current_chunk_index += 1
+                runtime.emitted_frames += len(frames)
+                emit_status(
+                    "chunk_sent",
+                    index=result_index,
+                    frames=len(frames),
+                    chunk_elapsed_seconds=round(now - started_at, 6),
+                    control_to_chunk_seconds=(
+                        round(control_to_chunk_seconds, 6) if control_to_chunk_seconds is not None else None
+                    ),
+                    runtime_metrics=self._runtime_metrics(state),
+                    stream_progress=self._stream_progress(state, runtime),
+                )
+
+            if runtime.current_chunk_index >= runtime.chunk_count or not state.active:
+                break
+            if submitted == runtime.current_chunk_index:
+                item = self._next_realtime_control(
+                    state,
+                    control_context,
+                    control_builder,
+                    submitted,
+                    emit_status,
+                    block=True,
+                )
+                if item is None:
+                    break
+                if not streaming_runtime.can_submit_chunk(streaming_session):
+                    raise RuntimeError("LingBot actor ingress remained blocked without in-flight work")
+                submit_chunk(item)
+            elif not outputs:
+                streaming_runtime.wait_until_idle(streaming_session, timeout=0.05)
 
     def _worker_loop(self, session_id: str) -> None:
         state = self._sessions.get(session_id)
@@ -828,24 +866,14 @@ class LingBotWorldFastService:
         state: LingBotWorldFastSessionState,
         emit_status: Callable[..., None],
     ) -> None:
-        """Run the only supported LingBot worker topology: VAE worker plus wavefront scheduler."""
+        """Run dynamic service ingress through the pipeline-owned actor scheduler."""
         try:
             with state.metrics_lock:
                 state.worker_started_at_monotonic = time.monotonic()
             self._emit_preview_frame(state)
             control_context = state.control_context or self.pipeline.control_context(state.config)
             control_builder = LingBotWorldFastControlBuilder(control_context)
-            runtime = LingBotWorldFastGenerationSession(config=state.config)
-            state.generation_session = runtime
-            emit_status(
-                "runtime_ready",
-                width=control_context.width,
-                height=control_context.height,
-                latent_frames=control_context.latent_frames,
-                total_chunks=control_context.latent_frames // control_context.chunk_size,
-                stream_progress=self._stream_progress(state, runtime),
-            )
-            self._run_realtime_worker_loop(session_id, state, control_context, control_builder, emit_status)
+            self._run_actor_worker_loop(state, control_context, control_builder, emit_status)
         except Exception as exc:
             logger.exception(f"LingBotWorld worker failed: session={session_id}, error={exc}")
             self._put_output(
@@ -916,7 +944,10 @@ class LingBotWorldFastService:
             return
         state.active = False
         state.pending_inputs.put({"type": "stop"})
-        if state.worker_thread is None or not state.worker_thread.is_alive():
+        worker = state.worker_thread
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            worker.join()
+        if worker is None or not worker.is_alive():
             self._release_generation_session(state)
             self._sessions.pop(session_id, None)
         logger.info(f"LingBotWorld session closed: {session_id}")

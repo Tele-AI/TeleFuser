@@ -21,7 +21,7 @@ from telefuser.orchestrator import (
     StreamingStageInvocation,
     StreamingStageSpec,
 )
-from telefuser.worker.parallel_worker import ParallelWorker
+from telefuser.utils.logging import logger
 
 from .session import LingBotWorldFastGenerationSession
 
@@ -229,19 +229,13 @@ class LingBotWorldFastStreamingRuntime:
             return entry
 
     def _denoise_actor(self):
-        if isinstance(self.pipeline.denoise_stage, ParallelWorker):
-            return ParallelWorkerStageActor(
-                self.pipeline.denoise_stage,
-                "denoise_and_update_cache",
-                self._denoise_inputs,
-                lambda value, _: {"latent": value},
-                close_worker=False,
-            )
-        return LocalStageActor(self._denoise_local, name="lingbot-denoise-actor")
+        return LocalStageActor(self._denoise, name="lingbot-denoise-actor")
 
     def _encode_inputs(self, invocation: StreamingStageInvocation) -> tuple[tuple[object, ...], dict[str, object]]:
-        runtime = self._entry_for_invocation(invocation).runtime
+        entry = self._entry_for_invocation(invocation)
+        runtime = entry.runtime
         index = invocation.key.sequence_id
+        self.pipeline._notify_progress(entry.progress_callback, "encoding_condition_chunk", index=index)
         return (), {
             "cache_handle": runtime.cache_handle,
             "chunk_index": index,
@@ -253,14 +247,16 @@ class LingBotWorldFastStreamingRuntime:
 
     def _encode_outputs(self, value: torch.Tensor, invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
-        if invocation.key.sequence_id == 0:
+        index = invocation.key.sequence_id
+        self.pipeline._notify_progress(entry.progress_callback, "condition_chunk_encoded", index=index)
+        if index == 0:
             entry.runtime.condition_image = None
         return {"condition": value.to(device=self.pipeline.device, dtype=self.pipeline.torch_dtype)}
 
-    def _denoise_inputs(self, invocation: StreamingStageInvocation) -> tuple[tuple[object, ...], dict[str, object]]:
+    def _denoise_kwargs(self, invocation: StreamingStageInvocation) -> dict[str, object]:
         runtime = self._entry_for_invocation(invocation).runtime
         index = invocation.key.sequence_id
-        return (), {
+        return {
             "cache_handle": runtime.cache_handle,
             "condition_chunk": invocation.inputs["condition"],
             "prompt_emb": runtime.prompt_emb,
@@ -269,13 +265,41 @@ class LingBotWorldFastStreamingRuntime:
             "max_attention_size": runtime.max_attention_size,
         }
 
-    def _denoise_local(self, invocation: StreamingStageInvocation) -> dict[str, object]:
-        _, kwargs = self._denoise_inputs(invocation)
-        return {"latent": self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)}
+    def _denoise(self, invocation: StreamingStageInvocation) -> dict[str, object]:
+        entry = self._entry_for_invocation(invocation)
+        runtime = entry.runtime
+        index = invocation.key.sequence_id
+        cached_latent = runtime.world_kv_cached_latents.pop(index, None) if runtime.world_kv_cached_latents else None
+        if cached_latent is not None:
+            self.pipeline._notify_progress(entry.progress_callback, "world_kv_cache_hit", index=index)
+            advance = self.pipeline.denoise_stage.advance_noise(cache_handle=runtime.cache_handle)
+            if callable(advance):
+                advance()
+            latent = cached_latent.to(device=self.pipeline.device, dtype=self.pipeline.torch_dtype)
+        else:
+            self.pipeline._notify_progress(entry.progress_callback, "denoising_chunk", index=index)
+            kwargs = self._denoise_kwargs(invocation)
+            latent = self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)
+            if callable(latent):
+                latent = latent()
+            self.pipeline._notify_progress(entry.progress_callback, "chunk_denoised", index=index)
+        if runtime.world_kv_binding is not None:
+            try:
+                runtime.world_kv_binding.on_chunk_finalized(runtime, index, latent)
+            except Exception as exc:
+                logger.warning(f"world_kv on_chunk_finalized failed at chunk {index}: {exc}")
+        return {"latent": latent}
 
     def _decode_inputs(self, invocation: StreamingStageInvocation) -> tuple[tuple[object, ...], dict[str, object]]:
-        runtime = self._entry_for_invocation(invocation).runtime
+        entry = self._entry_for_invocation(invocation)
+        runtime = entry.runtime
         index = invocation.key.sequence_id
+        self.pipeline._notify_progress(
+            entry.progress_callback,
+            "decoding_chunk",
+            index=index,
+            device=str(self.pipeline.vae_device),
+        )
         return (), {
             "cache_handle": runtime.cache_handle,
             "latents": invocation.inputs["latent"],

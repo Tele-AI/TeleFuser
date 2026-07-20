@@ -26,8 +26,6 @@ from telefuser.worker.parallel_worker import ParallelWorker
 from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
 from .denoising import LingBotWorldFastDenoisingStage
 from .session import (
-    LingBotWorldFastChunkRequest,
-    LingBotWorldFastChunkResult,
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionStatus,
@@ -56,14 +54,6 @@ class LingBotWorldFastPipelineConfig:
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     vae_parallel_config: ParallelConfig = field(default_factory=lambda: ParallelConfig(device_ids=[0]))
     attention_config: AttentionConfig = field(default_factory=AttentionConfig)
-
-
-@dataclass
-class _InFlightDenoise:
-    """A submitted DiT chunk owned by the caller's wavefront loop."""
-
-    chunk_index: int
-    wait_for_denoise: Callable[[], torch.Tensor]
 
 
 class LingBotWorldFastPipeline(BasePipeline):
@@ -294,27 +284,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         tensor = torch.nn.functional.interpolate(tensor.unsqueeze(0), size=(height, width), mode="bicubic").squeeze(0)
         return tensor.to("cpu", dtype=self.config.vae_config.torch_dtype)
 
-    def _encode_condition_chunk(
-        self, session: LingBotWorldFastGenerationSession, chunk_index: int | None = None
-    ) -> torch.Tensor:
-        """Encode one condition chunk in the dedicated VAE worker."""
-        if chunk_index is None:
-            chunk_index = session.current_chunk_index
-        if session.cache_handle is None:
-            raise RuntimeError("VAE encode requires an active session cache handle")
-        condition = self.vae_encode_worker.encode_condition_chunk(
-            cache_handle=session.cache_handle,
-            chunk_index=chunk_index,
-            chunk_count=session.chunk_count,
-            chunk_size=session.chunk_size,
-            height=session.height,
-            width=session.width,
-            sync=True,
-        )
-        if chunk_index == 0:
-            session.condition_image = None
-        return condition.to(device=self.device, dtype=self.torch_dtype)
-
     def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> None:
         """Register session-owned VAE caches in the dedicated worker."""
         if session.cache_handle is None or session.condition_image is None:
@@ -354,7 +323,7 @@ class LingBotWorldFastPipeline(BasePipeline):
 
     def release_session(self, session: LingBotWorldFastGenerationSession) -> None:
         """Idempotently release cache and decoder state owned by a session."""
-        with session.transaction_lock:
+        with session.lifecycle_lock:
             vae_cache_released = self._release_vae_session_cache(session)
             cache_released = self._release_session_cache(session)
             session.condition_image = None
@@ -404,26 +373,9 @@ class LingBotWorldFastPipeline(BasePipeline):
         if control_context.control_type == "act":
             action["action"] = np.zeros((control_context.chunk_size, 4), dtype=np.float32)
 
-        session = LingBotWorldFastGenerationSession(config=session_config)
-        try:
-            self(
-                session,
-                LingBotWorldFastChunkRequest(
-                    chunk_index=0,
-                    session_id="warmup",
-                    control=LingBotWorldFastControlBuilder(control_context).defer(action),
-                ),
-            )
-            self(
-                session,
-                LingBotWorldFastChunkRequest(
-                    chunk_index=1,
-                    session_id="warmup",
-                    control=LingBotWorldFastControlBuilder(control_context).defer(action),
-                ),
-            )
-        finally:
-            self.release_session(session)
+        control_builder = LingBotWorldFastControlBuilder(control_context)
+        controls = [control_builder.defer(action) for _ in range(2)]
+        self.generate_video(session_config, controls)
 
     def __del__(self) -> None:
         """Best-effort fallback for callers that do not explicitly close the pipeline."""
@@ -432,62 +384,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         except Exception:
             pass
 
-    @torch.inference_mode()
-    def __call__(
-        self,
-        session: LingBotWorldFastGenerationSession,
-        request: LingBotWorldFastChunkRequest,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> LingBotWorldFastChunkResult:
-        """Initialize a session on first use and generate one controlled chunk."""
-        if not session.transaction_lock.acquire(blocking=False):
-            raise RuntimeError("LingBot session already has a chunk in progress")
-        try:
-            self._validate_chunk_request(session, request)
-            resolved_control: torch.Tensor | None = None
-            if session.status == LingBotWorldFastSessionStatus.NEW:
-                try:
-
-                    def materialize_first_control() -> None:
-                        nonlocal resolved_control
-                        resolved_control = self._resolve_control(request.control)
-
-                    initialized = self._create_initialized_session(
-                        session.config,
-                        progress_callback,
-                        before_cache=materialize_first_control,
-                    )
-                    session.__dict__.update(
-                        (key, value) for key, value in initialized.__dict__.items() if key != "transaction_lock"
-                    )
-                except Exception as exc:
-                    session.status = LingBotWorldFastSessionStatus.POISONED
-                    session.poisoned_reason = f"{type(exc).__name__}: {exc}"
-                    self.release_session(session)
-                    raise
-            if resolved_control is None:
-                resolved_control = self._resolve_control(request.control)
-            self._validate_control(session, resolved_control)
-            return self._generate_session_chunk(session, request, resolved_control, progress_callback)
-        finally:
-            session.transaction_lock.release()
-
-    @staticmethod
-    def _validate_chunk_request(
-        session: LingBotWorldFastGenerationSession,
-        request: LingBotWorldFastChunkRequest,
-    ) -> None:
-        if session.status == LingBotWorldFastSessionStatus.POISONED:
-            raise RuntimeError(f"Cannot continue poisoned LingBot session: {session.poisoned_reason}")
-        if session.status == LingBotWorldFastSessionStatus.RUNNING:
-            raise RuntimeError("LingBot session already has a chunk in progress")
-        if session.status == LingBotWorldFastSessionStatus.RELEASED:
-            raise RuntimeError("Cannot generate a chunk from an inactive LingBot session")
-        if request.chunk_index != session.current_chunk_index:
-            raise ValueError(
-                f"Chunk request index {request.chunk_index} does not match session index {session.current_chunk_index}"
-            )
-
     @staticmethod
     def _resolve_control(control: torch.Tensor | Callable[[], torch.Tensor]) -> torch.Tensor:
         resolved = control() if callable(control) else control
@@ -495,92 +391,12 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise TypeError("Deferred control factory must return a torch.Tensor")
         return resolved
 
-    def _generate_session_chunk(
-        self,
-        session: LingBotWorldFastGenerationSession,
-        request: LingBotWorldFastChunkRequest,
-        control: torch.Tensor,
-        progress_callback: Callable[..., None] | None,
-    ) -> LingBotWorldFastChunkResult:
-        """Execute a chunk while the caller holds the session transaction lock."""
-        session.status = LingBotWorldFastSessionStatus.RUNNING
-        try:
-            chunk_frames = self.generate_next_chunk(
-                session,
-                control=control,
-                progress_callback=progress_callback,
-            )
-        except Exception as exc:
-            session.status = LingBotWorldFastSessionStatus.POISONED
-            session.poisoned_reason = f"{type(exc).__name__}: {exc}"
-            self.release_session(session)
-            raise
-
-        session.status = LingBotWorldFastSessionStatus.COMMITTED
-        done = session.current_chunk_index >= session.chunk_count
-        if done:
-            self.release_session(session)
-            if session.status == LingBotWorldFastSessionStatus.POISONED:
-                raise RuntimeError(session.poisoned_reason or "Final chunk cleanup failed")
-        logger.info(
-            f"Generated LingBot chunk {request.chunk_index + 1}/{session.chunk_count}: {len(chunk_frames)} frames"
-        )
-        return LingBotWorldFastChunkResult(
-            chunk_index=request.chunk_index,
-            frames=chunk_frames,
-            emitted_frames=session.emitted_frames,
-            done=done,
-            session_id=request.session_id,
-        )
-
-    @torch.inference_mode()
-    def generate_video(
-        self,
-        session_config: LingBotWorldFastSessionConfig,
-        controls: list[torch.Tensor | Callable[[], torch.Tensor]],
-        progress_callback: Callable[..., None] | None = None,
-    ) -> list[Image.Image]:
-        """Generate all chunks through the default one-control-lookahead scheduler."""
-        control_iterator = iter(controls)
-        try:
-            first_control = next(control_iterator)
-        except StopIteration as exc:
-            raise ValueError("Control sequence must contain at least one chunk") from exc
-
-        runtime = self._create_initialized_session(session_config, progress_callback)
-        frames: list[Image.Image] = []
-        try:
-            in_flight = self._submit_chunk(runtime, 0, first_control, progress_callback=progress_callback)
-            while in_flight is not None:
-                chunk_index, denoised = self._wait_for_chunk(runtime, in_flight)
-                next_control: torch.Tensor | Callable[[], torch.Tensor] | None = None
-                if chunk_index + 1 < runtime.chunk_count:
-                    try:
-                        next_control = next(control_iterator)
-                    except StopIteration as exc:
-                        raise ValueError("Control sequence ended before the generation session completed") from exc
-                in_flight, chunk_frames, done = self._complete_chunk(
-                    runtime,
-                    in_flight,
-                    denoised,
-                    next_control,
-                    progress_callback=progress_callback,
-                )
-                frames.extend(chunk_frames)
-                if done:
-                    break
-
-        finally:
-            self.release_session(runtime)
-        return frames
-
     @ProfilingContext4Debug("initialize_session")
     @torch.inference_mode()
     def _create_initialized_session(
         self,
         session_config: LingBotWorldFastSessionConfig,
         progress_callback: Callable[..., None] | None = None,
-        before_cache: Callable[[], None] | None = None,
     ) -> LingBotWorldFastGenerationSession:
         """Allocate model state for the first chunk; callers never invoke this directly."""
         control_context = self.control_context(session_config)
@@ -621,8 +437,6 @@ class LingBotWorldFastPipeline(BasePipeline):
         denoise_generator = torch.Generator(device=self.device)
         denoise_seed = (int(session_config.seed) ^ 0x51A7E5EED) & 0x7FFF_FFFF_FFFF_FFFF
         denoise_generator.manual_seed(denoise_seed)
-        if before_cache is not None:
-            before_cache()
         with self._cache_handle_lock:
             cache_handle = self._next_cache_handle
             self._next_cache_handle += 1
@@ -675,192 +489,21 @@ class LingBotWorldFastPipeline(BasePipeline):
         session.status = LingBotWorldFastSessionStatus.READY
         return session
 
-    def _submit_denoise_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        chunk_index: int,
-        control: torch.Tensor,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> Callable[[], torch.Tensor]:
-        """Encode conditions and enqueue a DiT chunk without waiting for its result."""
-        self._notify_progress(progress_callback, "encoding_condition_chunk", index=chunk_index)
-        condition_chunk = self._encode_condition_chunk(runtime, chunk_index=chunk_index)
-        self._notify_progress(progress_callback, "condition_chunk_encoded", index=chunk_index)
-        cached_latent = (
-            runtime.world_kv_cached_latents.pop(chunk_index, None) if runtime.world_kv_cached_latents else None
-        )
-        if cached_latent is not None:
-            if isinstance(self.denoise_stage, ParallelWorker):
-                wait_for_advance = self.denoise_stage.advance_noise(cache_handle=runtime.cache_handle)
-                return lambda: (wait_for_advance(), cached_latent.to(device=self.device, dtype=self.torch_dtype))[1]
-            self.denoise_stage.advance_noise(cache_handle=runtime.cache_handle)
-            return lambda: cached_latent.to(device=self.device, dtype=self.torch_dtype)
-
-        self._notify_progress(progress_callback, "denoising_chunk", index=chunk_index)
-        denoise_kwargs = dict(
-            cache_handle=runtime.cache_handle,
-            condition_chunk=condition_chunk,
-            prompt_emb=runtime.prompt_emb,
-            control_chunk=control,
-            current_start=chunk_index * runtime.chunk_size * runtime.frame_tokens,
-            max_attention_size=runtime.max_attention_size,
-        )
-        if isinstance(self.denoise_stage, ParallelWorker):
-            return self.denoise_stage.denoise_and_update_cache(**denoise_kwargs)
-        denoised = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs)
-        return lambda: denoised
-
-    def _submit_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        chunk_index: int,
-        control: torch.Tensor | Callable[[], torch.Tensor],
-        progress_callback: Callable[..., None] | None = None,
-    ) -> _InFlightDenoise:
-        """Validate and submit one DiT chunk for the one-control-lookahead loop."""
-        if chunk_index >= runtime.chunk_count:
-            raise RuntimeError("The LingBot session has no remaining chunks")
-        resolved_control = self._resolve_control(control)
-        self._validate_control(runtime, resolved_control)
-        return _InFlightDenoise(
-            chunk_index=chunk_index,
-            wait_for_denoise=self._submit_denoise_chunk(
-                runtime,
-                chunk_index,
-                resolved_control,
-                progress_callback=progress_callback,
-            ),
-        )
-
-    def _complete_denoise_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        chunk_index: int,
-        wait_for_denoise: Callable[[], torch.Tensor],
-    ) -> torch.Tensor:
-        """Wait for a submitted DiT chunk and commit optional world-KV bookkeeping."""
-        with ProfilingContext4Debug("denoise_chunk"):
-            denoised = wait_for_denoise()
-        if runtime.world_kv_binding is not None:
-            try:
-                runtime.world_kv_binding.on_chunk_finalized(runtime, chunk_index, denoised)
-            except Exception as exc:
-                logger.warning(f"world_kv on_chunk_finalized failed at chunk {chunk_index}: {exc}")
-        return denoised
-
-    def _wait_for_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        in_flight: _InFlightDenoise,
-    ) -> tuple[int, torch.Tensor]:
-        """Wait for the submitted DiT chunk while the caller receives controls."""
-        return in_flight.chunk_index, self._complete_denoise_chunk(
-            runtime,
-            in_flight.chunk_index,
-            in_flight.wait_for_denoise,
-        )
-
-    def _submit_decode_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        chunk_index: int,
-        denoised: torch.Tensor,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> Callable[[], list[Image.Image]]:
-        """Enqueue VAE decode and return a waiter that converts frames to images."""
-        self._notify_progress(progress_callback, "decoding_chunk", index=chunk_index, device=str(self.vae_device))
-        is_first_clip = chunk_index == 0
-        is_last_clip = chunk_index == runtime.chunk_count - 1
-        if runtime.cache_handle is None:
-            raise RuntimeError("VAE decode requires an active session cache handle")
-        wait_for_decode = self.vae_decode_worker.decode_chunk(
-            cache_handle=runtime.cache_handle,
-            latents=denoised,
-            is_first_clip=is_first_clip,
-            is_last_clip=is_last_clip,
-        )
-
-        def wait() -> list[Image.Image]:
-            with ProfilingContext4Debug("vae_decode"):
-                images = self.tensor2video(wait_for_decode())
-            self._notify_progress(progress_callback, "chunk_decoded", index=chunk_index, frames=len(images))
-            return images
-
-        return wait
-
-    def _complete_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        in_flight: _InFlightDenoise,
-        denoised: torch.Tensor,
-        next_control: torch.Tensor | Callable[[], torch.Tensor] | None = None,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> tuple[_InFlightDenoise | None, list[Image.Image], bool]:
-        """Submit the optional lookahead chunk, then decode and commit the current chunk."""
-        chunk_index = in_flight.chunk_index
-        if chunk_index != runtime.current_chunk_index:
-            raise RuntimeError("LingBot chunk completion does not match the current session index")
-
-        next_in_flight = None
-        next_index = chunk_index + 1
-        if next_control is not None and next_index < runtime.chunk_count:
-            next_in_flight = self._submit_chunk(
-                runtime,
-                next_index,
-                next_control,
-                progress_callback=progress_callback,
-            )
-
-        images = self._submit_decode_chunk(
-            runtime,
-            chunk_index,
-            denoised,
-            progress_callback=progress_callback,
-        )()
-        runtime.current_chunk_index += 1
-        runtime.emitted_frames += len(images)
-        return next_in_flight, images, runtime.current_chunk_index >= runtime.chunk_count
-
     @torch.inference_mode()
-    def generate_next_chunk(
-        self,
-        runtime: LingBotWorldFastGenerationSession,
-        control: torch.Tensor,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> list[Image.Image]:
-        """Generate one chunk through the submit/complete worker boundary."""
-        if runtime.current_chunk_index >= runtime.chunk_count:
-            return []
-
-        with ProfilingContext4Debug("generate_next_chunk"):
-            chunk_index = runtime.current_chunk_index
-            wait_for_denoise = self._submit_denoise_chunk(
-                runtime, chunk_index, control, progress_callback=progress_callback
-            )
-            denoised = self._complete_denoise_chunk(runtime, chunk_index, wait_for_denoise)
-            images = self._submit_decode_chunk(runtime, chunk_index, denoised, progress_callback=progress_callback)()
-            runtime.current_chunk_index += 1
-            runtime.emitted_frames += len(images)
-            return images
-
-    @torch.inference_mode()
-    def generate_video_streaming(
+    def generate_video(
         self,
         session_config: LingBotWorldFastSessionConfig,
         controls: list[torch.Tensor | Callable[[], torch.Tensor]],
         progress_callback: Callable[..., None] | None = None,
         timeout: float = 300.0,
     ) -> list[Image.Image]:
-        """Generate all chunks through the opt-in bounded three-stage scheduler.
+        """Generate all chunks through the bounded three-stage actor scheduler.
 
         This is an offline adapter over the pipeline-owned streaming runtime. It
         keeps every tensor edge bounded and returns decoded batches in chunk order.
-        The legacy :meth:`generate_video` wavefront remains the default path.
         """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        if session_config.world_kv_binding is not None:
-            raise ValueError("generate_video_streaming does not support world_kv_binding yet")
 
         runtime = self._create_initialized_session(session_config, progress_callback)
         streaming_runtime: LingBotWorldFastStreamingRuntime

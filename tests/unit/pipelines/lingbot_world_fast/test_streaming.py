@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from unittest.mock import MagicMock
 
 import torch
 from PIL import Image
@@ -31,12 +32,19 @@ class _Worker:
 
 
 class _Denoise:
+    def __init__(self):
+        self.advance_calls: list[int] = []
+
     def denoise_and_update_cache(self, **kwargs):
         return kwargs["condition_chunk"]
+
+    def advance_noise(self, cache_handle: int):
+        self.advance_calls.append(cache_handle)
 
 
 class _Pipeline:
     device = "cpu"
+    vae_device = torch.device("cpu")
     torch_dtype = torch.float32
 
     def __init__(self):
@@ -131,3 +139,39 @@ def test_streaming_runtime_shares_one_actor_graph_across_sessions() -> None:
     assert {call["cache_handle"] for call in pipeline.vae_encode_worker.calls} == {10, 11}
     assert {call["cache_handle"] for call in pipeline.vae_decode_worker.calls} == {10, 11}
     assert pipeline.released == [10, 11]
+
+
+def test_streaming_runtime_preserves_world_kv_decode_only_hits() -> None:
+    pipeline = _Pipeline()
+    binding = MagicMock()
+    cached_latent = torch.tensor([7.0])
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=1,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=12,
+        world_kv_binding=binding,
+        world_kv_cached_latents={0: cached_latent},
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    try:
+        streaming_runtime.submit_chunk(session, 0, torch.tensor([4.0]))
+        assert streaming_runtime.wait_until_idle(session)
+        assert streaming_runtime.error(session) is None
+        assert streaming_runtime.poll_frames(session)
+    finally:
+        streaming_runtime.close_session(session)
+        streaming_runtime.close()
+
+    assert pipeline.denoise_stage.advance_calls == [12]
+    decode_call = pipeline.vae_decode_worker.calls[0]
+    torch.testing.assert_close(decode_call["latents"], cached_latent)
+    binding.on_chunk_finalized.assert_called_once()

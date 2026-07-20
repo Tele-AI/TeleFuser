@@ -164,7 +164,7 @@ def run(
     controls = [
         control_source.control_at(index) for index in range(control_context.latent_frames // control_context.chunk_size)
     ]
-    return pipeline.generate_video_streaming(session_config, controls)
+    return pipeline.generate_video(session_config, controls)
 
 
 @click.command()
