@@ -513,6 +513,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             frame_tokens=frame_tokens,
             chunk_size=session_config.chunk_size,
             max_attention_size=max_attention_size,
+            kv_cache_capacity_tokens=kv_size,
             cache_handle=cache_handle,
         )
         try:

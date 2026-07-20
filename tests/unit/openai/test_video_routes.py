@@ -34,6 +34,8 @@ def client(tmp_path):
             "task_id": "vid_123",
             "status": TaskStatus.COMPLETED.value,
             "output_path": str(tmp_path / "video.mp4"),
+            "peak_memory_mb": 2048.0,
+            "inference_time_s": 12.5,
         }
     )
     task_manager.get_task = MagicMock(
@@ -143,6 +145,8 @@ class TestVideoRetrieve:
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == "vid_123"
+        assert data["peak_memory_mb"] == 2048.0
+        assert data["inference_time_s"] == 12.5
 
     def test_delete_completed_video_reports_completed_status(self, client):
         """Delete on a terminal task reports the real terminal status."""

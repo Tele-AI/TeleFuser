@@ -63,6 +63,7 @@ class LingBotWorldFastSessionConfig:
     control_pitch_step_degrees: float = 2.0
     control_pitch_limit_degrees: float = 85.0
     show_control_hud: bool = True
+    benchmark_metrics: bool = False
 
 
 class LingBotWorldFastSessionStatus(str, Enum):
@@ -88,6 +89,7 @@ class LingBotWorldFastGenerationSession:
     frame_tokens: int = 0
     chunk_size: int = 0
     max_attention_size: int = 0
+    kv_cache_capacity_tokens: int = 0
     cache_handle: int | None = None
     current_chunk_index: int = 0
     emitted_frames: int = 0

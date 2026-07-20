@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
+from telefuser.metrics.runtime import RuntimeMeasurement, finish_runtime_measurement, start_runtime_measurement
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
 
@@ -273,6 +274,7 @@ class LingBotWorldFastService:
                 )
             ),
             show_control_hud=bool(config.get("show_control_hud", defaults.get("show_control_hud", True))),
+            benchmark_metrics=bool(config.get("benchmark_metrics", defaults.get("benchmark_metrics", False))),
         )
         control_context = self.pipeline.control_context(session_config)
         state = LingBotWorldFastSessionState(
@@ -845,6 +847,46 @@ class LingBotWorldFastService:
             return control_builder.defer(directional_chunk), applied_controls
         return None
 
+    def _benchmark_devices(self) -> tuple[str | torch.device, ...]:
+        """Return every CUDA-capable pipeline device for benchmark synchronization."""
+        devices: list[str | torch.device] = []
+        for name in ("device", "text_device", "vae_encode_device", "vae_decode_device", "vae_device"):
+            device = getattr(self.pipeline, name, None)
+            if device is not None and device not in devices:
+                devices.append(device)
+        parallel_config = getattr(getattr(self.pipeline, "config", None), "parallel_config", None)
+        for device_id in getattr(parallel_config, "device_ids", None) or ():
+            device = f"cuda:{int(device_id)}"
+            if device not in devices:
+                devices.append(device)
+        return tuple(devices)
+
+    def _start_benchmark_measurement(
+        self,
+        state: LingBotWorldFastSessionState,
+    ) -> RuntimeMeasurement | None:
+        if not state.config.benchmark_metrics:
+            return None
+        try:
+            # Generation runs in child actors, while this timer lives in the service
+            # process. Process-local allocator peaks would therefore be incomplete.
+            return start_runtime_measurement(self._benchmark_devices(), capture_peak_memory=False)
+        except Exception as exc:
+            logger.warning(f"Could not start LingBot benchmark measurement: {exc}")
+            return None
+
+    @staticmethod
+    def _finish_benchmark_measurement(
+        measurement: RuntimeMeasurement | None,
+    ) -> dict[str, object] | None:
+        if measurement is None:
+            return None
+        try:
+            return finish_runtime_measurement(measurement)
+        except Exception as exc:
+            logger.warning(f"Could not finish LingBot benchmark measurement: {exc}")
+            return None
+
     def _run_actor_worker_loop(
         self,
         state: LingBotWorldFastSessionState,
@@ -856,7 +898,11 @@ class LingBotWorldFastService:
         first_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
         if first_item is None:
             return
-        runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
+        runtime_measurement = self._start_benchmark_measurement(state)
+        try:
+            runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
+        finally:
+            runtime_facts = self._finish_benchmark_measurement(runtime_measurement)
         state.generation_session = runtime
         if not state.active:
             return
@@ -872,10 +918,13 @@ class LingBotWorldFastService:
             latent_frames=runtime.latent_f,
             total_chunks=runtime.chunk_count,
             stream_progress=self._stream_progress(state, runtime),
+            runtime=self._runtime_metadata(runtime),
+            **({"measurement": {"name": "runtime_creation", **runtime_facts}} if runtime_facts is not None else {}),
         )
 
         submitted = 0
         controls_by_chunk: dict[int, list[str] | None] = {}
+        measurements_by_chunk: dict[int, RuntimeMeasurement] = {}
 
         def raise_scheduler_error() -> None:
             error = streaming_runtime.error(streaming_session)
@@ -887,9 +936,13 @@ class LingBotWorldFastService:
             deferred_control, applied_controls = item
             control = self.pipeline._resolve_control(deferred_control)
             self.pipeline._validate_control(runtime, control)
+            chunk_measurement = self._start_benchmark_measurement(state)
             if not streaming_runtime.try_submit_chunk(streaming_session, submitted, control):
+                self._finish_benchmark_measurement(chunk_measurement)
                 raise RuntimeError("LingBot streaming ingress became unavailable after capacity check")
             controls_by_chunk[submitted] = applied_controls
+            if chunk_measurement is not None:
+                measurements_by_chunk[submitted] = chunk_measurement
             emit_status(
                 "generating_chunk",
                 index=submitted,
@@ -912,6 +965,7 @@ class LingBotWorldFastService:
                 if not frames:
                     raise RuntimeError(f"LingBot actor emitted no frames for chunk {result_index}")
                 applied_controls = controls_by_chunk.pop(result_index, None)
+                chunk_facts = self._finish_benchmark_measurement(measurements_by_chunk.pop(result_index, None))
                 if state.config.show_control_hud:
                     frames = self._overlay_control_hud(frames, applied_controls)
                 self._put_output(
@@ -946,6 +1000,18 @@ class LingBotWorldFastService:
                     ),
                     runtime_metrics=self._runtime_metrics(state),
                     stream_progress=self._stream_progress(state, runtime),
+                    **(
+                        {
+                            "measurement": {
+                                "index": result_index,
+                                "frames": len(frames),
+                                "compute_seconds": chunk_facts["seconds"],
+                                "memory": chunk_facts["memory"],
+                            }
+                        }
+                        if chunk_facts is not None
+                        else {}
+                    ),
                 )
 
             if runtime.current_chunk_index >= runtime.chunk_count or not state.active:
@@ -1037,6 +1103,19 @@ class LingBotWorldFastService:
                 self._put_output(state, {"type": "done"})
                 if self._sessions.get(session_id) is state:
                     self._sessions.pop(session_id, None)
+
+    def _runtime_metadata(self, runtime: LingBotWorldFastGenerationSession) -> dict[str, int]:
+        return {
+            "height": int(runtime.height),
+            "width": int(runtime.width),
+            "latent_frames": int(runtime.latent_f),
+            "frame_tokens": int(runtime.frame_tokens),
+            "chunk_size": int(runtime.chunk_size),
+            "max_attention_size": int(runtime.max_attention_size),
+            "kv_local_attn_size": int(self.pipeline.dit.local_attn_size),
+            "kv_sink_size": int(self.pipeline.dit.sink_size),
+            "kv_cache_capacity_tokens": int(runtime.kv_cache_capacity_tokens),
+        }
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)
