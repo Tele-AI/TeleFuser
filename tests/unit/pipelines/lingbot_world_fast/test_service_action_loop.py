@@ -82,7 +82,6 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     with (
         patch.object(service, "_next_realtime_control", return_value=first_control),
         patch.object(service, "_put_output") as put_output,
-        patch.object(service, "_encode_frames_to_b64", return_value=["encoded"]),
     ):
         service._run_actor_worker_loop(state, state.control_context, control_builder, emit_status)
 
@@ -95,6 +94,49 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     assert runtime.current_chunk_index == 1
     assert runtime.emitted_frames == 1
     assert state.streaming_session is streaming_session
+
+
+def test_chunk_hud_and_metadata_use_the_control_snapshot_submitted_to_the_model() -> None:
+    pipeline = MagicMock()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(
+            prompt="test",
+            image=Image.new("RGB", (8, 8)),
+            chunk_size=1,
+            frame_num=1,
+            show_control_hud=True,
+        ),
+        latent_f=1,
+        chunk_size=1,
+        width=8,
+        height=8,
+        cache_handle=7,
+    )
+    pipeline._create_initialized_session.return_value = runtime
+    pipeline._resolve_control.return_value = torch.zeros(1)
+    streaming_runtime = MagicMock()
+    streaming_session = SimpleNamespace(session_id="actor-session")
+    streaming_runtime.create_session.return_value = streaming_session
+    streaming_runtime.error.return_value = None
+    streaming_runtime.try_submit_chunk.return_value = True
+    frames = [Image.new("RGB", (8, 8))]
+    streaming_runtime.poll_frames.return_value = [(0, frames)]
+    pipeline._get_streaming_runtime.return_value = streaming_runtime
+
+    service = LingBotWorldFastService(pipeline)
+    state = LingBotWorldFastSessionState(config=runtime.config, control_context=SimpleNamespace())
+    emit_status = MagicMock()
+    with (
+        patch.object(service, "_next_realtime_control", return_value=(object(), ["w", "j"])),
+        patch.object(service, "_overlay_control_hud", return_value=frames) as overlay,
+        patch.object(service, "_put_output") as put_output,
+    ):
+        service._run_actor_worker_loop(state, state.control_context, MagicMock(), emit_status)
+
+    overlay.assert_called_once_with(frames, ["w", "j"])
+    assert put_output.call_args.args[1]["applied_controls"] == ["w", "j"]
+    chunk_sent = [call for call in emit_status.call_args_list if call.args[0] == "chunk_sent"]
+    assert chunk_sent[0].kwargs["controls"] == ["w", "j"]
 
 
 def test_actor_worker_does_not_submit_after_close_during_initialization() -> None:
@@ -115,6 +157,42 @@ def test_actor_worker_does_not_submit_after_close_during_initialization() -> Non
     assert state.generation_session is runtime
 
 
+def test_actor_worker_does_not_prefetch_directional_chunks() -> None:
+    pipeline = MagicMock()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)), chunk_size=1),
+        latent_f=2,
+        chunk_size=1,
+        cache_handle=7,
+    )
+    pipeline._create_initialized_session.return_value = runtime
+    pipeline._resolve_control.return_value = torch.zeros(1)
+    streaming_runtime = MagicMock()
+    streaming_session = SimpleNamespace(session_id="actor-session")
+    streaming_runtime.create_session.return_value = streaming_session
+    streaming_runtime.error.return_value = None
+    streaming_runtime.try_submit_chunk.return_value = True
+    streaming_runtime.can_submit_chunk.return_value = True
+    streaming_runtime.poll_frames.return_value = []
+
+    service = LingBotWorldFastService(pipeline)
+    state = LingBotWorldFastSessionState(config=runtime.config, control_context=SimpleNamespace())
+
+    def stop_wait(*_args: object, **_kwargs: object) -> bool:
+        state.active = False
+        return True
+
+    streaming_runtime.wait_until_idle.side_effect = stop_wait
+    pipeline._get_streaming_runtime.return_value = streaming_runtime
+
+    with patch.object(service, "_next_realtime_control", return_value=(object(), ["w"])):
+        service._run_actor_worker_loop(state, state.control_context, MagicMock(), MagicMock())
+
+    streaming_runtime.try_submit_chunk.assert_called_once_with(
+        streaming_session, 0, pipeline._resolve_control.return_value
+    )
+
+
 def test_direction_action_updates_state_and_wakes_worker() -> None:
     service = LingBotWorldFastService(MagicMock())
     state = _state()
@@ -126,6 +204,8 @@ def test_direction_action_updates_state_and_wakes_worker() -> None:
     )
 
     assert state.pressed_controls == {"w"}
+    assert state.pending_direction_command is not None
+    assert (state.pending_direction_command.revision, state.pending_direction_command.controls) == (1, frozenset({"w"}))
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
 
 
@@ -138,7 +218,164 @@ def test_release_stops_control_without_scheduling_stationary_generation() -> Non
     service.push_chunk("session-a", {"type": "control", "key": "ArrowUp", "event": "release"})
 
     assert state.pressed_controls == set()
-    assert state.pending_inputs.empty()
+    assert state.pending_direction_command is None
+    assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
+
+
+def test_held_direction_does_not_synthesize_another_chunk_without_an_event() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.pressed_controls.add("j")
+    control_builder = MagicMock()
+
+    item = service._next_realtime_control(
+        state,
+        SimpleNamespace(control_type="cam", chunk_size=3),
+        control_builder,
+        chunk_index=1,
+        emit_status=MagicMock(),
+        block=False,
+    )
+
+    assert item is None
+    control_builder.defer.assert_not_called()
+
+
+def test_new_short_press_overwrites_stale_direction_snapshot() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(control_type="cam", chunk_size=3)
+    service._sessions["session-a"] = state
+
+    for direction in ("left", "left", "left", "right"):
+        service.push_chunk("session-a", {"type": "control", "direction": direction, "event": "press"})
+        service.push_chunk("session-a", {"type": "control", "direction": direction, "event": "release"})
+
+    assert state.pending_direction_command is not None
+    assert state.pending_direction_command.controls == frozenset({"d"})
+    assert state.overwritten_direction_commands == 3
+
+
+def test_reset_clears_held_and_pending_direction_state() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+    service.push_chunk("session-a", {"type": "control", "direction": "left", "event": "press"})
+
+    service.push_chunk("session-a", {"type": "control", "direction": "up", "event": "reset"})
+
+    assert state.pressed_controls == set()
+    assert state.pending_direction_command is None
+    assert state.control_initialized is False
+
+
+def test_reset_controls_retains_pose_but_reset_pose_restores_identity() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_c2w[0][3] = 2.0
+    state.control_pitch = 0.5
+    state.control_initialized = True
+    service._sessions["session-a"] = state
+
+    service.push_chunk("session-a", {"type": "control", "control": "w", "event": "reset"})
+
+    assert state.control_c2w[0][3] == 2.0
+    assert state.control_pitch == 0.5
+    assert state.control_initialized is True
+
+    service.push_chunk("session-a", {"type": "control", "control": "w", "event": "reset_pose"})
+
+    assert state.control_c2w == np.eye(4).tolist()
+    assert state.control_pitch == 0.0
+    assert state.control_initialized is False
+
+
+def test_unsupported_direction_event_does_not_mutate_control_state() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+
+    service.push_chunk("session-a", {"type": "control", "direction": "left", "event": "tap"})
+
+    assert state.pressed_controls == set()
+    assert state.pending_direction_command is None
+
+
+def test_latest_short_press_is_applied_without_sticky_rotation() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(control_type="cam", chunk_size=3)
+    service._sessions["session-a"] = state
+    control_builder = MagicMock()
+
+    for direction in ("left", "backward"):
+        service.push_chunk("session-a", {"type": "control", "direction": direction, "event": "press"})
+        service.push_chunk("session-a", {"type": "control", "direction": direction, "event": "release"})
+
+    first = service._next_realtime_control(state, state.control_context, control_builder, 0, MagicMock(), block=True)
+
+    assert first is not None
+    assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["s"]]
+
+
+def test_control_state_supports_combined_translation_and_rotation() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(control_type="cam", chunk_size=3)
+    service._sessions["session-a"] = state
+    control_builder = MagicMock()
+
+    service.push_chunk("session-a", {"type": "control_state", "controls": ["w"]})
+    service.push_chunk("session-a", {"type": "control_state", "controls": ["w", "j"]})
+    service._next_realtime_control(state, state.control_context, control_builder, 0, MagicMock(), block=True)
+
+    assert state.pressed_controls == {"w", "j"}
+    assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["j", "w"]]
+
+
+def test_held_direction_continues_only_after_a_chunk_is_completed() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.pressed_controls.add("j")
+    control_builder = MagicMock()
+
+    assert (
+        service._next_realtime_control(
+            state,
+            SimpleNamespace(control_type="cam", chunk_size=3),
+            control_builder,
+            chunk_index=1,
+            emit_status=MagicMock(),
+            block=False,
+        )
+        is None
+    )
+
+    item = service._next_realtime_control(
+        state,
+        SimpleNamespace(control_type="cam", chunk_size=3),
+        control_builder,
+        chunk_index=1,
+        emit_status=MagicMock(),
+        block=True,
+    )
+
+    assert item is not None
+
+
+def test_explicit_controls_keep_only_the_latest_pending_value() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+
+    first = {"control_tensor": "first"}
+    second = {"control_tensor": "second"}
+    service.push_chunk("session-a", first)
+    service.push_chunk("session-a", second)
+
+    assert state.latest_explicit_control == second
+    assert state.overwritten_explicit_controls == 1
+    assert state.pending_inputs.qsize() == 1
 
 
 def test_directional_chunks_match_source_video_rate_integration_and_boundary() -> None:
@@ -147,11 +384,13 @@ def test_directional_chunks_match_source_video_rate_integration_and_boundary() -
     state.pressed_controls.add("w")
     context = SimpleNamespace(control_type="cam", chunk_size=3)
 
-    first = service._build_directional_control_chunk(state, context)
-    second = service._build_directional_control_chunk(state, context)
+    first = service._build_directional_control_chunk(state, context, {"w"})
+    second = service._build_directional_control_chunk(state, context, {"w"})
 
     assert first is not None
     assert second is not None
+    assert first["translation_scale"] == 3.0
+    assert second["translation_scale"] == 3.0
     assert "previous_pose" not in first
     first_poses = np.asarray(first["poses"])
     second_poses = np.asarray(second["poses"])
@@ -166,12 +405,12 @@ def test_wasd_ijkl_and_arrow_aliases_have_distinct_translation_and_rotation_cont
     context = SimpleNamespace(control_type="cam", chunk_size=3)
 
     state.pressed_controls.add("j")
-    yaw_chunk = service._build_directional_control_chunk(state, context)
+    yaw_chunk = service._build_directional_control_chunk(state, context, {"j"})
 
     assert yaw_chunk is not None
     expected_yaw = np.deg2rad(-16.0)
     np.testing.assert_allclose(np.asarray(yaw_chunk["poses"])[-1, 0, 0], np.cos(expected_yaw), atol=1e-6)
-    assert service._direction_from_chunk({"key": "ArrowLeft"}) == "j"
+    assert service._direction_from_chunk({"key": "ArrowLeft"}) == "a"
     assert service._direction_from_chunk({"key": "KeyA"}) == "a"
     assert service._direction_from_chunk({"key": "KeyI"}) == "i"
 
@@ -209,14 +448,13 @@ def test_preview_frame_includes_idle_control_hud() -> None:
 
     with (
         patch.object(service, "_overlay_control_hud", return_value=[Image.new("RGB", (832, 480))]) as overlay,
-        patch.object(service, "_encode_frames_to_b64", return_value=["encoded-frame"]),
         patch.object(service, "_put_output") as put_output,
     ):
         service._emit_preview_frame(state)
 
     overlay.assert_called_once()
     assert overlay.call_args.kwargs == {"controls": None}
-    assert put_output.call_args.args[1]["frames_b64"] == ["encoded-frame"]
+    assert "frames_b64" not in put_output.call_args.args[1]
     assert put_output.call_args.args[1]["frames"][0].size == (832, 480)
 
 
@@ -417,6 +655,19 @@ def test_close_session_waits_for_worker_to_release_generation_state() -> None:
     assert state.pending_inputs.get_nowait() == {"type": "stop"}
 
 
+def test_close_session_uses_a_bounded_worker_join_timeout() -> None:
+    service = LingBotWorldFastService(MagicMock(), close_timeout=1.5)
+    state = _state()
+    state.worker_thread = MagicMock()
+    state.worker_thread.is_alive.return_value = True
+    service._sessions["session-a"] = state
+
+    service.close_session("session-a")
+
+    state.worker_thread.join.assert_called_once_with(timeout=1.5)
+    assert "session-a" in service._sessions
+
+
 def test_release_generation_session_closes_actor_session_once() -> None:
     pipeline = MagicMock()
     streaming_runtime = MagicMock()
@@ -450,6 +701,25 @@ def test_release_generation_session_retains_handles_when_drain_fails() -> None:
 
     assert state.streaming_session is streaming_session
     assert state.generation_session is generation_session
+
+
+def test_worker_emits_terminal_messages_when_cleanup_fails() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+    emitted: list[dict] = []
+
+    with (
+        patch.object(service, "_emit_preview_frame"),
+        patch.object(service, "_run_actor_worker_loop"),
+        patch.object(service, "_release_generation_session", side_effect=RuntimeError("release failed")),
+        patch.object(service, "_put_output", side_effect=lambda _, payload: emitted.append(payload)),
+    ):
+        service._run_worker_loop("session-a", state, MagicMock())
+
+    assert [payload["type"] for payload in emitted] == ["error", "status", "done"]
+    assert emitted[0]["stage"] == "cleanup_failed"
+    assert "session-a" not in service._sessions
 
 
 def test_service_start_warms_the_pipeline_with_its_default_shape() -> None:

@@ -22,6 +22,10 @@ def test_webrtc_demo_uses_stream_service_defaults() -> None:
     assert '$("image-preview").src = imagePreviewObjectUrl' in webrtc_demo.HTML_TEMPLATE
     assert "requestBody.image = image" in webrtc_demo.HTML_TEMPLATE
     assert "requestBody.image_path = DEFAULT_IMAGE_PATH" in webrtc_demo.HTML_TEMPLATE
+    assert 'type: "control_state"' in webrtc_demo.HTML_TEMPLATE
+    assert 'window.addEventListener("blur", () => releaseAllControls(true))' in webrtc_demo.HTML_TEMPLATE
+    assert 'document.addEventListener("visibilitychange"' in webrtc_demo.HTML_TEMPLATE
+    assert 'id="reset-pose"' in webrtc_demo.HTML_TEMPLATE
 
 
 def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
@@ -59,6 +63,7 @@ def test_unified_example_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:
     get_pipeline.assert_called_once_with(parallelism=4)
     assert service.pipeline is pipeline
     assert service.default_fps == offline_example.PPL_CONFIG["target_fps"]
+    assert service.default_session_config["control_translation_scale"] == 3.0
 
 
 def test_unified_example_get_service_retains_example_default_gpu_num() -> None:

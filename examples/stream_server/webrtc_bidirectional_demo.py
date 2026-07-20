@@ -337,7 +337,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="actions">
           <button id="connect">Connect</button>
           <button id="stop">Stop</button>
-          <button id="reset-control">Reset Control</button>
+          <button id="reset-control">Release Controls</button>
+          <button id="reset-pose">Reset Camera Pose</button>
         </div>
 
         <div class="control-pads">
@@ -525,9 +526,16 @@ function setControlActive(control, active) {
   if (btn) btn.classList.toggle("active", active);
 }
 
-function sendControl(control, eventName) {
+function sendControlState() {
+  if (!dc || dc.readyState !== "open") return;
+  const msg = JSON.stringify({ type: "control_state", controls: Array.from(pressedControls).sort() });
+  dc.send(msg);
+  log("out", msg);
+}
+
+function setControlPressed(control, active) {
   if (!control) return;
-  if (eventName === "press") {
+  if (active) {
     if (pressedControls.has(control)) return;
     pressedControls.add(control);
     setControlActive(control, true);
@@ -536,23 +544,16 @@ function sendControl(control, eventName) {
     pressedControls.delete(control);
     setControlActive(control, false);
   }
-  if (dc && dc.readyState === "open") {
-    const msg = JSON.stringify({ type: "control", control, event: eventName });
-    dc.send(msg);
-    log("out", msg);
-  }
+  sendControlState();
 }
 
 function releaseAllControls(sendMessages = true) {
+  const hadPressedControls = pressedControls.size > 0;
   for (const control of Array.from(pressedControls)) {
     pressedControls.delete(control);
     setControlActive(control, false);
-    if (sendMessages && dc && dc.readyState === "open") {
-      const msg = JSON.stringify({ type: "control", control, event: "release" });
-      dc.send(msg);
-      log("out", msg);
-    }
   }
+  if (sendMessages && hadPressedControls) sendControlState();
 }
 
 document.querySelectorAll("[data-control]").forEach(btn => {
@@ -560,34 +561,52 @@ document.querySelectorAll("[data-control]").forEach(btn => {
   btn.addEventListener("pointerdown", evt => {
     evt.preventDefault();
     btn.setPointerCapture(evt.pointerId);
-    sendControl(control, "press");
+    setControlPressed(control, true);
   });
   btn.addEventListener("pointerup", evt => {
     evt.preventDefault();
-    sendControl(control, "release");
+    setControlPressed(control, false);
   });
-  btn.addEventListener("pointercancel", () => sendControl(control, "release"));
-  btn.addEventListener("lostpointercapture", () => sendControl(control, "release"));
+  btn.addEventListener("pointercancel", () => setControlPressed(control, false));
+  btn.addEventListener("lostpointercapture", () => setControlPressed(control, false));
 });
 
 document.addEventListener("keydown", evt => {
   const control = keyToControl[evt.key] || keyToControl[evt.code];
   if (!control) return;
   evt.preventDefault();
-  sendControl(control, "press");
+  setControlPressed(control, true);
 });
 
 document.addEventListener("keyup", evt => {
   const control = keyToControl[evt.key] || keyToControl[evt.code];
   if (!control) return;
   evt.preventDefault();
-  sendControl(control, "release");
+  setControlPressed(control, false);
+});
+
+window.addEventListener("blur", () => releaseAllControls(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseAllControls(true);
+});
+window.addEventListener("pagehide", () => {
+  releaseAllControls(true);
+  if (dc && dc.readyState === "open") dc.send(JSON.stringify({ type: "stop" }));
 });
 
 $("reset-control").onclick = () => {
   releaseAllControls(false);
   if (dc && dc.readyState === "open") {
     const msg = JSON.stringify({ type: "control", control: "up", event: "reset" });
+    dc.send(msg);
+    log("out", msg);
+  }
+};
+
+$("reset-pose").onclick = () => {
+  releaseAllControls(false);
+  if (dc && dc.readyState === "open") {
+    const msg = JSON.stringify({ type: "control", control: "up", event: "reset_pose" });
     dc.send(msg);
     log("out", msg);
   }

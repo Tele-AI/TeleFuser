@@ -342,3 +342,30 @@ def test_online_builder_uses_session_intrinsics_and_preserves_chunk_boundary_del
     torch.testing.assert_close(relative[:, 2, 3], torch.ones(3))
     assert len(captured_intrinsics) == 1
     torch.testing.assert_close(captured_intrinsics[0], context.intrinsics.repeat(3, 1))
+
+
+def test_online_builder_scales_normalized_translation_for_realtime_controls() -> None:
+    context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        control_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=3,
+        chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
+    )
+    builder = LingBotWorldFastControlBuilder(context)
+    builder._build_tensor = lambda poses, _intrinsics, _action: poses
+    poses = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
+    poses[:, 2, 3] = [0.3, 0.4, 0.5]
+    previous_pose = np.eye(4, dtype=np.float32)
+    previous_pose[2, 3] = 0.2
+
+    relative = builder.build({"poses": poses, "previous_pose": previous_pose, "translation_scale": 3})
+
+    torch.testing.assert_close(relative[:, 2, 3], torch.full((3,), 3.0))
