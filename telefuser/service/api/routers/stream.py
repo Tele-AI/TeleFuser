@@ -9,6 +9,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
@@ -38,7 +39,7 @@ class StreamRoutes:
         svc = self._require_service()
         pipeline_closed = False
         try:
-            svc.close_session(session_id)
+            await asyncio.to_thread(svc.close_session, session_id)
             pipeline_closed = True
         except Exception as exc:
             logger.warning(f"Failed to close pipeline stream session {session_id}: {exc}")

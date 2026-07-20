@@ -199,6 +199,24 @@ class ServerConfig(BaseSettings):
         le=50_000_000,
         description="Target WebRTC video bitrate in bits per second.",
     )
+    webrtc_video_buffer_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=10.0,
+        description="Maximum buffered WebRTC video duration before oldest frames are dropped.",
+    )
+    webrtc_data_channel_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=120.0,
+        description="Time to wait for the required bidirectional WebRTC DataChannel to open.",
+    )
+    webrtc_disconnected_grace_seconds: float = Field(
+        default=5.0,
+        ge=0,
+        le=120.0,
+        description="Grace period for transient WebRTC disconnected states before the session is closed.",
+    )
 
     # Pipeline replication settings
     num_replicas: int = Field(

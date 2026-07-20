@@ -54,6 +54,9 @@ class WebRTCRoutes:
             configuration=configuration,
             video_codec=config.webrtc_video_codec,
             video_bitrate=config.webrtc_video_bitrate,
+            video_buffer_seconds=config.webrtc_video_buffer_seconds,
+            data_channel_timeout_seconds=config.webrtc_data_channel_timeout_seconds,
+            disconnected_grace_seconds=config.webrtc_disconnected_grace_seconds,
         )
 
     @staticmethod

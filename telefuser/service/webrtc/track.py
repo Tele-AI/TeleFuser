@@ -131,14 +131,19 @@ class FrameGeneratorTrack(MediaStreamTrack):
         generator: AsyncGenerator[dict, None] | None = None,
         fps: int = 24,
         audio_track: AudioGeneratorTrack | None = None,
+        max_buffer_seconds: float = 1.0,
     ) -> None:
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+        if max_buffer_seconds <= 0:
+            raise ValueError("max_buffer_seconds must be positive")
         super().__init__()
         self._generator = generator
         self._fps = fps
         self._frame_interval = 1.0 / fps
         self._pts_per_frame = _RTP_CLOCK_RATE // fps
         self._audio_track = audio_track
-        self._queue: asyncio.Queue[av.VideoFrame] = asyncio.Queue(maxsize=200)
+        self._queue: asyncio.Queue[av.VideoFrame] = asyncio.Queue(maxsize=max(1, round(fps * max_buffer_seconds)))
         self._frame_count = 0
         self._task: asyncio.Task | None = None
         self._finished = False
@@ -149,17 +154,33 @@ class FrameGeneratorTrack(MediaStreamTrack):
         self.dropped_frames = 0
 
     def push_frame(self, frame: av.VideoFrame) -> bool:
-        """Push a decoded frame directly (used by ChunkRouter in bidirectional mode)."""
-        self._placeholder_width = frame.width
-        self._placeholder_height = frame.height
-        try:
-            self._queue.put_nowait(frame)
+        """Push one frame, evicting the oldest frame when the client falls behind."""
+        return self.push_frames((frame,))
+
+    def push_frames(self, frames: tuple[av.VideoFrame, ...] | list[av.VideoFrame]) -> bool:
+        """Push a video batch while preserving the newest possible playback window."""
+        if not frames:
             return True
-        except asyncio.QueueFull:
-            self.dropped_frames += 1
-            if self.dropped_frames == 1 or self.dropped_frames % 100 == 0:
-                logger.warning(f"FrameGeneratorTrack queue full; dropped_frames={self.dropped_frames}")
-            return False
+        for frame in frames:
+            self._placeholder_width = frame.width
+            self._placeholder_height = frame.height
+
+        capacity = self._queue.maxsize
+        accepted = list(frames[-capacity:])
+        dropped = len(frames) - len(accepted)
+        while self._queue.qsize() + len(accepted) > capacity:
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:  # pragma: no cover - qsize is advisory
+                break
+        for frame in accepted:
+            self._queue.put_nowait(frame)
+        if dropped:
+            self.dropped_frames += dropped
+            if self.dropped_frames == dropped or self.dropped_frames % 100 < dropped:
+                logger.warning(f"FrameGeneratorTrack dropped_old_frames={self.dropped_frames}")
+        return dropped == 0
 
     def signal_done(self) -> None:
         self._finished = True
@@ -181,7 +202,7 @@ class FrameGeneratorTrack(MediaStreamTrack):
                         continue
                     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
-                    await self._queue.put(frame)
+                    self.push_frame(frame)
 
                 if self._audio_track is not None:
                     audio_b64 = data.get("audio_b64")
@@ -212,10 +233,13 @@ class FrameGeneratorTrack(MediaStreamTrack):
             frame = self._queue.get_nowait()
             self._last_frame = frame
         except asyncio.QueueEmpty:
-            if self._finished and self._last_frame is None:
-                raise MediaStreamError("Track ended")
             if self._last_frame is not None:
+                # An idle control stream must keep displaying its last generated
+                # result. Ending the RTP track here makes browsers render black
+                # while the peer connection is still open.
                 frame = self._last_frame
+            elif self._finished:
+                raise MediaStreamError("Track ended — no frames received")
             elif self._generator is None:
                 try:
                     frame = await asyncio.wait_for(self._queue.get(), timeout=0.25)

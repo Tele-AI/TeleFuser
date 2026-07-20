@@ -386,11 +386,11 @@ class ApiServer:
         if self.task_processor is not None:
             await self.task_processor.stop()
 
-        if self.stream_service is not None:
-            await self.stream_service.aclose()
-
         if self._webrtc_routes is not None:
             await self._webrtc_routes.cleanup()
+
+        if self.stream_service is not None:
+            await self.stream_service.aclose()
 
         if self.file_service:
             try:
