@@ -38,22 +38,26 @@ class ChunkRouter:
         audio_track: object | None,
         data_channel_send: Callable[[str], None] | None,
         session_id: str,
+        on_complete: Callable[[str], None] | None = None,
     ) -> None:
         self._generator = generator
         self._video_track = video_track
         self._audio_track = audio_track
         self._dc_send = data_channel_send
         self._session_id = session_id
+        self._on_complete = on_complete
         self._chunk_count = 0
 
     async def run(self) -> None:
         """Main loop: consume generator, dispatch chunks."""
+        cancelled = False
         try:
             async for chunk in self._generator:
-                self._route_chunk(chunk)
-                self._chunk_count += 1
+                if self._route_chunk(chunk):
+                    self._chunk_count += 1
         except asyncio.CancelledError:
-            return
+            cancelled = True
+            raise
         except Exception as exc:
             logger.error(f"ChunkRouter error: session={self._session_id} {exc}")
         finally:
@@ -62,16 +66,20 @@ class ChunkRouter:
                 self._video_track.signal_done()
             if self._audio_track is not None:
                 self._audio_track.signal_done()
+            if not cancelled and self._on_complete is not None:
+                self._on_complete(self._session_id)
 
-    def _route_chunk(self, chunk: dict) -> None:
+    def _route_chunk(self, chunk: dict) -> bool:
         is_nested = "frames_b64" not in chunk and isinstance(chunk.get("data"), dict)
         data = chunk.get("data", {}) if is_nested else chunk
 
         raw_frames = data.get("frames")
         frames: list[object] | tuple[object, ...] = raw_frames if isinstance(raw_frames, (list, tuple)) else ()
         frames_b64: list[str] = data.get("frames_b64", [])
+        is_video_chunk = bool(frames or frames_b64)
         if self._video_track is not None:
             if frames:
+                converted_frames: list[av.VideoFrame] = []
                 for source in frames:
                     if isinstance(source, av.VideoFrame):
                         frame = source
@@ -81,7 +89,13 @@ class ChunkRouter:
                     else:
                         logger.warning(f"ChunkRouter dropped unsupported raw video frame: session={self._session_id}")
                         continue
-                    self._video_track.push_frame(frame)
+                    converted_frames.append(frame)
+                push_frames = getattr(type(self._video_track), "push_frames", None)
+                if callable(push_frames):
+                    self._video_track.push_frames(converted_frames)
+                else:
+                    for frame in converted_frames:
+                        self._video_track.push_frame(frame)
             else:
                 for fb64 in frames_b64:
                     raw = base64.b64decode(fb64)
@@ -114,6 +128,7 @@ class ChunkRouter:
                 self._dc_send(msg.model_dump_json())
             except Exception as exc:
                 logger.warning(f"ChunkRouter metadata send failed: session={self._session_id} {exc}")
+        return is_video_chunk
 
     def _send_done(self) -> None:
         if self._dc_send is None:

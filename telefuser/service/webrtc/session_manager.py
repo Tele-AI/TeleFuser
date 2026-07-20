@@ -47,6 +47,8 @@ class _BidirectionalSession:
     chunk_router: ChunkRouter | None = None
     router_task: asyncio.Task | None = None
     relay_tasks: list[asyncio.Task] = field(default_factory=list)
+    data_channel_timeout_task: asyncio.Task | None = None
+    disconnect_task: asyncio.Task | None = None
 
 
 class WebRTCSessionManager:
@@ -58,19 +60,69 @@ class WebRTCSessionManager:
         configuration: RTCConfiguration | None = None,
         video_codec: str = "H264",
         video_bitrate: int = 8_000_000,
+        video_buffer_seconds: float = 1.0,
+        terminal_grace_seconds: float = 0.1,
+        close_on_output_complete: bool = False,
+        pipeline_close_timeout: float = 30.0,
+        data_channel_timeout_seconds: float = 10.0,
+        disconnected_grace_seconds: float = 5.0,
     ) -> None:
         if video_bitrate < 500_000:
             raise ValueError(f"video_bitrate must be at least 500000, got {video_bitrate}")
+        if video_buffer_seconds <= 0:
+            raise ValueError("video_buffer_seconds must be positive")
         video_codec = video_codec.upper()
         if video_codec not in {"H264", "VP8"}:
             raise ValueError(f"Unsupported WebRTC video codec: {video_codec}")
+        if terminal_grace_seconds < 0:
+            raise ValueError("terminal_grace_seconds must be non-negative")
+        if pipeline_close_timeout <= 0:
+            raise ValueError("pipeline_close_timeout must be positive")
+        if data_channel_timeout_seconds <= 0:
+            raise ValueError("data_channel_timeout_seconds must be positive")
+        if disconnected_grace_seconds < 0:
+            raise ValueError("disconnected_grace_seconds must be non-negative")
         self._sessions: dict[str, _Session | _BidirectionalSession | object] = {}
         self._max_sessions = max_sessions
         self._configuration = configuration
         self._video_codec = video_codec
         self._video_bitrate = video_bitrate
+        self._video_buffer_seconds = video_buffer_seconds
+        self._terminal_grace_seconds = terminal_grace_seconds
+        self._close_on_output_complete = close_on_output_complete
+        self._pipeline_close_timeout = pipeline_close_timeout
+        self._data_channel_timeout_seconds = data_channel_timeout_seconds
+        self._disconnected_grace_seconds = disconnected_grace_seconds
         self._lock = asyncio.Lock()
         self._configure_video_bitrate(video_bitrate)
+
+    def _schedule_output_complete(self, session_id: str) -> None:
+        """Optionally close a completed stream after its terminal message flushes."""
+        if not self._close_on_output_complete:
+            return
+        asyncio.create_task(self._close_after_output_complete(session_id))
+
+    async def _close_after_output_complete(self, session_id: str) -> None:
+        if self._terminal_grace_seconds:
+            await asyncio.sleep(self._terminal_grace_seconds)
+        await self.close_session(session_id, reason="output_complete")
+
+    async def _close_if_data_channel_missing(self, session_id: str) -> None:
+        """Release a reserved pipeline session when the required channel never opens."""
+        await asyncio.sleep(self._data_channel_timeout_seconds)
+        entry = self._sessions.get(session_id)
+        if isinstance(entry, _BidirectionalSession) and entry.data_channel is None:
+            logger.warning(f"WebRTC DataChannel did not open before timeout: session={session_id}")
+            await self.close_session(session_id, reason="data_channel_timeout")
+
+    async def _close_after_disconnect_grace(self, session_id: str) -> None:
+        """Allow transient ICE disconnects to recover before releasing the session."""
+        if self._disconnected_grace_seconds:
+            await asyncio.sleep(self._disconnected_grace_seconds)
+        entry = self._sessions.get(session_id)
+        if isinstance(entry, _BidirectionalSession) and entry.pc.connectionState == "disconnected":
+            logger.info(f"WebRTC disconnect grace expired: session={session_id}")
+            await self.close_session(session_id, reason="connection_disconnected")
 
     @staticmethod
     def _configure_video_bitrate(video_bitrate: int) -> None:
@@ -120,7 +172,12 @@ class WebRTCSessionManager:
             if has_audio_offer:
                 audio_track = AudioGeneratorTrack()
 
-            track = FrameGeneratorTrack(generator, fps=fps, audio_track=audio_track)
+            track = FrameGeneratorTrack(
+                generator,
+                fps=fps,
+                audio_track=audio_track,
+                max_buffer_seconds=self._video_buffer_seconds,
+            )
 
             @pc.on("connectionstatechange")
             async def _on_state_change() -> None:
@@ -190,9 +247,15 @@ class WebRTCSessionManager:
         try:
             pc = RTCPeerConnection(configuration=self._configuration or RTCConfiguration())
             session = _BidirectionalSession(pc=pc, on_close=on_close, session_id=session_id)
+            async with self._lock:
+                self._sessions[session_id] = session
 
             has_audio_offer = "m=audio" in offer_sdp
-            output_video = FrameGeneratorTrack(generator=None, fps=fps)
+            output_video = FrameGeneratorTrack(
+                generator=None,
+                fps=fps,
+                max_buffer_seconds=self._video_buffer_seconds,
+            )
             output_audio: AudioGeneratorTrack | None = None
             if has_audio_offer:
                 output_audio = AudioGeneratorTrack()
@@ -209,8 +272,23 @@ class WebRTCSessionManager:
 
             @pc.on("datachannel")
             def _on_datachannel(channel) -> None:
+                if channel.label != "telefuser":
+                    logger.warning(f"Ignoring unexpected DataChannel: session={session_id} label={channel.label}")
+                    channel.close()
+                    return
+                if session.data_channel is not None:
+                    logger.warning(f"Ignoring duplicate DataChannel: session={session_id}")
+                    channel.close()
+                    return
                 session.data_channel = channel
+                if session.data_channel_timeout_task is not None:
+                    session.data_channel_timeout_task.cancel()
+                    session.data_channel_timeout_task = None
                 logger.info(f"DataChannel received: session={session_id} label={channel.label}")
+
+                @channel.on("close")
+                def _on_channel_close() -> None:
+                    asyncio.ensure_future(self.close_session(session_id, reason="data_channel_closed"))
 
                 @channel.on("message")
                 def _on_message(message) -> None:
@@ -233,6 +311,7 @@ class WebRTCSessionManager:
                     audio_track=output_audio,
                     data_channel_send=channel.send,
                     session_id=session_id,
+                    on_complete=self._schedule_output_complete if self._close_on_output_complete else None,
                 )
                 session.chunk_router = router
                 session.router_task = asyncio.ensure_future(router.run())
@@ -256,9 +335,15 @@ class WebRTCSessionManager:
             @pc.on("connectionstatechange")
             async def _on_state_change() -> None:
                 state = pc.connectionState
-                if state in ("failed", "disconnected", "closed"):
+                if state in ("failed", "closed"):
                     logger.info(f"WebRTC connection {state}: session={session_id}")
                     await self.close_session(session_id, reason=f"connection_{state}")
+                elif state == "disconnected":
+                    if session.disconnect_task is None or session.disconnect_task.done():
+                        session.disconnect_task = asyncio.create_task(self._close_after_disconnect_grace(session_id))
+                elif state == "connected" and session.disconnect_task is not None:
+                    session.disconnect_task.cancel()
+                    session.disconnect_task = None
 
             # --- SDP exchange -----------------------------------------------
 
@@ -267,8 +352,7 @@ class WebRTCSessionManager:
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
 
-            async with self._lock:
-                self._sessions[session_id] = session
+            session.data_channel_timeout_task = asyncio.create_task(self._close_if_data_channel_missing(session_id))
 
             logger.info(f"WebRTC bidirectional session created: session={session_id}")
             return pc.localDescription.sdp, pc.localDescription.type
@@ -297,6 +381,10 @@ class WebRTCSessionManager:
                 except Exception as exc:
                     logger.warning(f"WebRTC server-push track close failed: session={session_id} {exc}")
         elif isinstance(entry, _BidirectionalSession):
+            current_task = asyncio.current_task()
+            for task in (entry.data_channel_timeout_task, entry.disconnect_task):
+                if task is not None and task is not current_task and not task.done():
+                    task.cancel()
             for task in entry.relay_tasks:
                 if not task.done():
                     task.cancel()
@@ -320,7 +408,12 @@ class WebRTCSessionManager:
                 entry.output_audio_track.stop()
             if notify_pipeline and entry.on_close is not None:
                 try:
-                    await asyncio.to_thread(entry.on_close, entry.session_id)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(entry.on_close, entry.session_id),
+                        timeout=self._pipeline_close_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"WebRTC pipeline close callback timed out: session={session_id}")
                 except Exception as exc:
                     logger.warning(f"WebRTC pipeline close callback failed: session={session_id} {exc}")
 

@@ -705,11 +705,17 @@ def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) ->
             configuration: FakeRTCConfiguration,
             video_codec: str,
             video_bitrate: int,
+            video_buffer_seconds: float,
+            data_channel_timeout_seconds: float,
+            disconnected_grace_seconds: float,
         ) -> None:
             captured["max_sessions"] = max_sessions
             captured["configuration"] = configuration
             captured["video_codec"] = video_codec
             captured["video_bitrate"] = video_bitrate
+            captured["video_buffer_seconds"] = video_buffer_seconds
+            captured["data_channel_timeout_seconds"] = data_channel_timeout_seconds
+            captured["disconnected_grace_seconds"] = disconnected_grace_seconds
 
     monkeypatch.setitem(
         sys.modules,
@@ -743,6 +749,9 @@ def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["max_sessions"] == 3
     assert captured["video_codec"] == "H264"
     assert captured["video_bitrate"] == 8_000_000
+    assert captured["video_buffer_seconds"] == 1.0
+    assert captured["data_channel_timeout_seconds"] == 10.0
+    assert captured["disconnected_grace_seconds"] == 5.0
     ice_servers = captured["configuration"].iceServers
     assert [server.urls for server in ice_servers] == ["stun:local:3478", "turn:local:3478"]
     assert ice_servers[1].username == "user"
