@@ -1,3 +1,7 @@
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
+
 import numpy as np
 import pytest
 import torch
@@ -10,8 +14,11 @@ from telefuser.pipelines.lingbot_world_fast.control import (
     compute_relative_poses,
     get_ks_transformed,
     interpolate_camera_poses,
+    load_action_control_inputs,
+    load_camera_control_inputs,
     truncate_control_sequence,
 )
+from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline
 
 
 def _builder() -> LingBotWorldFastControlBuilder:
@@ -74,6 +81,133 @@ def test_offline_control_source_materializes_once_when_first_requested() -> None
     assert calls == 1
     assert torch.equal(second(), torch.tensor([2]))
     assert calls == 1
+
+
+def test_camera_control_loader_uses_explicit_intrinsics_path() -> None:
+    poses = np.ones((9, 4, 4), dtype=np.float32)
+    intrinsics = np.ones(4, dtype=np.float32)
+
+    with patch(
+        "telefuser.pipelines.lingbot_world_fast.control.np.load",
+        side_effect=[poses, intrinsics],
+    ) as load:
+        loaded = load_camera_control_inputs("/controls", "/calibration/camera.npy")
+
+    loaded_poses, loaded_intrinsics = loaded
+    np.testing.assert_array_equal(loaded_poses, poses)
+    np.testing.assert_array_equal(loaded_intrinsics, intrinsics)
+    assert load.call_args_list == [
+        call(Path("/controls/poses.npy")),
+        call(Path("/calibration/camera.npy")),
+    ]
+
+
+def test_action_control_loader_uses_explicit_intrinsics_path() -> None:
+    poses = np.ones((9, 4, 4), dtype=np.float32)
+    intrinsics = np.ones(4, dtype=np.float32)
+    action = np.ones((9, 4), dtype=np.float32)
+
+    with patch(
+        "telefuser.pipelines.lingbot_world_fast.control.np.load",
+        side_effect=[poses, intrinsics, action],
+    ) as load:
+        loaded = load_action_control_inputs("/controls", "/calibration/camera.npy")
+
+    assert all(actual is expected for actual, expected in zip(loaded, (poses, intrinsics, action), strict=True))
+    assert load.call_args_list == [
+        call(Path("/controls/poses.npy")),
+        call(Path("/calibration/camera.npy")),
+        call(Path("/controls/action.npy")),
+    ]
+
+
+def test_pipeline_prepares_offline_controls_without_exposing_internal_layers() -> None:
+    context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        control_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=6,
+        chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
+    )
+    session_config = SimpleNamespace(frame_num=9)
+    pipeline = LingBotWorldFastPipeline.__new__(LingBotWorldFastPipeline)
+    pipeline.config = SimpleNamespace(orig_height=8, orig_width=8)
+    first = MagicMock()
+    second = MagicMock()
+
+    with (
+        patch.object(pipeline, "control_context", return_value=context),
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.pipeline.load_camera_control_inputs",
+            return_value=("poses", "intrinsics"),
+        ) as load_camera,
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.pipeline.truncate_control_sequence",
+            return_value=("trimmed_poses", "trimmed_intrinsics", None),
+        ) as truncate,
+        patch("telefuser.pipelines.lingbot_world_fast.pipeline.LingBotWorldFastOfflineControlSource") as source_cls,
+    ):
+        source_cls.return_value.control_at.side_effect = [first, second]
+        controls = pipeline.prepare_offline_controls(
+            session_config,
+            "/controls",
+            "/calibration/camera.npy",
+        )
+
+    assert controls == [first, second]
+    load_camera.assert_called_once_with("/controls", "/calibration/camera.npy")
+    truncate.assert_called_once_with("poses", "intrinsics", None, 9)
+    assert [item.args[0] for item in source_cls.return_value.control_at.call_args_list] == [0, 1]
+
+
+def test_pipeline_uses_explicit_calibration_size_for_offline_intrinsics() -> None:
+    context = LingBotWorldFastControlContext(
+        control_type="cam",
+        device="cpu",
+        control_dtype=torch.float32,
+        orig_height=8,
+        orig_width=8,
+        height=8,
+        width=8,
+        latent_h=1,
+        latent_w=1,
+        latent_frames=3,
+        chunk_size=3,
+        intrinsics=torch.tensor([8.0, 8.0, 4.0, 4.0]),
+    )
+    pipeline = LingBotWorldFastPipeline.__new__(LingBotWorldFastPipeline)
+    pipeline.config = SimpleNamespace(orig_height=480, orig_width=832)
+
+    with (
+        patch.object(pipeline, "control_context", return_value=context),
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.pipeline.load_camera_control_inputs",
+            return_value=("poses", "intrinsics"),
+        ),
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.pipeline.truncate_control_sequence",
+            return_value=("trimmed_poses", "trimmed_intrinsics", None),
+        ),
+        patch("telefuser.pipelines.lingbot_world_fast.pipeline.LingBotWorldFastOfflineControlSource") as source_cls,
+    ):
+        pipeline.prepare_offline_controls(
+            SimpleNamespace(frame_num=9),
+            "/controls",
+            "/calibration/camera.npy",
+            intrinsics_width=1920,
+            intrinsics_height=1080,
+        )
+
+    builder = source_cls.call_args.args[0]
+    assert builder.context.orig_width == 1920
+    assert builder.context.orig_height == 1080
 
 
 def test_external_builder_matches_legacy_offline_camera_control_math() -> None:

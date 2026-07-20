@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,6 +91,7 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
         streaming_session, 0, pipeline._resolve_control.return_value
     )
     assert put_output.call_args.args[1]["index"] == 0
+    assert put_output.call_args.args[1]["frames"][0].size == (8, 8)
     assert runtime.current_chunk_index == 1
     assert runtime.emitted_frames == 1
     assert state.streaming_session is streaming_session
@@ -214,6 +217,7 @@ def test_preview_frame_includes_idle_control_hud() -> None:
     overlay.assert_called_once()
     assert overlay.call_args.kwargs == {"controls": None}
     assert put_output.call_args.args[1]["frames_b64"] == ["encoded-frame"]
+    assert put_output.call_args.args[1]["frames"][0].size == (832, 480)
 
 
 def test_service_stop_closes_sessions_before_pipeline() -> None:
@@ -305,6 +309,23 @@ def test_create_session_rejects_non_positive_stream_parameters(field: str, value
         service.create_session(request)
 
 
+def test_load_image_accepts_browser_data_url() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 6), (10, 20, 30, 255)).save(buffer, format="PNG")
+    image_data = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    image = LingBotWorldFastService._load_image({"image": f"data:image/png;base64,{image_data}"})
+
+    assert image.mode == "RGB"
+    assert image.size == (8, 6)
+    assert image.getpixel((0, 0)) == (10, 20, 30)
+
+
+def test_load_image_rejects_invalid_browser_data_url() -> None:
+    with pytest.raises(ValueError, match="invalid base64"):
+        LingBotWorldFastService._load_image({"image": "data:image/png;base64,not-valid"})
+
+
 def test_create_session_initializes_fixed_intrinsics_from_intrinsics_path() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)
@@ -315,12 +336,16 @@ def test_create_session_initializes_fixed_intrinsics_from_intrinsics_path() -> N
             {
                 "image": Image.new("RGB", (8, 8)),
                 "intrinsics_path": "/controls/intrinsics.npy",
+                "intrinsics_width": 8,
+                "intrinsics_height": 8,
             }
         )
 
     load.assert_called_once_with(Path("/controls/intrinsics.npy"))
     session_config = pipeline.control_context.call_args.args[0]
     assert session_config.intrinsics is intrinsics
+    assert session_config.intrinsics_width == 8
+    assert session_config.intrinsics_height == 8
     assert service._sessions[session_id].control_context is pipeline.control_context.return_value
 
 

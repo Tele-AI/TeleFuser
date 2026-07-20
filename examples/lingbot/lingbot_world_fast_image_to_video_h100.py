@@ -22,13 +22,6 @@ import torch
 from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
-from telefuser.pipelines.lingbot_world_fast.control import (
-    LingBotWorldFastControlBuilder,
-    LingBotWorldFastOfflineControlSource,
-    load_action_control_inputs,
-    load_camera_control_inputs,
-    truncate_control_sequence,
-)
 from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig
@@ -40,6 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATA_ROOT = _PROJECT_ROOT / "examples" / "data" / "lingbot_world_fast"
 DEFAULT_IMAGE_PATH = str(_DATA_ROOT / "image.jpg")
 DEFAULT_ACTION_PATH = str(_DATA_ROOT)
+DEFAULT_INTRINSICS_PATH = str(_DATA_ROOT / "intrinsics.npy")
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "work_dirs"
 DEFAULT_PROMPT = (
     "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped "
@@ -132,6 +126,9 @@ def run(
     seed: int = PPL_CONFIG["seed"],
     resolution: str = PPL_CONFIG["resolution"],
     action_path: str = DEFAULT_ACTION_PATH,
+    intrinsics_path: str = DEFAULT_INTRINSICS_PATH,
+    intrinsics_width: int = 832,
+    intrinsics_height: int = 480,
     fps: int | None = None,
 ) -> list[Image.Image]:
     """Generate a complete offline video through the pipeline core API."""
@@ -152,18 +149,13 @@ def run(
         seed=seed,
         max_attention_size=PPL_CONFIG["max_attention_size"],
     )
-    control_context = pipeline.control_context(session_config)
-    control_builder = LingBotWorldFastControlBuilder(control_context)
-    if session_config.control_mode == "act":
-        poses, intrinsics, action = load_action_control_inputs(action_path)
-    else:
-        poses, intrinsics = load_camera_control_inputs(action_path)
-        action = None
-    poses, intrinsics, action = truncate_control_sequence(poses, intrinsics, action, session_config.frame_num)
-    control_source = LingBotWorldFastOfflineControlSource(control_builder, poses, intrinsics, action)
-    controls = [
-        control_source.control_at(index) for index in range(control_context.latent_frames // control_context.chunk_size)
-    ]
+    controls = pipeline.prepare_offline_controls(
+        session_config,
+        action_path,
+        intrinsics_path,
+        intrinsics_width=intrinsics_width,
+        intrinsics_height=intrinsics_height,
+    )
     return pipeline.generate_video(session_config, controls)
 
 
@@ -176,6 +168,14 @@ def run(
 )
 @click.option("--image_path", default=DEFAULT_IMAGE_PATH, type=click.Path(exists=True))
 @click.option("--action_path", default=DEFAULT_ACTION_PATH, type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--intrinsics-path",
+    "intrinsics_path",
+    default=DEFAULT_INTRINSICS_PATH,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option("--intrinsics-width", default=832, type=click.IntRange(min=1), show_default=True)
+@click.option("--intrinsics-height", default=480, type=click.IntRange(min=1), show_default=True)
 @click.option("--prompt", default=DEFAULT_PROMPT, help="Positive guidance prompt")
 @click.option("--seed", default=PPL_CONFIG["seed"], type=int)
 @click.option("--resolution", default=PPL_CONFIG["resolution"], type=click.Choice(list(RESOLUTION_AREAS)))
@@ -191,6 +191,9 @@ def main(
     gpu_num: int,
     image_path: str,
     action_path: str,
+    intrinsics_path: str,
+    intrinsics_width: int,
+    intrinsics_height: int,
     prompt: str,
     seed: int,
     resolution: str,
@@ -212,6 +215,9 @@ def main(
             seed=seed,
             resolution=resolution,
             action_path=action_path,
+            intrinsics_path=intrinsics_path,
+            intrinsics_width=intrinsics_width,
+            intrinsics_height=intrinsics_height,
             fps=fps,
         )
         elapsed = time.perf_counter() - start

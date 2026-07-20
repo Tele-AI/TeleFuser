@@ -387,16 +387,22 @@ class LingBotWorldFastControlBuilder:
         )
 
 
-def load_camera_control_inputs(action_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+def load_camera_control_inputs(
+    action_path: str | Path,
+    intrinsics_path: str | Path,
+) -> tuple[np.ndarray, np.ndarray]:
     root = Path(action_path)
     poses = np.load(root / "poses.npy")
-    intrinsics = np.load(root / "intrinsics.npy")
+    intrinsics = np.load(Path(intrinsics_path))
     return poses, intrinsics
 
 
-def load_action_control_inputs(action_path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_action_control_inputs(
+    action_path: str | Path,
+    intrinsics_path: str | Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     root = Path(action_path)
     poses = np.load(root / "poses.npy")
-    intrinsics = np.load(root / "intrinsics.npy")
+    intrinsics = np.load(Path(intrinsics_path))
     action = np.load(root / "action.npy")
     return poses, intrinsics, action

@@ -11,9 +11,9 @@ Usage:
     telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py -p 8088 --skip-validation
 
     # 2. Start this client (opens browser):
-    python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088 --image-path /path/to/input.png
+    python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
 
-    # 3. Enter a prompt, click Connect, then use arrow keys or the D-pad.
+    # 3. Select an image, enter a prompt, click Connect, then use arrow keys or the D-pad.
 """
 
 from __future__ import annotations
@@ -27,354 +27,16 @@ import threading
 import urllib.error
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 DEFAULT_SERVER_URL = "http://localhost:8088"
 DEFAULT_PORT = 8091
-DEFAULT_SAMPLE_SHIFT = 10.0
-MAX_GENERATION_SECONDS = 20.0
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_IMAGE_PATH = str(_PROJECT_ROOT / "examples" / "data" / "lingbot_world_fast" / "image.jpg")
 DEFAULT_PROMPT = (
     "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped "
     "mountains under a bright blue sky with drifting white clouds. Gentle ripples reflect the tree and sky."
 )
-
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>TeleFuser WebRTC Bidirectional Demo</title>
-<style>
-  body {{ font-family: sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; }}
-  .video-row {{ display: flex; gap: 16px; margin: 16px 0; }}
-  .video-box {{ flex: 1; }}
-  .video-box h3 {{ margin: 0 0 8px; font-size: 14px; color: #666; }}
-  video {{ width: 100%; max-height: 360px; background: #000; border-radius: 8px; }}
-  .controls {{ display: flex; gap: 10px; margin: 16px 0; align-items: center; flex-wrap: wrap; }}
-  input[type=text] {{ flex: 1; min-width: 200px; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }}
-  button {{ padding: 8px 20px; font-size: 14px; border: none; border-radius: 4px; cursor: pointer; }}
-  #connect {{ background: #2563eb; color: #fff; }}
-  #connect:disabled {{ background: #94a3b8; cursor: default; }}
-  #stop {{ background: #dc2626; color: #fff; display: none; }}
-  #send {{ background: #16a34a; color: #fff; display: none; }}
-  #unmute {{ background: #7c3aed; color: #fff; display: none; }}
-  label {{ font-size: 14px; cursor: pointer; }}
-  #status {{ color: #666; font-size: 13px; margin: 8px 0; }}
-  #messages {{ border: 1px solid #e5e7eb; border-radius: 4px; padding: 8px; max-height: 200px;
-               overflow-y: auto; font-family: monospace; font-size: 12px; background: #f9fafb; }}
-  .msg {{ margin: 2px 0; }}
-  .msg-in {{ color: #2563eb; }}
-  .msg-out {{ color: #16a34a; }}
-</style>
-</head>
-<body>
-<h2>TeleFuser WebRTC Bidirectional Demo</h2>
-
-<div class="video-row">
-  <div class="video-box">
-    <h3>Server Output</h3>
-    <video id="output-video" autoplay playsinline muted></video>
-  </div>
-  <div class="video-box">
-    <h3>Camera Input (optional)</h3>
-    <video id="input-video" autoplay playsinline muted></video>
-  </div>
-</div>
-
-<div class="controls">
-  <input id="prompt" type="text" placeholder="Enter a prompt..." value="a dog running">
-  <label><input type="checkbox" id="use-camera"> Camera</label>
-  <label><input type="checkbox" id="use-mic"> Mic</label>
-  <button id="connect">Connect</button>
-  <button id="send">Send Prompt</button>
-  <button id="stop">Stop</button>
-  <button id="unmute">Unmute Output</button>
-</div>
-<div id="status">Ready.</div>
-<h3 style="font-size: 14px; color: #666; margin: 16px 0 4px;">DataChannel Messages</h3>
-<div id="messages"></div>
-
-<script>
-const SERVER_URL = "{server_url}";
-const RTC_CONFIG = {rtc_config};
-const IMAGE_PATH = {image_path};
-const REQUEST_OPTIONS = {request_options};
-const ICE_GATHER_TIMEOUT_MS = {ice_gather_timeout_ms};
-let pc = null;
-let dc = null;
-let sessionId = null;
-let localStream = null;
-
-async function fetchJsonWithTimeout(url, options, timeoutMs) {{
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {{
-    const resp = await fetch(url, {{ ...options, signal: controller.signal }});
-    return resp;
-  }} finally {{
-    clearTimeout(timeout);
-  }}
-}}
-
-function log(dir, text) {{
-  const el = document.getElementById("messages");
-  const cls = dir === "in" ? "msg-in" : "msg-out";
-  const prefix = dir === "in" ? "<<" : ">>";
-  const truncated = text.length > 200 ? text.slice(0, 200) + "..." : text;
-  el.innerHTML += '<div class="msg ' + cls + '">' + prefix + " " + truncated + "</div>";
-  el.scrollTop = el.scrollHeight;
-}}
-
-function setStatus(text) {{
-  document.getElementById("status").textContent = text;
-}}
-
-function describeCandidate(candidateStr) {{
-  if (!candidateStr) return "";
-  const parts = candidateStr.split(" ");
-  const typIdx = parts.indexOf("typ");
-  const typ = typIdx !== -1 ? parts[typIdx + 1] : "";
-  const proto = parts.length > 2 ? parts[2] : "";
-  return (typ ? (" typ=" + typ) : "") + (proto ? (" proto=" + proto) : "");
-}}
-
-async function waitForIceGathering(pc, timeoutMs) {{
-  if (pc.iceGatheringState === "complete") return true;
-  return await Promise.race([
-    new Promise(resolve => {{
-      const onStateChange = () => {{
-        if (pc.iceGatheringState === "complete") {{
-          pc.removeEventListener("icegatheringstatechange", onStateChange);
-          resolve(true);
-        }}
-      }};
-      pc.addEventListener("icegatheringstatechange", onStateChange);
-    }}),
-    new Promise(resolve => setTimeout(() => resolve(false), timeoutMs)),
-  ]);
-}}
-
-document.getElementById("connect").onclick = async () => {{
-  const prompt = document.getElementById("prompt").value.trim();
-  if (!prompt) return;
-
-  setStatus("Connecting...");
-  document.getElementById("connect").disabled = true;
-
-  try {{
-    pc = new RTCPeerConnection(RTC_CONFIG);
-    let iceCandidateCount = 0;
-    let relayCandidateCount = 0;
-
-    pc.oniceconnectionstatechange = () => {{
-      if (!pc) return;
-      log("in", "iceConnectionState=" + pc.iceConnectionState);
-      if (pc.iceConnectionState === "failed") {{
-        setStatus("ICE failed (check TURN reachability/ports).");
-      }}
-    }};
-    pc.onicegatheringstatechange = () => {{
-      if (!pc) return;
-      log("in", "iceGatheringState=" + pc.iceGatheringState);
-    }};
-    pc.onicecandidateerror = (evt) => {{
-      const msg = "iceCandidateError " + (evt.errorText || "") + " " + (evt.url || "");
-      log("in", msg);
-    }};
-    pc.onicecandidate = (evt) => {{
-      if (evt.candidate && evt.candidate.candidate) {{
-        iceCandidateCount += 1;
-        if (evt.candidate.candidate.includes(" typ relay ")) {{
-          relayCandidateCount += 1;
-        }}
-        log("in", "iceCandidate" + describeCandidate(evt.candidate.candidate));
-      }}
-    }};
-
-    // 1. Create DataChannel (client-created, server reuses)
-    dc = pc.createDataChannel("telefuser");
-    dc.onopen = () => {{
-      setStatus("DataChannel open. Sending prompt...");
-      const msg = JSON.stringify({{ type: "control", prompt: prompt }});
-      dc.send(msg);
-      log("out", msg);
-      document.getElementById("send").style.display = "inline-block";
-    }};
-    dc.onmessage = (evt) => {{
-      log("in", evt.data);
-      try {{
-        const msg = JSON.parse(evt.data);
-        const data = msg.data || msg;
-        if (data.error) {{
-          setStatus("Server error: " + data.error);
-        }} else if (data.stage) {{
-          const suffix = data.index !== undefined ? " #" + data.index : "";
-          setStatus("Server: " + data.stage + suffix);
-        }} else if (msg.type === "done") {{
-          setStatus("Done.");
-        }}
-      }} catch (e) {{}}
-    }};
-    dc.onclose = () => {{
-      if (!_cleaning) {{
-        setStatus("DataChannel closed.");
-      }}
-    }};
-
-    // 2. Optionally add camera/mic tracks
-    const useCamera = document.getElementById("use-camera").checked;
-    const useMic = document.getElementById("use-mic").checked;
-    if (useCamera || useMic) {{
-      const constraints = {{ video: useCamera, audio: useMic }};
-      localStream = await navigator.mediaDevices.getUserMedia(constraints);
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-      if (useCamera) {{
-        document.getElementById("input-video").srcObject = localStream;
-      }}
-    }}
-
-    // 3. Add recvonly transceivers for server output
-    pc.addTransceiver("video", {{ direction: "recvonly" }});
-    pc.addTransceiver("audio", {{ direction: "recvonly" }});
-
-    // 4. Handle incoming server tracks
-    pc.ontrack = (evt) => {{
-      if (evt.track.kind === "video") {{
-        document.getElementById("output-video").srcObject = evt.streams[0];
-        setStatus("Streaming...");
-        document.getElementById("unmute").style.display = "inline-block";
-      }}
-    }};
-
-    pc.onconnectionstatechange = () => {{
-      if (!pc) return;
-      const state = pc.connectionState;
-      if (state === "failed" || state === "closed") {{
-        setStatus("Connection " + state);
-        cleanup();
-      }} else if (state === "connected") {{
-        document.getElementById("stop").style.display = "inline-block";
-      }}
-    }};
-
-    // 5. SDP offer/answer exchange
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    setStatus("Gathering ICE...");
-    const iceComplete = await waitForIceGathering(pc, ICE_GATHER_TIMEOUT_MS);
-    log("in", "iceGatheringComplete=" + iceComplete + " candidates=" + iceCandidateCount + " relay=" + relayCandidateCount);
-    if (RTC_CONFIG.iceTransportPolicy === "relay" && relayCandidateCount === 0) {{
-      throw new Error("No TURN relay candidate gathered. Check TURN URL, credentials, and opened TURN ports.");
-    }}
-    setStatus("Sending offer...");
-
-    const requestOptions = Object.assign({{}}, REQUEST_OPTIONS);
-    const requestFps = requestOptions.fps || 24;
-    const requestBody = {{
-      sdp: pc.localDescription.sdp,
-      type: pc.localDescription.type,
-      task: "bidirectional",
-      prompt: prompt,
-      fps: requestFps,
-      config: Object.assign({{}}, requestOptions),
-      ...requestOptions,
-    }};
-    if (IMAGE_PATH) {{
-      requestBody.image_path = IMAGE_PATH;
-    }}
-
-    const resp = await fetchJsonWithTimeout(
-      SERVER_URL + "/v1/stream/webrtc/offer",
-      {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify(requestBody),
-      }},
-      30000,
-    );
-
-    if (!resp.ok) {{
-      const err = await resp.json().catch(() => ({{}}));
-      throw new Error(err.detail || resp.statusText);
-    }}
-
-    const answer = await resp.json();
-    sessionId = answer.session_id;
-    await pc.setRemoteDescription(new RTCSessionDescription({{
-      sdp: answer.sdp,
-      type: answer.type,
-    }}));
-
-  }} catch (e) {{
-    setStatus("Error: " + e.message);
-    cleanup();
-  }}
-}};
-
-document.getElementById("send").onclick = () => {{
-  if (!dc || dc.readyState !== "open") return;
-  const prompt = document.getElementById("prompt").value.trim();
-  if (!prompt) return;
-  const msg = JSON.stringify({{ type: "control", prompt: prompt }});
-  dc.send(msg);
-  log("out", msg);
-}};
-
-document.getElementById("stop").onclick = async () => {{
-  if (dc && dc.readyState === "open") {{
-    const msg = JSON.stringify({{ type: "stop" }});
-    dc.send(msg);
-    log("out", msg);
-  }}
-  setStatus("Stopped.");
-  if (sessionId) {{
-    await fetchJsonWithTimeout(
-      SERVER_URL + "/v1/stream/webrtc/" + sessionId,
-      {{ method: "DELETE" }},
-      5000,
-    ).catch(() => {{}});
-  }}
-  cleanup();
-}};
-
-document.getElementById("unmute").onclick = () => {{
-  const video = document.getElementById("output-video");
-  video.muted = !video.muted;
-  document.getElementById("unmute").textContent = video.muted ? "Unmute Output" : "Mute Output";
-}};
-
-let _cleaning = false;
-function cleanup() {{
-  if (_cleaning) return;
-  _cleaning = true;
-  if (localStream) {{
-    localStream.getTracks().forEach(t => t.stop());
-    localStream = null;
-    document.getElementById("input-video").srcObject = null;
-  }}
-  if (pc) {{
-    try {{ pc.close(); }} catch(e) {{}}
-    pc = null;
-    dc = null;
-  }}
-  if (sessionId) {{
-    fetchJsonWithTimeout(
-      SERVER_URL + "/v1/stream/webrtc/" + sessionId,
-      {{ method: "DELETE" }},
-      5000,
-    ).catch(() => {{}});
-    sessionId = null;
-  }}
-  document.getElementById("output-video").srcObject = null;
-  document.getElementById("connect").disabled = false;
-  document.getElementById("stop").style.display = "none";
-  document.getElementById("send").style.display = "none";
-  document.getElementById("unmute").style.display = "none";
-  document.getElementById("unmute").textContent = "Unmute Output";
-  setTimeout(() => {{ _cleaning = false; }}, 0);
-}}
-</script>
-</body>
-</html>"""
-
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html>
@@ -473,17 +135,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 12px;
     font-weight: 600;
   }
-  input,
-  select {
-    width: 100%;
-    min-height: 36px;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    padding: 7px 9px;
-    font-size: 13px;
-    background: #fff;
-    color: var(--text);
-  }
   textarea {
     width: 100%;
     min-height: 72px;
@@ -494,10 +145,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 13px;
     font-family: inherit;
   }
-  .grid {
+  input[type="file"] {
+    width: 100%;
+    color: #374151;
+    font-size: 12px;
+  }
+  .image-preview {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    gap: 5px;
+    margin-top: 2px;
+  }
+  .image-preview img {
+    display: block;
+    width: 100%;
+    height: 140px;
+    object-fit: cover;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #f8fafc;
+  }
+  .image-preview span {
+    color: var(--muted);
+    font-size: 11px;
   }
   .actions {
     display: flex;
@@ -577,11 +246,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 11px;
     text-align: center;
   }
-  .field-help {
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 11px;
-  }
   .telemetry-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -632,21 +296,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     #status { text-align: left; }
     .video-head { align-items: flex-start; flex-direction: column; }
   }
-  .field:has(#duration-seconds),
-  .field:has(#frame-num),
-  .field:has(#fps),
-  .field:has(#chunk-size),
-  .field:has(#seed),
-  .field:has(#sample-shift),
-  .field:has(#control-mode),
-  .field:has(#intrinsics-path),
-  .field:has(#control-move-step),
-  .field:has(#control-yaw-step),
-  .field:has(#control-lateral-step),
-  .field:has(#show-control-hud),
-  #duration-help {
-    display: none;
-  }
 </style>
 </head>
 <body>
@@ -677,65 +326,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <textarea id="prompt"></textarea>
         </div>
         <div class="field">
-          <label for="image-path">Server image path</label>
-          <input id="image-path" type="text" placeholder="/path/on/remote/server.png">
-        </div>
-        <div class="grid">
-          <div class="field">
-            <label for="duration-seconds">Duration (seconds)</label>
-            <input id="duration-seconds" type="number" min="0.5" max="20" step="0.5">
+          <label for="image-file">Initial image (optional)</label>
+          <input id="image-file" type="file" accept="image/*">
+          <div class="image-preview">
+            <img id="image-preview" src="/default-image" alt="Initial image preview">
+            <span id="image-preview-label">Default image</span>
           </div>
-          <div class="field">
-            <label for="frame-num">Generated frames</label>
-            <input id="frame-num" type="number" readonly>
-          </div>
-          <div class="field">
-            <label for="fps">FPS</label>
-            <input id="fps" type="number" min="1" step="1" readonly>
-          </div>
-          <div class="field">
-            <label for="chunk-size">Chunk size</label>
-            <input id="chunk-size" type="number" min="1" step="1" readonly>
-          </div>
-          <div class="field">
-            <label for="seed">Seed</label>
-            <input id="seed" type="number" step="1">
-          </div>
-        </div>
-        <div id="duration-help" class="field-help"></div>
-        <div class="grid">
-          <div class="field">
-            <label for="sample-shift">Sample shift</label>
-            <input id="sample-shift" type="number" step="0.1">
-          </div>
-          <div class="field">
-            <label for="control-mode">Control mode</label>
-            <select id="control-mode">
-              <option value="cam">cam</option>
-              <option value="act">act</option>
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <label for="intrinsics-path">Camera intrinsics path</label>
-          <input id="intrinsics-path" type="text" placeholder="Optional intrinsics.npy path">
-        </div>
-        <div class="grid">
-          <div class="field">
-            <label for="control-move-step">Move step</label>
-            <input id="control-move-step" type="number" min="0" step="0.01">
-          </div>
-          <div class="field">
-            <label for="control-yaw-step">Yaw step</label>
-            <input id="control-yaw-step" type="number" min="0" step="0.5">
-          </div>
-          <div class="field">
-            <label for="control-lateral-step">Lateral step</label>
-            <input id="control-lateral-step" type="number" min="0" step="0.01">
-          </div>
-        </div>
-        <div class="field">
-          <label><input id="show-control-hud" type="checkbox"> Control HUD</label>
         </div>
 
         <div class="actions">
@@ -787,11 +383,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const SERVER_URL = __SERVER_URL__;
 const RTC_CONFIG = __RTC_CONFIG__;
-const DEFAULT_IMAGE_PATH = __IMAGE_PATH__;
+const DEFAULT_IMAGE_PATH = __DEFAULT_IMAGE_PATH__;
 const DEFAULT_PROMPT = __PROMPT__;
-const DEFAULT_OPTIONS = __REQUEST_OPTIONS__;
 const ICE_GATHER_TIMEOUT_MS = __ICE_GATHER_TIMEOUT_MS__;
-const MAX_GENERATION_SECONDS = __MAX_GENERATION_SECONDS__;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 let pc = null;
 let dc = null;
@@ -863,54 +458,6 @@ function log(dir, text) {
   el.scrollTop = el.scrollHeight;
 }
 
-function numberValue(id, fallback) {
-  const raw = $(id).value;
-  if (raw === "") return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : fallback;
-}
-
-function frameNumForDuration(durationSeconds, fps, chunkSize) {
-  const duration = Math.min(MAX_GENERATION_SECONDS, Math.max(0.5, durationSeconds));
-  const targetFrames = Math.floor(duration * fps) + 1;
-  const targetLatentFrames = Math.floor((targetFrames - 1) / 4) + 1;
-  const completeLatentFrames = Math.max(chunkSize, Math.floor(targetLatentFrames / chunkSize) * chunkSize);
-  return 4 * (completeLatentFrames - 1) + 1;
-}
-
-function updateFrameNum() {
-  const fps = Math.max(1, numberValue("fps", DEFAULT_OPTIONS.fps ?? 16));
-  const chunkSize = Math.max(1, numberValue("chunk-size", DEFAULT_OPTIONS.chunk_size ?? 3));
-  const duration = Math.min(
-    MAX_GENERATION_SECONDS,
-    Math.max(0.5, numberValue("duration-seconds", 5.0)),
-  );
-  $("duration-seconds").value = duration;
-  const frameNum = frameNumForDuration(duration, fps, chunkSize);
-  $("frame-num").value = frameNum;
-  const actualDuration = (frameNum - 1) / fps;
-  $("duration-help").textContent =
-    "Actual duration: " + actualDuration.toFixed(2) + " s · maximum: " + MAX_GENERATION_SECONDS + " s";
-}
-
-function fillDefaults() {
-  $("prompt").value = DEFAULT_PROMPT;
-  $("image-path").value = DEFAULT_IMAGE_PATH || "";
-  $("fps").value = DEFAULT_OPTIONS.fps ?? 16;
-  $("chunk-size").value = DEFAULT_OPTIONS.chunk_size ?? 3;
-  $("duration-seconds").max = MAX_GENERATION_SECONDS;
-  $("duration-seconds").value = ((DEFAULT_OPTIONS.frame_num ?? 81) - 1) / (DEFAULT_OPTIONS.fps ?? 16);
-  $("sample-shift").value = DEFAULT_OPTIONS.sample_shift ?? 10.0;
-  $("seed").value = DEFAULT_OPTIONS.seed ?? 42;
-  $("control-mode").value = DEFAULT_OPTIONS.control_mode || "cam";
-  $("intrinsics-path").value = DEFAULT_OPTIONS.intrinsics_path || "";
-  $("control-move-step").value = DEFAULT_OPTIONS.control_move_step ?? 0.05;
-  $("control-yaw-step").value = DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0;
-  $("control-lateral-step").value = DEFAULT_OPTIONS.control_lateral_step ?? 0.05;
-  $("show-control-hud").checked = DEFAULT_OPTIONS.show_control_hud ?? true;
-  updateFrameNum();
-}
-
 async function fetchJsonWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -920,6 +467,33 @@ async function fetchJsonWithTimeout(url, options, timeoutMs) {
     clearTimeout(timeout);
   }
 }
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read the selected image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+let imagePreviewObjectUrl = null;
+
+$("image-file").addEventListener("change", () => {
+  if (imagePreviewObjectUrl) {
+    URL.revokeObjectURL(imagePreviewObjectUrl);
+    imagePreviewObjectUrl = null;
+  }
+  const file = $("image-file").files[0];
+  if (file && file.type.startsWith("image/")) {
+    imagePreviewObjectUrl = URL.createObjectURL(file);
+    $("image-preview").src = imagePreviewObjectUrl;
+    $("image-preview-label").textContent = file.name;
+    return;
+  }
+  $("image-preview").src = "/default-image";
+  $("image-preview-label").textContent = "Default image";
+});
 
 function describeCandidate(candidateStr) {
   if (!candidateStr) return "";
@@ -944,10 +518,6 @@ async function waitForIceGathering(peer, timeoutMs) {
     }),
     new Promise(resolve => setTimeout(() => resolve(false), timeoutMs)),
   ]);
-}
-
-function requestOptionsFromForm() {
-  return { ...DEFAULT_OPTIONS };
 }
 
 function setControlActive(control, active) {
@@ -1025,13 +595,17 @@ $("reset-control").onclick = () => {
 
 $("connect").onclick = async () => {
   const prompt = $("prompt").value.trim();
-  const imagePath = $("image-path").value.trim();
+  const imageFile = $("image-file").files[0];
   if (!prompt) {
     setStatus("Prompt is required.");
     return;
   }
-  if (!imagePath) {
-    setStatus("Server image path is required.");
+  if (imageFile && !imageFile.type.startsWith("image/")) {
+    setStatus("Please select an image file.");
+    return;
+  }
+  if (imageFile && imageFile.size > MAX_IMAGE_BYTES) {
+    setStatus("Image must not exceed 10 MiB.");
     return;
   }
 
@@ -1039,6 +613,7 @@ $("connect").onclick = async () => {
   $("connect").disabled = true;
 
   try {
+    const image = imageFile ? await readFileAsDataUrl(imageFile) : null;
     pc = new RTCPeerConnection(RTC_CONFIG);
     let iceCandidateCount = 0;
     let relayCandidateCount = 0;
@@ -1119,18 +694,16 @@ $("connect").onclick = async () => {
     }
 
     setStatus("Sending offer...");
-    const requestOptions = requestOptionsFromForm();
     const requestBody = {
       sdp: pc.localDescription.sdp,
       type: pc.localDescription.type,
       task: "bidirectional",
       prompt,
-      image_path: imagePath,
-      config: { ...requestOptions },
-      ...requestOptions,
     };
-    if (requestOptions.fps !== undefined) {
-      requestBody.fps = requestOptions.fps;
+    if (image) {
+      requestBody.image = image;
+    } else {
+      requestBody.image_path = DEFAULT_IMAGE_PATH;
     }
     const resp = await fetchJsonWithTimeout(
       SERVER_URL + "/v1/stream/webrtc/offer",
@@ -1158,20 +731,13 @@ $("connect").onclick = async () => {
   }
 };
 
-$("stop").onclick = async () => {
+$("stop").onclick = () => {
   setStatus("Stopping...");
   releaseAllControls(true);
   if (dc && dc.readyState === "open") {
     const msg = JSON.stringify({ type: "stop" });
     dc.send(msg);
     log("out", msg);
-  }
-  if (sessionId) {
-    await fetchJsonWithTimeout(
-      SERVER_URL + "/v1/stream/webrtc/" + sessionId,
-      { method: "DELETE" },
-      5000,
-    ).catch(() => {});
   }
   cleanup();
 };
@@ -1199,7 +765,7 @@ function cleanup() {
   setTimeout(() => { cleaning = false; }, 0);
 }
 
-fillDefaults();
+$("prompt").value = DEFAULT_PROMPT;
 </script>
 </body>
 </html>"""
@@ -1209,47 +775,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LingBot-World-Fast WebRTC control demo")
     parser.add_argument("--server-url", default=DEFAULT_SERVER_URL, help="Stream server base URL")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Local HTTP server port")
-    parser.add_argument("--image-path", default="", help="Server-side image path for pipelines that require one")
-    parser.add_argument("--fps", type=int, default=16, help="Output WebRTC FPS and pipeline FPS")
-    parser.add_argument("--frame-num", type=int, default=81, help="Requested LingBot frame count")
-    parser.add_argument("--chunk-size", type=int, default=3, help="LingBot latent chunk size")
-    parser.add_argument("--sample-shift", type=float, default=DEFAULT_SAMPLE_SHIFT, help="LingBot sampler shift")
-    parser.add_argument("--seed", type=int, default=42, help="LingBot random seed")
-    parser.add_argument("--max-attention-size", type=int, default=None, help="Optional LingBot max attention size")
-    parser.add_argument("--max-sequence-length", type=int, default=512, help="LingBot max text sequence length")
-    parser.add_argument("--control-mode", default="cam", choices=("cam", "act"), help="LingBot control mode")
-    parser.add_argument("--intrinsics-path", default="", help="Optional LingBot camera intrinsics .npy path")
-    parser.add_argument("--control-move-step", type=float, default=0.05, help="LingBot video-frame move step")
-    parser.add_argument(
-        "--control-yaw-step-degrees",
-        type=float,
-        default=2.0,
-        help="LingBot yaw step per video frame",
-    )
-    parser.add_argument(
-        "--control-lateral-step",
-        type=float,
-        default=0.05,
-        help="LingBot video-frame lateral strafe step",
-    )
-    parser.add_argument(
-        "--control-pitch-step-degrees",
-        type=float,
-        default=2.0,
-        help="LingBot pitch step per video frame",
-    )
-    parser.add_argument(
-        "--control-pitch-limit-degrees",
-        type=float,
-        default=85.0,
-        help="LingBot absolute pitch limit",
-    )
-    parser.add_argument(
-        "--show-control-hud",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Overlay an active-control HUD on chunks that consumed direction controls",
-    )
     parser.add_argument(
         "--ice-gather-timeout-ms",
         type=int,
@@ -1284,8 +809,6 @@ def main() -> None:
     )
     parser.add_argument("--no-open", action="store_true", help="Don't open browser automatically")
     args = parser.parse_args()
-    if args.image_path and not os.path.exists(args.image_path):
-        parser.error(f"--image-path does not exist on the server: {args.image_path}")
 
     rtc_config: dict[str, object] = {}
     if args.turn_url:
@@ -1298,19 +821,15 @@ def main() -> None:
     if args.force_turn_relay:
         rtc_config["iceTransportPolicy"] = "relay"
 
-    request_options: dict[str, object] = {}
-
     # When proxying, the browser should call the demo origin (no separate port forward needed for --server-url).
     server_url_for_browser = "" if args.proxy_backend else args.server_url
 
     html = (
         HTML_TEMPLATE.replace("__SERVER_URL__", json.dumps(server_url_for_browser))
         .replace("__RTC_CONFIG__", json.dumps(rtc_config))
-        .replace("__IMAGE_PATH__", json.dumps(args.image_path))
+        .replace("__DEFAULT_IMAGE_PATH__", json.dumps(DEFAULT_IMAGE_PATH))
         .replace("__PROMPT__", json.dumps(DEFAULT_PROMPT))
-        .replace("__REQUEST_OPTIONS__", json.dumps(request_options))
         .replace("__ICE_GATHER_TIMEOUT_MS__", str(args.ice_gather_timeout_ms))
-        .replace("__MAX_GENERATION_SECONDS__", str(MAX_GENERATION_SECONDS))
     )
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -1359,6 +878,14 @@ def main() -> None:
             self.wfile.write(resp_body)
 
         def do_GET(self) -> None:
+            if self.path == "/default-image":
+                body = Path(DEFAULT_IMAGE_PATH).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1385,9 +912,6 @@ def main() -> None:
     url = f"http://localhost:{args.port}"
     print(f"Serving LingBot-World-Fast WebRTC demo at {url}")
     print(f"Stream server: {args.server_url}")
-    if args.image_path:
-        print(f"Image path: {args.image_path}")
-    print(f"Request options: {json.dumps(request_options)}")
     print(f"ICE gather timeout: {args.ice_gather_timeout_ms} ms")
     if args.proxy_backend:
         print("Proxy: enabled (browser will call this demo origin; no separate port forward needed for --server-url)")
