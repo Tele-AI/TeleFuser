@@ -23,6 +23,10 @@ import torch
 from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
+from telefuser.core.module_manager import ModuleManager
+from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
+from telefuser.models.wan_video_text_encoder import WanTextEncoder
+from telefuser.models.wan_video_vae import WanVideoVAE
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig, resolve_lingbot_frame_count
 from telefuser.pipelines.lingbot_world_v2 import (
@@ -46,8 +50,21 @@ DEFAULT_PROMPT = (
 RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
 
 PPL_CONFIG = dict(
+    vae_path=str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B" / "Wan2.1_VAE.pth"),
+    text_encoder_path=str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B" / "models_t5_umt5-xxl-enc-bf16.pth"),
+    dit_path_list=[
+        str(
+            TF_MODEL_ZOO_PATH
+            / "lingbot"
+            / "lingbot-world-v2-14b-causal-fast"
+            / "transformers"
+            / f"model-{index:05d}-of-00008.safetensors"
+        )
+        for index in range(1, 9)
+    ],
     parallelism=1,
-    vae_device_id=0,
+    vae_encode_device_id=0,
+    vae_decode_device_id=0,
     control_mode="cam",
     resolution="480p",
     frame_num=77,
@@ -79,24 +96,63 @@ def get_pipeline(
     v2_model_root: str | None = None,
 ) -> LingBotWorldV2Pipeline:
     """Load LingBot-World v2 for offline chunked generation."""
-    if model_root is None or v2_model_root is None:
-        default_model_root = str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B")
-        default_v2_model_root = str(TF_MODEL_ZOO_PATH / "lingbot" / "lingbot-world-v2-14b-causal-fast" / "transformers")
-    else:
-        default_model_root, default_v2_model_root = model_root, v2_model_root
     if parallelism < 1:
         raise ValueError(f"parallelism must be positive, got {parallelism}")
 
-    vae_device = int(PPL_CONFIG["vae_device_id"])
+    model_root_path = Path(model_root).expanduser() if model_root else None
+    v2_model_root_path = Path(v2_model_root).expanduser() if v2_model_root else None
+    vae_path = str(model_root_path / "Wan2.1_VAE.pth") if model_root_path else PPL_CONFIG["vae_path"]
+    text_encoder_path = (
+        str(model_root_path / "models_t5_umt5-xxl-enc-bf16.pth") if model_root_path else PPL_CONFIG["text_encoder_path"]
+    )
+    dit_path_list = (
+        [str(v2_model_root_path / f"model-{index:05d}-of-00008.safetensors") for index in range(1, 9)]
+        if v2_model_root_path
+        else PPL_CONFIG["dit_path_list"]
+    )
+
+    vae_encode_device = int(PPL_CONFIG["vae_encode_device_id"])
+    vae_decode_device = int(PPL_CONFIG["vae_decode_device_id"])
     dit_device_ids = list(range(parallelism))
     dtype = PPL_CONFIG["torch_dtype"]
+    module_manager = ModuleManager(device="cpu")
+    module_manager.load_model(
+        vae_path,
+        name="wan_video_vae",
+        model_class=WanVideoVAE,
+        torch_dtype=PPL_CONFIG["vae_torch_dtype"],
+        low_cpu_mem_usage=True,
+        strict=False,
+    )
+    module_manager.load_model(
+        text_encoder_path,
+        name="wan_video_text_encoder",
+        model_class=WanTextEncoder,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+    )
+    module_manager.load_model(
+        dit_path_list,
+        name="lingbot_world_fast_dit",
+        model_class=LingBotWorldFastDiT,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+    )
     pipeline = LingBotWorldV2Pipeline(device="cuda", torch_dtype=dtype)
     pipeline.init(
+        module_manager,
         LingBotWorldV2PipelineConfig(
-            checkpoint_dir=model_root or default_model_root,
-            fast_checkpoint_path=v2_model_root or default_v2_model_root,
-            vae_config=ModelRuntimeConfig(
-                device_type="cuda", device_id=vae_device, torch_dtype=PPL_CONFIG["vae_torch_dtype"]
+            vae_encode_config=ModelRuntimeConfig(
+                device_type="cuda",
+                device_id=vae_encode_device,
+                torch_dtype=PPL_CONFIG["vae_torch_dtype"],
+                parallel_config=ParallelConfig(device_ids=[vae_encode_device]),
+            ),
+            vae_decode_config=ModelRuntimeConfig(
+                device_type="cuda",
+                device_id=vae_decode_device,
+                torch_dtype=PPL_CONFIG["vae_torch_dtype"],
+                parallel_config=ParallelConfig(device_ids=[vae_decode_device]),
             ),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=dit_device_ids[0], torch_dtype=dtype),
             dit_torch_dtype=dtype,
@@ -111,7 +167,6 @@ def get_pipeline(
                 sp_ulysses_degree=len(dit_device_ids),
                 enable_fsdp=PPL_CONFIG["enable_fsdp"] and len(dit_device_ids) > 1,
             ),
-            vae_parallel_config=ParallelConfig(device_ids=[vae_device]),
         ),
     )
     return pipeline

@@ -67,8 +67,8 @@ LingBot 的离线 chunked generation 与双向 WebRTC session 均使用此生命
 VAE decode 是独立 actor，即使位于同一张 GPU 也可以重叠执行。若放置超过显存容量，应移动 stage 到其他设备，
 或声明明确的部署约束；不要增加隐式的全局互斥锁。
 
-LingBot 支持独立的 `vae_encode_config` 和 `vae_decode_config`。未设置这两个字段时，旧的 `vae_config` 与
-`vae_parallel_config` 仍作为兼容 fallback。
+LingBot 的 `vae_encode_config` 和 `vae_decode_config` 是两个独立且完整的
+`ModelRuntimeConfig`，不再提供共享的 VAE placement fallback。
 
 ## 可观测性与实时运行
 

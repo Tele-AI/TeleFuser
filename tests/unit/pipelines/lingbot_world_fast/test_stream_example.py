@@ -30,8 +30,12 @@ def test_webrtc_demo_uses_stream_service_defaults() -> None:
 
 def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
     pipeline = MagicMock()
+    module_manager = MagicMock()
 
-    with patch.object(offline_example, "LingBotWorldFastPipeline", return_value=pipeline) as pipeline_cls:
+    with (
+        patch.object(offline_example, "ModuleManager", return_value=module_manager),
+        patch.object(offline_example, "LingBotWorldFastPipeline", return_value=pipeline) as pipeline_cls,
+    ):
         result = offline_example.get_pipeline(
             parallelism=4,
             model_root="/models/Wan2.2-I2V-A14B",
@@ -41,10 +45,8 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
     assert result is pipeline
     pipeline_cls.assert_called_once_with(device="cuda", torch_dtype=torch.bfloat16)
 
-    assert len(pipeline.init.call_args.args) == 1
-    config = pipeline.init.call_args.args[0]
-    assert config.checkpoint_dir == "/models/Wan2.2-I2V-A14B"
-    assert config.fast_checkpoint_path == "/models/lingbot-world-fast"
+    assert pipeline.init.call_args.args[0] is module_manager
+    config = pipeline.init.call_args.args[1]
     assert config.control_type == "cam"
     assert config.max_area == 480 * 832
     assert config.local_attn_size == -1
@@ -52,6 +54,18 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
     assert config.parallel_config.device_ids == [0, 1, 2, 3]
     assert config.parallel_config.sp_ulysses_degree == 4
     assert config.parallel_config.enable_fsdp is offline_example.PPL_CONFIG["enable_fsdp"]
+    assert config.vae_encode_config.device_id == 0
+    assert config.vae_encode_config.parallel_config.device_ids == [0]
+    assert config.vae_decode_config.device_id == 0
+    assert config.vae_decode_config.parallel_config.device_ids == [0]
+    load_calls = module_manager.load_model.call_args_list
+    assert [call.args[0] for call in load_calls[:2]] == [
+        "/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
+        "/models/Wan2.2-I2V-A14B/models_t5_umt5-xxl-enc-bf16.pth",
+    ]
+    assert load_calls[2].args[0] == [
+        f"/models/lingbot-world-fast/model-{index:05d}-of-00016.safetensors" for index in range(1, 17)
+    ]
 
 
 def test_unified_example_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:
@@ -78,10 +92,16 @@ def test_unified_example_get_service_retains_example_default_gpu_num() -> None:
 
 def test_get_pipeline_uses_module_model_zoo_path() -> None:
     pipeline = MagicMock()
-    with patch.object(offline_example, "LingBotWorldFastPipeline", return_value=pipeline):
+    module_manager = MagicMock()
+    with (
+        patch.object(offline_example, "ModuleManager", return_value=module_manager),
+        patch.object(offline_example, "LingBotWorldFastPipeline", return_value=pipeline),
+    ):
         offline_example.get_pipeline()
 
-    assert len(pipeline.init.call_args.args) == 1
-    config = pipeline.init.call_args.args[0]
-    assert config.checkpoint_dir == str(offline_example.TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B")
-    assert config.fast_checkpoint_path == str(offline_example.TF_MODEL_ZOO_PATH / "lingbot/lingbot-world-fast")
+    assert pipeline.init.call_args.args[0] is module_manager
+    assert [call.args[0] for call in module_manager.load_model.call_args_list] == [
+        offline_example.PPL_CONFIG["vae_path"],
+        offline_example.PPL_CONFIG["text_encoder_path"],
+        offline_example.PPL_CONFIG["dit_path_list"],
+    ]

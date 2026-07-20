@@ -6,6 +6,7 @@ import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_world_size
 from telefuser.distributed.fsdp import shard_model
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
@@ -51,11 +52,13 @@ class LingBotWorldFastDenoisingStage(BaseStage):
     def __init__(
         self,
         name: str,
-        dit_model: LingBotWorldFastDiT,
+        module_manager: ModuleManager,
         model_runtime_config: ModelRuntimeConfig,
     ) -> None:
         super().__init__(name, model_runtime_config)
-        self.dit = dit_model
+        self.dit: LingBotWorldFastDiT = module_manager.fetch_module("lingbot_world_fast_dit")
+        if self.dit is None:
+            raise ValueError("LingBot denoising stage requires a loaded lingbot_world_fast_dit module")
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
         self._cache_registry: dict[int, _DenoisingCacheState] = {}

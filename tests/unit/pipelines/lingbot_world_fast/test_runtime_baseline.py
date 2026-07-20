@@ -27,7 +27,7 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
         orig_width=16,
         local_attn_size=-1,
         sink_size=0,
-        vae_config=SimpleNamespace(torch_dtype=torch.float32),
+        vae_encode_config=SimpleNamespace(torch_dtype=torch.float32),
     )
     pipeline.dit = SimpleNamespace(
         patch_size=(1, 2, 2),
@@ -61,8 +61,10 @@ def _create_runtime(frame_num: int, seed: int = 42):
 def test_v1_and_v2_defaults_match_the_shared_source_contract() -> None:
     image = Image.new("RGB", (16, 16))
 
-    assert LingBotWorldFastPipelineConfig().vae_config.torch_dtype == torch.float32
-    assert LingBotWorldV2PipelineConfig().vae_config.torch_dtype == torch.float32
+    assert LingBotWorldFastPipelineConfig().vae_encode_config.torch_dtype == torch.float32
+    assert LingBotWorldFastPipelineConfig().vae_decode_config.torch_dtype == torch.float32
+    assert LingBotWorldV2PipelineConfig().vae_encode_config.torch_dtype == torch.float32
+    assert LingBotWorldV2PipelineConfig().vae_decode_config.torch_dtype == torch.float32
     assert LingBotWorldFastSessionConfig(prompt="v1", image=image).frame_policy == "truncate"
 
 
@@ -90,7 +92,7 @@ def test_denoising_cache_cursors_use_mutable_scalar_tensors() -> None:
 def test_v1_and_v2_share_source_image_geometry_and_preprocessing() -> None:
     pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
     pipeline.vae_device = torch.device("cpu")
-    pipeline.config = SimpleNamespace(vae_config=SimpleNamespace(torch_dtype=torch.float32))
+    pipeline.config = SimpleNamespace(vae_encode_config=SimpleNamespace(torch_dtype=torch.float32))
     image = Image.fromarray(np.arange(5 * 7 * 3, dtype=np.uint8).reshape(5, 7, 3), mode="RGB")
 
     actual = pipeline._prepare_image_tensor(image, height=6, width=8)

@@ -8,6 +8,7 @@ import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.models.wan_video_vae import (
     WanVideoVAE,
     WanVideoVAEStreamingDecodeState,
@@ -26,9 +27,11 @@ class _VAEEncodeCacheState:
 class LingBotWorldFastVAEEncodeStage(BaseStage):
     """Run condition encoding in a VAE worker independent from video decoding."""
 
-    def __init__(self, name: str, vae: WanVideoVAE, model_runtime_config: ModelRuntimeConfig) -> None:
+    def __init__(self, name: str, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
         super().__init__(name, model_runtime_config)
-        self.vae = vae
+        self.vae: WanVideoVAE = module_manager.fetch_module("wan_video_vae")
+        if self.vae is None:
+            raise ValueError("LingBot VAE encode stage requires a loaded wan_video_vae module")
         self.model_names = ["vae"]
         self._cache_registry: dict[int, _VAEEncodeCacheState] = {}
 
@@ -85,9 +88,11 @@ class _VAEDecodeCacheState:
 class LingBotWorldFastVAEDecodeStage(BaseStage):
     """Run video decoding in a VAE worker independent from condition encoding."""
 
-    def __init__(self, name: str, vae: WanVideoVAE, model_runtime_config: ModelRuntimeConfig) -> None:
+    def __init__(self, name: str, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
         super().__init__(name, model_runtime_config)
-        self.vae = vae
+        self.vae: WanVideoVAE = module_manager.fetch_module("wan_video_vae")
+        if self.vae is None:
+            raise ValueError("LingBot VAE decode stage requires a loaded wan_video_vae module")
         self.model_names = ["vae"]
         self._cache_registry: dict[int, _VAEDecodeCacheState] = {}
 

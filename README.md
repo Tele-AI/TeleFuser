@@ -17,8 +17,6 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
-- ✨ **2026-07-19**: Added the actor-based streaming pipeline scheduler with bounded backpressure, per-session metrics, deterministic actor-owned cleanup, and independent LingBot VAE placement. See [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md).
-
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).

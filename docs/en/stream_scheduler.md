@@ -70,8 +70,9 @@ Do not infer a resource group from `device_id` or `ParallelConfig.device_ids`. F
 decode are independent actors and may overlap on the same GPU. If a placement exceeds memory capacity, move stages to
 different devices or define a deliberate deployment constraint; do not add an implicit global mutex.
 
-LingBot supports independent `vae_encode_config` and `vae_decode_config`. When those fields are omitted, the legacy
-`vae_config` and `vae_parallel_config` settings remain the compatibility fallback.
+LingBot uses independent `vae_encode_config` and `vae_decode_config`. Each VAE
+stage receives its own complete `ModelRuntimeConfig`; there is no shared VAE
+placement fallback.
 
 ## Observability and Real-Time Operation
 

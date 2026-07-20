@@ -23,7 +23,9 @@ def test_denoising_stage_parallel_models_enables_ulysses_and_fsdp() -> None:
         attention_config=AttentionConfig(),
         parallel_config=parallel_config,
     )
-    stage = LingBotWorldFastDenoisingStage("denoise", dit, runtime_config)
+    module_manager = MagicMock()
+    module_manager.fetch_module.return_value = dit
+    stage = LingBotWorldFastDenoisingStage("denoise", module_manager, runtime_config)
     device_mesh = MagicMock()
     fsdp_model = MagicMock()
 
@@ -61,7 +63,9 @@ def test_denoising_stage_parallel_models_without_fsdp_keeps_model() -> None:
         device_id=0,
         parallel_config=parallel_config,
     )
-    stage = LingBotWorldFastDenoisingStage("denoise", dit, runtime_config)
+    module_manager = MagicMock()
+    module_manager.fetch_module.return_value = dit
+    stage = LingBotWorldFastDenoisingStage("denoise", module_manager, runtime_config)
     device_mesh = MagicMock()
 
     with (
