@@ -58,11 +58,16 @@ PPL_CONFIG = dict(
     target_fps=16,
     max_duration_seconds=120.0,
     attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
-    enable_fsdp=False,
+    enable_fsdp=True,
     local_attn_size=18,
     sink_size=6,
     timestep_indices=(0, 250, 500, 750),
     max_attention_size=None,
+    control_move_step=0.10,
+    control_lateral_step=0.10,
+    control_translation_scale=3.0,
+    control_yaw_step_degrees=0.5,
+    control_pitch_step_degrees=0.5,
     vae_torch_dtype=torch.float32,
     torch_dtype=torch.bfloat16,
 )
@@ -104,7 +109,7 @@ def get_pipeline(
             parallel_config=ParallelConfig(
                 device_ids=dit_device_ids if len(dit_device_ids) > 1 else None,
                 sp_ulysses_degree=len(dit_device_ids),
-                enable_fsdp=PPL_CONFIG["enable_fsdp"],
+                enable_fsdp=PPL_CONFIG["enable_fsdp"] and len(dit_device_ids) > 1,
             ),
             vae_parallel_config=ParallelConfig(device_ids=[vae_device]),
         ),
@@ -126,6 +131,11 @@ def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastSer
             "frame_policy": PPL_CONFIG["frame_policy"],
             "sample_shift": PPL_CONFIG["sample_shift"],
             "max_attention_size": PPL_CONFIG["max_attention_size"],
+            "control_move_step": PPL_CONFIG["control_move_step"],
+            "control_lateral_step": PPL_CONFIG["control_lateral_step"],
+            "control_translation_scale": PPL_CONFIG["control_translation_scale"],
+            "control_yaw_step_degrees": PPL_CONFIG["control_yaw_step_degrees"],
+            "control_pitch_step_degrees": PPL_CONFIG["control_pitch_step_degrees"],
         },
     )
 

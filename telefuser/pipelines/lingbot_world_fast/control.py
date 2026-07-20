@@ -38,6 +38,22 @@ def compute_relative_poses(
     return relative
 
 
+def scale_relative_translation(poses: torch.Tensor, scale: object | None) -> torch.Tensor:
+    """Scale already-normalized relative translation for real-time camera control."""
+    if scale is None:
+        return poses
+    if isinstance(scale, bool):
+        raise ValueError("Translation scale must be a positive number")
+    try:
+        value = float(scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Translation scale must be a positive number") from exc
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("Translation scale must be a positive number")
+    poses[:, :3, 3] *= value
+    return poses
+
+
 def interpolate_camera_poses(
     src_indices: np.ndarray,
     src_rot_mat: np.ndarray,
@@ -324,6 +340,7 @@ class LingBotWorldFastControlBuilder:
                 raise ValueError(f"Previous pose must have shape (4, 4), got {tuple(previous_pose_t.shape)}")
             poses_with_boundary = torch.cat([previous_pose_t.unsqueeze(0), poses_t], dim=0)
             poses_rel = compute_relative_poses(poses_with_boundary, framewise=True)[1:]
+        poses_rel = scale_relative_translation(poses_rel, action.get("translation_scale"))
         return self._build_tensor(poses_rel, intrinsics_t, action.get("action")).to(dtype=torch.float32)
 
     def build_sequence(

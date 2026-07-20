@@ -58,6 +58,8 @@ class LingBotWorldFastSessionConfig:
     control_move_step: float = 0.05
     control_yaw_step_degrees: float = 2.0
     control_lateral_step: float = 0.05
+    # Multiplier for the normalized framewise translation supplied to the DiT.
+    control_translation_scale: float = 3.0
     control_pitch_step_degrees: float = 2.0
     control_pitch_limit_degrees: float = 85.0
     show_control_hud: bool = True
@@ -103,13 +105,24 @@ class LingBotWorldFastGenerationSession:
         return self.latent_f // self.chunk_size
 
 
+@dataclass(frozen=True)
+class LingBotWorldFastDirectionCommand:
+    """One discrete direction snapshot produced by a press event."""
+
+    revision: int
+    controls: frozenset[str]
+
+
 @dataclass
 class LingBotWorldFastSessionState:
     config: LingBotWorldFastSessionConfig
     control_context: LingBotWorldFastControlContext | None = None
     generation_session: LingBotWorldFastGenerationSession | None = None
     streaming_session: LingBotWorldFastStreamingSession | None = None
-    pending_inputs: "queue.Queue[dict]" = field(default_factory=queue.Queue)
+    # This queue only wakes the worker or delivers a stop signal. The latest
+    # directional snapshot is stored separately so stale input cannot lag the
+    # rendered video.
+    pending_inputs: "queue.Queue[dict]" = field(default_factory=lambda: queue.Queue(maxsize=1))
     output_queue: asyncio.Queue | None = None
     worker_thread: threading.Thread | None = None
     loop: asyncio.AbstractEventLoop | None = None
@@ -124,7 +137,14 @@ class LingBotWorldFastSessionState:
     dropped_status_payloads: int = 0
     metrics_lock: object = field(default_factory=threading.Lock, repr=False)
     pressed_controls: set[str] = field(default_factory=set)
-    queued_controls: set[str] = field(default_factory=set)
+    pending_direction_command: LingBotWorldFastDirectionCommand | None = None
+    next_control_revision: int = 0
+    last_applied_control_revision: int | None = None
+    overwritten_direction_commands: int = 0
+    latest_explicit_control: dict | None = None
+    overwritten_explicit_controls: int = 0
+    dropped_control_signals: int = 0
+    scheduler_metrics: dict[str, object] | None = None
     control_c2w: list[list[float]] = field(
         default_factory=lambda: [
             [1.0, 0.0, 0.0, 0.0],
