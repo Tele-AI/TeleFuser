@@ -89,9 +89,12 @@ Client                          Server
 
 The client **must** create a DataChannel named `"telefuser"` before generating the SDP offer. The server reuses that single channel for receiving control input and sending metadata output. Video and audio are transported over RTP media tracks in both directions.
 
+Outgoing video prefers H.264 at 8 Mbps by default. Override these settings with `TELEFUSER_WEBRTC_VIDEO_CODEC` (`H264` or `VP8`) and `TELEFUSER_WEBRTC_VIDEO_BITRATE` (bits per second).
+
 **ChunkRouter** is the server-side fan-out adapter that consumes the pipeline's `pull_chunks()` generator exactly once and dispatches:
 
-- `frames_b64` → decoded JPEG → `av.VideoFrame` → pushed to `FrameGeneratorTrack` (RTP video)
+- `frames` → raw PIL or `av.VideoFrame` → pushed directly to `FrameGeneratorTrack` (preferred, lossless bridge)
+- `frames_b64` → decoded JPEG → `av.VideoFrame` → pushed to `FrameGeneratorTrack` (compatibility fallback)
 - `audio_b64` → decoded PCM16 → fed to `AudioGeneratorTrack` (RTP audio)
 - Remaining metadata → serialized as `StreamChunkMessage` JSON → sent over DataChannel
 
@@ -353,7 +356,9 @@ In bidirectional mode, the client-created `"telefuser"` DataChannel carries JSON
   "webrtc_active_sessions": 1,
   "webrtc_server_push_sessions": 1,
   "webrtc_bidirectional_sessions": 0,
-  "webrtc_max_sessions": 10
+  "webrtc_max_sessions": 10,
+  "webrtc_video_codec": "H264",
+  "webrtc_video_bitrate": 8000000
 }
 ```
 
@@ -371,7 +376,9 @@ In bidirectional mode, the client-created `"telefuser"` DataChannel carries JSON
   "webrtc_active_sessions": 0,
   "webrtc_server_push_sessions": 0,
   "webrtc_bidirectional_sessions": 0,
-  "webrtc_max_sessions": 10
+  "webrtc_max_sessions": 10,
+  "webrtc_video_codec": "H264",
+  "webrtc_video_bitrate": 8000000
 }
 ```
 
@@ -539,11 +546,11 @@ Press arrow keys in the browser to see the D-pad overlay respond in real time.
 
 ### Bidirectional Client Demo
 
-`examples/stream_server/webrtc_bidirectional_demo.py` — A general-purpose bidirectional WebRTC client with:
+`examples/stream_server/webrtc_bidirectional_demo.py` — A LingBot bidirectional WebRTC client with:
 
-- DataChannel for sending prompts and control messages
-- Optional camera and microphone input via media tracks
-- Server output video player and DataChannel message log
+- DataChannel prompt and direction controls
+- A browser-selected initial image up to 10 MiB
+- Server output video, runtime telemetry, and a DataChannel message log
 
 ```bash
 python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
@@ -635,12 +642,6 @@ requests to 8088 by default.
 python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
-  --image-path examples/data/lingbot_world_fast/image.jpg \
-  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
-  --frame-num 321 \
-  --chunk-size 3 \
-  --sample-shift 10.0 \
-  --fps 16 \
   --turn-url 'turn:localhost:3478?transport=tcp' \
   --turn-username telefuser \
   --turn-credential telefuser-turn \
@@ -691,10 +692,10 @@ is occupied, use `-L 13478:127.0.0.1:3478` and pass
 `--turn-url 'turn:localhost:13478?transport=tcp'` to the browser demo. Do not change the server-side
 `TELEFUSER_TURN_SERVER`, which still connects to coturn at remote port 3478.
 
-`--image-path` and `--intrinsics-path` are server-side paths, not laptop-local paths. For real-time keyboard control,
-the service loads `--intrinsics-path` and keeps its first row fixed for the session. The demo
-enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are
-forwarded by the demo process to `--server-url`.
+Select the initial image in the browser before connecting. The browser sends it with the WebRTC offer, so the image
+does not need to exist on the remote host. Generation settings and default camera intrinsics come from the stream
+service configuration. The demo enables proxying by default; the browser only needs to access the demo port.
+Requests to `/v1/stream/webrtc/*` are forwarded by the demo process to `--server-url`.
 
 #### Run the Browser and Service on the Same Machine
 
@@ -726,12 +727,6 @@ env -u TELEFUSER_TURN_SERVER \
   python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
-  --image-path examples/data/lingbot_world_fast/image.jpg \
-  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
-  --frame-num 321 \
-  --chunk-size 3 \
-  --sample-shift 10.0 \
-  --fps 16 \
   --no-open
 ```
 

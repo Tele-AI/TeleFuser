@@ -52,6 +52,8 @@ class WebRTCRoutes:
         self._session_manager = WebRTCSessionManager(
             max_sessions=config.webrtc_max_sessions,
             configuration=configuration,
+            video_codec=config.webrtc_video_codec,
+            video_bitrate=config.webrtc_video_bitrate,
         )
 
     @staticmethod

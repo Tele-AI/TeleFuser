@@ -20,6 +20,7 @@ from collections.abc import AsyncGenerator, Callable
 import av
 import cv2
 import numpy as np
+from PIL import Image
 
 from telefuser.service.api.stream_schema import StreamChunkMessage, StreamDoneMessage, serialisable_chunk
 from telefuser.utils.logging import logger
@@ -66,26 +67,41 @@ class ChunkRouter:
         is_nested = "frames_b64" not in chunk and isinstance(chunk.get("data"), dict)
         data = chunk.get("data", {}) if is_nested else chunk
 
+        raw_frames = data.get("frames")
+        frames: list[object] | tuple[object, ...] = raw_frames if isinstance(raw_frames, (list, tuple)) else ()
         frames_b64: list[str] = data.get("frames_b64", [])
-        if frames_b64 and self._video_track is not None:
-            for fb64 in frames_b64:
-                raw = base64.b64decode(fb64)
-                np_arr = np.frombuffer(raw, dtype=np.uint8)
-                bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                if bgr is None:
-                    logger.warning(f"ChunkRouter dropped undecodable video frame: session={self._session_id}")
-                    continue
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
-                self._video_track.push_frame(frame)
+        if self._video_track is not None:
+            if frames:
+                for source in frames:
+                    if isinstance(source, av.VideoFrame):
+                        frame = source
+                    elif isinstance(source, Image.Image):
+                        rgb = np.ascontiguousarray(source.convert("RGB"))
+                        frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+                    else:
+                        logger.warning(f"ChunkRouter dropped unsupported raw video frame: session={self._session_id}")
+                        continue
+                    self._video_track.push_frame(frame)
+            else:
+                for fb64 in frames_b64:
+                    raw = base64.b64decode(fb64)
+                    np_arr = np.frombuffer(raw, dtype=np.uint8)
+                    bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if bgr is None:
+                        logger.warning(f"ChunkRouter dropped undecodable video frame: session={self._session_id}")
+                        continue
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+                    self._video_track.push_frame(frame)
 
         audio_b64 = data.get("audio_b64")
         if audio_b64 and self._audio_track is not None:
             self._audio_track.feed(base64.b64decode(audio_b64))
 
-        metadata = {k: v for k, v in chunk.items() if k not in _MEDIA_KEYS}
+        media_keys = _MEDIA_KEYS | {"frames"} if isinstance(raw_frames, (list, tuple)) else _MEDIA_KEYS
+        metadata = {k: v for k, v in chunk.items() if k not in media_keys}
         if is_nested and isinstance(metadata.get("data"), dict):
-            metadata["data"] = {k: v for k, v in metadata["data"].items() if k not in _MEDIA_KEYS}
+            metadata["data"] = {k: v for k, v in metadata["data"].items() if k not in media_keys}
             if not metadata["data"]:
                 del metadata["data"]
         if metadata and self._dc_send is not None:

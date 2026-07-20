@@ -14,7 +14,7 @@ import json
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 
-from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 
 from telefuser.utils.logging import logger
 
@@ -52,11 +52,47 @@ class _BidirectionalSession:
 class WebRTCSessionManager:
     """Creates and manages WebRTC peer connections for stream sessions."""
 
-    def __init__(self, max_sessions: int = 10, configuration: RTCConfiguration | None = None) -> None:
+    def __init__(
+        self,
+        max_sessions: int = 10,
+        configuration: RTCConfiguration | None = None,
+        video_codec: str = "H264",
+        video_bitrate: int = 8_000_000,
+    ) -> None:
+        if video_bitrate < 500_000:
+            raise ValueError(f"video_bitrate must be at least 500000, got {video_bitrate}")
+        video_codec = video_codec.upper()
+        if video_codec not in {"H264", "VP8"}:
+            raise ValueError(f"Unsupported WebRTC video codec: {video_codec}")
         self._sessions: dict[str, _Session | _BidirectionalSession | object] = {}
         self._max_sessions = max_sessions
         self._configuration = configuration
+        self._video_codec = video_codec
+        self._video_bitrate = video_bitrate
         self._lock = asyncio.Lock()
+        self._configure_video_bitrate(video_bitrate)
+
+    @staticmethod
+    def _configure_video_bitrate(video_bitrate: int) -> None:
+        """Configure aiortc software encoders before their lazy construction."""
+        from aiortc.codecs import h264, vpx
+
+        h264.DEFAULT_BITRATE = video_bitrate
+        h264.MAX_BITRATE = video_bitrate
+        vpx.DEFAULT_BITRATE = video_bitrate
+        vpx.MAX_BITRATE = video_bitrate
+
+    def _set_video_codec_preferences(self, pc: RTCPeerConnection) -> None:
+        """Prefer the configured codec while retaining interoperable fallbacks."""
+        codecs = RTCRtpSender.getCapabilities("video").codecs
+        preferred_mime = f"video/{self._video_codec}".lower()
+        preferred = [codec for codec in codecs if codec.mimeType.lower() == preferred_mime]
+        remaining = [codec for codec in codecs if codec.mimeType.lower() not in {preferred_mime, "video/rtx"}]
+        rtx = [codec for codec in codecs if codec.mimeType.lower() == "video/rtx"]
+        ordered = [*preferred, *remaining, *rtx]
+        for transceiver in pc.getTransceivers():
+            if transceiver.kind == "video":
+                transceiver.setCodecPreferences(ordered)
 
     # -- Server-push sessions ------------------------------------------------
 
@@ -94,6 +130,7 @@ class WebRTCSessionManager:
                     await self.close_session(session_id, reason=f"connection_{state}")
 
             pc.addTrack(track)
+            self._set_video_codec_preferences(pc)
             if audio_track is not None:
                 pc.addTrack(audio_track)
 
@@ -164,6 +201,7 @@ class WebRTCSessionManager:
             session.output_audio_track = output_audio
 
             pc.addTrack(output_video)
+            self._set_video_codec_preferences(pc)
             if output_audio is not None:
                 pc.addTrack(output_audio)
 
@@ -333,4 +371,6 @@ class WebRTCSessionManager:
             "webrtc_server_push_sessions": server_push,
             "webrtc_bidirectional_sessions": bidirectional,
             "webrtc_max_sessions": self._max_sessions,
+            "webrtc_video_codec": self._video_codec,
+            "webrtc_video_bitrate": self._video_bitrate,
         }

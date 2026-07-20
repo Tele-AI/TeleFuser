@@ -302,6 +302,7 @@ def test_bidirectional_webrtc_offer_flattens_session_config() -> None:
         sdp="offer-sdp",
         task="i2v",
         prompt="test prompt",
+        image="data:image/png;base64,test-image",
         config={"image_path": "/tmp/input.png", "fps": 16, "frame_num": 81},
     )
 
@@ -313,6 +314,7 @@ def test_bidirectional_webrtc_offer_flattens_session_config() -> None:
         "task": "i2v",
         "prompt": "test prompt",
         "fps": 16,
+        "image": "data:image/png;base64,test-image",
         "image_path": "/tmp/input.png",
         "frame_num": 81,
     }
@@ -697,9 +699,17 @@ def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) ->
             self.iceServers = iceServers
 
     class FakeWebRTCSessionManager:
-        def __init__(self, max_sessions: int, configuration: FakeRTCConfiguration) -> None:
+        def __init__(
+            self,
+            max_sessions: int,
+            configuration: FakeRTCConfiguration,
+            video_codec: str,
+            video_bitrate: int,
+        ) -> None:
             captured["max_sessions"] = max_sessions
             captured["configuration"] = configuration
+            captured["video_codec"] = video_codec
+            captured["video_bitrate"] = video_bitrate
 
     monkeypatch.setitem(
         sys.modules,
@@ -731,6 +741,8 @@ def test_webrtc_routes_use_api_server_config(monkeypatch: pytest.MonkeyPatch) ->
     WebRTCRoutes(server)
 
     assert captured["max_sessions"] == 3
+    assert captured["video_codec"] == "H264"
+    assert captured["video_bitrate"] == 8_000_000
     ice_servers = captured["configuration"].iceServers
     assert [server.urls for server in ice_servers] == ["stun:local:3478", "turn:local:3478"]
     assert ice_servers[1].username == "user"

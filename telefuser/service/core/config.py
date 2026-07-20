@@ -189,6 +189,16 @@ class ServerConfig(BaseSettings):
 
     # Stream settings
     webrtc_max_sessions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent WebRTC sessions")
+    webrtc_video_codec: Literal["H264", "VP8"] = Field(
+        default="H264",
+        description="Preferred WebRTC video codec. Other supported codecs remain available as fallbacks.",
+    )
+    webrtc_video_bitrate: int = Field(
+        default=8_000_000,
+        ge=500_000,
+        le=50_000_000,
+        description="Target WebRTC video bitrate in bits per second.",
+    )
 
     # Pipeline replication settings
     num_replicas: int = Field(
