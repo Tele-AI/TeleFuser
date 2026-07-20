@@ -101,8 +101,11 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             {
                 "k": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
                 "v": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
-                "global_end_index": 0,
-                "local_end_index": 0,
+                # These cursors cross actor/FSDP call boundaries.  Keep their
+                # storage inside the cache so shallow argument copies retain
+                # the updates made by the attention block.
+                "global_end_index": torch.zeros((), dtype=torch.int64, device=self.device),
+                "local_end_index": torch.zeros((), dtype=torch.int64, device=self.device),
             }
             for _ in range(self.dit.num_layers)
         ]
