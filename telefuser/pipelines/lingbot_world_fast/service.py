@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import gc
+import io
 import math
 import queue
 import threading
@@ -61,6 +63,7 @@ MAX_GENERATION_SECONDS = 20.0
 DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"chunk", "preview"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"done", "error"})
+_MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 class LingBotWorldFastService:
@@ -125,10 +128,32 @@ class LingBotWorldFastService:
         if isinstance(image, Image.Image):
             return image
         if isinstance(image, str):
+            if image.startswith("data:image/"):
+                return LingBotWorldFastService._load_image_data_url(image)
             return Image.open(image).convert("RGB")
         if image_path:
             return Image.open(image_path).convert("RGB")
-        raise ValueError("LingBotWorldFastService requires 'image' or 'image_path'")
+        raise ValueError("LingBotWorldFastService requires an image")
+
+    @staticmethod
+    def _load_image_data_url(image_data_url: str) -> Image.Image:
+        header, separator, payload = image_data_url.partition(",")
+        if not separator or ";base64" not in header:
+            raise ValueError("Browser image must be a base64 data URL")
+        max_base64_chars = 4 * ((_MAX_INPUT_IMAGE_BYTES + 2) // 3)
+        if len(payload) > max_base64_chars:
+            raise ValueError("Browser image exceeds the 10 MiB size limit")
+        try:
+            image_bytes = base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("Browser image contains invalid base64 data") from exc
+        if len(image_bytes) > _MAX_INPUT_IMAGE_BYTES:
+            raise ValueError("Browser image exceeds the 10 MiB size limit")
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                return image.convert("RGB")
+        except OSError as exc:
+            raise ValueError("Browser image has an unsupported or invalid format") from exc
 
     @staticmethod
     def _frame_num_for_duration(max_duration_seconds: float, fps: int, chunk_size: int) -> int:
@@ -216,6 +241,8 @@ class LingBotWorldFastService:
             max_attention_size=config.get("max_attention_size", defaults.get("max_attention_size")),
             max_sequence_length=int(config.get("max_sequence_length", defaults.get("max_sequence_length", 512))),
             intrinsics=intrinsics,
+            intrinsics_width=config.get("intrinsics_width", defaults.get("intrinsics_width")),
+            intrinsics_height=config.get("intrinsics_height", defaults.get("intrinsics_height")),
             control_move_step=float(config.get("control_move_step", defaults.get("control_move_step", 0.05))),
             control_yaw_step_degrees=float(
                 config.get(
@@ -354,7 +381,7 @@ class LingBotWorldFastService:
         }
 
     @staticmethod
-    def _encode_frames_to_b64(frames: list[Image.Image], quality: int = 85) -> list[str]:
+    def _encode_frames_to_b64(frames: list[Image.Image], quality: int = 95) -> list[str]:
         """Serialize generated frames for the streaming transport."""
         encoded: list[str] = []
         for frame in frames:
@@ -396,6 +423,7 @@ class LingBotWorldFastService:
                 "index": -1,
                 "fps": state.config.fps,
                 "timestamp": time.time(),
+                "frames": frames,
                 "frames_b64": self._encode_frames_to_b64(frames),
             },
         )
@@ -799,6 +827,7 @@ class LingBotWorldFastService:
                         "index": result_index,
                         "fps": state.config.fps,
                         "timestamp": time.time(),
+                        "frames": frames,
                         "frames_b64": self._encode_frames_to_b64(frames),
                     },
                 )

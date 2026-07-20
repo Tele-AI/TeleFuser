@@ -53,6 +53,8 @@ class LingBotWorldFastSessionConfig:
     # Optional CacheSeek world_kv reuse. None preserves baseline behavior.
     world_kv_binding: object | None = None
     intrinsics: object | None = None
+    intrinsics_width: int | None = None
+    intrinsics_height: int | None = None
     control_move_step: float = 0.05
     control_yaw_step_degrees: float = 2.0
     control_lateral_step: float = 0.05

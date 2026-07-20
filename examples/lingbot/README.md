@@ -91,8 +91,10 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
 
 ### Custom Input and Output
 
-`--action_path` accepts a directory. In camera-control mode, the directory must contain `poses.npy` and
-`intrinsics.npy`.
+`--action_path` accepts a directory containing `poses.npy` and, in action-control mode, `action.npy`.
+Pass the camera calibration file separately with `--intrinsics-path`. If it was calibrated at a resolution other
+than `832x480`, also pass `--intrinsics-width` and `--intrinsics-height`; the pipeline transforms the calibration to
+the generated frame size.
 
 ```bash
 python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
@@ -101,6 +103,9 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
     --fast_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-fast" \
     --image_path /path/to/input.jpg \
     --action_path /path/to/camera_control \
+    --intrinsics-path /path/to/intrinsics.npy \
+    --intrinsics-width 1920 \
+    --intrinsics-height 1080 \
     --prompt "A cinematic scene with smooth camera motion" \
     --resolution 720p \
     --fps 16 \
@@ -128,7 +133,10 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
 | `--model_root` | `${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B` | Wan2.2 I2V base model directory |
 | `--fast_model_root` | `${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-fast` | LingBot-World-Fast model directory |
 | `--image_path` | Bundled `image.jpg` | Input image path |
-| `--action_path` | Bundled control directory | Directory containing `poses.npy` and `intrinsics.npy` |
+| `--action_path` | Bundled control directory | Directory containing `poses.npy` and optional `action.npy` |
+| `--intrinsics-path` | Bundled `intrinsics.npy` | Camera intrinsics in `[fx, fy, cx, cy]` order |
+| `--intrinsics-width` | `832` | Pixel width of the calibration coordinate system |
+| `--intrinsics-height` | `480` | Pixel height of the calibration coordinate system |
 | `--prompt` | Bundled English prompt | Positive guidance prompt |
 | `--resolution` | `480p` | Output resolution; available values are `480p` and `720p` |
 | `--fps` | `16` | Output video frame rate |
@@ -228,12 +236,6 @@ not need direct access to 8088.
 python examples/stream_server/webrtc_bidirectional_demo.py \
     --server-url http://127.0.0.1:8088 \
     --port 8091 \
-    --image-path examples/data/lingbot_world_fast/image.jpg \
-    --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
-    --frame-num 321 \
-    --chunk-size 3 \
-    --sample-shift 10.0 \
-    --fps 16 \
     --turn-url 'turn:localhost:3478?transport=tcp' \
     --turn-username telefuser \
     --turn-credential telefuser-turn \
@@ -303,20 +305,16 @@ env -u TELEFUSER_TURN_SERVER \
     python examples/stream_server/webrtc_bidirectional_demo.py \
     --server-url http://127.0.0.1:8088 \
     --port 8091 \
-    --image-path examples/data/lingbot_world_fast/image.jpg \
-    --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
-    --frame-num 321 \
-    --chunk-size 3 \
-    --sample-shift 10.0 \
-    --fps 16 \
     --no-open
 ```
 
 Open `http://localhost:8091` in the browser on that machine.
 
-`--image-path` and `--intrinsics-path` are paths on the remote host. In real-time `cam` mode, `image.jpg` supplies the
-initial frame, `--intrinsics-path` supplies the fixed camera intrinsics, and `poses.npy` is not replayed; camera poses
-are generated from live controls.
+Select the initial image in the browser before connecting; it is sent directly with the WebRTC offer. Real-time
+camera poses come from live controls. When the request omits camera intrinsics, the service centers the principal
+point on the selected image and uses its width as both focal lengths, preserving LingBot's default horizontal field
+of view for square, landscape, and portrait inputs. Requests with calibrated intrinsics should also send
+`intrinsics_width` and `intrinsics_height` so the service can transform them from calibration pixels to output pixels.
 
 ### Camera Controls
 

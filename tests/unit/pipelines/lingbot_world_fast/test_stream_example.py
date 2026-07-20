@@ -1,3 +1,4 @@
+import inspect
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -5,13 +6,22 @@ import torch
 from examples.lingbot import lingbot_world_fast_image_to_video_h100 as offline_example
 from examples.stream_server import webrtc_bidirectional_demo as webrtc_demo
 from telefuser.core.config import AttnImplType
-from telefuser.pipelines.lingbot_world_fast.service import MAX_GENERATION_SECONDS
 
 
-def test_webrtc_demo_defaults_match_offline_h100_example() -> None:
-    assert webrtc_demo.DEFAULT_SAMPLE_SHIFT == offline_example.PPL_CONFIG["sample_shift"]
+def test_webrtc_demo_uses_stream_service_defaults() -> None:
+    source = inspect.getsource(webrtc_demo)
+
+    assert webrtc_demo.DEFAULT_IMAGE_PATH == offline_example.DEFAULT_IMAGE_PATH
     assert webrtc_demo.DEFAULT_PROMPT == offline_example.DEFAULT_PROMPT
-    assert webrtc_demo.MAX_GENERATION_SECONDS == MAX_GENERATION_SECONDS
+    assert source.count("HTML_TEMPLATE =") == 1
+    assert "DEFAULT_OPTIONS" not in source
+    assert "--intrinsics-path" not in source
+    assert "--image-path" not in source
+    assert 'type="file"' in webrtc_demo.HTML_TEMPLATE
+    assert 'id="image-preview" src="/default-image"' in webrtc_demo.HTML_TEMPLATE
+    assert '$("image-preview").src = imagePreviewObjectUrl' in webrtc_demo.HTML_TEMPLATE
+    assert "requestBody.image = image" in webrtc_demo.HTML_TEMPLATE
+    assert "requestBody.image_path = DEFAULT_IMAGE_PATH" in webrtc_demo.HTML_TEMPLATE
 
 
 def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> None:

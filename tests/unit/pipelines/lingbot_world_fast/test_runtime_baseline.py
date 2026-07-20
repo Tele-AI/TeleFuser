@@ -85,6 +85,59 @@ def test_v1_and_v2_share_source_image_geometry_and_preprocessing() -> None:
     assert LingBotWorldV2Pipeline._prepare_image_tensor is LingBotWorldFastPipeline._prepare_image_tensor
 
 
+@pytest.mark.parametrize(("width", "height"), [(32, 16), (32, 32), (16, 32)])
+def test_default_intrinsics_follow_reference_image_geometry(width: int, height: int) -> None:
+    pipeline = _build_runtime_pipeline()
+    pipeline.config.max_area = width * height
+
+    context = pipeline.control_context(
+        LingBotWorldFastSessionConfig(
+            prompt="geometry",
+            image=Image.new("RGB", (width, height)),
+            frame_num=9,
+        )
+    )
+
+    assert (context.orig_width, context.orig_height) == (width, height)
+    torch.testing.assert_close(
+        context.intrinsics,
+        torch.tensor([float(width), float(width), width * 0.5, height * 0.5]),
+    )
+
+
+def test_explicit_intrinsics_use_their_calibration_size() -> None:
+    pipeline = _build_runtime_pipeline()
+    intrinsics = [1200.0, 1190.0, 960.0, 540.0]
+
+    context = pipeline.control_context(
+        LingBotWorldFastSessionConfig(
+            prompt="calibrated",
+            image=Image.new("RGB", (1024, 1024)),
+            frame_num=9,
+            intrinsics=intrinsics,
+            intrinsics_width=1920,
+            intrinsics_height=1080,
+        )
+    )
+
+    assert (context.orig_width, context.orig_height) == (1920, 1080)
+    torch.testing.assert_close(context.intrinsics, torch.tensor(intrinsics))
+
+
+def test_intrinsics_calibration_size_must_be_a_positive_pair() -> None:
+    pipeline = _build_runtime_pipeline()
+    config = LingBotWorldFastSessionConfig(
+        prompt="invalid calibration",
+        image=Image.new("RGB", (16, 16)),
+        frame_num=9,
+        intrinsics=[16.0, 16.0, 8.0, 8.0],
+        intrinsics_width=16,
+    )
+
+    with pytest.raises(ValueError, match="provided together"):
+        pipeline.control_context(config)
+
+
 def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
     pipeline, runtime = _create_runtime(frame_num=81)
 

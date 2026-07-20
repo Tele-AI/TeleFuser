@@ -4,7 +4,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,7 +23,14 @@ from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
 
-from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
+from .control import (
+    LingBotWorldFastControlBuilder,
+    LingBotWorldFastControlContext,
+    LingBotWorldFastOfflineControlSource,
+    load_action_control_inputs,
+    load_camera_control_inputs,
+    truncate_control_sequence,
+)
 from .denoising import LingBotWorldFastDenoisingStage
 from .session import (
     LingBotWorldFastGenerationSession,
@@ -233,13 +240,17 @@ class LingBotWorldFastPipeline(BasePipeline):
             session_config.frame_policy,
         )
         if session_config.intrinsics is None:
-            focal = float(max(self.config.orig_width, self.config.orig_height))
+            intrinsics_width = session_config.image.width
+            intrinsics_height = session_config.image.height
+            focal = float(intrinsics_width)
             intrinsics = torch.tensor(
-                [focal, focal, self.config.orig_width * 0.5, self.config.orig_height * 0.5],
+                [focal, focal, intrinsics_width * 0.5, intrinsics_height * 0.5],
                 dtype=torch.float32,
                 device=self.device,
             )
         else:
+            intrinsics_width = session_config.intrinsics_width or self.config.orig_width
+            intrinsics_height = session_config.intrinsics_height or self.config.orig_height
             intrinsics = torch.as_tensor(session_config.intrinsics, dtype=torch.float32, device=self.device)
             if intrinsics.ndim == 2:
                 if intrinsics.shape[0] < 1 or intrinsics.shape[1] != 4:
@@ -255,8 +266,8 @@ class LingBotWorldFastPipeline(BasePipeline):
             control_type=self.config.control_type,
             device=self.device,
             control_dtype=torch.float32,
-            orig_height=self.config.orig_height,
-            orig_width=self.config.orig_width,
+            orig_height=intrinsics_height,
+            orig_width=intrinsics_width,
             height=height,
             width=width,
             latent_h=height // 8,
@@ -265,6 +276,49 @@ class LingBotWorldFastPipeline(BasePipeline):
             chunk_size=session_config.chunk_size,
             intrinsics=intrinsics,
         )
+
+    def prepare_offline_controls(
+        self,
+        session_config: LingBotWorldFastSessionConfig,
+        action_path: str | Path,
+        intrinsics_path: str | Path,
+        *,
+        intrinsics_width: int | None = None,
+        intrinsics_height: int | None = None,
+    ) -> list[Callable[[], torch.Tensor]]:
+        """Load offline inputs and return one deferred model control per chunk."""
+        if (intrinsics_width is None) != (intrinsics_height is None):
+            raise ValueError("intrinsics_width and intrinsics_height must be provided together")
+        for name, value in (("intrinsics_width", intrinsics_width), ("intrinsics_height", intrinsics_height)):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        control_context = self.control_context(session_config)
+        calibration_width = self.config.orig_width if intrinsics_width is None else intrinsics_width
+        calibration_height = self.config.orig_height if intrinsics_height is None else intrinsics_height
+        control_context = replace(
+            control_context,
+            orig_width=calibration_width,
+            orig_height=calibration_height,
+        )
+        if control_context.control_type == "act":
+            poses, intrinsics, action = load_action_control_inputs(action_path, intrinsics_path)
+        else:
+            poses, intrinsics = load_camera_control_inputs(action_path, intrinsics_path)
+            action = None
+        poses, intrinsics, action = truncate_control_sequence(
+            poses,
+            intrinsics,
+            action,
+            session_config.frame_num,
+        )
+        source = LingBotWorldFastOfflineControlSource(
+            LingBotWorldFastControlBuilder(control_context),
+            poses,
+            intrinsics,
+            action,
+        )
+        chunk_count = control_context.latent_frames // control_context.chunk_size
+        return [source.control_at(chunk_index) for chunk_index in range(chunk_count)]
 
     def _validate_session_config(self, session_config: LingBotWorldFastSessionConfig) -> None:
         if session_config.control_mode != self.config.control_type:
@@ -276,6 +330,19 @@ class LingBotWorldFastPipeline(BasePipeline):
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size!r}")
         if session_config.chunk_size < 1:
             raise ValueError(f"chunk_size must be a positive integer, got {session_config.chunk_size}")
+        has_intrinsics_width = session_config.intrinsics_width is not None
+        has_intrinsics_height = session_config.intrinsics_height is not None
+        if has_intrinsics_width != has_intrinsics_height:
+            raise ValueError("intrinsics_width and intrinsics_height must be provided together")
+        if has_intrinsics_width:
+            if session_config.intrinsics is None:
+                raise ValueError("intrinsics_width and intrinsics_height require intrinsics")
+            for name, value in (
+                ("intrinsics_width", session_config.intrinsics_width),
+                ("intrinsics_height", session_config.intrinsics_height),
+            ):
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    raise ValueError(f"{name} must be a positive integer, got {value!r}")
         effective_frame_num, _ = resolve_lingbot_frame_count(
             session_config.frame_num,
             session_config.chunk_size,
