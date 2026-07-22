@@ -189,15 +189,12 @@ def main() -> None:
             positive, positive_mask = _measure(
                 active_samples, "refiner_text_encode", lambda: pipeline.text_stage.encode(caption)
             )
-            negative, negative_mask = _measure(
-                active_samples, "refiner_text_encode", lambda: pipeline.text_stage.encode(negative_caption)
-            )
         else:
             positive = generation.prompt_conditions.positive_prompt_embeds
-            negative = generation.prompt_conditions.negative_prompt_embeds
             positive_mask = generation.prompt_conditions.positive_attention_mask
-            negative_mask = generation.prompt_conditions.negative_attention_mask
             refiner_prompt_conditions_reused = True
+        negative = torch.zeros_like(positive)
+        negative_mask = positive_mask.clone()
         _measure(active_samples, "base_release", pipeline.release_gpu_resources)
         if refiner is None:
             refiner = _measure(

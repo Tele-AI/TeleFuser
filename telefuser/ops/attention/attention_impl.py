@@ -157,6 +157,8 @@ def attention(
     attn_impl = attention_config.attn_impl
     scale = scale if scale is not None else attention_config.scale
     is_causal = is_causal or attention_config.is_causal
+    if sequence_lengths is not None and attn_impl != AttnImplType.TORCH_SDPA:
+        raise ValueError("packed sequence attention currently requires TORCH_SDPA")
 
     # Handle sparse attention
     if attn_impl in (AttnImplType.RADIAL_ATTN, AttnImplType.LOCAL_SPARSE_ATTN):

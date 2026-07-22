@@ -66,6 +66,7 @@ def test_only_moe_contract_exposes_refiner() -> None:
     moe_contract, _ = load_pipeline_contract(moe, ppl_file=EXAMPLE_PATHS["moe"].name, default_task="t2v")
 
     assert "refine" not in dense_contract.get_task_contract("t2v").parameters
+    assert "refine" not in moe_contract.get_task_contract("t2i").parameters
     assert moe_contract.get_task_contract("t2v").parameters["refine"].default is True
 
 
@@ -115,6 +116,17 @@ def test_dense_run_with_file_supports_service_t2i(tmp_path: Path) -> None:
     assert output_path.is_file()
 
 
+@pytest.mark.parametrize("variant", ["dense", "moe"])
+def test_t2i_replaces_video_output_suffix_with_png(variant: str, tmp_path: Path) -> None:
+    module = _load_example(variant)
+
+    result = module._save_output(torch.zeros(1, 3, 1, 2, 2), str(tmp_path / "result.mp4"))
+
+    expected = tmp_path / "result.png"
+    assert result == {"output_path": str(expected)}
+    assert expected.is_file()
+
+
 def test_dense_run_with_file_supports_service_t2v(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_example("dense")
     exported: list[np.ndarray] = []
@@ -130,12 +142,12 @@ def test_dense_run_with_file_supports_service_t2v(tmp_path: Path, monkeypatch: p
         device = "cpu"
 
         def generate(self, request, **_: object) -> SimpleNamespace:
-            assert request.num_frames == 121
+            assert request.num_frames == 49
             return SimpleNamespace(output=torch.full((1, 3, 5, 2, 2), 0.5))
 
     result = module.run_with_file(
         FakePipeline(),
-        json.dumps({"caption": {"scene": "test"}, "duration": 5}),
+        json.dumps({"caption": {"scene": "test"}, "duration": 2}),
         task="t2v",
         output_path=str(tmp_path / "dense.mp4"),
     )
@@ -160,12 +172,12 @@ def test_moe_run_releases_base_then_runs_refiner(monkeypatch: pytest.MonkeyPatch
             del request
             conditions = SimpleNamespace(
                 has_visual_condition=False,
-                positive_prompt_embeds=torch.zeros(1, 1, 2),
-                negative_prompt_embeds=torch.zeros(1, 1, 2),
-                positive_attention_mask=torch.ones(1, 1, dtype=torch.bool),
-                negative_attention_mask=torch.ones(1, 1, dtype=torch.bool),
+                positive_prompt_embeds=torch.full((1, 2, 2), 4.0),
+                negative_prompt_embeds=torch.full((1, 2, 2), 7.0),
+                positive_attention_mask=torch.tensor([[True, False]]),
+                negative_attention_mask=torch.tensor([[False, True]]),
             )
-            return SimpleNamespace(output=torch.zeros(1, 3, 1, 2, 2), prompt_conditions=conditions)
+            return SimpleNamespace(output=torch.zeros(1, 3, 5, 2, 2), prompt_conditions=conditions)
 
         def release_gpu_resources(self) -> None:
             self.released = True
@@ -174,10 +186,14 @@ def test_moe_run_releases_base_then_runs_refiner(monkeypatch: pytest.MonkeyPatch
         def __init__(self) -> None:
             self.called = False
             self.closed = False
+            self.negative: torch.Tensor | None = None
+            self.negative_mask: torch.Tensor | None = None
 
-        def refine(self, lowres_video, *args, **kwargs) -> torch.Tensor:
-            del args, kwargs
+        def refine(self, lowres_video, positive, negative, positive_mask, negative_mask, **kwargs) -> torch.Tensor:
+            del positive, positive_mask, kwargs
             self.called = True
+            self.negative = negative
+            self.negative_mask = negative_mask
             return lowres_video
 
         def close(self) -> None:
@@ -192,14 +208,28 @@ def test_moe_run_releases_base_then_runs_refiner(monkeypatch: pytest.MonkeyPatch
     frames = module.run(
         pipeline,
         json.dumps({"caption": {"scene": "test"}, "duration": 5}),
-        task="t2i",
+        task="t2v",
         refine=True,
     )
 
-    assert frames.shape == (1, 3, 1, 2, 2)
+    assert frames.shape == (1, 3, 5, 2, 2)
     assert pipeline.released
     assert refiner.called
     assert refiner.closed
+    assert torch.equal(refiner.negative, torch.zeros(1, 2, 2))
+    assert torch.equal(refiner.negative_mask, torch.tensor([[True, False]]))
+
+
+def test_moe_t2i_rejects_explicit_refiner_request() -> None:
+    module = _load_example("moe")
+
+    with pytest.raises(ValueError, match="does not support t2i"):
+        module.run(
+            SimpleNamespace(),
+            json.dumps({"caption": {"scene": "test"}, "duration": 5}),
+            task="t2i",
+            refine=True,
+        )
 
 
 @pytest.mark.parametrize("variant", ["dense", "moe"])

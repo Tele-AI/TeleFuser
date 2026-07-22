@@ -70,6 +70,7 @@ PPL_CONFIG: dict[str, Any] = {
     "refiner_tail_steps": 2,
     "refiner_parallelism": 0,
     "refiner_batch_cfg": False,
+    "refiner_null_cond_clone_zero": True,
 }
 
 
@@ -82,10 +83,10 @@ def _build_contract() -> dict[str, Any]:
             "seed": {"default": PPL_CONFIG["seed"]},
             "resolution": {"default": PPL_CONFIG["resolution"]},
             "aspect_ratio": {"default": PPL_CONFIG["aspect_ratio"]},
-            "refine": {"type": "boolean", "default": PPL_CONFIG["enable_refiner"]},
         }
         if task != "t2i":
             overrides["target_video_length"] = {"default": PPL_CONFIG["target_video_length"]}
+            overrides["refine"] = {"type": "boolean", "default": PPL_CONFIG["enable_refiner"]}
         task_contracts[task] = build_task_contract_template(task, parameter_overrides=overrides)
     return build_pipeline_manifest(
         pipeline_name=PPL_CONFIG["name"],
@@ -352,10 +353,10 @@ def run(
     seed: int = PPL_CONFIG["seed"],
     resolution: str = PPL_CONFIG["resolution"],
     aspect_ratio: str = PPL_CONFIG["aspect_ratio"],
-    target_video_length: int = PPL_CONFIG["target_video_length"],
+    target_video_length: float | None = None,
     task: str = "t2v",
     first_image_path: str = "",
-    refine: bool = PPL_CONFIG["enable_refiner"],
+    refine: bool | None = None,
     model_root: str = PPL_CONFIG["model_root"],
 ) -> torch.Tensor:
     """Run MoE T2I, T2V, or I2V with an optional refiner stage."""
@@ -363,12 +364,17 @@ def run(
         raise ValueError(f"unsupported LingBot-Video task: {task}")
     if task == "i2v" and not first_image_path:
         raise ValueError("LingBot-Video i2v requires first_image_path")
+    if task == "t2i" and refine is True:
+        raise ValueError("LingBot-Video refiner does not support t2i")
+    if refine is None:
+        refine = task != "t2i" and bool(PPL_CONFIG["enable_refiner"])
 
-    caption, _ = parse_lingbot_video_prompt(json.loads(prompt))
+    caption, prompt_duration = parse_lingbot_video_prompt(json.loads(prompt))
     width, height = _resolve_video_size(aspect_ratio, resolution)
-    num_frames = (
-        1 if task == "t2i" else num_frames_from_duration(float(target_video_length), fps=int(PPL_CONFIG["fps"]))
-    )
+    duration = target_video_length if target_video_length is not None else prompt_duration
+    if duration is None:
+        duration = float(PPL_CONFIG["target_video_length"])
+    num_frames = 1 if task == "t2i" else num_frames_from_duration(duration, fps=int(PPL_CONFIG["fps"]))
     resolved_negative_prompt = negative_prompt if negative_prompt is not None else default_negative_caption(num_frames)
     generation = pipeline.generate(
         LingBotVideoRequest(
@@ -389,11 +395,18 @@ def run(
 
     if generation.prompt_conditions.has_visual_condition:
         positive, positive_mask = pipeline.text_stage.encode(caption)
-        negative, negative_mask = pipeline.text_stage.encode(resolved_negative_prompt)
     else:
         positive = generation.prompt_conditions.positive_prompt_embeds
-        negative = generation.prompt_conditions.negative_prompt_embeds
         positive_mask = generation.prompt_conditions.positive_attention_mask
+    if PPL_CONFIG["refiner_null_cond_clone_zero"]:
+        negative = torch.zeros_like(positive)
+        negative_mask = positive_mask.clone()
+    elif (
+        generation.prompt_conditions.has_visual_condition or generation.prompt_conditions.negative_prompt_embeds is None
+    ):
+        negative, negative_mask = pipeline.text_stage.encode(resolved_negative_prompt)
+    else:
+        negative = generation.prompt_conditions.negative_prompt_embeds
         negative_mask = generation.prompt_conditions.negative_attention_mask
 
     pipeline.release_gpu_resources()
@@ -442,11 +455,14 @@ def run(
 def _save_output(frames: torch.Tensor, output_path: str) -> dict[str, str]:
     """Encode normalized RGB without an intermediate uint8 video conversion."""
     path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     video = frames[0].permute(1, 2, 3, 0).float().clamp(0.0, 1.0).cpu().numpy()
     if video.shape[0] == 1:
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            path = path.with_suffix(".png")
+        path.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray((video[0] * 255).round().astype(np.uint8)).save(path)
     else:
+        path.parent.mkdir(parents=True, exist_ok=True)
         export_to_video(list(video), str(path), fps=int(PPL_CONFIG["fps"]))
     return {"output_path": str(path)}
 
@@ -457,12 +473,12 @@ def run_with_file(
     negative_prompt: str | None = None,
     seed: int = PPL_CONFIG["seed"],
     output_path: str = "output.mp4",
-    target_video_length: int = PPL_CONFIG["target_video_length"],
+    target_video_length: float | None = None,
     resolution: str = PPL_CONFIG["resolution"],
     aspect_ratio: str = PPL_CONFIG["aspect_ratio"],
     task: str = "t2v",
     first_image_path: str = "",
-    refine: bool = PPL_CONFIG["enable_refiner"],
+    refine: bool | None = None,
     model_root: str = PPL_CONFIG["model_root"],
     **_: object,
 ) -> dict[str, str]:
@@ -497,14 +513,14 @@ def run_with_file(
 )
 @click.option("--resolution", default=PPL_CONFIG["resolution"])
 @click.option("--aspect_ratio", default=PPL_CONFIG["aspect_ratio"])
-@click.option("--target_video_length", default=PPL_CONFIG["target_video_length"], type=int)
+@click.option("--target_video_length", default=None, type=float)
 @click.option("--task", default="t2v", type=click.Choice(["t2i", "t2v", "i2v"]))
 @click.option("--first_image_path", default="", help="Required for i2v")
 @click.option(
     "--refiner_gpu_num", default=PPL_CONFIG["refiner_parallelism"], type=int, help="Refiner GPUs; 0 inherits gpu_num"
 )
 @click.option("--refiner_batch_cfg/--no-refiner_batch_cfg", default=PPL_CONFIG["refiner_batch_cfg"])
-@click.option("--refine/--no-refine", default=PPL_CONFIG["enable_refiner"])
+@click.option("--refine/--no-refine", default=None)
 @click.option("--output_path", default="output.mp4")
 def main(
     gpu_num: int,
@@ -515,12 +531,12 @@ def main(
     expert_backend: str,
     resolution: str,
     aspect_ratio: str,
-    target_video_length: int,
+    target_video_length: float | None,
     task: str,
     first_image_path: str,
     refiner_gpu_num: int,
     refiner_batch_cfg: bool,
-    refine: bool,
+    refine: bool | None,
     output_path: str,
 ) -> None:
     """Generate with the LingBot-Video MoE 30B checkpoint and refiner."""

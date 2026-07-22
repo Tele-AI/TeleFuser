@@ -58,9 +58,9 @@ class LingBotVideoPromptConditions:
     """Text conditions produced for one source-order CFG generation."""
 
     positive_prompt_embeds: torch.Tensor
-    negative_prompt_embeds: torch.Tensor
+    negative_prompt_embeds: torch.Tensor | None
     positive_attention_mask: torch.Tensor
-    negative_attention_mask: torch.Tensor
+    negative_attention_mask: torch.Tensor | None
     has_visual_condition: bool
 
 
@@ -84,12 +84,15 @@ class LingBotVideoPipeline(BasePipeline):
         self.vae_decode_stage: LingBotVideoVAEDecodeStage | None = None
         self.scheduler: FlowUniPCMultistepScheduler | None = None
         self.variant: str = "dense"
+        self._parallel_denoising_stage_template: LingBotVideoDenoisingStage | None = None
+        self._stopped = False
 
     def init(self, module_manager: ModuleManager, config: LingBotVideoPipelineConfig) -> None:
         """Initialize all LingBot-Video stages from a module manager."""
         self._model_info = module_manager.get_model_info()
         self.config = config
         self.variant = config.model.variant
+        self._stopped = False
 
         self.text_stage = LingBotVideoTextEncodingStage("text_encoder", module_manager, config.text_encoding_config)
         denoising_stage = LingBotVideoDenoisingStage(
@@ -101,8 +104,10 @@ class LingBotVideoPipeline(BasePipeline):
         self.scheduler = module_manager.fetch_module("scheduler")
 
         if config.enable_denoising_parallel and not dist.is_initialized():
+            self._parallel_denoising_stage_template = denoising_stage
             self.denoising_stage = ParallelWorker(denoising_stage)
         else:
+            self._parallel_denoising_stage_template = None
             denoising_stage.parallel_models()
 
     def _get_stages(self) -> list[object]:
@@ -115,6 +120,7 @@ class LingBotVideoPipeline(BasePipeline):
 
     def stop(self) -> None:
         """Close any owned distributed stage workers during service shutdown."""
+        self._stopped = True
         for stage in self._get_stages():
             close = getattr(stage, "close", None)
             if callable(close):
@@ -148,6 +154,16 @@ class LingBotVideoPipeline(BasePipeline):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _restore_released_denoising_worker(self) -> None:
+        """Recreate a distributed base worker released before loading the refiner."""
+        if self._stopped:
+            raise RuntimeError("LingBot-Video runtime has been stopped")
+        if not isinstance(self.denoising_stage, ParallelWorker) or not self.denoising_stage.closed:
+            return
+        if self._parallel_denoising_stage_template is None:
+            raise RuntimeError("LingBot-Video distributed denoising stage cannot be restored")
+        self.denoising_stage = ParallelWorker(self._parallel_denoising_stage_template)
+
     def __call__(
         self,
         request: LingBotVideoRequest,
@@ -169,6 +185,7 @@ class LingBotVideoPipeline(BasePipeline):
     ) -> LingBotVideoGeneration:
         """Run source-order sampling and retain its exact CFG prompt conditions."""
         self.validate_request(request)
+        self._restore_released_denoising_worker()
         if self.config is None or self.text_stage is None or self.denoising_stage is None or self.scheduler is None:
             raise RuntimeError("LingBot-Video runtime has not been configured")
         if negative_caption is None:
@@ -186,7 +203,10 @@ class LingBotVideoPipeline(BasePipeline):
             condition_pixels = preprocess_ti2v_image(source_image, height=request.height, width=request.width)
             vision_images = [self.text_stage.prepare_ti2v_vlm_image(condition_pixels)]
         positive, positive_mask = self.text_stage.encode(request.caption, images=vision_images)
-        negative, negative_mask = self.text_stage.encode(negative_caption, images=vision_images)
+        if self.config.guidance_scale > 1.0:
+            negative, negative_mask = self.text_stage.encode(negative_caption, images=vision_images)
+        else:
+            negative, negative_mask = None, None
         prompt_conditions = LingBotVideoPromptConditions(
             positive_prompt_embeds=positive,
             negative_prompt_embeds=negative,

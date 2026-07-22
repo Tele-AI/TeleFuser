@@ -128,4 +128,4 @@ def test_grouped_mm_backend_matches_sorted_backend_on_cuda() -> None:
     experts.set_execution_backend("grouped_mm")
     grouped_output = experts(tokens, indices, weights)
 
-    torch.testing.assert_close(grouped_output, sorted_output, rtol=2e-2, atol=2e-2)
+    assert torch.equal(grouped_output, sorted_output)
