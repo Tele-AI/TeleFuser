@@ -100,6 +100,7 @@ See the [Stream Server Guide](stream_server.md) for full streaming documentation
 | `LiveAct` | S2V (speech-to-video) | Speech-driven talking head generation |
 | `FlashVSR` | VSR | Streaming video super-resolution |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation |
+| `LingBot-World v2` | Bidirectional world-model streaming | Camera-controlled WebRTC loop — see [Stream Server Guide](stream_server.md) |
 
 ### Video Generation
 
@@ -108,6 +109,7 @@ See the [Stream Server Guide](stream_server.md) for full streaming documentation
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family |
 | `HunyuanVideo` | T2V, I2V | Supported via service examples |
 | `LTX Video` | I2V + Audio | Unified audio-video generation |
+| `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and in-memory refinement; see `examples/lingbot_video/README.md` |
 
 ### Image Generation
 

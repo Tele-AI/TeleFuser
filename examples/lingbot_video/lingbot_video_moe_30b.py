@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,10 +46,11 @@ from telefuser.utils.video import get_target_video_size_from_ratio
 from telefuser.worker.parallel_worker import ParallelWorker
 
 _DEFAULT_PROMPT = (Path(__file__).parent / "assets" / "t2v_5s.json.example").read_text(encoding="utf-8")
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
 
 PPL_CONFIG: dict[str, Any] = {
     "name": "lingbot_video_moe_30b",
-    "model_root": "model_zoo/lingbot/lingbot-video-moe-30b-a3b",
+    "model_root": TF_MODEL_ZOO_PATH + "/lingbot/lingbot-video-moe-30b-a3b",
     "variant": "moe",
     "supports_refiner": True,
     "prompt": _DEFAULT_PROMPT,

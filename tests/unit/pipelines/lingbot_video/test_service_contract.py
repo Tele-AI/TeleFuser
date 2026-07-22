@@ -70,6 +70,23 @@ def test_only_moe_contract_exposes_refiner() -> None:
     assert moe_contract.get_task_contract("t2v").parameters["refine"].default is True
 
 
+@pytest.mark.parametrize(
+    ("variant", "checkpoint"),
+    [
+        ("dense", "lingbot-video-dense-1.3b"),
+        ("moe", "lingbot-video-moe-30b-a3b"),
+    ],
+)
+def test_default_model_root_uses_tf_model_zoo_path(
+    variant: str, checkpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TF_MODEL_ZOO_PATH", "/models")
+
+    module = _load_example(variant)
+
+    assert module.PPL_CONFIG["model_root"] == f"/models/lingbot/{checkpoint}"
+
+
 @pytest.mark.parametrize("variant", ["dense", "moe"])
 def test_get_pipeline_uses_fixed_variant(variant: str, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_example(variant)

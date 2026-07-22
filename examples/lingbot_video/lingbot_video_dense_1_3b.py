@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +39,11 @@ from telefuser.service.core.contract_templates import build_pipeline_manifest, b
 from telefuser.utils.video import get_target_video_size_from_ratio
 
 _DEFAULT_PROMPT = (Path(__file__).parent / "assets" / "t2v_5s.json.example").read_text(encoding="utf-8")
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
 
 PPL_CONFIG: dict[str, Any] = {
     "name": "lingbot_video_dense_1_3b",
-    "model_root": "model_zoo/lingbot/lingbot-video-dense-1.3b",
+    "model_root": TF_MODEL_ZOO_PATH + "/lingbot/lingbot-video-dense-1.3b",
     "variant": "dense",
     "supports_refiner": False,
     "prompt": _DEFAULT_PROMPT,
