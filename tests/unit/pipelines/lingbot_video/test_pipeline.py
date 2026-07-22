@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.pipelines.lingbot_video import pipeline as pipeline_module
 from telefuser.pipelines.lingbot_video.data import DEFAULT_NEGATIVE_PROMPT, LingBotVideoRequest
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage, transformer_timestep
 from telefuser.pipelines.lingbot_video.pipeline import LingBotVideoPipeline, LingBotVideoPipelineConfig
@@ -141,6 +142,26 @@ def test_denoising_stage_returns_fp32_scheduler_prediction() -> None:
     assert torch.equal(prediction, torch.full_like(latents, 5.0))
 
 
+def test_denoising_stage_disables_cfg_when_guidance_is_below_one() -> None:
+    transformer = _BatchCfgProbeTransformer()
+    stage = LingBotVideoDenoisingStage(
+        "denoising",
+        _transformer_manager(transformer),
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
+    )
+
+    prediction = stage.predict_noise_with_cfg(
+        torch.zeros(1, 1, 1, 1, 1),
+        torch.tensor([1]),
+        torch.full((1, 1, 1), 3.0),
+        None,
+        guidance_scale=0.5,
+    )
+
+    assert torch.equal(prediction, torch.full_like(prediction, 3.0))
+    assert transformer.calls == 1
+
+
 class _BatchCfgProbeTransformer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -253,6 +274,29 @@ def test_pipeline_uses_source_negative_caption_when_not_overridden() -> None:
     assert text_stage.captions == ["{}", DEFAULT_NEGATIVE_PROMPT]
 
 
+def test_pipeline_skips_negative_encoding_when_cfg_is_disabled() -> None:
+    class _CapturingTextStage(_TextStage):
+        def __init__(self) -> None:
+            self.captions: list[str] = []
+
+        def encode(self, caption: str, images: object | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+            self.captions.append(caption)
+            return super().encode(caption, images)
+
+    text_stage = _CapturingTextStage()
+    pipeline = _initialized_pipeline()
+    pipeline.config.guidance_scale = 0.5
+    pipeline.text_stage = text_stage
+    pipeline.denoising_stage = _DenoisingStage()
+    pipeline.scheduler = _Scheduler()
+
+    generation = pipeline.generate(LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5), decode=False)
+
+    assert text_stage.captions == ["{}"]
+    assert generation.prompt_conditions.negative_prompt_embeds is None
+    assert generation.prompt_conditions.negative_attention_mask is None
+
+
 class _VAEEncodeStage:
     def __init__(self) -> None:
         self.pixel_values: torch.Tensor | None = None
@@ -320,3 +364,35 @@ def test_pipeline_releases_stages_before_a_separate_refiner_is_loaded() -> None:
     for stage in (text_stage, denoising_stage, vae_encode_stage, vae_decode_stage):
         assert stage.calls == 1
         assert not stage.onload_models_flag
+
+
+def test_pipeline_recreates_released_parallel_worker_for_next_request(monkeypatch) -> None:
+    class _FakeParallelWorker:
+        created: list[object] = []
+
+        def __init__(self, stage: object) -> None:
+            self.created.append(stage)
+            self.closed = False
+            self.device = torch.device("cpu")
+
+        def close(self) -> None:
+            self.closed = True
+
+        def denoise(self, latent: torch.Tensor, *_: object) -> torch.Tensor:
+            return torch.full_like(latent, 7.0)
+
+    monkeypatch.setattr(pipeline_module, "ParallelWorker", _FakeParallelWorker)
+    pipeline = _initialized_pipeline()
+    template = object()
+    pipeline.config.enable_denoising_parallel = True
+    pipeline._parallel_denoising_stage_template = template
+    pipeline.text_stage = _TextStage()
+    pipeline.denoising_stage = _FakeParallelWorker(template)
+    pipeline.vae_encode_stage = None
+    pipeline.vae_decode_stage = None
+
+    pipeline.release_gpu_resources()
+    generation = pipeline.generate(LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5), decode=False)
+
+    assert len(_FakeParallelWorker.created) == 2
+    assert torch.equal(generation.output, torch.full_like(generation.output, 7.0))

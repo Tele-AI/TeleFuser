@@ -119,16 +119,18 @@ def grouped_expert_forward(
     ).to(tokens.dtype)
     expert_output = _unpad_grouped_tokens(expert_output, padded_indices, sorted_tokens.shape[0])
 
-    sorted_weights = flat_weights[sorted_positions].to(expert_output.dtype)
-    weighted_output = expert_output * sorted_weights.unsqueeze(-1)
     routed = torch.zeros(
         num_tokens * top_k,
         hidden_size,
         dtype=expert_output.dtype,
         device=expert_output.device,
     )
-    routed[sorted_positions] = weighted_output
-    return routed.reshape(num_tokens, top_k, hidden_size).sum(dim=1).to(tokens.dtype)
+    routed[sorted_positions] = expert_output
+    return (
+        (routed.reshape(num_tokens, top_k, hidden_size).float() * weights.float().unsqueeze(-1))
+        .sum(dim=1)
+        .to(tokens.dtype)
+    )
 
 
 def _pad_grouped_tokens(

@@ -225,12 +225,11 @@ def main() -> None:
         raise RuntimeError("LingBot refiner requires the base text stage")
     if generation.prompt_conditions.has_visual_condition:
         positive, positive_mask = pipeline.text_stage.encode(caption)
-        negative, negative_mask = pipeline.text_stage.encode(negative_caption)
     else:
         positive = generation.prompt_conditions.positive_prompt_embeds
-        negative = generation.prompt_conditions.negative_prompt_embeds
         positive_mask = generation.prompt_conditions.positive_attention_mask
-        negative_mask = generation.prompt_conditions.negative_attention_mask
+    negative = torch.zeros_like(positive)
+    negative_mask = positive_mask.clone()
     _, base_release_seconds = _measure(pipeline.release_gpu_resources)
     refiner, refiner_load_seconds = _measure(
         lambda: build_refiner(args.model_dir, cpu_offload=not args.disable_cpu_offload)

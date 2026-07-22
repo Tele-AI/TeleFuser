@@ -201,12 +201,12 @@ class LingBotVideoDenoisingStage(BaseStage):
         model_timestep = transformer_timestep(timestep, transformer_dtype)
         autocast_enabled = latents.device.type == "cuda" and transformer_dtype in {torch.bfloat16, torch.float16}
         with torch.autocast(device_type=latents.device.type, dtype=transformer_dtype, enabled=autocast_enabled):
-            if guidance_scale == 1.0:
+            if guidance_scale <= 1.0:
                 return self.transformer(
                     latents, model_timestep, positive_prompt_embeds, positive_attention_mask
                 ).float()
             if negative_prompt_embeds is None:
-                raise ValueError("negative_prompt_embeds is required when guidance_scale is not 1")
+                raise ValueError("negative_prompt_embeds is required when guidance_scale is greater than 1")
             if self.batch_cfg:
                 combined_latents = torch.cat((latents, latents))
                 combined_timestep = torch.cat((model_timestep, model_timestep))
@@ -236,7 +236,7 @@ class LingBotVideoDenoisingStage(BaseStage):
         self,
         latent: torch.Tensor,
         positive_prompt_embeds: torch.Tensor,
-        negative_prompt_embeds: torch.Tensor,
+        negative_prompt_embeds: torch.Tensor | None,
         positive_attention_mask: torch.Tensor | None,
         negative_attention_mask: torch.Tensor | None,
         guidance_scale: float,

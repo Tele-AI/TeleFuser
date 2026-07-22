@@ -119,9 +119,9 @@ def main() -> None:
                 output = refiner.refine(
                     lowres_video,
                     generation.prompt_conditions.positive_prompt_embeds,
-                    generation.prompt_conditions.negative_prompt_embeds,
+                    torch.zeros_like(generation.prompt_conditions.positive_prompt_embeds),
                     generation.prompt_conditions.positive_attention_mask,
-                    generation.prompt_conditions.negative_attention_mask,
+                    generation.prompt_conditions.positive_attention_mask.clone(),
                     num_inference_steps=args.refiner_steps,
                     guidance_scale=args.refiner_guidance_scale,
                     shift=args.refiner_shift,
