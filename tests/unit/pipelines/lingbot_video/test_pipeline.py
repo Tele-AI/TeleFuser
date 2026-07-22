@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.pipelines.lingbot_video import denoising as denoising_module
 from telefuser.pipelines.lingbot_video import pipeline as pipeline_module
 from telefuser.pipelines.lingbot_video.data import DEFAULT_NEGATIVE_PROMPT, LingBotVideoRequest
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage, transformer_timestep
@@ -200,6 +201,36 @@ def test_denoising_stage_batched_cfg_matches_two_source_order_forwards() -> None
     assert torch.equal(actual, expected)
     assert serial_transformer.calls == 2
     assert batched_transformer.calls == 1
+
+
+def test_denoising_stage_cfg_parallel_gathers_positive_then_negative(monkeypatch: object) -> None:
+    latents = torch.zeros(1, 1, 1, 1, 1)
+    transformer = _BatchCfgProbeTransformer()
+    transformer.device_mesh = object()
+    stage = LingBotVideoDenoisingStage(
+        "cfg-parallel",
+        _transformer_manager(transformer),
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
+    )
+
+    monkeypatch.setattr(denoising_module, "get_cfg_world_size", lambda _: 2)
+    monkeypatch.setattr(denoising_module, "get_cfg_rank", lambda _: 0)
+    monkeypatch.setattr(
+        denoising_module,
+        "cfg_parallel_unshard",
+        lambda _, predictions: [torch.cat((predictions[0], predictions[0] - 2.0))],
+    )
+
+    prediction = stage.predict_noise_with_cfg(
+        latents,
+        torch.tensor([1]),
+        torch.full((1, 2, 1), 3.0),
+        torch.full((1, 2, 1), 1.0),
+        guidance_scale=2.0,
+    )
+
+    assert torch.equal(prediction, torch.full_like(prediction, 5.0))
+    assert transformer.calls == 1
 
 
 def test_denoising_stage_batched_cfg_pads_different_prompt_lengths() -> None:

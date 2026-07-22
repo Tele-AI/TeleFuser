@@ -71,6 +71,9 @@ PPL_CONFIG: dict[str, Any] = {
     "refiner_parallelism": 0,
     "refiner_batch_cfg": False,
     "refiner_null_cond_clone_zero": True,
+    "cfg_parallel_degree": 1,
+    "refiner_cfg_parallel_degree": 1,
+    "refiner_co_resident": True,
 }
 
 
@@ -134,7 +137,9 @@ def build_pipeline(
 
     parallel_config = parallel_config or ParallelConfig()
     if batch_cfg is None:
-        batch_cfg = parallel_config.world_size > 1
+        batch_cfg = parallel_config.world_size > 1 and parallel_config.cfg_degree == 1
+    if batch_cfg and parallel_config.cfg_degree > 1:
+        raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
     if parallel_config.enable_fsdp and cpu_offload:
         raise ValueError("LingBot FSDP inference requires cpu_offload=False")
     device, device_id = _resolve_runtime_device(device, parallel_config)
@@ -154,11 +159,15 @@ def build_pipeline(
 
     if expert_backend == "auto":
         expert_backend = "grouped_mm" if parallel_config.world_size > 1 else "sorted"
-    if expert_backend not in {"grouped_mm", "sorted"}:
-        raise ValueError("LingBot MoE expert_backend must be 'auto', 'grouped_mm', or 'sorted'")
+    if expert_backend not in {"fp8", "grouped_mm", "sorted"}:
+        raise ValueError("LingBot MoE expert_backend must be 'auto', 'fp8', 'grouped_mm', or 'sorted'")
     if expert_backend == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
         raise RuntimeError("LingBot grouped_mm requires a recent CUDA-enabled PyTorch build")
     transformer = load_lingbot_video_moe_transformer(transformer_dir, device="cpu", torch_dtype=torch_dtype)
+    if expert_backend == "fp8":
+        if not hasattr(torch, "_scaled_mm"):
+            raise RuntimeError("LingBot FP8 experts require torch._scaled_mm")
+        transformer.quantize_experts_fp8_()
     transformer.set_expert_execution_backend(expert_backend)
 
     module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
@@ -222,6 +231,7 @@ def build_refiner(
     attention_config: AttentionConfig | None = None,
     parallel_config: ParallelConfig | None = None,
     batch_cfg: bool | None = None,
+    expert_backend: str = PPL_CONFIG["expert_backend"],
 ) -> LingBotVideoRefinerStage:
     """Load refiner modules through ModuleManager and assemble its stages."""
     try:
@@ -232,6 +242,8 @@ def build_refiner(
     parallel_config = parallel_config or ParallelConfig()
     if batch_cfg is None:
         batch_cfg = False
+    if batch_cfg and parallel_config.cfg_degree > 1:
+        raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
     if parallel_config.enable_fsdp and cpu_offload:
         raise ValueError("LingBot refiner FSDP inference requires cpu_offload=False")
     device, device_id = _resolve_runtime_device(device, parallel_config)
@@ -248,9 +260,20 @@ def build_refiner(
         parallel_config=parallel_config,
     )
 
+    if expert_backend == "auto":
+        expert_backend = "grouped_mm" if parallel_config.world_size > 1 else "sorted"
+    if expert_backend not in {"fp8", "grouped_mm", "sorted"}:
+        raise ValueError("LingBot refiner expert_backend must be 'auto', 'fp8', 'grouped_mm', or 'sorted'")
+    transformer = load_lingbot_video_moe_transformer(root / "refiner", device="cpu", torch_dtype=torch_dtype)
+    if expert_backend == "fp8":
+        if not hasattr(torch, "_scaled_mm"):
+            raise RuntimeError("LingBot FP8 experts require torch._scaled_mm")
+        transformer.quantize_experts_fp8_()
+    transformer.set_expert_execution_backend(expert_backend)
+
     module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
     module_manager.add_module(
-        load_lingbot_video_moe_transformer(root / "refiner", device="cpu", torch_dtype=torch_dtype),
+        transformer,
         name="transformer",
         path=str(root / "refiner"),
     )
@@ -287,17 +310,24 @@ def get_pipeline(
     model_root: str = PPL_CONFIG["model_root"],
     refiner_parallelism: int | None = None,
     refiner_batch_cfg: bool | None = None,
+    cfg_parallel_degree: int | None = None,
+    refiner_cfg_parallel_degree: int | None = None,
+    refiner_co_resident: bool | None = None,
     expert_backend: str = PPL_CONFIG["expert_backend"],
 ) -> object:
     """Load the fixed MoE 30B checkpoint and configure its separate refiner."""
     if parallelism not in {1, 4}:
         raise ValueError("LingBot-Video MoE supports parallelism=1 or 4")
+    cfg_parallel_degree = int(PPL_CONFIG["cfg_parallel_degree"]) if cfg_parallel_degree is None else cfg_parallel_degree
+    if cfg_parallel_degree not in {1, 2} or parallelism % cfg_parallel_degree:
+        raise ValueError("LingBot CFG parallel degree must be 1 or 2 and divide parallelism")
     pipeline = build_pipeline(
         model_root,
         cpu_offload=parallelism == 1,
         parallel_config=ParallelConfig(
             device_ids=list(range(parallelism)),
-            sp_ulysses_degree=parallelism,
+            cfg_degree=cfg_parallel_degree,
+            sp_ulysses_degree=parallelism // cfg_parallel_degree,
             enable_fsdp=parallelism > 1,
         ),
         expert_backend=expert_backend,
@@ -307,15 +337,29 @@ def get_pipeline(
     ) or parallelism
     if refiner_parallelism not in {1, 4}:
         raise ValueError("LingBot-Video refiner supports parallelism=1 or 4")
+    refiner_cfg_parallel_degree = (
+        int(PPL_CONFIG["refiner_cfg_parallel_degree"])
+        if refiner_cfg_parallel_degree is None
+        else refiner_cfg_parallel_degree
+    )
+    if refiner_cfg_parallel_degree not in {1, 2} or refiner_parallelism % refiner_cfg_parallel_degree:
+        raise ValueError("LingBot refiner CFG parallel degree must be 1 or 2 and divide refiner parallelism")
     pipeline.refiner_parallel_config = ParallelConfig(
         device_ids=list(range(refiner_parallelism)),
-        sp_ulysses_degree=refiner_parallelism,
+        cfg_degree=refiner_cfg_parallel_degree,
+        sp_ulysses_degree=refiner_parallelism // refiner_cfg_parallel_degree,
         enable_fsdp=refiner_parallelism > 1,
     )
     pipeline.refiner_cpu_offload = refiner_parallelism == 1
     pipeline.refiner_batch_cfg = (
         bool(PPL_CONFIG["refiner_batch_cfg"]) if refiner_batch_cfg is None else refiner_batch_cfg
     )
+    if pipeline.refiner_batch_cfg and refiner_cfg_parallel_degree > 1:
+        raise ValueError("LingBot refiner CFG parallel and batch CFG are mutually exclusive")
+    pipeline.refiner_co_resident = (
+        bool(PPL_CONFIG["refiner_co_resident"]) if refiner_co_resident is None else refiner_co_resident
+    ) and parallelism > 1
+    pipeline.refiner_expert_backend = expert_backend
     return pipeline
 
 
@@ -409,12 +453,14 @@ def run(
         negative = generation.prompt_conditions.negative_prompt_embeds
         negative_mask = generation.prompt_conditions.negative_attention_mask
 
-    pipeline.release_gpu_resources()
+    if not getattr(pipeline, "refiner_co_resident", False):
+        pipeline.release_gpu_resources()
     refiner = build_refiner(
         model_root,
         cpu_offload=getattr(pipeline, "refiner_cpu_offload", True),
         parallel_config=getattr(pipeline, "refiner_parallel_config", None),
         batch_cfg=getattr(pipeline, "refiner_batch_cfg", False),
+        expert_backend=getattr(pipeline, "refiner_expert_backend", PPL_CONFIG["expert_backend"]),
     )
     try:
         lowres_video, _ = prepare_refiner_video(
@@ -447,6 +493,7 @@ def run(
             tail_steps=int(PPL_CONFIG["refiner_tail_steps"]),
             clean_first_frame=clean_first_frame,
             generator=_generator(pipeline, seed),
+            before_decode=(pipeline.release_gpu_resources if getattr(pipeline, "refiner_co_resident", False) else None),
         )
     finally:
         refiner.close()
@@ -501,6 +548,7 @@ def run_with_file(
 
 @click.command()
 @click.option("--gpu_num", default=1, type=int, help="Number of GPUs: 1 or 4")
+@click.option("--cfg_parallel_degree", default=PPL_CONFIG["cfg_parallel_degree"], type=click.Choice([1, 2]))
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="MoE 30B checkpoint root")
 @click.option("--prompt", default=PPL_CONFIG["prompt"], help="Structured JSON caption")
 @click.option("--negative_prompt", default=None, help="Optional structured negative caption")
@@ -508,8 +556,8 @@ def run_with_file(
 @click.option(
     "--expert_backend",
     default=PPL_CONFIG["expert_backend"],
-    type=click.Choice(["auto", "grouped_mm", "sorted"]),
-    help="MoE expert backend; auto selects grouped_mm for four GPUs",
+    type=click.Choice(["auto", "fp8", "grouped_mm", "sorted"]),
+    help="MoE expert backend; fp8 uses native dynamic W8A8 scaled GEMMs",
 )
 @click.option("--resolution", default=PPL_CONFIG["resolution"])
 @click.option("--aspect_ratio", default=PPL_CONFIG["aspect_ratio"])
@@ -520,10 +568,17 @@ def run_with_file(
     "--refiner_gpu_num", default=PPL_CONFIG["refiner_parallelism"], type=int, help="Refiner GPUs; 0 inherits gpu_num"
 )
 @click.option("--refiner_batch_cfg/--no-refiner_batch_cfg", default=PPL_CONFIG["refiner_batch_cfg"])
+@click.option(
+    "--refiner_cfg_parallel_degree",
+    default=PPL_CONFIG["refiner_cfg_parallel_degree"],
+    type=click.Choice([1, 2]),
+)
+@click.option("--refiner_co_resident/--no-refiner_co_resident", default=PPL_CONFIG["refiner_co_resident"])
 @click.option("--refine/--no-refine", default=None)
 @click.option("--output_path", default="output.mp4")
 def main(
     gpu_num: int,
+    cfg_parallel_degree: int,
     model_root: str,
     prompt: str,
     negative_prompt: str | None,
@@ -536,6 +591,8 @@ def main(
     first_image_path: str,
     refiner_gpu_num: int,
     refiner_batch_cfg: bool,
+    refiner_cfg_parallel_degree: int,
+    refiner_co_resident: bool,
     refine: bool | None,
     output_path: str,
 ) -> None:
@@ -545,6 +602,9 @@ def main(
         model_root,
         refiner_parallelism=refiner_gpu_num,
         refiner_batch_cfg=refiner_batch_cfg,
+        cfg_parallel_degree=cfg_parallel_degree,
+        refiner_cfg_parallel_degree=refiner_cfg_parallel_degree,
+        refiner_co_resident=refiner_co_resident,
         expert_backend=expert_backend,
     )
     try:

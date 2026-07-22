@@ -171,3 +171,41 @@ def test_refiner_releases_vae_before_denoising_and_worker_before_decode() -> Non
     assert encode.offloaded
     assert decode.offloaded
     assert denoise.closed
+
+
+def test_refiner_runs_release_callback_after_denoising_and_before_decode() -> None:
+    events: list[str] = []
+
+    class RecordingDecodeStage(_DecodeStage):
+        def decode(self, values: torch.Tensor) -> torch.Tensor:
+            events.append("decode")
+            return values
+
+    denoise = _LifecycleDenoiseStage()
+    stage = LingBotVideoRefinerStage(
+        denoising_stage=denoise,
+        vae_encode_stage=_EncodeStage(),
+        vae_decode_stage=RecordingDecodeStage(),
+        scheduler=_Scheduler(),
+    )
+
+    def release_base() -> None:
+        assert denoise.closed
+        events.append("release_base")
+
+    stage.refine(
+        torch.zeros(1, 3, 2, 1, 1),
+        torch.zeros(1, 1, 1),
+        torch.zeros(1, 1, 1),
+        None,
+        None,
+        num_inference_steps=1,
+        guidance_scale=1.0,
+        shift=1.0,
+        t_thresh=0.5,
+        tail_steps=0,
+        noise=torch.zeros(1, 1, 2, 1, 1),
+        before_decode=release_base,
+    )
+
+    assert events == ["release_base", "decode"]

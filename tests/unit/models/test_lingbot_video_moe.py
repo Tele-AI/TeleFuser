@@ -109,6 +109,34 @@ def test_grouped_mm_backend_requires_cuda() -> None:
         )
 
 
+def test_fp8_expert_quantization_preserves_checkpoint_keys() -> None:
+    experts = LingBotVideoGroupedExperts(num_experts=2, hidden_size=16, intermediate_size=32).bfloat16()
+    expected_keys = set(experts.state_dict())
+
+    experts.quantize_fp8_()
+
+    assert experts.w1.dtype == torch.float8_e4m3fn
+    assert experts.w2.dtype == torch.float8_e4m3fn
+    assert experts.w3.dtype == torch.float8_e4m3fn
+    assert experts.w1_scale.shape == (2, 32)
+    assert experts.w2_scale.shape == (2, 16)
+    assert experts.w3_scale.shape == (2, 32)
+    assert set(experts.state_dict()) == expected_keys
+
+
+def test_fp8_backend_requires_cuda() -> None:
+    experts = LingBotVideoGroupedExperts(num_experts=2, hidden_size=16, intermediate_size=32).bfloat16()
+    experts.quantize_fp8_()
+    experts.set_execution_backend("fp8")
+
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        experts(
+            torch.randn(2, 16, dtype=torch.bfloat16),
+            torch.tensor([[0, 1], [1, 0]]),
+            torch.full((2, 2), 0.5, dtype=torch.bfloat16),
+        )
+
+
 @pytest.mark.gpu
 def test_grouped_mm_backend_matches_sorted_backend_on_cuda() -> None:
     if not torch.cuda.is_available() or not hasattr(torch, "_grouped_mm"):
@@ -129,3 +157,26 @@ def test_grouped_mm_backend_matches_sorted_backend_on_cuda() -> None:
     grouped_output = experts(tokens, indices, weights)
 
     assert torch.equal(grouped_output, sorted_output)
+
+
+@pytest.mark.gpu
+def test_fp8_backend_matches_sorted_backend_on_cuda() -> None:
+    if not torch.cuda.is_available() or not hasattr(torch, "_scaled_mm"):
+        pytest.skip("native CUDA scaled_mm is unavailable")
+    torch.manual_seed(19)
+    experts = LingBotVideoGroupedExperts(num_experts=4, hidden_size=64, intermediate_size=128).cuda().bfloat16()
+    with torch.no_grad():
+        experts.w1.normal_(std=0.02)
+        experts.w2.normal_(std=0.02)
+        experts.w3.normal_(std=0.02)
+    tokens = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    indices = torch.randint(0, 4, (64, 2), device="cuda")
+    weights = torch.rand(64, 2, device="cuda", dtype=torch.bfloat16)
+    weights /= weights.sum(dim=-1, keepdim=True)
+
+    sorted_output = experts(tokens, indices, weights)
+    experts.quantize_fp8_()
+    experts.set_execution_backend("fp8")
+    fp8_output = experts(tokens, indices, weights)
+
+    torch.testing.assert_close(fp8_output, sorted_output, rtol=0.12, atol=2e-3)

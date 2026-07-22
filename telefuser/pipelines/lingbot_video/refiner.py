@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -251,6 +252,7 @@ class LingBotVideoRefinerStage:
         clean_first_frame: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         noise: torch.Tensor | None = None,
+        before_decode: Callable[[], None] | None = None,
     ) -> torch.Tensor:
         """Refine an in-memory RGB video using official low-noise initialization."""
         x_up = self.vae_encode_stage.encode(lowres_video, generator=generator)
@@ -309,4 +311,6 @@ class LingBotVideoRefinerStage:
         # loading the VAE decoder, otherwise the two high-memory stages can
         # overlap on rank zero.
         self.close()
+        if before_decode is not None:
+            before_decode()
         return self._resolve_stage_result(self.vae_decode_stage.decode(latent))
