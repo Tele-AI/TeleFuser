@@ -198,18 +198,19 @@ def main(
     image = Image.open(image_path).convert("RGB")
 
     # Run inference
-    start = time.time()
-    video = run(
-        pipe,
-        image,
-        prompt,
-        negative_prompt,
-        seed=seed,
-        resolution=resolution,
-    )
-    elapsed_time = time.time() - start
+    while True:
+        start = time.time()
+        video = run(
+            pipe,
+            image,
+            prompt,
+            negative_prompt,
+            seed=seed,
+            resolution=resolution,
+        )
+        elapsed_time = time.time() - start
 
-    print(f"Video generation time: {elapsed_time:.2f} seconds")
+        print(f"Video generation time: {elapsed_time:.2f} seconds")
 
     # Save results
     output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")

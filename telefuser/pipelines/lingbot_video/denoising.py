@@ -7,12 +7,17 @@ licensed upstream LingBot-Video implementation.
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig
-from telefuser.models.lingbot_video_dit import LingBotVideoTransformer3DModel
+from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
+from telefuser.core.module_manager import ModuleManager
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_group
+from telefuser.distributed.fsdp import shard_model
+from telefuser.platforms import current_platform
+from telefuser.utils.logging import logger
 
 
 def reinject_ti2v_condition(latent: torch.Tensor, condition: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -70,14 +75,51 @@ class LingBotVideoDenoisingStage(BaseStage):
     """Dense LingBot-Video denoising stage with source-equivalent CFG order."""
 
     def __init__(
-        self, name: str, transformer: LingBotVideoTransformer3DModel, model_runtime_config: ModelRuntimeConfig
+        self,
+        name: str,
+        module_manager: ModuleManager,
+        model_runtime_config: ModelRuntimeConfig,
+        *,
+        batch_cfg: bool = False,
     ) -> None:
         super().__init__(name, model_runtime_config)
+        transformer = module_manager.fetch_module("transformer")
         self.transformer = transformer
         set_attention_config = getattr(transformer, "set_attention_config", None)
         if callable(set_attention_config):
             set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["transformer"]
+        self.batch_cfg = batch_cfg
+
+    def parallel_models(self) -> None:
+        """Attach Ulysses SP and optional per-block FSDP to the DiT stage."""
+        parallel_config = self.model_runtime_config.parallel_config
+        if parallel_config.world_size == 1:
+            return
+        self.transformer.device_mesh = create_device_mesh_from_config(parallel_config)
+        if parallel_config.sp_ulysses_degree > 1:
+            self.transformer.set_ulysses_group(get_ulysses_group(self.transformer.device_mesh))
+            logger.info(f"enabled LingBot Ulysses SP degree={parallel_config.sp_ulysses_degree}")
+        if parallel_config.enable_fsdp:
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError("LingBot FSDP inference cannot be combined with model CPU offload")
+            # ParallelWorker receives a CPU checkpoint. Move all state first so
+            # intentionally unsharded FP32 parameters do not remain on CPU.
+            self.transformer.to(self.device)
+            ignored_states = [
+                parameter for parameter in self.transformer.parameters() if parameter.dtype != self.torch_dtype
+            ]
+            if ignored_states:
+                logger.info(f"retaining {len(ignored_states)} LingBot parameters with a non-runtime dtype outside FSDP")
+            logger.info(f"enabled LingBot block FSDP for {self.name}")
+            self.transformer = shard_model(
+                module=self.transformer,
+                device_id=self.device.index if self.device.index is not None else torch.cuda.current_device(),
+                wrap_module_names=self.transformer.get_fsdp_module_names(),
+                ignored_states=ignored_states,
+            )
+            self.onload_models_flag = True
+            current_platform.empty_cache()
 
     @with_model_offload(["transformer"])
     @torch.no_grad()
@@ -96,14 +138,33 @@ class LingBotVideoDenoisingStage(BaseStage):
         model_timestep = transformer_timestep(timestep, transformer_dtype)
         autocast_enabled = latents.device.type == "cuda" and transformer_dtype in {torch.bfloat16, torch.float16}
         with torch.autocast(device_type=latents.device.type, dtype=transformer_dtype, enabled=autocast_enabled):
-            positive = self.transformer(
-                latents, model_timestep, positive_prompt_embeds, positive_attention_mask
-            ).float()
             if guidance_scale == 1.0:
-                return positive
+                return self.transformer(
+                    latents, model_timestep, positive_prompt_embeds, positive_attention_mask
+                ).float()
             if negative_prompt_embeds is None:
                 raise ValueError("negative_prompt_embeds is required when guidance_scale is not 1")
-            negative = self.transformer(
-                latents, model_timestep, negative_prompt_embeds, negative_attention_mask
-            ).float()
+            matching_masks = (positive_attention_mask is None) == (negative_attention_mask is None)
+            matching_shapes = positive_prompt_embeds.shape == negative_prompt_embeds.shape
+            if self.batch_cfg and matching_masks and matching_shapes:
+                combined_latents = torch.cat((latents, latents))
+                combined_timestep = torch.cat((model_timestep, model_timestep))
+                combined_embeds = torch.cat((positive_prompt_embeds, negative_prompt_embeds))
+                combined_mask = (
+                    None
+                    if positive_attention_mask is None
+                    else torch.cat((positive_attention_mask, negative_attention_mask))
+                )
+                positive, negative = (
+                    self.transformer(combined_latents, combined_timestep, combined_embeds, combined_mask)
+                    .float()
+                    .chunk(2)
+                )
+            else:
+                positive = self.transformer(
+                    latents, model_timestep, positive_prompt_embeds, positive_attention_mask
+                ).float()
+                negative = self.transformer(
+                    latents, model_timestep, negative_prompt_embeds, negative_attention_mask
+                ).float()
         return negative + guidance_scale * (positive - negative)

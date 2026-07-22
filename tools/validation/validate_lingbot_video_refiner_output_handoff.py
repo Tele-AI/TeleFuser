@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -12,10 +13,13 @@ from typing import Any
 import torch
 from PIL import Image
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from examples.lingbot_video.lingbot_video_moe_30b import build_pipeline, build_refiner
 from telefuser.pipelines.lingbot_video import (
     LingBotVideoRequest,
-    build_lingbot_video_pipeline,
-    build_lingbot_video_refiner_stage,
     default_negative_caption,
     load_lingbot_video_prompt,
     load_refiner_first_frame,
@@ -196,9 +200,8 @@ def main() -> None:
         args.negative_caption if args.negative_caption is not None else default_negative_caption(num_frames)
     )
     pipeline, base_load_seconds = _measure(
-        lambda: build_lingbot_video_pipeline(
+        lambda: build_pipeline(
             args.model_dir,
-            variant="moe",
             guidance_scale=args.guidance_scale,
             num_inference_steps=args.steps,
             cpu_offload=False if args.disable_cpu_offload else None,
@@ -218,8 +221,8 @@ def main() -> None:
         )
     )
     frames = generation.output
-    if pipeline.text_stage is None or pipeline.model_dir is None:
-        raise RuntimeError("LingBot refiner requires the base text stage and checkpoint metadata")
+    if pipeline.text_stage is None:
+        raise RuntimeError("LingBot refiner requires the base text stage")
     if generation.prompt_conditions.has_visual_condition:
         positive, positive_mask = pipeline.text_stage.encode(caption)
         negative, negative_mask = pipeline.text_stage.encode(negative_caption)
@@ -230,7 +233,7 @@ def main() -> None:
         negative_mask = generation.prompt_conditions.negative_attention_mask
     _, base_release_seconds = _measure(pipeline.release_gpu_resources)
     refiner, refiner_load_seconds = _measure(
-        lambda: build_lingbot_video_refiner_stage(args.model_dir, cpu_offload=not args.disable_cpu_offload)
+        lambda: build_refiner(args.model_dir, cpu_offload=not args.disable_cpu_offload)
     )
     memory_input, memory_metadata = prepare_refiner_video(
         frames, source_fps=24.0, height=args.refiner_height, width=args.refiner_width

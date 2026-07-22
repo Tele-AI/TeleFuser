@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -13,10 +14,15 @@ from typing import Any
 import torch
 from PIL import Image
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from examples.lingbot_video.lingbot_video_dense_1_3b import build_pipeline as build_dense_pipeline
+from examples.lingbot_video.lingbot_video_moe_30b import build_pipeline as build_moe_pipeline
+from examples.lingbot_video.lingbot_video_moe_30b import build_refiner
 from telefuser.pipelines.lingbot_video import (
     LingBotVideoRequest,
-    build_lingbot_video_pipeline,
-    build_lingbot_video_refiner_stage,
     default_negative_caption,
     load_lingbot_video_prompt,
     load_refiner_first_frame,
@@ -135,12 +141,12 @@ def main() -> None:
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    pipeline_builder = build_dense_pipeline if args.variant == "dense" else build_moe_pipeline
     pipeline = _measure(
         setup_samples,
         "base_load",
-        lambda: build_lingbot_video_pipeline(
+        lambda: pipeline_builder(
             args.model_dir,
-            variant=args.variant,
             guidance_scale=args.guidance_scale,
             num_inference_steps=args.steps,
             cpu_offload=False if args.disable_cpu_offload else None,
@@ -197,7 +203,7 @@ def main() -> None:
             refiner = _measure(
                 setup_samples,
                 "refiner_load",
-                lambda: build_lingbot_video_refiner_stage(args.model_dir, cpu_offload=not args.disable_cpu_offload),
+                lambda: build_refiner(args.model_dir, cpu_offload=not args.disable_cpu_offload),
             )
             _instrument_method(
                 get_active_samples,

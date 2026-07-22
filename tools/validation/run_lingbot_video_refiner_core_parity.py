@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import load_file
 
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage
 from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_moe_transformer
 from telefuser.pipelines.lingbot_video.refiner import (
@@ -130,9 +131,11 @@ def main() -> None:
 
     local = load_lingbot_video_moe_transformer(DIRECTORY, device=DEVICE, torch_dtype=torch.bfloat16)
     local_scheduler = FlowUniPCMultistepScheduler.from_pretrained(ROOT / "scheduler")
+    module_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
+    module_manager.add_module(local, name="transformer")
     stage = LingBotVideoRefinerStage(
         denoising_stage=LingBotVideoDenoisingStage(
-            "refiner", local, ModelRuntimeConfig(device_type="cuda", torch_dtype=torch.bfloat16)
+            "refiner", module_manager, ModelRuntimeConfig(device_type="cuda", torch_dtype=torch.bfloat16)
         ),
         vae_encode_stage=_Encode(),
         vae_decode_stage=_Decode(),
