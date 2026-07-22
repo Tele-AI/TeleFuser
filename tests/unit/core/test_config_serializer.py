@@ -46,6 +46,7 @@ def test_serialize_config_parallel_config():
     assert result["dp_degree"] == 2
     assert result["sp_ulysses_degree"] == 1
     assert result["enable_fsdp"] is False
+    assert result["worker_intra_op_threads"] == 1
 
 
 def test_serialize_config_offload_config():

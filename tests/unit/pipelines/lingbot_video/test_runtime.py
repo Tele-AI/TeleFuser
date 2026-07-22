@@ -13,6 +13,7 @@ from telefuser.pipelines.lingbot_video import LingBotVideoModelConfig
 class _FakeModule:
     def __init__(self) -> None:
         self.device: str | None = None
+        self.expert_execution_backend: str | None = None
 
     def to(self, device: str) -> _FakeModule:
         self.device = device
@@ -23,6 +24,9 @@ class _FakeModule:
 
     def set_attention_config(self, attention_config) -> None:
         self.attention_config = attention_config
+
+    def set_expert_execution_backend(self, backend: str) -> None:
+        self.expert_execution_backend = backend
 
 
 def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> None:
@@ -77,6 +81,7 @@ def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> Non
 
     assert loaded_transformers == [(tmp_path / "transformer", "cpu"), (tmp_path / "refiner", "cpu")]
     assert base.variant == "moe"
+    assert base.denoising_stage.transformer.expert_execution_backend == "sorted"
     assert (
         base.denoising_stage.transformer.attention_config is base.denoising_stage.model_runtime_config.attention_config
     )

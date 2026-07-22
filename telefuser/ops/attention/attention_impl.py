@@ -48,6 +48,31 @@ from telefuser.utils.logging import logger
 _warned_attn_fallback: set[str] = set()
 
 
+def _packed_sdpa(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    sequence_lengths: list[int],
+    *,
+    scale: float | None,
+    is_causal: bool,
+) -> Tensor:
+    """Run SDPA independently for sequences packed along the BNSD sequence axis."""
+    if q.shape != k.shape or q.shape != v.shape or q.ndim != 4 or q.shape[0] != 1:
+        raise ValueError("packed SDPA requires matching Q/K/V tensors with shape [1, heads, sequence, dim]")
+    if any(length <= 0 for length in sequence_lengths) or sum(sequence_lengths) != q.shape[2]:
+        raise ValueError("packed SDPA sequence lengths must be positive and sum to the packed sequence dimension")
+    outputs = [
+        F.scaled_dot_product_attention(q_part, k_part, v_part, scale=scale, is_causal=is_causal)
+        for q_part, k_part, v_part in zip(
+            torch.split(q, sequence_lengths, dim=2),
+            torch.split(k, sequence_lengths, dim=2),
+            torch.split(v, sequence_lengths, dim=2),
+        )
+    ]
+    return torch.cat(outputs, dim=2)
+
+
 class SparseAttentionState:
     """Runtime state for sparse attention computation.
 
@@ -97,6 +122,7 @@ def attention(
     output_layout: Literal["BSND", "BNSD"] = "BSND",
     is_causal: bool = False,
     return_lse: bool = False,
+    sequence_lengths: list[int] | None = None,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -206,7 +232,12 @@ def attention(
     elif attn_impl == AttnImplType.TORCH_CUDNN and SDPA_AVAILABLE:
         output = sdpa_attn_cudnn(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
     elif attn_impl == AttnImplType.TORCH_SDPA and SDPA_AVAILABLE:
-        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
+        if sequence_lengths is None:
+            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
+        else:
+            if attn_mask is not None or current_layout != "BNSD":
+                raise ValueError("packed SDPA requires BNSD layout without an attention mask")
+            output = _packed_sdpa(q, k, v, sequence_lengths, scale=scale, is_causal=is_causal)
 
     # Sage Attention variants
     elif SAGE_ATTN_AVAILABLE and sageattention is not None:
@@ -265,7 +296,12 @@ def attention(
             v = v.transpose(1, 2).contiguous()
             current_layout = "BNSD"
 
-        output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
+        if sequence_lengths is None:
+            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
+        else:
+            if attn_mask is not None or current_layout != "BNSD":
+                raise ValueError("packed SDPA requires BNSD layout without an attention mask")
+            output = _packed_sdpa(q, k, v, sequence_lengths, scale=scale, is_causal=is_causal)
         attn_impl = AttnImplType.TORCH_SDPA
 
     # Handle output layout conversion - output matches current_layout, may need to convert to output_layout

@@ -210,24 +210,40 @@ class LingBotVideoPipeline(BasePipeline):
             dtype=torch.float32,
             generator=generator,
         )
-        self.scheduler.set_timesteps(self.config.num_inference_steps, device=latent.device, shift=self.config.shift)
-        for step in self.scheduler.timesteps:
-            if condition is not None:
-                latent = reinject_ti2v_condition(latent, condition, condition_mask)
-            prediction = self._resolve_stage_result(
-                self.denoising_stage.predict_noise_with_cfg(
+        if self.config.enable_denoising_parallel:
+            latent = self._resolve_stage_result(
+                self.denoising_stage.denoise(
                     latent,
-                    step.expand(latent.shape[0]),
                     positive,
                     negative,
                     positive_mask,
                     negative_mask,
                     self.config.guidance_scale,
+                    self.config.num_inference_steps,
+                    self.config.shift,
+                    condition,
+                    condition_mask,
                 )
             )
-            latent = self.scheduler.step(prediction, step, latent)
-        if condition is not None:
-            latent = reinject_ti2v_condition(latent, condition, condition_mask)
+        else:
+            self.scheduler.set_timesteps(self.config.num_inference_steps, device=latent.device, shift=self.config.shift)
+            for step in self.scheduler.timesteps:
+                if condition is not None:
+                    latent = reinject_ti2v_condition(latent, condition, condition_mask)
+                prediction = self._resolve_stage_result(
+                    self.denoising_stage.predict_noise_with_cfg(
+                        latent,
+                        step.expand(latent.shape[0]),
+                        positive,
+                        negative,
+                        positive_mask,
+                        negative_mask,
+                        self.config.guidance_scale,
+                    )
+                )
+                latent = self.scheduler.step(prediction, step, latent)
+            if condition is not None:
+                latent = reinject_ti2v_condition(latent, condition, condition_mask)
         if not decode:
             return LingBotVideoGeneration(latent, prompt_conditions)
         if self.vae_decode_stage is None:

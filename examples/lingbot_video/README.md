@@ -28,10 +28,12 @@ python examples/lingbot_video/lingbot_video_moe_30b.py \
 ```
 
 The command releases base-stage GPU weights before loading the separate refiner.
-Use `--no-refine` for MoE base-only generation. The default sorted eager MoE
-Use `--refiner_gpu_num` and `--refiner_batch_cfg` to override the corresponding MoE `PPL_CONFIG` defaults for a direct CLI run.
-route path is source-equivalent with a diagnostic fallback, but it is not a
-grouped-GEMM or FP8 production-performance backend.
+Use `--no-refine` for MoE base-only generation. `expert_backend=auto` keeps
+the validated sorted eager path on one GPU and selects native grouped GEMM for
+four-GPU inference. The grouped path requires a CUDA PyTorch build that exposes
+`torch._grouped_mm`; use `--expert_backend sorted` as the explicit fallback.
+Use `--refiner_gpu_num` and `--refiner_batch_cfg` to override the corresponding
+MoE `PPL_CONFIG` defaults for a direct CLI run.
 
 Set `PPL_CONFIG["model_root"]` in the selected example, then serve structured-caption T2I/T2V/TI2V requests with:
 

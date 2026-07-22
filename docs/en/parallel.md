@@ -385,7 +385,13 @@ class ParallelConfig:
     enable_fsdp: bool = False             # Enable FSDP
     timeout: int = 600                    # Timeout in seconds
     queue_with_cpu: bool = False          # Use CPU queue
+    worker_intra_op_threads: int = 1      # CPU intra-op threads per worker
 ```
+
+The default of one thread matches `torchrun` and prevents CPU oversubscription
+across GPU worker processes. Increase it only for distributed stages with
+substantial CPU-side computation; it does not change the parent process thread
+pool.
 
 ### Validation Rules
 

@@ -146,3 +146,33 @@ def shard_model_fsdp2(
     fully_shard(module, mesh=device_mesh, mp_policy=mp_policy)
 
     return module
+
+
+def shard_model_fsdp2_inference(
+    module: nn.Module,
+    device_mesh: DeviceMesh,
+    wrap_module_names: list[str],
+    ignored_states: Iterable[nn.Parameter] | None = None,
+) -> nn.Module:
+    """Apply source-style composable FSDP2 for inference-only model sharding."""
+    ignored_params = set(ignored_states or ())
+    if torch.cuda.is_available():
+        device = torch.device("cuda", torch.cuda.current_device())
+        for submodule in module.modules():
+            for name, buffer in tuple(submodule.named_buffers(recurse=False)):
+                if buffer is not None and buffer.device != device:
+                    submodule._buffers[name] = buffer.to(device=device)
+        for parameter in ignored_params:
+            if parameter.device != device:
+                parameter.data = parameter.data.to(device=device)
+
+    wrapped: set[nn.Module] = set()
+    for name in wrap_module_names:
+        target = getattr(module, name)
+        targets = target if isinstance(target, nn.ModuleList) else (target,)
+        for child in targets:
+            child_ignored_params = {parameter for parameter in child.parameters() if parameter in ignored_params}
+            fully_shard(child, mesh=device_mesh, ignored_params=child_ignored_params)
+            wrapped.add(child)
+    fully_shard(module, mesh=device_mesh, ignored_params=ignored_params)
+    return module

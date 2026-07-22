@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -94,3 +95,37 @@ def test_grouped_expert_backends_are_exactly_equivalent() -> None:
     where_output = experts(tokens, indices, weights)
 
     assert torch.equal(sorted_output, where_output)
+
+
+def test_grouped_mm_backend_requires_cuda() -> None:
+    experts = LingBotVideoGroupedExperts(num_experts=2, hidden_size=4, intermediate_size=8).bfloat16()
+    experts.set_execution_backend("grouped_mm")
+
+    with pytest.raises(RuntimeError, match="requires CUDA"):
+        experts(
+            torch.randn(2, 4, dtype=torch.bfloat16),
+            torch.tensor([[0, 1], [1, 0]]),
+            torch.full((2, 2), 0.5, dtype=torch.bfloat16),
+        )
+
+
+@pytest.mark.gpu
+def test_grouped_mm_backend_matches_sorted_backend_on_cuda() -> None:
+    if not torch.cuda.is_available() or not hasattr(torch, "_grouped_mm"):
+        pytest.skip("native CUDA grouped_mm is unavailable")
+    torch.manual_seed(17)
+    experts = LingBotVideoGroupedExperts(num_experts=4, hidden_size=32, intermediate_size=24).cuda().bfloat16()
+    with torch.no_grad():
+        experts.w1.uniform_(-0.1, 0.1)
+        experts.w2.uniform_(-0.1, 0.1)
+        experts.w3.uniform_(-0.1, 0.1)
+    tokens = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16)
+    indices = torch.randint(0, 4, (32, 2), device="cuda")
+    weights = torch.rand(32, 2, device="cuda", dtype=torch.bfloat16)
+    weights /= weights.sum(dim=-1, keepdim=True)
+
+    sorted_output = experts(tokens, indices, weights)
+    experts.set_execution_backend("grouped_mm")
+    grouped_output = experts(tokens, indices, weights)
+
+    torch.testing.assert_close(grouped_output, sorted_output, rtol=2e-2, atol=2e-2)

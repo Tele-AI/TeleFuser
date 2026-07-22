@@ -251,6 +251,7 @@ class ParallelConfig:
     pp_degree: int = 1           # Pipeline parallelism
     tp_degree: int = 1           # Tensor parallelism
     enable_fsdp: bool = False
+    worker_intra_op_threads: int = 1  # CPU intra-op threads per worker
 
     def validate(self) -> None:
         """Validate that device count matches parallelism degrees."""

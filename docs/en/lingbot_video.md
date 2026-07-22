@@ -20,8 +20,10 @@ transformer = load_lingbot_video_dense_transformer(
 The MoE and refiner directories are sharded. Use
 `load_lingbot_video_moe_transformer` for either `transformer/` or `refiner/`.
 The default sorted eager expert path preserves upstream route ordering and keeps
-a `where`-based diagnostic fallback. It is a validated single-GPU BF16 path,
-but not a grouped-GEMM, FP8, or distributed production-throughput backend. For
+a `where`-based diagnostic fallback. It remains the validated single-GPU BF16
+path. Four-GPU MoE execution defaults to native grouped GEMM when the installed
+CUDA PyTorch build exposes `torch._grouped_mm`; the example accepts
+`expert_backend=sorted` as an explicit fallback. For
 `variant="moe"`, the runtime defaults to stage CPU offload so the base DiT,
 text encoder, VAE, and separately loaded refiner do not need to reside on one
 GPU. Set `cpu_offload=False` only when GPU capacity is known to be sufficient.
@@ -111,18 +113,24 @@ telefuser serve examples/lingbot_video/lingbot_video_dense_1_3b.py --gpu-num 4 -
 This configuration keeps FSDP-enabled DiT weights resident on GPU and therefore
 requires `cpu_offload=False`. Checkpoint FP32 modulation parameters are retained
 as replicated FSDP ignored states, matching the upstream mixed-precision layout.
-The MoE 30B model uses its own example; its sorted eager experts are still
-replicated within each FSDP block rather than expert-parallelized:
+The MoE 30B model uses its own example. Its grouped expert weights are sharded
+with their containing FSDP blocks rather than expert-parallelized:
 
 ```bash
 telefuser serve examples/lingbot_video/lingbot_video_moe_30b.py --gpu-num 4 --port 8000
 ```
 
-The validated 832x480, 121-frame, 40-step MoE base run used 68.1 GiB peak GPU
-memory and 240.4 seconds for generation excluding checkpoint load and MP4
-encoding. The separately loaded refiner also has a validated four-GPU
-FSDP/Ulysses path. Expert parallelism, grouped GEMM, and FP8 remain disabled
-pending their own parity and throughput evidence.
+On PyTorch 2.11 with CUDA 13, the grouped-GEMM 832x480, 121-frame, 40-step MoE
+base run uses one worker-owned scheduler loop and one intra-op CPU thread per
+rank, matching `torchrun`. On four H100 GPUs, steady sampling is approximately
+2.3 seconds per step and 93 seconds for 40 steps, compared with 92 seconds for
+the source runner. The first TeleFuser request also pays about 15 seconds for
+FSDP materialization. A cold CLI invocation took 231.9 seconds because the
+parent load and spawn-time 30B model transfer are not included in steady
+service latency; persistent service requests amortize that setup. The
+separately loaded refiner also has a validated four-GPU FSDP/Ulysses path.
+Expert parallelism and FP8 remain disabled pending their own parity and
+throughput evidence.
 
 ## TI2V
 
@@ -256,9 +264,9 @@ When `--negative-caption` is omitted, the benchmark uses the same source-compati
 T2I or video negative caption as the pipeline, CLI, and service. Pass an explicit
 empty string only when intentionally benchmarking that semantic override.
 For a base-plus-refiner run, it also records the serial base release and refiner
-load phases. The default sorted eager MoE path is source-equivalent and has an
-explicit diagnostic fallback, but it is not a grouped-GEMM or FP8
-production-throughput backend.
+load phases. Single-GPU benchmarks use the source-equivalent sorted eager MoE
+path. Four-GPU benchmarks select grouped GEMM by default; use
+`expert_backend=sorted` only when measuring the correctness fallback.
 For T2I/T2V, the refiner reuses the exact CFG text conditions from the base
 generation and reports this as `refiner_prompt_conditions_reused`; TI2V keeps
 the source-compatible text-only refiner encoding path.
@@ -270,10 +278,11 @@ zero-drift numerical-oracle gate instead of only writing metrics.
 
 The numerical-oracle path requires CUDA, PyTorch, Diffusers, Transformers, and the
 checkpoint components `transformer/`, `text_encoder/`, `processor/`, `vae/`, and
-`scheduler/`. Dense runs source-equivalently on one GPU. The current MoE expert
-implementation is an eager correctness path; do not use it as a 30B production
-backend. Dense and MoE base DiTs have validated four-GPU FSDP/Ulysses SP paths.
+`scheduler/`. Dense runs source-equivalently on one GPU. MoE keeps sorted eager
+for single-GPU correctness and uses native grouped GEMM for four-GPU throughput;
+the latter requires a CUDA PyTorch build exposing `torch._grouped_mm`. Dense and
+MoE base DiTs have validated four-GPU FSDP/Ulysses SP paths.
 The MoE refiner has a validated independent four-GPU FSDP/Ulysses SP stage.
-FlashAttention, MoE expert parallelism, grouped GEMM, and FP8 experts are
-intentionally not enabled. The base-plus-refiner stage lifecycle remains
-serial so their 30B weights never coexist on GPU.
+External FlashAttention, MoE expert parallelism, and FP8 experts are not enabled.
+The base-plus-refiner stage lifecycle remains serial so their 30B weights never
+coexist on GPU.

@@ -251,6 +251,7 @@ class ParallelConfig:
     pp_degree: int = 1           # 流水线并行
     tp_degree: int = 1           # 张量并行
     enable_fsdp: bool = False
+    worker_intra_op_threads: int = 1  # 每个 worker 的 CPU intra-op 线程数
 
     def validate(self) -> None:
         """验证设备数量与并行度匹配。"""
