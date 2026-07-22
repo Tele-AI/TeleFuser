@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_video.vae import (
     LingBotVideoVAEDecodeStage,
     LingBotVideoVAEEncodeStage,
@@ -36,8 +37,10 @@ class _VAE(nn.Module):
 def test_vae_stages_apply_checkpoint_normalization() -> None:
     runtime = ModelRuntimeConfig(device_type="cpu")
     vae = _VAE()
-    encoded = LingBotVideoVAEEncodeStage("encode", vae, runtime).encode(torch.ones(1, 3, 1, 2, 2))
-    decoded = LingBotVideoVAEDecodeStage("decode", vae, runtime).decode(encoded)
+    module_manager = ModuleManager(device="cpu", torch_dtype=torch.float32)
+    module_manager.add_module(vae, name="vae")
+    encoded = LingBotVideoVAEEncodeStage("encode", module_manager, runtime).encode(torch.ones(1, 3, 1, 2, 2))
+    decoded = LingBotVideoVAEDecodeStage("decode", module_manager, runtime).decode(encoded)
 
     assert encoded[:, 0].item() == 0.0
     assert encoded[:, 1].item() == -0.25

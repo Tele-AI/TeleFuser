@@ -21,6 +21,35 @@ class _DenoiseStage:
         return torch.ones_like(latents)
 
 
+class _DeferredDenoiseStage(_DenoiseStage):
+    def predict_noise_with_cfg(self, latents: torch.Tensor, *_: object):
+        return lambda: torch.ones_like(latents)
+
+
+class _LifecycleEncodeStage(_EncodeStage):
+    def __init__(self) -> None:
+        self.offloaded = False
+
+    def offload_models(self) -> None:
+        self.offloaded = True
+
+
+class _LifecycleDecodeStage(_DecodeStage):
+    def __init__(self) -> None:
+        self.offloaded = False
+
+    def offload_models(self) -> None:
+        self.offloaded = True
+
+
+class _LifecycleDenoiseStage(_DenoiseStage):
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _Scheduler:
     sigma_max = 1.0
     sigma_min = 0.0
@@ -87,3 +116,58 @@ def test_refiner_accepts_captured_noise() -> None:
     )
 
     assert torch.equal(result, -torch.ones_like(result))
+
+
+def test_refiner_resolves_distributed_denoising_result() -> None:
+    stage = LingBotVideoRefinerStage(
+        denoising_stage=_DeferredDenoiseStage(),
+        vae_encode_stage=_EncodeStage(),
+        vae_decode_stage=_DecodeStage(),
+        scheduler=_Scheduler(),
+    )
+
+    result = stage.refine(
+        torch.zeros(1, 3, 2, 1, 1),
+        torch.zeros(1, 1, 1),
+        torch.zeros(1, 1, 1),
+        None,
+        None,
+        num_inference_steps=1,
+        guidance_scale=1.0,
+        shift=1.0,
+        t_thresh=0.5,
+        tail_steps=0,
+        noise=torch.zeros(1, 1, 2, 1, 1),
+    )
+
+    assert torch.equal(result, -torch.ones_like(result))
+
+
+def test_refiner_releases_vae_before_denoising_and_worker_before_decode() -> None:
+    encode = _LifecycleEncodeStage()
+    decode = _LifecycleDecodeStage()
+    denoise = _LifecycleDenoiseStage()
+    stage = LingBotVideoRefinerStage(
+        denoising_stage=denoise,
+        vae_encode_stage=encode,
+        vae_decode_stage=decode,
+        scheduler=_Scheduler(),
+    )
+
+    stage.refine(
+        torch.zeros(1, 3, 2, 1, 1),
+        torch.zeros(1, 1, 1),
+        torch.zeros(1, 1, 1),
+        None,
+        None,
+        num_inference_steps=1,
+        guidance_scale=1.0,
+        shift=1.0,
+        t_thresh=0.5,
+        tail_steps=0,
+        noise=torch.zeros(1, 1, 2, 1, 1),
+    )
+
+    assert encode.offloaded
+    assert decode.offloaded
+    assert denoise.closed

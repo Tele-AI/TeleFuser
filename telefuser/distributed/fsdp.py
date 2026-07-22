@@ -6,6 +6,7 @@ Supports both FSDP1 and FSDP2 APIs with automatic wrapping policies.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from functools import partial
 
 import torch
@@ -26,6 +27,7 @@ def shard_model(
     reduce_dtype: torch.dtype = torch.bfloat16,
     buffer_dtype: torch.dtype = torch.bfloat16,
     cpu_offload: bool = False,
+    ignored_states: Iterable[nn.Parameter] | None = None,
 ) -> FSDP:
     """Shard model using FSDP1.
 
@@ -38,6 +40,7 @@ def shard_model(
         reduce_dtype: Gradient reduction dtype
         buffer_dtype: Buffer dtype
         cpu_offload: Whether to offload parameters to CPU
+        ignored_states: Parameters to retain as unsharded, replicated state.
 
     Returns:
         FSDP-wrapped module
@@ -70,6 +73,7 @@ def shard_model(
         forward_prefetch=True,
         auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=wrap_fn),
         cpu_offload=CPUOffload(offload_params=True) if cpu_offload else None,
+        ignored_states=ignored_states,
     )
 
 

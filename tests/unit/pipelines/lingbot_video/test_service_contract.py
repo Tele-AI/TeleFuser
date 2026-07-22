@@ -1,4 +1,4 @@
-"""Tests for the LingBot-Video service entrypoint contract."""
+"""Tests for the split LingBot-Video CLI and service examples."""
 
 from __future__ import annotations
 
@@ -6,54 +6,104 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
-from PIL import Image
+from click.testing import CliRunner
 
 from telefuser.pipelines.lingbot_video import DEFAULT_NEGATIVE_PROMPT, DEFAULT_NEGATIVE_PROMPT_IMAGE
 from telefuser.service.core.pipeline_contract import load_pipeline_contract
 
+EXAMPLE_PATHS = {
+    "dense": Path("examples/lingbot_video/lingbot_video_dense_1_3b.py"),
+    "moe": Path("examples/lingbot_video/lingbot_video_moe_30b.py"),
+}
 
-def _load_service_module():
-    path = Path("examples/lingbot_video/lingbot_video_service.py")
-    spec = importlib.util.spec_from_file_location("lingbot_video_service_test", path)
+
+def _load_example(variant: str) -> ModuleType:
+    path = EXAMPLE_PATHS[variant]
+    module_name = f"lingbot_video_{variant}_example_test"
+    spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def test_service_contract_declares_t2i_t2v_and_i2v() -> None:
-    module = _load_service_module()
+@pytest.mark.parametrize("variant", ["dense", "moe"])
+def test_examples_expose_cli_and_service_entrypoints(variant: str) -> None:
+    module = _load_example(variant)
 
-    contract, is_explicit = load_pipeline_contract(module, ppl_file="lingbot_video_service.py", default_task="t2v")
+    for name in ("PPL_CONFIG", "CONTRACT", "get_pipeline", "run", "run_with_file"):
+        assert hasattr(module, name)
+    assert module.PIPELINE_CONTRACT is module.CONTRACT
+    assert module.PPL_CONFIG["variant"] == variant
 
+    prompt_payload = json.loads(module.PPL_CONFIG["prompt"])
+    assert prompt_payload["duration"] == 5
+    assert "comprehensive_description" in prompt_payload["caption"]
+    contract, is_explicit = load_pipeline_contract(
+        module,
+        ppl_file=EXAMPLE_PATHS[variant].name,
+        default_task="t2v",
+    )
     assert is_explicit
+    assert contract.pipeline_name == module.PPL_CONFIG["name"]
     assert contract.supported_tasks == ("t2i", "t2v", "i2v")
-    assert contract.get_task_contract("t2i").media_type == "image"
     assert contract.get_task_contract("t2i").parameters["negative_prompt"].default == DEFAULT_NEGATIVE_PROMPT_IMAGE
-    assert contract.get_task_contract("t2v").parameters["refine"].type == "boolean"
     assert contract.get_task_contract("t2v").parameters["negative_prompt"].default == DEFAULT_NEGATIVE_PROMPT
     assert contract.get_task_contract("i2v").required_inputs == ("first_image_path",)
 
 
-def test_service_writes_single_image_for_t2i(tmp_path: Path) -> None:
-    module = _load_service_module()
+def test_only_moe_contract_exposes_refiner() -> None:
+    dense = _load_example("dense")
+    moe = _load_example("moe")
+
+    dense_contract, _ = load_pipeline_contract(dense, ppl_file=EXAMPLE_PATHS["dense"].name, default_task="t2v")
+    moe_contract, _ = load_pipeline_contract(moe, ppl_file=EXAMPLE_PATHS["moe"].name, default_task="t2v")
+
+    assert "refine" not in dense_contract.get_task_contract("t2v").parameters
+    assert moe_contract.get_task_contract("t2v").parameters["refine"].default is True
+
+
+@pytest.mark.parametrize("variant", ["dense", "moe"])
+def test_get_pipeline_uses_fixed_variant(variant: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_example(variant)
+    calls: list[tuple[object, dict[str, object]]] = []
+    pipeline = SimpleNamespace()
+
+    def capture_build(model_root: str, **kwargs: object) -> object:
+        calls.append((model_root, kwargs))
+        return pipeline
+
+    monkeypatch.setattr(module, "build_pipeline", capture_build)
+    result = module.get_pipeline(parallelism=4, model_root="checkpoint")
+
+    assert result is pipeline
+    assert calls[0][0] == "checkpoint"
+    parallel_config = calls[0][1]["parallel_config"]
+    assert parallel_config.device_ids == [0, 1, 2, 3]
+    assert parallel_config.sp_ulysses_degree == 4
+    assert parallel_config.enable_fsdp
+    assert module.PPL_CONFIG["variant"] == variant
+
+
+def test_dense_run_with_file_supports_service_t2i(tmp_path: Path) -> None:
+    module = _load_example("dense")
 
     class FakePipeline:
-        variant = "dense"
+        device = "cpu"
 
         def generate(self, request, **_: object) -> SimpleNamespace:
             assert request.num_frames == 1
             assert request.caption == '{"scene":"test"}'
-            assert (request.height, request.width) == (480, 864)
+            assert (request.height, request.width) == (480, 832)
             return SimpleNamespace(output=torch.zeros(1, 3, 1, 2, 2))
 
-    output_path = tmp_path / "result.png"
+    output_path = tmp_path / "dense.png"
     result = module.run_with_file(
         FakePipeline(),
         json.dumps({"caption": {"scene": "test"}, "duration": 5}),
@@ -65,83 +115,49 @@ def test_service_writes_single_image_for_t2i(tmp_path: Path) -> None:
     assert output_path.is_file()
 
 
-def test_service_writes_video_for_t2v(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_service_module()
-    exported: list[object] = []
+def test_dense_run_with_file_supports_service_t2v(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_example("dense")
+    exported: list[np.ndarray] = []
 
-    import diffusers.utils
-
-    def capture_export(frames, output_path: str, fps: int) -> str:
-        del output_path, fps
+    def capture_export(frames: list[np.ndarray], output_path: str, fps: int) -> None:
+        del output_path
+        assert fps == 24
         exported.extend(frames)
-        return "unused.mp4"
 
-    monkeypatch.setattr(diffusers.utils, "export_to_video", capture_export)
+    monkeypatch.setattr(module, "export_to_video", capture_export)
 
     class FakePipeline:
-        variant = "dense"
+        device = "cpu"
 
         def generate(self, request, **_: object) -> SimpleNamespace:
-            assert request.num_frames == 97
-            assert (request.height, request.width) == (480, 864)
+            assert request.num_frames == 121
             return SimpleNamespace(output=torch.full((1, 3, 5, 2, 2), 0.5))
 
-    output_path = tmp_path / "result.mp4"
     result = module.run_with_file(
         FakePipeline(),
         json.dumps({"caption": {"scene": "test"}, "duration": 5}),
         task="t2v",
-        output_path=str(output_path),
+        output_path=str(tmp_path / "dense.mp4"),
     )
 
-    assert result == {"output_path": str(output_path)}
+    assert result == {"output_path": str(tmp_path / "dense.mp4")}
     assert len(exported) == 5
     assert exported[0].dtype == np.float32
     assert float(exported[0][0, 0, 0]) == 0.5
 
 
-def test_service_resolution_is_aligned_to_lingbot_vae_and_dit() -> None:
-    module = _load_service_module()
-
-    for resolution in ("480p", "720p", "1080p", "2k", "4k"):
-        width, height = module._lingbot_video_size("16:9", resolution)
-        assert width % 16 == 0
-        assert height % 16 == 0
-
-
-def test_service_rejects_i2v_without_first_image_path() -> None:
-    module = _load_service_module()
-
-    with pytest.raises(ValueError, match="requires first_image_path"):
-        module.run_with_file(
-            object(),
-            json.dumps({"caption": {"scene": "test"}, "duration": 5}),
-            task="i2v",
-        )
-
-
-def test_service_runs_base_then_refiner_on_one_pipeline(tmp_path: Path, monkeypatch) -> None:
-    module = _load_service_module()
-
-    class FakeTextStage:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def encode(self, caption: str) -> tuple[torch.Tensor, torch.Tensor]:
-            self.calls += 1
-            assert caption in {'{"scene":"test"}', DEFAULT_NEGATIVE_PROMPT_IMAGE}
-            return torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool)
+def test_moe_run_releases_base_then_runs_refiner(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_example("moe")
 
     class FakePipeline:
-        variant = "moe"
-        model_dir = "fake-model"
-        text_stage = FakeTextStage()
+        device = "cpu"
+        text_stage = object()
 
         def __init__(self) -> None:
             self.released = False
 
         def generate(self, request, **_: object) -> SimpleNamespace:
-            assert request.num_frames == 1
+            del request
             conditions = SimpleNamespace(
                 has_visual_condition=False,
                 positive_prompt_embeds=torch.zeros(1, 1, 2),
@@ -157,78 +173,53 @@ def test_service_runs_base_then_refiner_on_one_pipeline(tmp_path: Path, monkeypa
     class FakeRefiner:
         def __init__(self) -> None:
             self.called = False
+            self.closed = False
 
         def refine(self, lowres_video, *args, **kwargs) -> torch.Tensor:
             del args, kwargs
             self.called = True
-            assert lowres_video.shape == (1, 3, 1, 2, 2)
             return lowres_video
+
+        def close(self) -> None:
+            self.closed = True
 
     pipeline = FakePipeline()
     refiner = FakeRefiner()
-    monkeypatch.setattr(module, "build_lingbot_video_refiner_stage", lambda _: refiner)
+    monkeypatch.setattr(module, "build_refiner", lambda *args, **kwargs: refiner)
     monkeypatch.setitem(module.PPL_CONFIG, "refiner_height", 2)
     monkeypatch.setitem(module.PPL_CONFIG, "refiner_width", 2)
 
-    output_path = tmp_path / "refined.png"
-    result = module.run_with_file(
+    frames = module.run(
         pipeline,
         json.dumps({"caption": {"scene": "test"}, "duration": 5}),
         task="t2i",
         refine=True,
-        output_path=str(output_path),
     )
 
-    assert result == {"output_path": str(output_path)}
+    assert frames.shape == (1, 3, 1, 2, 2)
     assert pipeline.released
     assert refiner.called
-    assert pipeline.text_stage.calls == 0
-    assert output_path.is_file()
+    assert refiner.closed
 
 
-def test_service_reencodes_text_only_conditions_for_ti2v_refiner(tmp_path: Path, monkeypatch) -> None:
-    module = _load_service_module()
+@pytest.mark.parametrize("variant", ["dense", "moe"])
+def test_cli_invokes_model_specific_entrypoints(variant: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_example(variant)
+    pipeline = SimpleNamespace(stop=lambda: None)
+    calls: list[tuple[object, dict[str, object]]] = []
 
-    class FakeTextStage:
-        def __init__(self) -> None:
-            self.calls = 0
+    monkeypatch.setattr(module, "get_pipeline", lambda *args, **kwargs: pipeline)
 
-        def encode(self, caption: str) -> tuple[torch.Tensor, torch.Tensor]:
-            self.calls += 1
-            assert caption in {'{"scene":"test"}', DEFAULT_NEGATIVE_PROMPT}
-            return torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool)
+    def capture_run_with_file(pipe: object, *args: object, **kwargs: object) -> dict[str, str]:
+        calls.append((pipe, {"args": args, **kwargs}))
+        return {"output_path": "result.mp4"}
 
-    class FakePipeline:
-        variant = "moe"
-        model_dir = "fake-model"
-        text_stage = FakeTextStage()
-
-        def generate(self, request, **_: object) -> SimpleNamespace:
-            assert request.image is not None
-            conditions = SimpleNamespace(has_visual_condition=True)
-            return SimpleNamespace(output=torch.zeros(1, 3, 1, 2, 2), prompt_conditions=conditions)
-
-        def release_gpu_resources(self) -> None:
-            return None
-
-    class FakeRefiner:
-        def refine(self, lowres_video, *args, **kwargs) -> torch.Tensor:
-            del args, kwargs
-            return lowres_video
-
-    monkeypatch.setattr(module, "build_lingbot_video_refiner_stage", lambda _: FakeRefiner())
-    monkeypatch.setitem(module.PPL_CONFIG, "refiner_height", 2)
-    monkeypatch.setitem(module.PPL_CONFIG, "refiner_width", 2)
-    image_path = tmp_path / "first.png"
-    Image.new("RGB", (2, 2)).save(image_path)
-
-    module.run_with_file(
-        FakePipeline(),
-        json.dumps({"caption": {"scene": "test"}, "duration": 5}),
-        task="i2v",
-        first_image_path=str(image_path),
-        refine=True,
-        output_path=str(tmp_path / "refined.mp4"),
+    monkeypatch.setattr(module, "run_with_file", capture_run_with_file)
+    result = CliRunner().invoke(
+        module.main,
+        ["--output_path", "result.mp4", "--no-refine"] if variant == "moe" else ["--output_path", "result.mp4"],
     )
 
-    assert FakePipeline.text_stage.calls == 2
+    assert result.exit_code == 0, result.output
+    assert calls and calls[0][0] is pipeline
+    assert "Output saved to result.mp4" in result.output

@@ -117,6 +117,24 @@ pipelines:
       frame_num: 13
 
   # ============================================================
+  # lingbot_video — Fixed Dense and MoE examples
+  # ============================================================
+
+  lingbot_video_dense_1_3b_t2v:
+    script: lingbot_video/lingbot_video_dense_1_3b.py
+    gpu_count: 1
+    output_type: video
+    timeout_seconds: 1800
+    resolution: "480p"
+
+  lingbot_video_moe_30b_refiner_t2v:
+    script: lingbot_video/lingbot_video_moe_30b.py
+    gpu_count: 4
+    output_type: video
+    timeout_seconds: 3600
+    resolution: "480p"
+
+  # ============================================================
   # hunyuan_video
   # ============================================================
 

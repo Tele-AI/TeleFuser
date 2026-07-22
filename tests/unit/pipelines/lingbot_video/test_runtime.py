@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 import types
 
+from examples.lingbot_video import lingbot_video_moe_30b as moe_example
 from telefuser.core.config import WeightOffloadType
-from telefuser.pipelines.lingbot_video import runtime
+from telefuser.pipelines.lingbot_video import LingBotVideoModelConfig
 
 
 class _FakeModule:
@@ -24,13 +25,8 @@ class _FakeModule:
         self.attention_config = attention_config
 
 
-def test_moe_runtime_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> None:
+def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> None:
     loaded_transformers: list[tuple[object, str]] = []
-
-    def load_dense(path, *, device: str, torch_dtype):
-        del torch_dtype
-        loaded_transformers.append((path, device))
-        return _FakeModule()
 
     def load_moe(path, *, device: str, torch_dtype):
         del torch_dtype
@@ -68,16 +64,18 @@ def test_moe_runtime_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> Non
     transformers.Qwen3VLForConditionalGeneration = _TextEncoder
     monkeypatch.setitem(sys.modules, "diffusers", diffusers)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
-    monkeypatch.setattr(runtime, "load_lingbot_video_dense_transformer", load_dense)
-    monkeypatch.setattr(runtime, "load_lingbot_video_moe_transformer", load_moe)
-    monkeypatch.setattr(runtime, "load_lingbot_video_model_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(runtime.FlowUniPCMultistepScheduler, "from_pretrained", _Scheduler.from_pretrained)
+    monkeypatch.setattr(moe_example, "load_lingbot_video_moe_transformer", load_moe)
+    monkeypatch.setattr(
+        moe_example,
+        "load_lingbot_video_model_config",
+        lambda *args, **kwargs: LingBotVideoModelConfig(variant="moe", num_experts=2, top_k=1),
+    )
+    monkeypatch.setattr(moe_example.FlowUniPCMultistepScheduler, "from_pretrained", _Scheduler.from_pretrained)
 
-    base = runtime.build_lingbot_video_pipeline(tmp_path, device="cuda", variant="moe")
-    refiner = runtime.build_lingbot_video_refiner_stage(tmp_path, device="cuda")
+    base = moe_example.build_pipeline(tmp_path, device="cuda")
+    refiner = moe_example.build_refiner(tmp_path, device="cuda")
 
     assert loaded_transformers == [(tmp_path / "transformer", "cpu"), (tmp_path / "refiner", "cpu")]
-    assert base.model_dir == str(tmp_path)
     assert base.variant == "moe"
     assert (
         base.denoising_stage.transformer.attention_config is base.denoising_stage.model_runtime_config.attention_config

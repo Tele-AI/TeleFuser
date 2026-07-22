@@ -6,12 +6,16 @@ Apache-2.0 licensed upstream LingBot-Video implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
+import torch.distributed as dist
 
 from telefuser.core.base_pipeline import BasePipeline
+from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.schedulers.unipc import FlowUniPCMultistepScheduler
+from telefuser.worker.parallel_worker import ParallelWorker
 
 from .data import (
     LingBotVideoModelConfig,
@@ -30,14 +34,19 @@ from .vae import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class LingBotVideoPipelineConfig:
-    """Runtime configuration shared by Dense and MoE pipelines."""
+    """Configuration for LingBot-Video model stages and sampling."""
 
-    model: LingBotVideoModelConfig = LingBotVideoModelConfig()
+    model: LingBotVideoModelConfig = field(default_factory=LingBotVideoModelConfig)
+    text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
+    dit_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
+    vae_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     guidance_scale: float = 3.0
     num_inference_steps: int = 50
     shift: float = 3.0
+    batch_cfg: bool = False
+    enable_denoising_parallel: bool = False
 
     def __post_init__(self) -> None:
         if self.guidance_scale < 0 or self.num_inference_steps <= 0 or self.shift <= 0:
@@ -64,7 +73,7 @@ class LingBotVideoGeneration:
 
 
 class LingBotVideoPipeline(BasePipeline):
-    """Lifecycle-aware facade for independently loaded LingBot-Video stages."""
+    """LingBot-Video pipeline initialized from ModuleManager-owned components."""
 
     def __init__(self, device: str = "cuda", torch_dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__(device=device, torch_dtype=torch_dtype)
@@ -74,12 +83,50 @@ class LingBotVideoPipeline(BasePipeline):
         self.vae_encode_stage: LingBotVideoVAEEncodeStage | None = None
         self.vae_decode_stage: LingBotVideoVAEDecodeStage | None = None
         self.scheduler: FlowUniPCMultistepScheduler | None = None
-        self.model_dir: str | None = None
         self.variant: str = "dense"
 
-    def init(self, module_manager: object, config: LingBotVideoPipelineConfig) -> None:
-        del module_manager
+    def init(self, module_manager: ModuleManager, config: LingBotVideoPipelineConfig) -> None:
+        """Initialize all LingBot-Video stages from a module manager."""
+        self._model_info = module_manager.get_model_info()
         self.config = config
+        self.variant = config.model.variant
+
+        self.text_stage = LingBotVideoTextEncodingStage("text_encoder", module_manager, config.text_encoding_config)
+        denoising_stage = LingBotVideoDenoisingStage(
+            "transformer", module_manager, config.dit_config, batch_cfg=config.batch_cfg
+        )
+        self.denoising_stage = denoising_stage
+        self.vae_encode_stage = LingBotVideoVAEEncodeStage("vae_encode", module_manager, config.vae_config)
+        self.vae_decode_stage = LingBotVideoVAEDecodeStage("vae_decode", module_manager, config.vae_config)
+        self.scheduler = module_manager.fetch_module("scheduler")
+
+        if config.enable_denoising_parallel and not dist.is_initialized():
+            self.denoising_stage = ParallelWorker(denoising_stage)
+        else:
+            denoising_stage.parallel_models()
+
+    def _get_stages(self) -> list[object]:
+        """Return independently managed stages, including a distributed DiT worker."""
+        return [
+            stage
+            for stage in (self.text_stage, self.denoising_stage, self.vae_encode_stage, self.vae_decode_stage)
+            if stage is not None
+        ]
+
+    def stop(self) -> None:
+        """Close any owned distributed stage workers during service shutdown."""
+        for stage in self._get_stages():
+            close = getattr(stage, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _resolve_stage_result(value: object) -> torch.Tensor:
+        """Resolve a ParallelWorker deferred result while preserving direct-stage outputs."""
+        result = value() if callable(value) else value
+        if not isinstance(result, torch.Tensor):
+            raise TypeError(f"LingBot stage returned {type(result).__name__}, expected a tensor")
+        return result
 
     @staticmethod
     def validate_request(request: LingBotVideoRequest) -> LingBotVideoRequest:
@@ -87,25 +134,13 @@ class LingBotVideoPipeline(BasePipeline):
         validate_frame_count(request.num_frames)
         return request
 
-    def set_runtime(
-        self,
-        *,
-        text_stage: LingBotVideoTextEncodingStage,
-        denoising_stage: LingBotVideoDenoisingStage,
-        scheduler: FlowUniPCMultistepScheduler,
-        vae_decode_stage: LingBotVideoVAEDecodeStage | None = None,
-        vae_encode_stage: LingBotVideoVAEEncodeStage | None = None,
-    ) -> None:
-        """Attach independently loaded stages to this pipeline instance."""
-        self.text_stage = text_stage
-        self.denoising_stage = denoising_stage
-        self.scheduler = scheduler
-        self.vae_decode_stage = vae_decode_stage
-        self.vae_encode_stage = vae_encode_stage
-
     def release_gpu_resources(self) -> None:
         """Offload attached stages so a separately loaded refiner can use the GPU."""
         for stage in (self.text_stage, self.denoising_stage, self.vae_encode_stage, self.vae_decode_stage):
+            close = getattr(stage, "close", None)
+            if callable(close):
+                close()
+                continue
             offload_models = getattr(stage, "offload_models", None)
             if callable(offload_models):
                 offload_models()
@@ -179,14 +214,16 @@ class LingBotVideoPipeline(BasePipeline):
         for step in self.scheduler.timesteps:
             if condition is not None:
                 latent = reinject_ti2v_condition(latent, condition, condition_mask)
-            prediction = self.denoising_stage.predict_noise_with_cfg(
-                latent,
-                step.expand(latent.shape[0]),
-                positive,
-                negative,
-                positive_mask,
-                negative_mask,
-                self.config.guidance_scale,
+            prediction = self._resolve_stage_result(
+                self.denoising_stage.predict_noise_with_cfg(
+                    latent,
+                    step.expand(latent.shape[0]),
+                    positive,
+                    negative,
+                    positive_mask,
+                    negative_mask,
+                    self.config.guidance_scale,
+                )
             )
             latent = self.scheduler.step(prediction, step, latent)
         if condition is not None:
@@ -195,4 +232,5 @@ class LingBotVideoPipeline(BasePipeline):
             return LingBotVideoGeneration(latent, prompt_conditions)
         if self.vae_decode_stage is None:
             raise RuntimeError("decode=True requires a configured VAE decode stage")
-        return LingBotVideoGeneration(self.vae_decode_stage.decode(latent), prompt_conditions)
+        output = self._resolve_stage_result(self.vae_decode_stage.decode(latent))
+        return LingBotVideoGeneration(output, prompt_conditions)

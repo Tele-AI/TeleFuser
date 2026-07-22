@@ -25,6 +25,40 @@ class _DenoisingStage:
         return torch.ones_like(latents)
 
 
+class _PipelineTransformer(nn.Module):
+    def set_attention_config(self, attention_config: object) -> None:
+        self.attention_config = attention_config
+
+
+class _PipelineModuleManager:
+    def __init__(self) -> None:
+        self.modules = {
+            "transformer": _PipelineTransformer(),
+            "text_encoder": nn.Linear(1, 1),
+            "processor": object(),
+            "vae": nn.Linear(1, 1),
+            "scheduler": _Scheduler(),
+        }
+
+    def get_model_info(self) -> list[dict[str, object]]:
+        return []
+
+    def fetch_module(self, name: str) -> object:
+        return self.modules[name]
+
+
+def _transformer_manager(transformer: nn.Module) -> _PipelineModuleManager:
+    manager = _PipelineModuleManager()
+    manager.modules["transformer"] = transformer
+    return manager
+
+
+def _initialized_pipeline() -> LingBotVideoPipeline:
+    pipeline = LingBotVideoPipeline(device="cpu")
+    pipeline.init(_PipelineModuleManager(), LingBotVideoPipelineConfig(num_inference_steps=2))
+    return pipeline
+
+
 class _Scheduler:
     timesteps = torch.tensor([2, 1])
 
@@ -36,10 +70,11 @@ class _Scheduler:
         return latent - prediction
 
 
-def test_pipeline_runs_t2v_sampling_with_injected_runtime() -> None:
-    pipeline = LingBotVideoPipeline(device="cpu")
-    pipeline.init(None, LingBotVideoPipelineConfig(num_inference_steps=2))
-    pipeline.set_runtime(text_stage=_TextStage(), denoising_stage=_DenoisingStage(), scheduler=_Scheduler())
+def test_initialized_pipeline_runs_t2v_sampling() -> None:
+    pipeline = _initialized_pipeline()
+    pipeline.text_stage = _TextStage()
+    pipeline.denoising_stage = _DenoisingStage()
+    pipeline.scheduler = _Scheduler()
 
     generation = pipeline.generate(LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5), decode=False)
 
@@ -69,7 +104,9 @@ class _DtypeProbeTransformer(nn.Module):
 
 def test_denoising_stage_returns_fp32_scheduler_prediction() -> None:
     stage = LingBotVideoDenoisingStage(
-        "denoising", _DtypeProbeTransformer(), ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32)
+        "denoising",
+        _transformer_manager(_DtypeProbeTransformer()),
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
     )
     latents = torch.zeros(1, 1, 1, 1, 1)
     positive = torch.full((1, 1, 1), 3.0)
@@ -79,6 +116,41 @@ def test_denoising_stage_returns_fp32_scheduler_prediction() -> None:
 
     assert prediction.dtype is torch.float32
     assert torch.equal(prediction, torch.full_like(latents, 5.0))
+
+
+class _BatchCfgProbeTransformer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.patch_embedder = nn.Linear(1, 1, bias=False)
+        self.calls = 0
+
+    def forward(
+        self, latents: torch.Tensor, timestep: torch.Tensor, embeds: torch.Tensor, mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        del timestep, mask
+        self.calls += 1
+        offset = embeds.mean(dim=(1, 2)).reshape(-1, 1, 1, 1, 1)
+        return latents + offset
+
+
+def test_denoising_stage_batched_cfg_matches_two_source_order_forwards() -> None:
+    latents = torch.zeros(1, 1, 1, 1, 1)
+    positive = torch.full((1, 2, 1), 3.0)
+    negative = torch.full((1, 2, 1), 1.0)
+    runtime_config = ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32)
+    serial_transformer = _BatchCfgProbeTransformer()
+    batched_transformer = _BatchCfgProbeTransformer()
+    serial = LingBotVideoDenoisingStage("serial", _transformer_manager(serial_transformer), runtime_config)
+    batched = LingBotVideoDenoisingStage(
+        "batched", _transformer_manager(batched_transformer), runtime_config, batch_cfg=True
+    )
+
+    expected = serial.predict_noise_with_cfg(latents, torch.tensor([1]), positive, negative, guidance_scale=2.0)
+    actual = batched.predict_noise_with_cfg(latents, torch.tensor([1]), positive, negative, guidance_scale=2.0)
+
+    assert torch.equal(actual, expected)
+    assert serial_transformer.calls == 2
+    assert batched_transformer.calls == 1
 
 
 class _RecordingTextStage(_TextStage):
@@ -100,9 +172,10 @@ def test_pipeline_uses_source_negative_caption_when_not_overridden() -> None:
             return super().encode(caption, images)
 
     text_stage = _CapturingTextStage()
-    pipeline = LingBotVideoPipeline(device="cpu")
-    pipeline.init(None, LingBotVideoPipelineConfig(num_inference_steps=2))
-    pipeline.set_runtime(text_stage=text_stage, denoising_stage=_DenoisingStage(), scheduler=_Scheduler())
+    pipeline = _initialized_pipeline()
+    pipeline.text_stage = text_stage
+    pipeline.denoising_stage = _DenoisingStage()
+    pipeline.scheduler = _Scheduler()
 
     pipeline.generate(LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5), decode=False)
 
@@ -122,14 +195,11 @@ class _VAEEncodeStage:
 def test_pipeline_ti2v_reuses_one_visual_condition_for_both_cfg_branches() -> None:
     text_stage = _RecordingTextStage()
     vae_encode_stage = _VAEEncodeStage()
-    pipeline = LingBotVideoPipeline(device="cpu")
-    pipeline.init(None, LingBotVideoPipelineConfig(num_inference_steps=2))
-    pipeline.set_runtime(
-        text_stage=text_stage,
-        denoising_stage=_DenoisingStage(),
-        scheduler=_Scheduler(),
-        vae_encode_stage=vae_encode_stage,
-    )
+    pipeline = _initialized_pipeline()
+    pipeline.text_stage = text_stage
+    pipeline.denoising_stage = _DenoisingStage()
+    pipeline.scheduler = _Scheduler()
+    pipeline.vae_encode_stage = vae_encode_stage
 
     generation = pipeline.generate(
         LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5, image=torch.full((1, 3, 8, 8), 128.0)),
@@ -167,14 +237,12 @@ def test_pipeline_releases_stages_before_a_separate_refiner_is_loaded() -> None:
     denoising_stage = _OffloadStage()
     vae_encode_stage = _OffloadStage()
     vae_decode_stage = _OffloadStage()
-    pipeline = LingBotVideoPipeline(device="cpu")
-    pipeline.set_runtime(
-        text_stage=text_stage,
-        denoising_stage=denoising_stage,
-        scheduler=_Scheduler(),
-        vae_encode_stage=vae_encode_stage,
-        vae_decode_stage=vae_decode_stage,
-    )
+    pipeline = _initialized_pipeline()
+    pipeline.text_stage = text_stage
+    pipeline.denoising_stage = denoising_stage
+    pipeline.scheduler = _Scheduler()
+    pipeline.vae_encode_stage = vae_encode_stage
+    pipeline.vae_decode_stage = vae_decode_stage
 
     pipeline.release_gpu_resources()
 

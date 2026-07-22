@@ -10,6 +10,7 @@ import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 
 
 def latent_shape(
@@ -60,9 +61,9 @@ def first_frame_condition_mask(latent_frames: int, *, device: torch.device | str
 class LingBotVideoVAEEncodeStage(BaseStage):
     """Encode RGB video tensors using official LingBot latent normalization."""
 
-    def __init__(self, name: str, vae: torch.nn.Module, model_runtime_config: ModelRuntimeConfig) -> None:
+    def __init__(self, name: str, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
         super().__init__(name, model_runtime_config)
-        self.vae = vae
+        self.vae = module_manager.fetch_module("vae")
         self.model_names = ["vae"]
 
     @with_model_offload(["vae"])
@@ -84,9 +85,9 @@ class LingBotVideoVAEEncodeStage(BaseStage):
 class LingBotVideoVAEDecodeStage(BaseStage):
     """Decode normalized LingBot diffusion latents to RGB video tensors."""
 
-    def __init__(self, name: str, vae: torch.nn.Module, model_runtime_config: ModelRuntimeConfig) -> None:
+    def __init__(self, name: str, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
         super().__init__(name, model_runtime_config)
-        self.vae = vae
+        self.vae = module_manager.fetch_module("vae")
         self.model_names = ["vae"]
 
     @with_model_offload(["vae"])

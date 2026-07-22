@@ -10,8 +10,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage, reinject_ti2v_condition
-from telefuser.pipelines.lingbot_video.vae import (
+from telefuser.platforms import current_platform
+
+from .denoising import LingBotVideoDenoisingStage, reinject_ti2v_condition
+from .vae import (
     LingBotVideoVAEDecodeStage,
     LingBotVideoVAEEncodeStage,
     first_frame_condition_mask,
@@ -211,6 +213,28 @@ class LingBotVideoRefinerStage:
         self.vae_decode_stage = vae_decode_stage
         self.scheduler = scheduler
 
+    @staticmethod
+    def _resolve_stage_result(value: object) -> torch.Tensor:
+        """Resolve deferred ParallelWorker outputs while accepting direct stage tensors."""
+        result = value() if callable(value) else value
+        if not isinstance(result, torch.Tensor):
+            raise TypeError(f"LingBot refiner stage returned {type(result).__name__}, expected a tensor")
+        return result
+
+    def close(self) -> None:
+        """Close an owned distributed denoising worker after the refiner stage completes."""
+        close = getattr(self.denoising_stage, "close", None)
+        if callable(close):
+            close()
+
+    def _offload_vae_between_stages(self) -> None:
+        """Release VAE weights and allocator blocks before high-resolution DiT execution."""
+        for stage in (self.vae_encode_stage, self.vae_decode_stage):
+            offload_models = getattr(stage, "offload_models", None)
+            if callable(offload_models):
+                offload_models()
+        current_platform.empty_cache()
+
     def refine(
         self,
         lowres_video: torch.Tensor,
@@ -238,6 +262,10 @@ class LingBotVideoRefinerStage:
             condition = clean_latent[:, :, :1].contiguous()
             x_up = x_up.clone()
             x_up[:, :, :1] = condition.to(x_up.dtype)
+        # A 1088p VAE encode may leave several GiB of allocator blocks on
+        # rank zero.  The SP refiner is a separate stage, so it must not share
+        # that residency with the long-sequence MoE denoising worker.
+        self._offload_vae_between_stages()
         if noise is None:
             noise = torch.randn(x_up.shape, dtype=x_up.dtype, device=x_up.device, generator=generator)
         elif noise.shape != x_up.shape:
@@ -263,16 +291,22 @@ class LingBotVideoRefinerStage:
         for timestep in self.scheduler.timesteps:
             if condition is not None:
                 latent = reinject_ti2v_condition(latent, condition, condition_mask)
-            prediction = self.denoising_stage.predict_noise_with_cfg(
-                latent,
-                timestep.expand(latent.shape[0]),
-                positive_prompt_embeds,
-                negative_prompt_embeds,
-                positive_attention_mask,
-                negative_attention_mask,
-                guidance_scale,
+            prediction = self._resolve_stage_result(
+                self.denoising_stage.predict_noise_with_cfg(
+                    latent,
+                    timestep.expand(latent.shape[0]),
+                    positive_prompt_embeds,
+                    negative_prompt_embeds,
+                    positive_attention_mask,
+                    negative_attention_mask,
+                    guidance_scale,
+                )
             )
             latent = self.scheduler.step(prediction, timestep, latent)
         if condition is not None:
             latent = reinject_ti2v_condition(latent, condition, condition_mask)
-        return self.vae_decode_stage.decode(latent)
+        # The native SP worker owns the refiner weights.  Release it before
+        # loading the VAE decoder, otherwise the two high-memory stages can
+        # overlap on rank zero.
+        self.close()
+        return self._resolve_stage_result(self.vae_decode_stage.decode(latent))

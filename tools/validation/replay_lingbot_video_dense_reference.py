@@ -17,6 +17,7 @@ import torch
 from PIL import Image
 
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_video.data import preprocess_ti2v_image
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage, reinject_ti2v_condition
 from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_dense_transformer
@@ -130,7 +131,10 @@ def replay_text(
         .to(device)
         .eval()
     )
-    stage = LingBotVideoTextEncodingStage("text_encoder", text_encoder, processor, runtime_config)
+    module_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
+    module_manager.add_module(text_encoder, name="text_encoder")
+    module_manager.add_module(processor, name="processor")
+    stage = LingBotVideoTextEncodingStage("text_encoder", module_manager, runtime_config)
     stage._crop_prefix_length()
     recording_processor = _RecordingProcessor(processor)
     stage.processor = recording_processor
@@ -157,7 +161,8 @@ def replay_text(
             except ImportError as exc:
                 raise RuntimeError("TI2V VAE replay requires diffusers AutoencoderKLWan") from exc
             vae = AutoencoderKLWan.from_pretrained(model_dir / "vae", torch_dtype=torch.float32).to(device).eval()
-            vae_encode = LingBotVideoVAEEncodeStage("vae_encode", vae, runtime_config)
+            module_manager.add_module(vae, name="vae")
+            vae_encode = LingBotVideoVAEEncodeStage("vae_encode", module_manager, runtime_config)
             generator = torch.Generator(device=device).manual_seed(metadata.get("seed", seed))
             _record(
                 results,
@@ -196,7 +201,9 @@ def _load_replay_runtime(
     device = torch.device("cuda")
     runtime_config = ModelRuntimeConfig(device_type="cuda", torch_dtype=torch.bfloat16)
     transformer = load_lingbot_video_dense_transformer(model_dir / "transformer", device=device)
-    denoising = LingBotVideoDenoisingStage("transformer", transformer, runtime_config)
+    module_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
+    module_manager.add_module(transformer, name="transformer")
+    denoising = LingBotVideoDenoisingStage("transformer", module_manager, runtime_config)
     vae = AutoencoderKLWan.from_pretrained(model_dir / "vae", torch_dtype=torch.float32).to(device).eval()
     return runtime_config, denoising, vae
 
@@ -273,7 +280,9 @@ def _replay_with_runtime(
         torch.tensor(vae.config.latents_std, device=device),
     )
     _record(results, "vae_decode_input", _load_tensor(reference_dir, metadata, "vae_decode_input"), raw_latent)
-    decoder = LingBotVideoVAEDecodeStage("vae_decode", vae, runtime_config)
+    vae_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
+    vae_manager.add_module(vae, name="vae")
+    decoder = LingBotVideoVAEDecodeStage("vae_decode", vae_manager, runtime_config)
     frames = decoder.decode(current)
     captured_frames = torch.from_numpy(np.load(reference_dir / metadata["frames"]["path"]))
     candidate_frames = frames.permute(0, 2, 3, 4, 1)[0].cpu()

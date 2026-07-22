@@ -10,9 +10,11 @@ from math import prod
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention
 
 
@@ -122,10 +124,15 @@ class LingBotVideoAttention(nn.Module):
         self.norm_k = LingBotVideoRMSNorm(self.head_dim, norm_eps)
         self.to_out = nn.Linear(hidden_size, hidden_size, bias=out_bias)
         self.attention_config: object | None = None
+        self.ulysses_group: dist.ProcessGroup | None = None
 
     def set_attention_config(self, attention_config: object) -> None:
         """Attach a runtime-selected TeleFuser attention implementation."""
         self.attention_config = attention_config
+
+    def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
+        """Attach the Ulysses process group used for sequence-parallel attention."""
+        self.ulysses_group = group
 
     def forward(
         self, hidden_states: torch.Tensor, rotary_emb: torch.Tensor, attention_mask: torch.Tensor | None = None
@@ -136,6 +143,14 @@ class LingBotVideoAttention(nn.Module):
         value = self.to_v(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
         query = apply_lingbot_video_complex_rope(self.norm_q(query), rotary_emb)
         key = apply_lingbot_video_complex_rope(self.norm_k(key), rotary_emb)
+        group = self.ulysses_group
+        use_ulysses = (
+            group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1
+        )
+        if use_ulysses:
+            query = ulysses_scatter_heads(query, group)()
+            key = ulysses_scatter_heads(key, group)()
+            value = ulysses_scatter_heads(value, group)()
         output = attention(
             query.transpose(1, 2),
             key.transpose(1, 2),
@@ -147,7 +162,10 @@ class LingBotVideoAttention(nn.Module):
         )
         if not isinstance(output, torch.Tensor):
             raise RuntimeError("LingBot attention does not support log-sum-exp outputs")
-        return self.to_out(output.transpose(1, 2).reshape(batch, sequence, -1).to(hidden_states.dtype))
+        output = output.transpose(1, 2)
+        if use_ulysses:
+            output = ulysses_gather_heads(output, group, num_heads=self.num_heads)()
+        return self.to_out(output.reshape(batch, sequence, -1).to(hidden_states.dtype))
 
 
 class LingBotVideoBlock(nn.Module):
@@ -288,11 +306,60 @@ class LingBotVideoTransformer3DModel(nn.Module):
         self.norm_out = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=norm_eps)
         self.norm_out_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
         self.proj_out = nn.Linear(hidden_size, prod(patch_size) * out_channels)
+        self.ulysses_group: dist.ProcessGroup | None = None
 
     def set_attention_config(self, attention_config: object) -> None:
         """Propagate a shared attention backend configuration to every DiT block."""
         for block in self.blocks:
             block.attn.set_attention_config(attention_config)
+
+    def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
+        """Enable source-order Ulysses sequence parallelism for the joint token stream."""
+        self.ulysses_group = group
+        for block in self.blocks:
+            block.attn.set_ulysses_group(group)
+
+    def get_fsdp_module_names(self) -> list[str]:
+        """Return block containers suitable for per-block FSDP wrapping."""
+        return ["blocks"]
+
+    def _ulysses_world_size(self) -> int:
+        group = self.ulysses_group
+        if group is None or not dist.is_available() or not dist.is_initialized():
+            return 1
+        return dist.get_world_size(group)
+
+    def _ulysses_shard_joint(
+        self,
+        joint: torch.Tensor,
+        rotary: torch.Tensor,
+        temb_input: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Pad and shard the joint video/text sequence into equal Ulysses slices."""
+        world_size = self._ulysses_world_size()
+        if world_size == 1:
+            return joint, rotary, temb_input, valid_mask, 0
+        sequence = joint.shape[1]
+        padding = (-sequence) % world_size
+        if padding:
+            joint = F.pad(joint, (0, 0, 0, padding))
+            rotary = F.pad(rotary, (0, 0, 0, padding))
+            temb_input = F.pad(temb_input, (0, 0, 0, padding))
+            valid_mask = F.pad(valid_mask, (0, padding), value=False)
+        local_sequence = joint.shape[1] // world_size
+        rank = dist.get_rank(self.ulysses_group)
+        start = rank * local_sequence
+        end = start + local_sequence
+        return joint[:, start:end], rotary[:, start:end], temb_input[:, start:end], valid_mask[:, start:end], padding
+
+    def _ulysses_gather_sequence(self, local: torch.Tensor) -> torch.Tensor:
+        """Gather equal local token slices in rank order without changing their layout."""
+        if self._ulysses_world_size() == 1:
+            return local
+        gathered = [torch.empty_like(local) for _ in range(self._ulysses_world_size())]
+        dist.all_gather(gathered, local.contiguous(), group=self.ulysses_group)
+        return torch.cat(gathered, dim=1)
 
     def forward(
         self,
@@ -323,16 +390,31 @@ class LingBotVideoTransformer3DModel(nn.Module):
         )
         time_embedding = self.time_embedder(timestep)
         temb_input = time_embedding.unsqueeze(1).expand(-1, joint.shape[1], -1)
+        text_mask = (
+            encoder_attention_mask.bool()
+            if encoder_attention_mask is not None
+            else torch.ones(batch, text_length, dtype=torch.bool, device=hidden_states.device)
+        )
+        valid_mask = torch.cat(
+            (torch.ones(batch, video_tokens, dtype=torch.bool, device=hidden_states.device), text_mask), dim=1
+        )
+        joint, rotary, temb_input, local_valid_mask, padding = self._ulysses_shard_joint(
+            joint, rotary, temb_input, valid_mask
+        )
         temb6 = self.time_modulation(temb_input)
+        global_valid_mask = self._ulysses_gather_sequence(local_valid_mask)
         attention_mask = None
-        if encoder_attention_mask is not None and not bool(encoder_attention_mask.bool().all()):
-            video_mask = torch.ones(batch, video_tokens, dtype=torch.bool, device=hidden_states.device)
-            attention_mask = torch.cat((video_mask, encoder_attention_mask.bool()), dim=1)[:, None, None, :]
+        if not bool(global_valid_mask.all()):
+            attention_mask = global_valid_mask[:, None, None, :]
         for block in self.blocks:
             joint = block(joint, temb6, rotary, attention_mask)
         final_modulation = self.norm_out_modulation(temb_input)
         shift, scale = final_modulation.chunk(2, dim=-1)
         projected = self.proj_out((self.norm_out(joint) * (1.0 + scale) + shift).to(self.proj_out.weight.dtype))
+        if self._ulysses_world_size() > 1:
+            projected = self._ulysses_gather_sequence(projected)
+            if padding:
+                projected = projected[:, :-padding]
         projected = projected[:, :video_tokens]
         output = projected.reshape(batch, grid_t, grid_h, grid_w, patch_t, patch_h, patch_w, self.out_channels)
         return output.permute(0, 7, 1, 4, 2, 5, 3, 6).reshape(batch, self.out_channels, frames, height, width)

@@ -1,4 +1,4 @@
-"""LingBot-Video pipeline contracts and runtime components."""
+"""LingBot-Video reusable pipeline contracts and components."""
 
 from .data import (
     DEFAULT_NEGATIVE_PROMPT,
@@ -32,7 +32,6 @@ from .refiner import (
     prepare_refiner_latent,
     prepare_refiner_video,
 )
-from .runtime import build_lingbot_video_pipeline, build_lingbot_video_refiner_stage
 from .text_encoding import LingBotVideoTextEncodingStage
 from .vae import (
     LingBotVideoVAEDecodeStage,
@@ -50,8 +49,6 @@ __all__ = [
     "DEFAULT_NEGATIVE_PROMPT_IMAGE",
     "LingBotVideoPromptConditions",
     "LingBotVideoRefinerStage",
-    "build_lingbot_video_pipeline",
-    "build_lingbot_video_refiner_stage",
     "compute_refiner_sigmas",
     "load_refiner_first_frame",
     "load_refiner_video_file",

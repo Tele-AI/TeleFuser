@@ -10,10 +10,10 @@ from typing import Any
 
 import torch
 from PIL import Image
-from torch import nn
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.module_manager import ModuleManager
 
 from .data import smart_resize
 
@@ -42,16 +42,15 @@ class LingBotVideoTextEncodingStage(BaseStage):
     def __init__(
         self,
         name: str,
-        text_encoder: nn.Module,
-        processor: Any,
+        module_manager: ModuleManager,
         model_runtime_config: ModelRuntimeConfig,
         *,
         token_length: int = 37698,
         hidden_state_skip_layer: int | None = 0,
     ) -> None:
         super().__init__(name, model_runtime_config)
-        self.text_encoder = text_encoder
-        self.processor = processor
+        self.text_encoder = module_manager.fetch_module("text_encoder")
+        self.processor = module_manager.fetch_module("processor")
         self.token_length = token_length
         self.hidden_state_skip_layer = hidden_state_skip_layer
         self._crop_start: int | None = None
