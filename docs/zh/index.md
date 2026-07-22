@@ -55,7 +55,8 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| LingBot-World-Fast | 双向流式推理 | 通过 WebRTC DataChannel 的交互式世界模型 |
+| LingBot-World v2 | 双向流式推理 | 通过 WebRTC 的相机控制交互式世界模型 |
+| LingBot-World-Fast | 双向流式推理 | Legacy/causal-fast WebRTC 交互式世界模型 |
 
 ### 视频生成
 

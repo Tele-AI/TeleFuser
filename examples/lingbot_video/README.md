@@ -4,6 +4,8 @@ Dense 1.3B and MoE 30B are separate examples. Each module exposes
 `PPL_CONFIG`, `CONTRACT`, `get_pipeline`, `run`, and `run_with_file` for the
 shared CLI runner and TeleFuser service.
 Both examples default to the official five-second structured caption in `assets/t2v_5s.json.example` and the validated 832x480 LingBot landscape geometry.
+Their default checkpoints are resolved from `TF_MODEL_ZOO_PATH`, which defaults
+to `/hhb-data/aigc/model_zoo` in the current environment.
 
 The model-specific files also contain their checkpoint loading, stage assembly, request
 handling, refiner lifecycle, and output encoding. Shared behavior uses TeleFuser contract

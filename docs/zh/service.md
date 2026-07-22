@@ -100,6 +100,7 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 | `LiveAct` | S2V（语音转视频） | 语音驱动说话人头部生成 |
 | `FlashVSR` | VSR | 流式视频超分辨率 |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成和续写 |
+| `LingBot-World v2` | 双向世界模型流式推理 | 相机控制的 WebRTC 闭环 — 参见[流式服务指南](stream_server.md) |
 
 ### 视频生成
 
@@ -108,6 +109,7 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 | `WanVideo`（Wan2.1 / Wan2.2） | T2V, I2V, FL2V | 主要视频生成系列 |
 | `HunyuanVideo` | T2V, I2V | 通过服务示例支持 |
 | `LTX Video` | I2V + Audio | 音视频统一生成 |
+| `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 refinement；参见 `examples/lingbot_video/README.md` |
 
 ### 图像生成
 

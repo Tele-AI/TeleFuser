@@ -56,7 +56,8 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| LingBot-World-Fast | Bidirectional streaming | Interactive world model via WebRTC DataChannel |
+| LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via WebRTC |
+| LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast interactive world model via WebRTC DataChannel |
 
 ### Video Generation
 
