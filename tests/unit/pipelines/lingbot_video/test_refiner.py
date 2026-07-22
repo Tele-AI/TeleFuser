@@ -20,6 +20,14 @@ from telefuser.pipelines.lingbot_video.refiner import (
 )
 from tools.validation.capture_lingbot_video_reference import _upstream_import_path
 
+UPSTREAM_ROOT = Path("work_dirs/lingbot-video-master")
+
+
+def _require_upstream_checkout() -> Path:
+    if not (UPSTREAM_ROOT / "lingbot_video" / "__init__.py").is_file():
+        pytest.skip("LingBot-Video upstream checkout is not available")
+    return UPSTREAM_ROOT
+
 
 def test_refiner_schedule_starts_at_threshold_and_descends() -> None:
     sigmas = compute_refiner_sigmas(
@@ -97,8 +105,9 @@ def test_mp4_refiner_handoff_matches_upstream_with_pyav_decord_adapter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     av = pytest.importorskip("av")
+    export_to_video = pytest.importorskip("diffusers.utils").export_to_video
+    upstream_root = _require_upstream_checkout()
     path = tmp_path / "base.mp4"
-    from diffusers.utils import export_to_video
 
     frames = [np.full((16, 16, 3), value * 20, dtype=np.uint8) for value in range(10)]
     export_to_video(frames, str(path), fps=48)
@@ -134,7 +143,6 @@ def test_mp4_refiner_handoff_matches_upstream_with_pyav_decord_adapter(
     decord.VideoReader = _VideoReader
     decord.cpu = lambda _: object()
     monkeypatch.setitem(sys.modules, "decord", decord)
-    upstream_root = Path("work_dirs/lingbot-video-master")
     with _upstream_import_path(upstream_root):
         upstream_utils = importlib.import_module("lingbot_video.utils")
         reference, reference_metadata = upstream_utils.load_refiner_video_tensor(path, 16, 16, sample_fps=24, vae_tc=4)
@@ -147,10 +155,10 @@ def test_mp4_refiner_handoff_matches_upstream_with_pyav_decord_adapter(
 def test_ti2v_refiner_first_frame_matches_upstream_geometry(tmp_path: Path) -> None:
     from PIL import Image
 
+    upstream_root = _require_upstream_checkout()
     image = np.arange(9 * 15 * 3, dtype=np.uint8).reshape(9, 15, 3)
     path = tmp_path / "first.png"
     Image.fromarray(image).save(path)
-    upstream_root = Path("work_dirs/lingbot-video-master")
     with _upstream_import_path(upstream_root):
         upstream_utils = importlib.import_module("lingbot_video.utils")
         reference = upstream_utils.load_first_frame_condition_tensor(path, 8, 12, 6, 10)
