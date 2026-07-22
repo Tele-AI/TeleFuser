@@ -18,7 +18,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -436,7 +436,7 @@ def _capture_once(
     np.save(destination / "frames.npy", frames_array)
     metadata = {
         "capture_schema_version": 1,
-        "captured_at": datetime.now(UTC).isoformat(),
+        "captured_at": datetime.now(timezone.utc).isoformat(),
         "kind": "lingbot_video_numerical_oracle",
         "mode": mode,
         "case": case["name"],

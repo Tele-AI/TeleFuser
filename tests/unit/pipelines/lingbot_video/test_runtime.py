@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 from examples.lingbot_video import lingbot_video_moe_30b as moe_example
 from telefuser.core.config import WeightOffloadType
@@ -75,6 +76,17 @@ def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> Non
         lambda *args, **kwargs: LingBotVideoModelConfig(variant="moe", num_experts=2, top_k=1),
     )
     monkeypatch.setattr(moe_example.FlowUniPCMultistepScheduler, "from_pretrained", _Scheduler.from_pretrained)
+
+    def load_from_huggingface(self, module_path, *, module_name=None, module_class=None, **kwargs) -> None:
+        del kwargs
+        assert module_class is not None
+        self.add_module(
+            module_class.from_pretrained(module_path),
+            name=module_name or Path(module_path).name,
+            path=str(module_path),
+        )
+
+    monkeypatch.setattr(moe_example.ModuleManager, "load_from_huggingface", load_from_huggingface)
 
     base = moe_example.build_pipeline(tmp_path, device="cuda")
     refiner = moe_example.build_refiner(tmp_path, device="cuda")

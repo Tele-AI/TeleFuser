@@ -18,6 +18,10 @@ class CpuPlatform(BasePlatform):
     full_dist_backend: str = "cpu:gloo"
 
     @staticmethod
+    def empty_cache() -> None:
+        """CPU has no device allocator cache to release."""
+
+    @staticmethod
     def default_device():
         return torch.device("cpu")
 
