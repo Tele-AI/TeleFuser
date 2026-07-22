@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from telefuser.ops.moe import grouped_expert_forward, route_topk
+from telefuser.ops.moe import fp8_expert_forward, grouped_expert_forward, quantize_expert_weight_fp8, route_topk
 
 from .lingbot_video_dit import LingBotVideoBlock, LingBotVideoMLP, LingBotVideoTransformer3DModel
 
@@ -60,15 +60,45 @@ class LingBotVideoGroupedExperts(nn.Module):
         self.w1 = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
         self.w2 = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
         self.w3 = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
+        self.register_buffer("w1_scale", None, persistent=False)
+        self.register_buffer("w2_scale", None, persistent=False)
+        self.register_buffer("w3_scale", None, persistent=False)
         self.set_execution_backend(execution_backend)
 
     def set_execution_backend(self, backend: str) -> None:
         """Select the source-style sorted path or the diagnostic where fallback."""
-        if backend not in {"grouped_mm", "sorted", "where"}:
-            raise ValueError("execution backend must be 'grouped_mm', 'sorted', or 'where'")
+        if backend not in {"fp8", "grouped_mm", "sorted", "where"}:
+            raise ValueError("execution backend must be 'fp8', 'grouped_mm', 'sorted', or 'where'")
         self.execution_backend = backend
 
+    def quantize_fp8_(self) -> None:
+        """Replace BF16 expert weights with per-channel FP8 parameters in place."""
+        if self.w1.dtype == torch.float8_e4m3fn:
+            return
+        self.w1, self.w1_scale = self._quantized_parameter(self.w1)
+        self.w2, self.w2_scale = self._quantized_parameter(self.w2)
+        self.w3, self.w3_scale = self._quantized_parameter(self.w3)
+
+    @staticmethod
+    def _quantized_parameter(weight: nn.Parameter) -> tuple[nn.Parameter, torch.Tensor]:
+        quantized, scale = quantize_expert_weight_fp8(weight.detach())
+        return nn.Parameter(quantized, requires_grad=False), scale
+
     def forward(self, tokens: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        if self.execution_backend == "fp8":
+            if self.w1_scale is None or self.w2_scale is None or self.w3_scale is None:
+                raise RuntimeError("FP8 expert backend requires quantize_fp8_() before execution")
+            return fp8_expert_forward(
+                tokens,
+                indices,
+                weights,
+                self.w1,
+                self.w2,
+                self.w3,
+                self.w1_scale,
+                self.w2_scale,
+                self.w3_scale,
+            )
         if self.execution_backend == "grouped_mm":
             return grouped_expert_forward(tokens, indices, weights, self.w1, self.w2, self.w3)
         if self.execution_backend == "where":
@@ -249,3 +279,9 @@ class LingBotVideoMoeTransformer3DModel(LingBotVideoTransformer3DModel):
         for module in self.modules():
             if isinstance(module, LingBotVideoGroupedExperts):
                 module.set_execution_backend(backend)
+
+    def quantize_experts_fp8_(self) -> None:
+        """Quantize every routed expert while keeping dense/shared layers in BF16."""
+        for module in self.modules():
+            if isinstance(module, LingBotVideoGroupedExperts):
+                module.quantize_fp8_()

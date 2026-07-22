@@ -133,6 +133,105 @@ def grouped_expert_forward(
     )
 
 
+def quantize_expert_weight_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize [experts, out, in] weights with per-output-channel FP8 scales."""
+    if weight.ndim != 3:
+        raise ValueError("expert weight must have shape [experts, out_features, in_features]")
+    fp8_dtype = torch.float8_e4m3fn
+    fp8_info = torch.finfo(fp8_dtype)
+    source = weight.float()
+    scales = source.abs().amax(dim=2).clamp_min(torch.finfo(torch.float32).tiny) / fp8_info.max
+    quantized = (source / scales.unsqueeze(2)).clamp(min=fp8_info.min, max=fp8_info.max).to(fp8_dtype)
+    return quantized, scales
+
+
+def fp8_expert_forward(
+    tokens: torch.Tensor,
+    indices: torch.Tensor,
+    weights: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w3_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Run sorted LingBot experts with native dynamic W8A8 scaled GEMMs."""
+    if not hasattr(torch, "_scaled_mm"):
+        raise RuntimeError("FP8 expert execution requires torch._scaled_mm")
+    if tokens.device.type != "cuda":
+        raise RuntimeError("FP8 expert execution requires CUDA tensors")
+    if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn or w3.dtype != torch.float8_e4m3fn:
+        raise RuntimeError("FP8 expert weights must be quantized before execution")
+    if indices.shape != weights.shape or indices.ndim != 2:
+        raise ValueError("expert indices and weights must have matching [tokens, top_k] shapes")
+
+    top_k = indices.shape[1]
+    flat_weights = weights.reshape(-1)
+    flat_indices = indices.reshape(-1)
+    active_positions = torch.where(flat_weights != 0)[0]
+    if active_positions.numel() == 0:
+        return tokens.new_zeros(tokens.shape)
+
+    active_experts = flat_indices[active_positions]
+    sort_order = torch.argsort(active_experts, stable=True)
+    sorted_positions = active_positions[sort_order]
+    sorted_experts = active_experts[sort_order]
+    sorted_tokens = tokens[sorted_positions // top_k]
+    counts = torch.bincount(sorted_experts, minlength=w1.shape[0])
+
+    outputs: list[torch.Tensor] = []
+    offset = 0
+    for expert_index, count in enumerate(counts.tolist()):
+        if count == 0:
+            continue
+        selected = sorted_tokens[offset : offset + count]
+        offset += count
+        selected_fp8, selected_scale = _quantize_rows_fp8(selected)
+        gate = _scaled_mm_fp8(selected_fp8, w1[expert_index], selected_scale, w1_scale[expert_index])
+        up = _scaled_mm_fp8(selected_fp8, w3[expert_index], selected_scale, w3_scale[expert_index])
+        activation_fp8, activation_scale = _quantize_rows_fp8(F.silu(gate) * up)
+        outputs.append(_scaled_mm_fp8(activation_fp8, w2[expert_index], activation_scale, w2_scale[expert_index]))
+
+    expert_output = torch.cat(outputs, dim=0).to(tokens.dtype)
+    routed = torch.zeros(
+        tokens.shape[0] * top_k,
+        tokens.shape[-1],
+        dtype=tokens.dtype,
+        device=tokens.device,
+    )
+    routed[sorted_positions] = expert_output
+    return (
+        (routed.reshape(tokens.shape[0], top_k, -1).float() * weights.float().unsqueeze(-1)).sum(dim=1).to(tokens.dtype)
+    )
+
+
+def _quantize_rows_fp8(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dynamically quantize matrix rows for torch._scaled_mm row-wise scaling."""
+    fp8_dtype = torch.float8_e4m3fn
+    fp8_info = torch.finfo(fp8_dtype)
+    scale = tensor.float().abs().amax(dim=1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+    scale = (scale / fp8_info.max).contiguous()
+    quantized = (tensor.float() / scale).clamp(min=fp8_info.min, max=fp8_info.max).to(fp8_dtype)
+    return quantized, scale
+
+
+def _scaled_mm_fp8(
+    activation: torch.Tensor,
+    weight: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Apply one row-wise scaled FP8 matrix multiplication."""
+    return torch._scaled_mm(
+        activation,
+        weight.transpose(0, 1),
+        scale_a=activation_scale,
+        scale_b=weight_scale.unsqueeze(0).contiguous(),
+        out_dtype=torch.bfloat16,
+    )
+
+
 def _pad_grouped_tokens(
     tokens: torch.Tensor,
     counts: torch.Tensor,

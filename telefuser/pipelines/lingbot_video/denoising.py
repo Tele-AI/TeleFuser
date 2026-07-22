@@ -14,8 +14,14 @@ import torch
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_group
+from telefuser.distributed.device_mesh import (
+    create_device_mesh_from_config,
+    get_cfg_rank,
+    get_cfg_world_size,
+    get_ulysses_group,
+)
 from telefuser.distributed.fsdp import shard_model_fsdp2_inference
+from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
@@ -142,6 +148,11 @@ class LingBotVideoDenoisingStage(BaseStage):
         if parallel_config.world_size == 1:
             return
         self.transformer.device_mesh = create_device_mesh_from_config(parallel_config)
+        cfg_world_size = get_cfg_world_size(self.transformer.device_mesh)
+        if cfg_world_size not in {1, 2}:
+            raise ValueError(f"LingBot CFG parallel requires degree 1 or 2, got {cfg_world_size}")
+        if cfg_world_size > 1 and self.batch_cfg:
+            raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
         if parallel_config.sp_ulysses_degree > 1:
             self.transformer.set_ulysses_group(get_ulysses_group(self.transformer.device_mesh))
             logger.info(f"enabled LingBot Ulysses SP degree={parallel_config.sp_ulysses_degree}")
@@ -149,7 +160,7 @@ class LingBotVideoDenoisingStage(BaseStage):
             if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
                 raise ValueError("LingBot FSDP inference cannot be combined with model CPU offload")
             ignored_states = [
-                parameter for parameter in self.transformer.parameters() if parameter.dtype != self.torch_dtype
+                parameter for parameter in self.transformer.parameters() if parameter.dtype == torch.float32
             ]
             if ignored_states:
                 logger.info(f"retaining {len(ignored_states)} LingBot parameters with a non-runtime dtype outside FSDP")
@@ -207,7 +218,15 @@ class LingBotVideoDenoisingStage(BaseStage):
                 ).float()
             if negative_prompt_embeds is None:
                 raise ValueError("negative_prompt_embeds is required when guidance_scale is greater than 1")
-            if self.batch_cfg:
+            device_mesh = getattr(self.transformer, "device_mesh", None)
+            cfg_world_size = get_cfg_world_size(device_mesh)
+            if cfg_world_size > 1:
+                cfg_rank = get_cfg_rank(device_mesh)
+                prompt_embeds = positive_prompt_embeds if cfg_rank == 0 else negative_prompt_embeds
+                attention_mask = positive_attention_mask if cfg_rank == 0 else negative_attention_mask
+                prediction = self.transformer(latents, model_timestep, prompt_embeds, attention_mask).float()
+                positive, negative = cfg_parallel_unshard(device_mesh, [prediction])[0].chunk(2)
+            elif self.batch_cfg:
                 combined_latents = torch.cat((latents, latents))
                 combined_timestep = torch.cat((model_timestep, model_timestep))
                 combined_embeds, combined_mask = _batch_cfg_prompt_inputs(

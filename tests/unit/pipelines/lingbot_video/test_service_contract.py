@@ -92,6 +92,28 @@ def test_get_pipeline_uses_fixed_variant(variant: str, monkeypatch: pytest.Monke
     assert module.PPL_CONFIG["variant"] == variant
 
 
+@pytest.mark.parametrize("variant", ["dense", "moe"])
+def test_get_pipeline_supports_cfg_parallel_with_sequence_parallel(
+    variant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_example(variant)
+    calls: list[dict[str, object]] = []
+
+    def capture_build(_: str, **kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(module, "build_pipeline", capture_build)
+    pipeline = module.get_pipeline(parallelism=4, cfg_parallel_degree=2)
+
+    parallel_config = calls[0]["parallel_config"]
+    assert parallel_config.cfg_degree == 2
+    assert parallel_config.sp_ulysses_degree == 2
+    assert parallel_config.enable_fsdp
+    if variant == "moe":
+        assert pipeline.refiner_co_resident
+
+
 def test_dense_run_with_file_supports_service_t2i(tmp_path: Path) -> None:
     module = _load_example("dense")
 
@@ -218,6 +240,53 @@ def test_moe_run_releases_base_then_runs_refiner(monkeypatch: pytest.MonkeyPatch
     assert refiner.closed
     assert torch.equal(refiner.negative, torch.zeros(1, 2, 2))
     assert torch.equal(refiner.negative_mask, torch.tensor([[True, False]]))
+
+
+def test_moe_run_keeps_base_resident_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_example("moe")
+
+    class FakePipeline:
+        device = "cpu"
+        text_stage = object()
+        refiner_co_resident = True
+
+        def __init__(self) -> None:
+            self.released = False
+
+        def generate(self, request: object, **_: object) -> SimpleNamespace:
+            del request
+            conditions = SimpleNamespace(
+                has_visual_condition=False,
+                positive_prompt_embeds=torch.zeros(1, 2, 2),
+                negative_prompt_embeds=torch.zeros(1, 2, 2),
+                positive_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+                negative_attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            )
+            return SimpleNamespace(output=torch.zeros(1, 3, 5, 2, 2), prompt_conditions=conditions)
+
+        def release_gpu_resources(self) -> None:
+            self.released = True
+
+    class FakeRefiner:
+        def refine(self, lowres_video: torch.Tensor, *_: object, **__: object) -> torch.Tensor:
+            return lowres_video
+
+        def close(self) -> None:
+            return None
+
+    pipeline = FakePipeline()
+    monkeypatch.setattr(module, "build_refiner", lambda *args, **kwargs: FakeRefiner())
+    monkeypatch.setitem(module.PPL_CONFIG, "refiner_height", 2)
+    monkeypatch.setitem(module.PPL_CONFIG, "refiner_width", 2)
+
+    module.run(
+        pipeline,
+        json.dumps({"caption": {"scene": "test"}, "duration": 5}),
+        task="t2v",
+        refine=True,
+    )
+
+    assert not pipeline.released
 
 
 def test_moe_t2i_rejects_explicit_refiner_request() -> None:

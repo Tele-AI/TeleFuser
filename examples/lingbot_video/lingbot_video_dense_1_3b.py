@@ -52,6 +52,7 @@ PPL_CONFIG: dict[str, Any] = {
     "resolution": "480p",
     "aspect_ratio": "16:9",
     "seed": 42,
+    "cfg_parallel_degree": 1,
 }
 
 
@@ -113,7 +114,9 @@ def build_pipeline(
 
     parallel_config = parallel_config or ParallelConfig()
     if batch_cfg is None:
-        batch_cfg = parallel_config.world_size > 1
+        batch_cfg = parallel_config.world_size > 1 and parallel_config.cfg_degree == 1
+    if batch_cfg and parallel_config.cfg_degree > 1:
+        raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
     if parallel_config.enable_fsdp and cpu_offload:
         raise ValueError("LingBot FSDP inference requires cpu_offload=False")
     device, device_id = _resolve_runtime_device(device, parallel_config)
@@ -183,15 +186,23 @@ def build_pipeline(
     return pipeline
 
 
-def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]) -> object:
+def get_pipeline(
+    parallelism: int = 1,
+    model_root: str = PPL_CONFIG["model_root"],
+    cfg_parallel_degree: int | None = None,
+) -> object:
     """Load the fixed Dense 1.3B checkpoint on one or four GPUs."""
     if parallelism not in {1, 4}:
         raise ValueError("LingBot-Video Dense supports parallelism=1 or 4")
+    cfg_parallel_degree = int(PPL_CONFIG["cfg_parallel_degree"]) if cfg_parallel_degree is None else cfg_parallel_degree
+    if cfg_parallel_degree not in {1, 2} or parallelism % cfg_parallel_degree:
+        raise ValueError("LingBot CFG parallel degree must be 1 or 2 and divide parallelism")
     return build_pipeline(
         model_root,
         parallel_config=ParallelConfig(
             device_ids=list(range(parallelism)),
-            sp_ulysses_degree=parallelism,
+            cfg_degree=cfg_parallel_degree,
+            sp_ulysses_degree=parallelism // cfg_parallel_degree,
             enable_fsdp=parallelism > 1,
         ),
     )
@@ -306,6 +317,7 @@ def run_with_file(
 
 @click.command()
 @click.option("--gpu_num", default=1, type=int, help="Number of GPUs: 1 or 4")
+@click.option("--cfg_parallel_degree", default=PPL_CONFIG["cfg_parallel_degree"], type=click.Choice([1, 2]))
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Dense 1.3B checkpoint root")
 @click.option("--prompt", default=PPL_CONFIG["prompt"], help="Structured JSON caption")
 @click.option("--negative_prompt", default=None, help="Optional structured negative caption")
@@ -318,6 +330,7 @@ def run_with_file(
 @click.option("--output_path", default="output.mp4")
 def main(
     gpu_num: int,
+    cfg_parallel_degree: int,
     model_root: str,
     prompt: str,
     negative_prompt: str | None,
@@ -330,7 +343,7 @@ def main(
     output_path: str,
 ) -> None:
     """Generate with the LingBot-Video Dense 1.3B checkpoint."""
-    pipeline = get_pipeline(gpu_num, model_root)
+    pipeline = get_pipeline(gpu_num, model_root, cfg_parallel_degree)
     try:
         result = run_with_file(
             pipeline,
