@@ -15,7 +15,7 @@ from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_group
-from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.fsdp import shard_model_fsdp2_inference
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
@@ -46,6 +46,39 @@ def transformer_timestep(timestep: torch.Tensor, transformer_dtype: torch.dtype)
     if transformer_dtype in {torch.bfloat16, torch.float16}:
         sigma = sigma.to(transformer_dtype)
     return (sigma * 1000.0).float()
+
+
+def _batch_cfg_prompt_inputs(
+    positive_embeds: torch.Tensor,
+    negative_embeds: torch.Tensor,
+    positive_mask: torch.Tensor | None,
+    negative_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad positive and negative prompt conditions for one batched CFG forward."""
+    if positive_embeds.ndim != 3 or negative_embeds.ndim != 3:
+        raise ValueError("CFG prompt embeddings must have shape [batch, sequence, hidden_size]")
+    if positive_embeds.shape[0] != negative_embeds.shape[0] or positive_embeds.shape[2] != negative_embeds.shape[2]:
+        raise ValueError("positive and negative CFG embeddings must have matching batch and hidden dimensions")
+
+    def pad(
+        embeds: torch.Tensor,
+        mask: torch.Tensor | None,
+        target_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if mask is None:
+            mask = torch.ones(embeds.shape[:2], dtype=torch.bool, device=embeds.device)
+        if mask.shape != embeds.shape[:2]:
+            raise ValueError("CFG prompt attention mask must match the embedding batch and sequence dimensions")
+        padding = target_length - embeds.shape[1]
+        if padding:
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, padding))
+            mask = torch.nn.functional.pad(mask, (0, padding), value=False)
+        return embeds, mask
+
+    target_length = max(positive_embeds.shape[1], negative_embeds.shape[1])
+    positive_embeds, positive_mask = pad(positive_embeds, positive_mask, target_length)
+    negative_embeds, negative_mask = pad(negative_embeds, negative_mask, target_length)
+    return torch.cat((positive_embeds, negative_embeds)), torch.cat((positive_mask, negative_mask))
 
 
 def denoise_lingbot_video(
@@ -85,14 +118,26 @@ class LingBotVideoDenoisingStage(BaseStage):
         super().__init__(name, model_runtime_config)
         transformer = module_manager.fetch_module("transformer")
         self.transformer = transformer
+        self.scheduler = module_manager.fetch_module("scheduler")
         set_attention_config = getattr(transformer, "set_attention_config", None)
         if callable(set_attention_config):
             set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["transformer"]
         self.batch_cfg = batch_cfg
+        # Denoising repeatedly invokes the same FSDP graph. Releasing the CUDA
+        # allocator cache after every step forces costly weight-buffer
+        # reallocations that the source runner keeps cached for the full loop.
+        self.empty_cache_after_call = False
 
     def parallel_models(self) -> None:
         """Attach Ulysses SP and optional per-block FSDP to the DiT stage."""
+        if self.device.type == "cuda":
+            # Match the source runner's FP32 matmul policy. This primarily
+            # affects the MoE router projections, which intentionally run in
+            # FP32 and are otherwise much slower on Ampere-and-newer GPUs.
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
+
         parallel_config = self.model_runtime_config.parallel_config
         if parallel_config.world_size == 1:
             return
@@ -103,18 +148,15 @@ class LingBotVideoDenoisingStage(BaseStage):
         if parallel_config.enable_fsdp:
             if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
                 raise ValueError("LingBot FSDP inference cannot be combined with model CPU offload")
-            # ParallelWorker receives a CPU checkpoint. Move all state first so
-            # intentionally unsharded FP32 parameters do not remain on CPU.
-            self.transformer.to(self.device)
             ignored_states = [
                 parameter for parameter in self.transformer.parameters() if parameter.dtype != self.torch_dtype
             ]
             if ignored_states:
                 logger.info(f"retaining {len(ignored_states)} LingBot parameters with a non-runtime dtype outside FSDP")
-            logger.info(f"enabled LingBot block FSDP for {self.name}")
-            self.transformer = shard_model(
+            logger.info(f"enabled LingBot block FSDP2 for {self.name}")
+            self.transformer = shard_model_fsdp2_inference(
                 module=self.transformer,
-                device_id=self.device.index if self.device.index is not None else torch.cuda.current_device(),
+                device_mesh=self.transformer.device_mesh,
                 wrap_module_names=self.transformer.get_fsdp_module_names(),
                 ignored_states=ignored_states,
             )
@@ -134,6 +176,27 @@ class LingBotVideoDenoisingStage(BaseStage):
         guidance_scale: float = 1.0,
     ) -> torch.Tensor:
         """Run positive then negative CFG under transformer compute autocast."""
+        return self._predict_noise_with_cfg(
+            latents,
+            timestep,
+            positive_prompt_embeds,
+            negative_prompt_embeds,
+            positive_attention_mask,
+            negative_attention_mask,
+            guidance_scale,
+        )
+
+    def _predict_noise_with_cfg(
+        self,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+        positive_prompt_embeds: torch.Tensor,
+        negative_prompt_embeds: torch.Tensor | None,
+        positive_attention_mask: torch.Tensor | None,
+        negative_attention_mask: torch.Tensor | None,
+        guidance_scale: float,
+    ) -> torch.Tensor:
+        """Run CFG without crossing the stage lifecycle boundary."""
         transformer_dtype = self.transformer.patch_embedder.weight.dtype
         model_timestep = transformer_timestep(timestep, transformer_dtype)
         autocast_enabled = latents.device.type == "cuda" and transformer_dtype in {torch.bfloat16, torch.float16}
@@ -144,16 +207,14 @@ class LingBotVideoDenoisingStage(BaseStage):
                 ).float()
             if negative_prompt_embeds is None:
                 raise ValueError("negative_prompt_embeds is required when guidance_scale is not 1")
-            matching_masks = (positive_attention_mask is None) == (negative_attention_mask is None)
-            matching_shapes = positive_prompt_embeds.shape == negative_prompt_embeds.shape
-            if self.batch_cfg and matching_masks and matching_shapes:
+            if self.batch_cfg:
                 combined_latents = torch.cat((latents, latents))
                 combined_timestep = torch.cat((model_timestep, model_timestep))
-                combined_embeds = torch.cat((positive_prompt_embeds, negative_prompt_embeds))
-                combined_mask = (
-                    None
-                    if positive_attention_mask is None
-                    else torch.cat((positive_attention_mask, negative_attention_mask))
+                combined_embeds, combined_mask = _batch_cfg_prompt_inputs(
+                    positive_prompt_embeds,
+                    negative_prompt_embeds,
+                    positive_attention_mask,
+                    negative_attention_mask,
                 )
                 positive, negative = (
                     self.transformer(combined_latents, combined_timestep, combined_embeds, combined_mask)
@@ -168,3 +229,39 @@ class LingBotVideoDenoisingStage(BaseStage):
                     latents, model_timestep, negative_prompt_embeds, negative_attention_mask
                 ).float()
         return negative + guidance_scale * (positive - negative)
+
+    @with_model_offload(["transformer"])
+    @torch.no_grad()
+    def denoise(
+        self,
+        latent: torch.Tensor,
+        positive_prompt_embeds: torch.Tensor,
+        negative_prompt_embeds: torch.Tensor,
+        positive_attention_mask: torch.Tensor | None,
+        negative_attention_mask: torch.Tensor | None,
+        guidance_scale: float,
+        num_inference_steps: int,
+        shift: float,
+        condition: torch.Tensor | None = None,
+        condition_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run the complete sampling loop in one worker invocation."""
+        self.scheduler.set_timesteps(num_inference_steps, device=latent.device, shift=shift)
+        for timestep in self.scheduler.timesteps:
+            if condition is not None:
+                if condition_mask is None:
+                    raise ValueError("condition_mask is required when condition is provided")
+                latent = reinject_ti2v_condition(latent, condition, condition_mask)
+            prediction = self._predict_noise_with_cfg(
+                latent,
+                timestep.expand(latent.shape[0]),
+                positive_prompt_embeds,
+                negative_prompt_embeds,
+                positive_attention_mask,
+                negative_attention_mask,
+                guidance_scale,
+            )
+            latent = self.scheduler.step(prediction, timestep, latent)
+        if condition is not None and condition_mask is not None:
+            latent = reinject_ti2v_condition(latent, condition, condition_mask)
+        return latent

@@ -25,6 +25,15 @@ class _DenoisingStage:
         return torch.ones_like(latents)
 
 
+class _LoopDenoisingStage(_DenoisingStage):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def denoise(self, latent: torch.Tensor, *_: object) -> torch.Tensor:
+        self.calls += 1
+        return torch.full_like(latent, 7.0)
+
+
 class _PipelineTransformer(nn.Module):
     def set_attention_config(self, attention_config: object) -> None:
         self.attention_config = attention_config
@@ -90,6 +99,20 @@ def test_initialized_pipeline_runs_t2v_sampling() -> None:
     )
 
 
+def test_parallel_pipeline_runs_the_complete_denoise_loop_in_one_stage_call() -> None:
+    pipeline = _initialized_pipeline()
+    stage = _LoopDenoisingStage()
+    pipeline.config.enable_denoising_parallel = True
+    pipeline.text_stage = _TextStage()
+    pipeline.denoising_stage = stage
+    pipeline.scheduler = _Scheduler()
+
+    generation = pipeline.generate(LingBotVideoRequest(caption="{}", height=16, width=16, num_frames=5), decode=False)
+
+    assert stage.calls == 1
+    assert torch.equal(generation.output, torch.full_like(generation.output, 7.0))
+
+
 class _DtypeProbeTransformer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -127,9 +150,14 @@ class _BatchCfgProbeTransformer(nn.Module):
     def forward(
         self, latents: torch.Tensor, timestep: torch.Tensor, embeds: torch.Tensor, mask: torch.Tensor | None
     ) -> torch.Tensor:
-        del timestep, mask
+        del timestep
         self.calls += 1
-        offset = embeds.mean(dim=(1, 2)).reshape(-1, 1, 1, 1, 1)
+        if mask is None:
+            offset = embeds.mean(dim=(1, 2))
+        else:
+            weights = mask.to(embeds.dtype).unsqueeze(-1)
+            offset = (embeds * weights).sum(dim=(1, 2)) / weights.sum(dim=(1, 2))
+        offset = offset.reshape(-1, 1, 1, 1, 1)
         return latents + offset
 
 
@@ -151,6 +179,49 @@ def test_denoising_stage_batched_cfg_matches_two_source_order_forwards() -> None
     assert torch.equal(actual, expected)
     assert serial_transformer.calls == 2
     assert batched_transformer.calls == 1
+
+
+def test_denoising_stage_batched_cfg_pads_different_prompt_lengths() -> None:
+    latents = torch.zeros(1, 1, 1, 1, 1)
+    positive = torch.full((1, 3, 1), 3.0)
+    negative = torch.full((1, 1, 1), 1.0)
+    runtime_config = ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32)
+    serial_transformer = _BatchCfgProbeTransformer()
+    batched_transformer = _BatchCfgProbeTransformer()
+    serial = LingBotVideoDenoisingStage("serial", _transformer_manager(serial_transformer), runtime_config)
+    batched = LingBotVideoDenoisingStage(
+        "batched", _transformer_manager(batched_transformer), runtime_config, batch_cfg=True
+    )
+
+    expected = serial.predict_noise_with_cfg(latents, torch.tensor([1]), positive, negative, guidance_scale=2.0)
+    actual = batched.predict_noise_with_cfg(latents, torch.tensor([1]), positive, negative, guidance_scale=2.0)
+
+    assert torch.equal(actual, expected)
+    assert serial_transformer.calls == 2
+    assert batched_transformer.calls == 1
+
+
+def test_denoising_stage_can_own_the_complete_scheduler_loop() -> None:
+    transformer = _BatchCfgProbeTransformer()
+    stage = LingBotVideoDenoisingStage(
+        "batched",
+        _transformer_manager(transformer),
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
+        batch_cfg=True,
+    )
+    latent = stage.denoise(
+        torch.zeros(1, 1, 1, 1, 1),
+        torch.full((1, 1, 1), 3.0),
+        torch.full((1, 1, 1), 1.0),
+        torch.ones(1, 1, dtype=torch.bool),
+        torch.ones(1, 1, dtype=torch.bool),
+        2.0,
+        2,
+        3.0,
+    )
+
+    assert transformer.calls == 2
+    assert torch.equal(latent, torch.full_like(latent, -5.0))
 
 
 class _RecordingTextStage(_TextStage):

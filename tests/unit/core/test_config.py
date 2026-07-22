@@ -66,6 +66,13 @@ class TestParallelConfig:
         """Default world_size should be 1."""
         config = ParallelConfig()
         assert config.world_size == 1
+        assert config.worker_intra_op_threads == 1
+
+    def test_worker_intra_op_threads_must_be_positive(self):
+        """Distributed worker CPU thread count must be positive."""
+        config = ParallelConfig(worker_intra_op_threads=0)
+        with pytest.raises(ValueError, match="worker_intra_op_threads must be positive"):
+            config.validate()
 
     @pytest.mark.parametrize(
         "device_ids,degrees,expected_world_size",

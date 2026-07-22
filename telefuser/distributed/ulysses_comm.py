@@ -35,6 +35,21 @@ def _wait_async_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def ulysses_all_to_all_split_cat(
+    tensor: torch.Tensor,
+    process_group: dist.ProcessGroup,
+    *,
+    scatter_dim: int,
+    gather_dim: int,
+) -> torch.Tensor:
+    """Run the source-style synchronous list all-to-all used by LingBot Ulysses."""
+    _, world_size = _get_distributed_info(process_group)
+    inputs = [part.contiguous() for part in torch.tensor_split(tensor, world_size, scatter_dim)]
+    outputs = [torch.empty_like(inputs[0]) for _ in range(world_size)]
+    dist.all_to_all(outputs, inputs, group=process_group)
+    return torch.cat(outputs, dim=gather_dim).contiguous()
+
+
 def ulysses_scatter_heads(
     tensor: torch.Tensor,
     process_group: dist.ProcessGroup,

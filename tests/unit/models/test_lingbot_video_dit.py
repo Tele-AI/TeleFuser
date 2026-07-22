@@ -66,3 +66,32 @@ def test_transformer_rejects_non_patch_aligned_latent_geometry() -> None:
 
     with pytest.raises(ValueError, match="divisible by the checkpoint patch size"):
         model(torch.randn(1, 16, 1, 3, 4), torch.tensor([1]), torch.randn(1, 3, 12))
+
+
+def test_transformer_packed_batch_matches_independent_samples_with_different_text_lengths() -> None:
+    torch.manual_seed(11)
+    model = LingBotVideoTransformer3DModel(
+        in_channels=2,
+        out_channels=2,
+        hidden_size=16,
+        num_attention_heads=2,
+        depth=1,
+        intermediate_size=32,
+        text_dim=12,
+        freq_dim=8,
+        axes_dims=(2, 2, 4),
+    ).eval()
+    latents = torch.randn(2, 2, 1, 2, 2)
+    timesteps = torch.tensor([700.0, 300.0])
+    text = torch.randn(2, 3, 12)
+    mask = torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.bool)
+
+    actual = model(latents, timesteps, text, mask)
+    expected = torch.cat(
+        [
+            model(latents[index : index + 1], timesteps[index : index + 1], text[index : index + 1, :length])
+            for index, length in enumerate((3, 1))
+        ]
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

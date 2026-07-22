@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
-from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
+from telefuser.distributed.ulysses_comm import ulysses_all_to_all_split_cat
 from telefuser.ops.attention import attention
 
 
@@ -135,7 +135,11 @@ class LingBotVideoAttention(nn.Module):
         self.ulysses_group = group
 
     def forward(
-        self, hidden_states: torch.Tensor, rotary_emb: torch.Tensor, attention_mask: torch.Tensor | None = None
+        self,
+        hidden_states: torch.Tensor,
+        rotary_emb: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        packed_sequence_lengths: list[int] | None = None,
     ) -> torch.Tensor:
         batch, sequence, _ = hidden_states.shape
         query = self.to_q(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
@@ -148,15 +152,33 @@ class LingBotVideoAttention(nn.Module):
             group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1
         )
         if use_ulysses:
-            query = ulysses_scatter_heads(query, group)()
-            key = ulysses_scatter_heads(key, group)()
-            value = ulysses_scatter_heads(value, group)()
+            world_size = dist.get_world_size(group)
+            local_heads = self.num_heads // world_size
+            query = ulysses_all_to_all_split_cat(
+                query.reshape(batch, sequence, self.num_heads * self.head_dim),
+                group,
+                scatter_dim=2,
+                gather_dim=1,
+            ).view(batch, sequence * world_size, local_heads, self.head_dim)
+            key = ulysses_all_to_all_split_cat(
+                key.reshape(batch, sequence, self.num_heads * self.head_dim),
+                group,
+                scatter_dim=2,
+                gather_dim=1,
+            ).view(batch, sequence * world_size, local_heads, self.head_dim)
+            value = ulysses_all_to_all_split_cat(
+                value.reshape(batch, sequence, self.num_heads * self.head_dim),
+                group,
+                scatter_dim=2,
+                gather_dim=1,
+            ).view(batch, sequence * world_size, local_heads, self.head_dim)
         output = attention(
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
             attention_config=self.attention_config,
             attn_mask=attention_mask,
+            sequence_lengths=packed_sequence_lengths,
             input_layout="BNSD",
             output_layout="BNSD",
         )
@@ -164,7 +186,12 @@ class LingBotVideoAttention(nn.Module):
             raise RuntimeError("LingBot attention does not support log-sum-exp outputs")
         output = output.transpose(1, 2)
         if use_ulysses:
-            output = ulysses_gather_heads(output, group, num_heads=self.num_heads)()
+            output = ulysses_all_to_all_split_cat(
+                output.reshape(batch, sequence * world_size, local_heads * self.head_dim),
+                group,
+                scatter_dim=1,
+                gather_dim=2,
+            ).view(batch, sequence, self.num_heads, self.head_dim)
         return self.to_out(output.reshape(batch, sequence, -1).to(hidden_states.dtype))
 
 
@@ -195,6 +222,7 @@ class LingBotVideoBlock(nn.Module):
         temb6: torch.Tensor,
         rotary_emb: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        packed_sequence_lengths: list[int] | None = None,
     ) -> torch.Tensor:
         batch, sequence, hidden_size = hidden_states.shape
         if temb6.shape != (batch, sequence, 6 * hidden_size):
@@ -202,7 +230,12 @@ class LingBotVideoBlock(nn.Module):
         modulation = temb6 + self.scale_shift_table.unsqueeze(0)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation.chunk(6, dim=-1)
         attention_input = self.norm1(hidden_states) * (1.0 + scale_msa) + shift_msa
-        attention_output = self.attn(attention_input.to(self.attn.to_q.weight.dtype), rotary_emb, attention_mask)
+        attention_output = self.attn(
+            attention_input.to(self.attn.to_q.weight.dtype),
+            rotary_emb,
+            attention_mask,
+            packed_sequence_lengths,
+        )
         hidden_states = hidden_states + (gate_msa.tanh() * self.norm_post_attn(attention_output)).to(
             hidden_states.dtype
         )
@@ -379,35 +412,60 @@ class LingBotVideoTransformer3DModel(nn.Module):
         patches = hidden_states.reshape(batch, channels, grid_t, patch_t, grid_h, patch_h, grid_w, patch_w)
         patches = patches.permute(0, 2, 4, 6, 3, 5, 7, 1).reshape(batch, video_tokens, -1)
         video = self.patch_embedder(patches)
-        text = self.text_embedder(encoder_hidden_states)
-        joint = torch.cat((video, text), dim=1)
-        text_length = text.shape[1]
-        positions = make_lingbot_video_joint_position_ids(text_length, grid_t, grid_h, grid_w, hidden_states.device)
-        rotary = (
-            lingbot_video_complex_frequencies(positions, self.axes_dims, self.rope_theta)
-            .unsqueeze(0)
-            .expand(batch, -1, -1)
-        )
-        time_embedding = self.time_embedder(timestep)
-        temb_input = time_embedding.unsqueeze(1).expand(-1, joint.shape[1], -1)
+        encoded_text_length = encoder_hidden_states.shape[1]
         text_mask = (
             encoder_attention_mask.bool()
             if encoder_attention_mask is not None
-            else torch.ones(batch, text_length, dtype=torch.bool, device=hidden_states.device)
+            else torch.ones(batch, encoded_text_length, dtype=torch.bool, device=hidden_states.device)
         )
-        valid_mask = torch.cat(
-            (torch.ones(batch, video_tokens, dtype=torch.bool, device=hidden_states.device), text_mask), dim=1
-        )
+        text_lengths = [int(length) for length in text_mask.sum(dim=-1).detach().cpu().tolist()]
+        packed_batch = batch > 1
+        packed_attention = packed_batch or self._ulysses_world_size() > 1
+        time_embedding = self.time_embedder(timestep)
+
+        if packed_attention:
+            joint_parts: list[torch.Tensor] = []
+            rotary_parts: list[torch.Tensor] = []
+            temb_parts: list[torch.Tensor] = []
+            packed_sequence_lengths = [video_tokens + text_length for text_length in text_lengths]
+            for index, text_length in enumerate(text_lengths):
+                text = self.text_embedder(encoder_hidden_states[index : index + 1, :text_length])
+                joint_parts.append(torch.cat((video[index : index + 1], text), dim=1))
+                positions = make_lingbot_video_joint_position_ids(
+                    text_length, grid_t, grid_h, grid_w, hidden_states.device
+                )
+                rotary_parts.append(lingbot_video_complex_frequencies(positions, self.axes_dims, self.rope_theta))
+                temb_parts.append(
+                    time_embedding[index : index + 1].unsqueeze(1).expand(1, video_tokens + text_length, -1)
+                )
+            joint = torch.cat(joint_parts, dim=1)
+            rotary = torch.cat(rotary_parts).unsqueeze(0)
+            temb_input = torch.cat(temb_parts, dim=1)
+            valid_mask = torch.ones(1, joint.shape[1], dtype=torch.bool, device=hidden_states.device)
+        else:
+            text = self.text_embedder(encoder_hidden_states)
+            joint = torch.cat((video, text), dim=1)
+            positions = make_lingbot_video_joint_position_ids(
+                encoded_text_length, grid_t, grid_h, grid_w, hidden_states.device
+            )
+            rotary = lingbot_video_complex_frequencies(positions, self.axes_dims, self.rope_theta).unsqueeze(0)
+            temb_input = time_embedding.unsqueeze(1).expand(-1, joint.shape[1], -1)
+            valid_mask = torch.cat(
+                (torch.ones(batch, video_tokens, dtype=torch.bool, device=hidden_states.device), text_mask), dim=1
+            )
+            packed_sequence_lengths = None
+
         joint, rotary, temb_input, local_valid_mask, padding = self._ulysses_shard_joint(
             joint, rotary, temb_input, valid_mask
         )
+        if packed_sequence_lengths is not None and padding:
+            packed_sequence_lengths = [*packed_sequence_lengths, padding]
         temb6 = self.time_modulation(temb_input)
-        global_valid_mask = self._ulysses_gather_sequence(local_valid_mask)
         attention_mask = None
-        if not bool(global_valid_mask.all()):
-            attention_mask = global_valid_mask[:, None, None, :]
+        if packed_sequence_lengths is None and not bool(local_valid_mask.all()):
+            attention_mask = local_valid_mask[:, None, None, :]
         for block in self.blocks:
-            joint = block(joint, temb6, rotary, attention_mask)
+            joint = block(joint, temb6, rotary, attention_mask, packed_sequence_lengths)
         final_modulation = self.norm_out_modulation(temb_input)
         shift, scale = final_modulation.chunk(2, dim=-1)
         projected = self.proj_out((self.norm_out(joint) * (1.0 + scale) + shift).to(self.proj_out.weight.dtype))
@@ -415,6 +473,11 @@ class LingBotVideoTransformer3DModel(nn.Module):
             projected = self._ulysses_gather_sequence(projected)
             if padding:
                 projected = projected[:, :-padding]
-        projected = projected[:, :video_tokens]
+        if packed_batch:
+            projected = torch.cat(
+                [part[:, :video_tokens] for part in torch.split(projected, packed_sequence_lengths[:batch], dim=1)]
+            )
+        else:
+            projected = projected[:, :video_tokens]
         output = projected.reshape(batch, grid_t, grid_h, grid_w, patch_t, patch_h, patch_w, self.out_channels)
         return output.permute(0, 7, 1, 4, 2, 5, 3, 6).reshape(batch, self.out_channels, frames, height, width)

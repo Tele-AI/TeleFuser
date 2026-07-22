@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from telefuser.ops.moe import route_topk
+from telefuser.ops.moe import grouped_expert_forward, route_topk
 
 from .lingbot_video_dit import LingBotVideoBlock, LingBotVideoMLP, LingBotVideoTransformer3DModel
 
@@ -64,11 +64,13 @@ class LingBotVideoGroupedExperts(nn.Module):
 
     def set_execution_backend(self, backend: str) -> None:
         """Select the source-style sorted path or the diagnostic where fallback."""
-        if backend not in {"sorted", "where"}:
-            raise ValueError("execution backend must be 'sorted' or 'where'")
+        if backend not in {"grouped_mm", "sorted", "where"}:
+            raise ValueError("execution backend must be 'grouped_mm', 'sorted', or 'where'")
         self.execution_backend = backend
 
     def forward(self, tokens: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        if self.execution_backend == "grouped_mm":
+            return grouped_expert_forward(tokens, indices, weights, self.w1, self.w2, self.w3)
         if self.execution_backend == "where":
             return self._forward_where(tokens, indices, weights)
         return self._forward_sorted(tokens, indices, weights)

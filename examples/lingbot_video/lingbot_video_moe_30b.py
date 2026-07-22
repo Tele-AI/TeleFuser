@@ -59,6 +59,7 @@ PPL_CONFIG: dict[str, Any] = {
     "resolution": "480p",
     "aspect_ratio": "16:9",
     "seed": 42,
+    "expert_backend": "auto",
     "enable_refiner": True,
     "refiner_height": 1088,
     "refiner_width": 1920,
@@ -121,6 +122,7 @@ def build_pipeline(
     attention_config: AttentionConfig | None = None,
     parallel_config: ParallelConfig | None = None,
     batch_cfg: bool | None = None,
+    expert_backend: str = PPL_CONFIG["expert_backend"],
 ) -> LingBotVideoPipeline:
     """Load MoE base modules and initialize the complete pipeline."""
     try:
@@ -149,9 +151,18 @@ def build_pipeline(
         parallel_config=parallel_config,
     )
 
+    if expert_backend == "auto":
+        expert_backend = "grouped_mm" if parallel_config.world_size > 1 else "sorted"
+    if expert_backend not in {"grouped_mm", "sorted"}:
+        raise ValueError("LingBot MoE expert_backend must be 'auto', 'grouped_mm', or 'sorted'")
+    if expert_backend == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
+        raise RuntimeError("LingBot grouped_mm requires a recent CUDA-enabled PyTorch build")
+    transformer = load_lingbot_video_moe_transformer(transformer_dir, device="cpu", torch_dtype=torch_dtype)
+    transformer.set_expert_execution_backend(expert_backend)
+
     module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
     module_manager.add_module(
-        load_lingbot_video_moe_transformer(transformer_dir, device="cpu", torch_dtype=torch_dtype),
+        transformer,
         name="transformer",
         path=str(transformer_dir),
     )
@@ -275,6 +286,7 @@ def get_pipeline(
     model_root: str = PPL_CONFIG["model_root"],
     refiner_parallelism: int | None = None,
     refiner_batch_cfg: bool | None = None,
+    expert_backend: str = PPL_CONFIG["expert_backend"],
 ) -> object:
     """Load the fixed MoE 30B checkpoint and configure its separate refiner."""
     if parallelism not in {1, 4}:
@@ -287,6 +299,7 @@ def get_pipeline(
             sp_ulysses_degree=parallelism,
             enable_fsdp=parallelism > 1,
         ),
+        expert_backend=expert_backend,
     )
     refiner_parallelism = (
         int(PPL_CONFIG["refiner_parallelism"]) if refiner_parallelism is None else refiner_parallelism
@@ -476,6 +489,12 @@ def run_with_file(
 @click.option("--prompt", default=PPL_CONFIG["prompt"], help="Structured JSON caption")
 @click.option("--negative_prompt", default=None, help="Optional structured negative caption")
 @click.option("--seed", default=PPL_CONFIG["seed"], type=int)
+@click.option(
+    "--expert_backend",
+    default=PPL_CONFIG["expert_backend"],
+    type=click.Choice(["auto", "grouped_mm", "sorted"]),
+    help="MoE expert backend; auto selects grouped_mm for four GPUs",
+)
 @click.option("--resolution", default=PPL_CONFIG["resolution"])
 @click.option("--aspect_ratio", default=PPL_CONFIG["aspect_ratio"])
 @click.option("--target_video_length", default=PPL_CONFIG["target_video_length"], type=int)
@@ -493,6 +512,7 @@ def main(
     prompt: str,
     negative_prompt: str | None,
     seed: int,
+    expert_backend: str,
     resolution: str,
     aspect_ratio: str,
     target_video_length: int,
@@ -509,6 +529,7 @@ def main(
         model_root,
         refiner_parallelism=refiner_gpu_num,
         refiner_batch_cfg=refiner_batch_cfg,
+        expert_backend=expert_backend,
     )
     try:
         result = run_with_file(

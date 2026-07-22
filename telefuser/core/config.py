@@ -46,6 +46,7 @@ class ParallelConfig:
     enable_fsdp: bool = False
     timeout: int = 600  # Seconds
     queue_with_cpu: bool = False
+    worker_intra_op_threads: int = 1  # Per-process PyTorch CPU intra-op threads
 
     @property
     def world_size(self) -> int:
@@ -57,6 +58,8 @@ class ParallelConfig:
 
     def validate(self) -> None:
         """Validate that device count matches parallelism degrees."""
+        if self.worker_intra_op_threads < 1:
+            raise ValueError("worker_intra_op_threads must be positive")
         device_num = 1 if self.device_ids is None else len(self.device_ids)
         degree_sum = (
             self.cfg_degree

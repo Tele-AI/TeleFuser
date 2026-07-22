@@ -385,7 +385,11 @@ class ParallelConfig:
     enable_fsdp: bool = False             # 启用 FSDP
     timeout: int = 600                    # 超时时间（秒）
     queue_with_cpu: bool = False          # 使用 CPU 队列
+    worker_intra_op_threads: int = 1      # 每个 worker 的 CPU intra-op 线程数
 ```
+
+默认值 1 与 `torchrun` 一致，可避免多个 GPU worker 的 CPU 线程过度竞争。只有分布式
+stage 包含大量 CPU 计算时才需要提高该值；它不会修改父进程的线程池。
 
 ### 验证规则
 

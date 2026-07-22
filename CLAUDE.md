@@ -88,7 +88,8 @@ telefuser/
 - Dense and MoE LingBot-Video requests use structured JSON captions. Spatial height and width must be divisible by 16: the Wan VAE downsamples by 8 and the DiT uses a spatial patch size of 2.
 - TI2V conditions are independent Qwen3-VL visual tokens and a VAE clean frame-zero latent. Preserve both paths and reapply the latent condition after every denoising step.
 - The MoE refiner is a separately loaded stage. For a shared GPU, release/offload base stages before loading it, and retain the native RGB handoff rather than introducing an MP4 round trip.
-- The sorted eager MoE path is the validated single-GPU correctness implementation. Grouped-GEMM, FP8, and distributed execution require separate parity and benchmark evidence before being enabled.
+- The sorted eager MoE path is the validated single-GPU correctness implementation. Four-GPU MoE uses native grouped GEMM when `torch._grouped_mm` is available and retains sorted eager as an explicit fallback. FP8 and expert parallelism require separate parity and benchmark evidence before being enabled.
+- Distributed LingBot base sampling keeps the complete scheduler loop inside each stage worker. Do not move per-step latents through the parent process. Spawned distributed workers use one PyTorch intra-op CPU thread per rank, matching `torchrun` and avoiding host launch-thread oversubscription.
 
 ### Layer Architecture Principles For Models
 

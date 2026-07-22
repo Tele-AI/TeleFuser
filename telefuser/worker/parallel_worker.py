@@ -69,11 +69,15 @@ def _worker_loop(
     try:
         device = stage.device
         if world_size > 1:
+            parallel_config = stage.model_runtime_config.parallel_config
+            # Match torchrun's per-rank default. Letting every spawned worker
+            # inherit the host-wide intra-op pool oversubscribes CPU launch
+            # threads and can leave accelerators idle between eager kernels.
+            torch.set_num_threads(parallel_config.worker_intra_op_threads)
             os.environ["RANK"] = str(rank)
             os.environ["WORLD_SIZE"] = str(world_size)
             os.environ["MASTER_ADDR"] = "localhost"
             os.environ["MASTER_PORT"] = str(master_port)
-            parallel_config = stage.model_runtime_config.parallel_config
             device_ids = parallel_config.device_ids
             device_id = rank
             if device_ids is not None:
@@ -118,7 +122,8 @@ def _worker_loop(
                     args = [args]
                 y = getattr(stage, name)(*args, **kwargs)
             del kwargs, args
-            current_platform.empty_cache()
+            if getattr(stage, "empty_cache_after_call", True):
+                current_platform.empty_cache()
             # Always output results when world_size=1
             if world_size == 1 or rank == 0:
                 queue_out.put(y)
