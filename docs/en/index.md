@@ -68,6 +68,7 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 | FlashVSR | VSR | Video super-resolution |
 | LiveAct | S2V | Speech-to-video |
 | LongCat-Video | T2V, I2V | Long video generation |
+| LingBot-Video | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |
 
 ### Image Generation
 

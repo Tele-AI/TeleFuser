@@ -6,7 +6,7 @@ TeleFuser is a high-performance framework for efficient multimodal generation mo
 
 **Tech Stack:** Python 3.10-3.13, PyTorch 2.6+, CUDA 12.8+, FastAPI, Ray
 
-**Supported Models:** WanVideo (Wan2.1/2.2), Qwen-Image, Z-Image, FlashVSR, HunyuanVideo, Flux2 Klein, LTX Video, LiveAct, LongCat-Video, LingBot-World
+**Supported Models:** WanVideo (Wan2.1/2.2), Qwen-Image, Z-Image, FlashVSR, HunyuanVideo, Flux2 Klein, LTX Video, LiveAct, LongCat-Video, LingBot-World, LingBot-Video
 
 ## Commands
 
@@ -43,6 +43,7 @@ telefuser/
 │   ├── longcat_video/ # LongCat-Video: T2V, I2V
 │   ├── lingbot_world_fast/  # LingBot shared causal-fast engine
 │   ├── lingbot_world_v2/    # LingBot-World v2 causal-fast facade
+│   ├── lingbot_video/      # LingBot-Video Dense/MoE/refiner runtime
 │   └── common/       # Shared pipeline utilities
 ├── models/           # Model architectures: DiT, VAE, text encoders
 ├── ops/              # Custom operations: attention, FFN, normalization
@@ -81,6 +82,13 @@ telefuser/
   and memory without retaining duration-sized tensor lists.
 - Interpret chunk period as output cadence: real-time operation requires p95 to stay
   below the media duration represented by one chunk, with margin for transport and encoding.
+
+### LingBot-Video Single-Process Runtime
+
+- Dense and MoE LingBot-Video requests use structured JSON captions. Spatial height and width must be divisible by 16: the Wan VAE downsamples by 8 and the DiT uses a spatial patch size of 2.
+- TI2V conditions are independent Qwen3-VL visual tokens and a VAE clean frame-zero latent. Preserve both paths and reapply the latent condition after every denoising step.
+- The MoE refiner is a separately loaded stage. For a shared GPU, release/offload base stages before loading it, and retain the native RGB handoff rather than introducing an MP4 round trip.
+- The sorted eager MoE path is the validated single-GPU correctness implementation. Grouped-GEMM, FP8, and distributed execution require separate parity and benchmark evidence before being enabled.
 
 ### Layer Architecture Principles For Models
 

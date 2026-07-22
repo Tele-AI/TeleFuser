@@ -1,0 +1,88 @@
+"""Tests for LingBot checkpoint assembly and memory lifecycle defaults."""
+
+from __future__ import annotations
+
+import sys
+import types
+
+from telefuser.core.config import WeightOffloadType
+from telefuser.pipelines.lingbot_video import runtime
+
+
+class _FakeModule:
+    def __init__(self) -> None:
+        self.device: str | None = None
+
+    def to(self, device: str) -> _FakeModule:
+        self.device = device
+        return self
+
+    def eval(self) -> _FakeModule:
+        return self
+
+    def set_attention_config(self, attention_config) -> None:
+        self.attention_config = attention_config
+
+
+def test_moe_runtime_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> None:
+    loaded_transformers: list[tuple[object, str]] = []
+
+    def load_dense(path, *, device: str, torch_dtype):
+        del torch_dtype
+        loaded_transformers.append((path, device))
+        return _FakeModule()
+
+    def load_moe(path, *, device: str, torch_dtype):
+        del torch_dtype
+        loaded_transformers.append((path, device))
+        return _FakeModule()
+
+    class _Processor:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args, kwargs
+            return object()
+
+    class _TextEncoder(_FakeModule):
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args, kwargs
+            return cls()
+
+    class _VAE(_FakeModule):
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args, kwargs
+            return cls()
+
+    class _Scheduler:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args, kwargs
+            return cls()
+
+    diffusers = types.ModuleType("diffusers")
+    diffusers.AutoencoderKLWan = _VAE
+    transformers = types.ModuleType("transformers")
+    transformers.AutoProcessor = _Processor
+    transformers.Qwen3VLForConditionalGeneration = _TextEncoder
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setattr(runtime, "load_lingbot_video_dense_transformer", load_dense)
+    monkeypatch.setattr(runtime, "load_lingbot_video_moe_transformer", load_moe)
+    monkeypatch.setattr(runtime, "load_lingbot_video_model_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime.FlowUniPCMultistepScheduler, "from_pretrained", _Scheduler.from_pretrained)
+
+    base = runtime.build_lingbot_video_pipeline(tmp_path, device="cuda", variant="moe")
+    refiner = runtime.build_lingbot_video_refiner_stage(tmp_path, device="cuda")
+
+    assert loaded_transformers == [(tmp_path / "transformer", "cpu"), (tmp_path / "refiner", "cpu")]
+    assert base.model_dir == str(tmp_path)
+    assert base.variant == "moe"
+    assert (
+        base.denoising_stage.transformer.attention_config is base.denoising_stage.model_runtime_config.attention_config
+    )
+    assert base.denoising_stage.model_runtime_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    assert (
+        refiner.denoising_stage.model_runtime_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    )

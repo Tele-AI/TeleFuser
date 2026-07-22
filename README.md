@@ -195,6 +195,7 @@ telefuser/
 | `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
+| `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Precision-first Dense/MoE generation with a single-process base-to-refiner path; see [docs/en/lingbot_video.md](docs/en/lingbot_video.md) |
 
 ### Image Generation and Other Multimodal Pipelines
 

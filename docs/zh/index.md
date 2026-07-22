@@ -67,6 +67,7 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 | FlashVSR | VSR | 视频超分辨率 |
 | LiveAct | S2V | 语音转视频 |
 | LongCat-Video | T2V, I2V | 长视频生成 |
+| LingBot-Video | T2I, T2V, TI2V, MoE refiner | 精度优先的 Dense/MoE 视频生成 |
 
 ### 图像生成
 
