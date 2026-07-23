@@ -253,6 +253,17 @@ compute stream to wait for the copy stream after every prefetch made the same FP
 `prefetch_size=2` configuration take 6.039 s, versus 4.966 s on the normal asynchronous path.
 This demonstrates effective H2D/compute overlap in the normal path.
 
+#### Original Cache-DiT Comparison
+
+To compare scheduling granularity, the [original Cache-DiT `layerwise_cpu_offload` implementation](https://github.com/vipshop/cache-dit/blob/main/src/cache_dit/offload/layerwise.py) was applied to the full DiT with its default leaf-module selection. Under the same FP8 model, input, warmup, and timing protocol, Cache-DiT selected 1,087 leaf targets, kept 543 persistent targets (about 50%), and used `transfer_buckets=4` with its bounded prefetch window.
+
+| Implementation | DiT time | Peak allocated VRAM |
+|---|---:|---:|
+| TeleFuser block-level `ASYNC_CPU_OFFLOAD`, `prefetch_size=4` | 4.570 s | 33.50 GiB |
+| Original Cache-DiT leafwise, `transfer_buckets=4` | 9.695 s | 31.20 GiB |
+
+Cache-DiT used 2.30 GiB less peak VRAM, yet TeleFuser's DiT was still 2.12× faster (52.9% less time). For Qwen-Image, using transformer blocks as the transfer, buffer-reuse, and prefetch unit avoids the small-grained H2D, parameter-rebinding, and allocation overhead of 1,087 leaf-module targets.
+
 #### Base BF16 Qwen-Image
 
 Qwen-Image-2512 BF16 weights, 1664×928, 50 steps, and CFG=4:

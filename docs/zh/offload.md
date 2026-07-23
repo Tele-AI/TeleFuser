@@ -248,6 +248,17 @@ Qwen-Image-2512-Lightning FP8 权重，1328×1328，16 steps，CFG=1，`offload_
 copy stream 的 DiT 时间为 6.039 s，而正常异步路径为 4.966 s。这证明 H2D 传输与计算在正常
 路径中存在有效重叠。
 
+#### 原始 Cache-DiT 对比
+
+为比较调度粒度，使用 [Cache-DiT 的原始 `layerwise_cpu_offload` 实现](https://github.com/vipshop/cache-dit/blob/main/src/cache_dit/offload/layerwise.py)，让它按默认规则选择整个 DiT 的叶子模块。相同 FP8 模型、输入、预热和计时口径下，Cache-DiT 选择了 1087 个叶子 target，保留 543 个 persistent target（约 50%），并使用 `transfer_buckets=4` 和受限预取窗口。
+
+| 实现 | DiT 时间 | 峰值已分配显存 |
+|---|---:|---:|
+| TeleFuser block 级 `ASYNC_CPU_OFFLOAD`，`prefetch_size=4` | 4.570 s | 33.50 GiB |
+| 原始 Cache-DiT leafwise，`transfer_buckets=4` | 9.695 s | 31.20 GiB |
+
+Cache-DiT 峰值显存少 2.30 GiB，但 TeleFuser 的 DiT 仍快 2.12×（时间减少 52.9%）。该对比说明对 Qwen-Image 而言，以 transformer block 为传输、缓冲复用和预取单位，比 1087 个叶子模块的小粒度 H2D、参数重绑定和分配开销更低。
+
 #### BF16 基础 Qwen-Image
 
 Qwen-Image-2512 BF16 权重，1664×928，50 steps，CFG=4：
