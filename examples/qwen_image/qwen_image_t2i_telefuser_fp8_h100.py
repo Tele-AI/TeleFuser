@@ -71,8 +71,13 @@ def get_pipeline(model_root=PPL_CONFIG["model_root"]):
     text_encoder_paths = [os.path.join(model_root, p) for p in PPL_CONFIG["text_encoder_path_list"]]
     tokenizer_path = os.path.join(model_root, PPL_CONFIG["tokenizer_path"])
 
+    quant_config = QuantConfig(
+        enabled=True,
+        quant_type=QuantType.TORCHAO_FP8,
+        kernel_backend=QuantKernelBackend.TORCHAO,
+    )
     mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
-    mm.load_model(dit_paths, device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(dit_paths, device="cuda", torch_dtype=torch.bfloat16, quant_config=quant_config)
     mm.load_model(vae_paths, device="cpu", torch_dtype=torch.bfloat16)
     mm.load_model(text_encoder_paths, device="cpu", torch_dtype=torch.bfloat16)
     mm.load_from_huggingface(tokenizer_path, "transformers", module_name="tokenizer")
@@ -81,11 +86,6 @@ def get_pipeline(model_root=PPL_CONFIG["model_root"]):
     pipe_config = QwenImagePipelineConfig()
     pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     pipe_config.dit_config.offload_config.offload_type = WeightOffloadType.NO_CPU_OFFLOAD
-    pipe_config.dit_config.quant_config = QuantConfig(
-        enabled=True,
-        quant_type=QuantType.TORCHAO_FP8,
-        kernel_backend=QuantKernelBackend.TORCHAO,
-    )
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
     pipeline.init(mm, pipe_config)
     return pipeline
