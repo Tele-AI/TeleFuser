@@ -4,12 +4,6 @@ Telefuser users bitsandbytes as its backend of NF4 weight-only linear quantizati
 
 First, install Telefuser as [here](https://github.com/Tele-AI/TeleFuser#install).
 
-Then, install bitsandbytes:
-
-```bash
-pip install -U bitsandbytes
-```
-
 Next, download `Qwen-Image-2512` model to your `TF_MODEL_ZOO_PATH` (or specify the model path to `--model_root`), and run the NF4 `Qwen-Image-2512` example:
 
 ```bash
