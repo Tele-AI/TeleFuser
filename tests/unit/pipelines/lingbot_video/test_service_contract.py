@@ -37,9 +37,8 @@ def _load_example(variant: str) -> ModuleType:
 def test_examples_expose_cli_and_service_entrypoints(variant: str) -> None:
     module = _load_example(variant)
 
-    for name in ("PPL_CONFIG", "CONTRACT", "get_pipeline", "run", "run_with_file"):
+    for name in ("PPL_CONFIG", "PIPELINE_CONTRACT", "get_pipeline", "run", "run_with_file"):
         assert hasattr(module, name)
-    assert module.PIPELINE_CONTRACT is module.CONTRACT
     assert module.PPL_CONFIG["variant"] == variant
 
     prompt_payload = json.loads(module.PPL_CONFIG["prompt"])
