@@ -34,7 +34,6 @@ from telefuser.pipelines.lingbot_video import (
     LingBotVideoVAEEncodeStage,
     default_negative_caption,
     load_lingbot_video_model_config,
-    load_lingbot_video_moe_transformer,
     load_refiner_first_frame,
     num_frames_from_duration,
     parse_lingbot_video_prompt,
@@ -100,20 +99,7 @@ def _build_contract() -> dict[str, Any]:
     )
 
 
-CONTRACT = _build_contract()
-PIPELINE_CONTRACT = CONTRACT
-
-
-def _resolve_runtime_device(device: str, parallel_config: ParallelConfig) -> tuple[str, int]:
-    """Resolve the torchrun-local device or the parent device for native workers."""
-    if parallel_config.world_size == 1:
-        parsed = torch.device(device)
-        return device, parsed.index or 0
-    if torch.device(device).type != "cuda":
-        raise ValueError("LingBot distributed inference requires CUDA devices")
-    local_rank = torch.cuda.current_device()
-    torch.cuda.set_device(local_rank)
-    return f"cuda:{local_rank}", local_rank
+PIPELINE_CONTRACT = _build_contract()
 
 
 def build_pipeline(
@@ -144,15 +130,15 @@ def build_pipeline(
         raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
     if parallel_config.enable_fsdp and cpu_offload:
         raise ValueError("LingBot FSDP inference requires cpu_offload=False")
-    device, device_id = _resolve_runtime_device(device, parallel_config)
+    runtime_device = torch.device(device)
     root = Path(model_root)
     transformer_dir = root / "transformer"
     offload_config = OffloadConfig(
         offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD if cpu_offload else WeightOffloadType.NO_CPU_OFFLOAD
     )
     runtime_config = ModelRuntimeConfig(
-        device_type=torch.device(device).type,
-        device_id=device_id,
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
         torch_dtype=torch_dtype,
         attention_config=attention_config or AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA),
         offload_config=offload_config,
@@ -165,19 +151,18 @@ def build_pipeline(
         raise ValueError("LingBot MoE expert_backend must be 'auto', 'fp8', 'grouped_mm', or 'sorted'")
     if expert_backend == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
         raise RuntimeError("LingBot grouped_mm requires a recent CUDA-enabled PyTorch build")
-    transformer = load_lingbot_video_moe_transformer(transformer_dir, device="cpu", torch_dtype=torch_dtype)
+    module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
+    module_manager.load_model(str(transformer_dir), name="transformer", torch_dtype=torch_dtype)
+    transformer = module_manager.fetch_module("transformer")
+    if transformer is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {transformer_dir}")
+    transformer.promote_stability_layers_to_fp32()
     if expert_backend == "fp8":
         if not hasattr(torch, "_scaled_mm"):
             raise RuntimeError("LingBot FP8 experts require torch._scaled_mm")
         transformer.quantize_experts_fp8_()
     transformer.set_expert_execution_backend(expert_backend)
 
-    module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
-    module_manager.add_module(
-        transformer,
-        name="transformer",
-        path=str(transformer_dir),
-    )
     module_manager.load_from_huggingface(
         str(root / "processor"),
         module_source="transformers",
@@ -248,14 +233,14 @@ def build_refiner(
         raise ValueError("LingBot CFG parallel and batch CFG are mutually exclusive")
     if parallel_config.enable_fsdp and cpu_offload:
         raise ValueError("LingBot refiner FSDP inference requires cpu_offload=False")
-    device, device_id = _resolve_runtime_device(device, parallel_config)
+    runtime_device = torch.device(device)
     root = Path(model_root)
     offload_config = OffloadConfig(
         offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD if cpu_offload else WeightOffloadType.NO_CPU_OFFLOAD
     )
     runtime_config = ModelRuntimeConfig(
-        device_type=torch.device(device).type,
-        device_id=device_id,
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
         torch_dtype=torch_dtype,
         attention_config=attention_config or AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA),
         offload_config=offload_config,
@@ -266,19 +251,18 @@ def build_refiner(
         expert_backend = "grouped_mm" if parallel_config.world_size > 1 else "sorted"
     if expert_backend not in {"fp8", "grouped_mm", "sorted"}:
         raise ValueError("LingBot refiner expert_backend must be 'auto', 'fp8', 'grouped_mm', or 'sorted'")
-    transformer = load_lingbot_video_moe_transformer(root / "refiner", device="cpu", torch_dtype=torch_dtype)
+    module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
+    module_manager.load_model(str(root / "refiner"), name="transformer", torch_dtype=torch_dtype)
+    transformer = module_manager.fetch_module("transformer")
+    if transformer is None:
+        raise RuntimeError(f"Unable to load LingBot-Video refiner from {root / 'refiner'}")
+    transformer.promote_stability_layers_to_fp32()
     if expert_backend == "fp8":
         if not hasattr(torch, "_scaled_mm"):
             raise RuntimeError("LingBot FP8 experts require torch._scaled_mm")
         transformer.quantize_experts_fp8_()
     transformer.set_expert_execution_backend(expert_backend)
 
-    module_manager = ModuleManager(torch_dtype=torch_dtype, device="cpu")
-    module_manager.add_module(
-        transformer,
-        name="transformer",
-        path=str(root / "refiner"),
-    )
     module_manager.load_from_huggingface(
         str(root / "vae"),
         module_source="diffusers",

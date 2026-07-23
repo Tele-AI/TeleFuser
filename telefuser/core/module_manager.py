@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
 from typing import Any
 
@@ -225,6 +226,19 @@ class ModuleManager:
         """
         device = device or self.device
         torch_dtype = torch_dtype or self.torch_dtype
+
+        # Resolve Diffusers-style checkpoint directories to their safetensors
+        # payloads. Sharded checkpoints are merged below, just like an
+        # explicitly supplied list of checkpoint files.
+        if isinstance(file_path, str) and os.path.isdir(file_path):
+            index_path = os.path.join(file_path, "diffusion_pytorch_model.safetensors.index.json")
+            single_file = os.path.join(file_path, "diffusion_pytorch_model.safetensors")
+            if os.path.isfile(index_path):
+                with open(index_path, encoding="utf-8") as handle:
+                    weight_map = json.load(handle)["weight_map"]
+                file_path = [os.path.join(file_path, shard) for shard in sorted(set(weight_map.values()))]
+            elif os.path.isfile(single_file):
+                file_path = single_file
 
         # Expand wildcards if present
         if isinstance(file_path, str) and ("*" in file_path or "?" in file_path):

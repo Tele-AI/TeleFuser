@@ -29,14 +29,12 @@ class _FakeModule:
     def set_expert_execution_backend(self, backend: str) -> None:
         self.expert_execution_backend = backend
 
+    def promote_stability_layers_to_fp32(self) -> None:
+        self.promoted_stability_layers = True
+
 
 def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> None:
-    loaded_transformers: list[tuple[object, str]] = []
-
-    def load_moe(path, *, device: str, torch_dtype):
-        del torch_dtype
-        loaded_transformers.append((path, device))
-        return _FakeModule()
+    loaded_transformers: list[tuple[str, str | None]] = []
 
     class _Processor:
         @classmethod
@@ -69,13 +67,19 @@ def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> Non
     transformers.Qwen3VLForConditionalGeneration = _TextEncoder
     monkeypatch.setitem(sys.modules, "diffusers", diffusers)
     monkeypatch.setitem(sys.modules, "transformers", transformers)
-    monkeypatch.setattr(moe_example, "load_lingbot_video_moe_transformer", load_moe)
     monkeypatch.setattr(
         moe_example,
         "load_lingbot_video_model_config",
         lambda *args, **kwargs: LingBotVideoModelConfig(variant="moe", num_experts=2, top_k=1),
     )
     monkeypatch.setattr(moe_example.FlowUniPCMultistepScheduler, "from_pretrained", _Scheduler.from_pretrained)
+
+    def load_model(self, file_path, *, name=None, **kwargs) -> None:
+        del kwargs
+        loaded_transformers.append((file_path, name))
+        self.add_module(_FakeModule(), name=name or "transformer", path=file_path)
+
+    monkeypatch.setattr(moe_example.ModuleManager, "load_model", load_model)
 
     def load_from_huggingface(self, module_path, *, module_name=None, module_class=None, **kwargs) -> None:
         del kwargs
@@ -91,7 +95,10 @@ def test_moe_example_defaults_to_cpu_stage_offload(tmp_path, monkeypatch) -> Non
     base = moe_example.build_pipeline(tmp_path, device="cuda")
     refiner = moe_example.build_refiner(tmp_path, device="cuda")
 
-    assert loaded_transformers == [(tmp_path / "transformer", "cpu"), (tmp_path / "refiner", "cpu")]
+    assert loaded_transformers == [
+        (str(tmp_path / "transformer"), "transformer"),
+        (str(tmp_path / "refiner"), "transformer"),
+    ]
     assert base.variant == "moe"
     assert base.denoising_stage.transformer.expert_execution_backend == "sorted"
     assert (

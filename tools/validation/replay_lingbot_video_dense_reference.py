@@ -20,7 +20,6 @@ from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_video.data import preprocess_ti2v_image
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage, reinject_ti2v_condition
-from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_dense_transformer
 from telefuser.pipelines.lingbot_video.text_encoding import LingBotVideoTextEncodingStage
 from telefuser.pipelines.lingbot_video.vae import (
     LingBotVideoVAEDecodeStage,
@@ -200,9 +199,12 @@ def _load_replay_runtime(
         raise RuntimeError("Dense replay requires diffusers AutoencoderKLWan") from exc
     device = torch.device("cuda")
     runtime_config = ModelRuntimeConfig(device_type="cuda", torch_dtype=torch.bfloat16)
-    transformer = load_lingbot_video_dense_transformer(model_dir / "transformer", device=device)
     module_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
-    module_manager.add_module(transformer, name="transformer")
+    module_manager.load_model(str(model_dir / "transformer"), name="transformer")
+    transformer = module_manager.fetch_module("transformer")
+    if transformer is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {model_dir / 'transformer'}")
+    transformer.promote_stability_layers_to_fp32()
     denoising = LingBotVideoDenoisingStage("transformer", module_manager, runtime_config)
     vae = AutoencoderKLWan.from_pretrained(model_dir / "vae", torch_dtype=torch.float32).to(device).eval()
     return runtime_config, denoising, vae
