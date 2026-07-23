@@ -63,7 +63,7 @@ PPL_CONFIG = dict(
     target_fps=16,
     max_duration_seconds=5.0,
     attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
-    enable_fsdp=True,
+    enable_fsdp=False,
     local_attn_size=-1,
     sink_size=0,
     timestep_indices=(0, 179, 358, 679),
@@ -76,14 +76,30 @@ PPL_CONFIG = dict(
 )
 
 
+def _resolve_stage_devices(total_gpu_count: int) -> tuple[list[int], int, int]:
+    """Return DiT, VAE encode, and VAE decode devices for available GPUs."""
+    if total_gpu_count < 1:
+        raise ValueError(f"parallelism must be positive, got {total_gpu_count}")
+    if total_gpu_count in {2, 4}:
+        return list(range(total_gpu_count)), 0, 1
+    if total_gpu_count == 5:
+        return [0, 1, 2, 3], 4, 4
+    if total_gpu_count == 6:
+        return [0, 1, 2, 3, 4], 5, 5
+    return (
+        list(range(total_gpu_count)),
+        int(PPL_CONFIG["vae_encode_device_id"]),
+        int(PPL_CONFIG["vae_decode_device_id"]),
+    )
+
+
 def get_pipeline(
     parallelism: int = PPL_CONFIG["parallelism"],
     model_root: str | None = None,
     fast_model_root: str | None = None,
 ) -> LingBotWorldFastPipeline:
     """Load LingBot-World-Fast for offline chunked generation."""
-    if parallelism < 1:
-        raise ValueError(f"parallelism must be positive, got {parallelism}")
+    dit_device_ids, vae_encode_device, vae_decode_device = _resolve_stage_devices(parallelism)
     model_root_path = Path(model_root).expanduser() if model_root else None
     fast_model_root_path = Path(fast_model_root).expanduser() if fast_model_root else None
     vae_path = str(model_root_path / "Wan2.1_VAE.pth") if model_root_path else PPL_CONFIG["vae_path"]
@@ -125,29 +141,33 @@ def get_pipeline(
         LingBotWorldFastPipelineConfig(
             vae_encode_config=ModelRuntimeConfig(
                 device_type="cuda",
-                device_id=int(PPL_CONFIG["vae_encode_device_id"]),
+                device_id=vae_encode_device,
                 torch_dtype=PPL_CONFIG["vae_torch_dtype"],
-                parallel_config=ParallelConfig(device_ids=[int(PPL_CONFIG["vae_encode_device_id"])]),
+                parallel_config=ParallelConfig(device_ids=[vae_encode_device]),
             ),
             vae_decode_config=ModelRuntimeConfig(
                 device_type="cuda",
-                device_id=int(PPL_CONFIG["vae_decode_device_id"]),
+                device_id=vae_decode_device,
                 torch_dtype=PPL_CONFIG["vae_torch_dtype"],
-                parallel_config=ParallelConfig(device_ids=[int(PPL_CONFIG["vae_decode_device_id"])]),
+                parallel_config=ParallelConfig(device_ids=[vae_decode_device]),
             ),
-            text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=0, torch_dtype=dtype),
-            dit_torch_dtype=dtype,
+            text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=dit_device_ids[0], torch_dtype=dtype),
+            dit_config=ModelRuntimeConfig(
+                device_type="cuda",
+                device_id=dit_device_ids[0],
+                torch_dtype=dtype,
+                attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
+                parallel_config=ParallelConfig(
+                    device_ids=dit_device_ids if len(dit_device_ids) > 1 else None,
+                    sp_ulysses_degree=len(dit_device_ids),
+                    enable_fsdp=PPL_CONFIG["enable_fsdp"] and len(dit_device_ids) > 1,
+                ),
+            ),
             control_type=PPL_CONFIG["control_mode"],
             max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]],
             local_attn_size=PPL_CONFIG["local_attn_size"],
             sink_size=PPL_CONFIG["sink_size"],
             timestep_indices=PPL_CONFIG["timestep_indices"],
-            attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
-            parallel_config=ParallelConfig(
-                device_ids=list(range(parallelism)) if parallelism > 1 else None,
-                sp_ulysses_degree=parallelism,
-                enable_fsdp=PPL_CONFIG["enable_fsdp"] and parallelism > 1,
-            ),
         ),
     )
     return pipeline
@@ -216,7 +236,7 @@ def run(
     "--gpu_num",
     default=PPL_CONFIG["parallelism"],
     type=int,
-    help="Number of GPUs used for Ulysses sequence parallelism",
+    help="Total GPUs; selects the LingBot VAE and DiT placement strategy",
 )
 @click.option("--image_path", default=DEFAULT_IMAGE_PATH, type=click.Path(exists=True))
 @click.option("--action_path", default=DEFAULT_ACTION_PATH, type=click.Path(exists=True, file_okay=False))

@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from telefuser.core.config import ModelRuntimeConfig
 from telefuser.pipelines.lingbot_world_fast.pipeline import LingBotWorldFastPipeline, LingBotWorldFastPipelineConfig
 
 
@@ -38,9 +39,7 @@ def test_pipeline_consumes_preloaded_lingbot_components_from_module_manager(tmp_
         pipeline = LingBotWorldFastPipeline(device="cpu", torch_dtype=torch.float32)
         pipeline.init(
             module_manager,
-            LingBotWorldFastPipelineConfig(
-                dit_torch_dtype=torch.float32,
-            ),
+            LingBotWorldFastPipelineConfig(dit_config=ModelRuntimeConfig(torch_dtype=torch.float32)),
         )
 
     assert module_manager.load_model.call_count == 0

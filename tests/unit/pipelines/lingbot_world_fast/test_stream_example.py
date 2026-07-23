@@ -50,14 +50,14 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
     assert config.control_type == "cam"
     assert config.max_area == 480 * 832
     assert config.local_attn_size == -1
-    assert config.attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90
-    assert config.parallel_config.device_ids == [0, 1, 2, 3]
-    assert config.parallel_config.sp_ulysses_degree == 4
-    assert config.parallel_config.enable_fsdp is offline_example.PPL_CONFIG["enable_fsdp"]
+    assert config.dit_config.attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.dit_config.parallel_config.sp_ulysses_degree == 4
+    assert config.dit_config.parallel_config.enable_fsdp is offline_example.PPL_CONFIG["enable_fsdp"]
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 0
-    assert config.vae_decode_config.parallel_config.device_ids == [0]
+    assert config.vae_decode_config.device_id == 1
+    assert config.vae_decode_config.parallel_config.device_ids == [1]
     load_calls = module_manager.load_model.call_args_list
     assert [call.args[0] for call in load_calls[:2]] == [
         "/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
@@ -66,6 +66,13 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
     assert load_calls[2].args[0] == [
         f"/models/lingbot-world-fast/model-{index:05d}-of-00016.safetensors" for index in range(1, 17)
     ]
+
+
+def test_unified_example_resolves_fixed_gpu_layouts() -> None:
+    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, 1)
+    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, 1)
+    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, 4)
+    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, 5)
 
 
 def test_unified_example_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:

@@ -129,7 +129,7 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--gpu_num` | `1` | Number of GPUs used for Ulysses sequence parallelism |
+| `--gpu_num` | `1` | Total visible GPUs; selects the LingBot VAE and DiT placement strategy |
 | `--model_root` | `${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B` | Wan2.2 I2V base model directory |
 | `--fast_model_root` | `${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-fast` | LingBot-World-Fast model directory |
 | `--image_path` | Bundled `image.jpg` | Input image path |
@@ -166,13 +166,33 @@ through `PPL_CONFIG`; `stream-serve --gpu-num` is passed to `get_service(gpu_num
 
 ### Scheduler and Stage Placement
 
-LingBot offline and stream-server execution share the actor-based streaming scheduler.
-The bundled examples place VAE encode and decode on GPU 0, while direct
-`LingBotWorldFastPipelineConfig` users may set `vae_encode_config` and
-`vae_decode_config` independently. The scheduler does not infer a resource
-group from overlapping device IDs, so VAE encode, DiT, and VAE decode may
-overlap on one GPU. If a topology runs out of memory, move stages to different
-devices.
+LingBot offline and stream-server execution share the actor-based streaming scheduler. The bundled examples use
+fixed placement for the following total GPU counts:
+
+| Total GPUs | DiT GPUs | VAE encode GPU | VAE decode GPU |
+| --- | --- | --- | --- |
+| 2 | `0-1` | `0` | `1` |
+| 4 | `0-3` | `0` | `1` |
+| 5 | `0-3` | `4` | `4` |
+| 6 | `0-4` | `5` | `5` |
+
+For other counts, the examples retain the PPL-configured VAE devices and assign all visible GPUs to DiT. Direct
+`LingBotWorldFastPipelineConfig` users may set `vae_encode_config`, `vae_decode_config`, and `dit_config` independently.
+
+### H100 Compile Benchmark
+
+The v2 example was measured at 480p (832x464 internal size), 77 output frames, five latent chunks of four frames,
+BF16 DiT, FP32 VAE, SageAttention SM90, `torch.compile` enabled, and FSDP disabled. Each value is the mean from a
+second session after a complete warmup session. Pure DiT measures synchronous `denoise_and_update_cache`; chunk
+period is the mean interval between decoded chunk outputs while encode, DiT, and decode overlap.
+
+| Total H100 GPUs | Pure DiT seconds/chunk | Overlapped chunk period seconds/chunk |
+| --- | --- | --- |
+| 2 | 1.587 | 2.096 |
+| 4 | 0.911 | 1.615 |
+
+The scheduler does not infer a resource group from overlapping device IDs, so VAE encode, DiT, and VAE decode may
+overlap on a shared GPU.
 
 See the [streaming scheduler guide](../../docs/en/stream_scheduler.md) for
 architecture, metric definitions, and lifecycle guarantees.

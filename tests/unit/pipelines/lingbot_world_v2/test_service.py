@@ -30,12 +30,13 @@ def test_v2_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -
     assert config.local_attn_size == 18
     assert config.sink_size == 6
     assert config.timestep_indices == (0, 250, 500, 750)
-    assert config.attention_config.attn_impl == AttnImplType.TORCH_CUDNN
-    assert config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.dit_config.attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90
+    assert config.dit_config.compile_config.enabled is True
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3]
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 0
-    assert config.vae_decode_config.parallel_config.device_ids == [0]
+    assert config.vae_decode_config.device_id == 1
+    assert config.vae_decode_config.parallel_config.device_ids == [1]
     load_calls = module_manager.load_model.call_args_list
     assert [call.args[0] for call in load_calls[:2]] == [
         "/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
@@ -62,12 +63,19 @@ def test_v2_offline_multi_gpu_defaults_to_the_shared_vae_worker() -> None:
         )
 
     config = pipeline.init.call_args.args[1]
-    assert config.parallel_config.device_ids == [0, 1, 2, 3]
-    assert config.parallel_config.sp_ulysses_degree == 4
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.dit_config.parallel_config.sp_ulysses_degree == 4
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 0
-    assert config.vae_decode_config.parallel_config.device_ids == [0]
+    assert config.vae_decode_config.device_id == 1
+    assert config.vae_decode_config.parallel_config.device_ids == [1]
+
+
+def test_v2_unified_example_resolves_fixed_gpu_layouts() -> None:
+    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, 1)
+    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, 1)
+    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, 4)
+    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, 5)
 
 
 def test_v2_unified_example_uses_ppl_configured_vae_stage_devices_independently() -> None:
@@ -80,13 +88,13 @@ def test_v2_unified_example_uses_ppl_configured_vae_stage_devices_independently(
         patch.object(offline_example, "LingBotWorldV2Pipeline", return_value=pipeline),
     ):
         offline_example.get_pipeline(
-            parallelism=4,
+            parallelism=3,
             model_root="/models/Wan2.2-I2V-A14B",
             v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
         )
 
     config = pipeline.init.call_args.args[1]
-    assert config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2]
     assert config.vae_encode_config.device_id == 5
     assert config.vae_encode_config.parallel_config.device_ids == [5]
     assert config.vae_decode_config.device_id == 6

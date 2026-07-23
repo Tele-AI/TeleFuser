@@ -62,6 +62,9 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
         self._cache_registry: dict[int, _DenoisingCacheState] = {}
+        if model_runtime_config.parallel_config.world_size == 1 and model_runtime_config.compile_config.enabled:
+            logger.info(f"Enabling torch.compile for {self.name}")
+            self.dit = torch.compile(self.dit, **model_runtime_config.compile_config.get_compile_kwargs())
 
     def parallel_models(self) -> None:
         """Configure Ulysses SP and optional FSDP inside a ParallelWorker."""
@@ -81,6 +84,9 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 buffer_dtype=self.torch_dtype,
             )
             self.onload_models_flag = True
+        if self.model_runtime_config.compile_config.enabled:
+            logger.info(f"Enabling torch.compile for {self.name}")
+            self.dit = torch.compile(self.dit, **self.model_runtime_config.compile_config.get_compile_kwargs())
 
     def _init_self_kv_cache(
         self,

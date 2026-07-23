@@ -14,7 +14,7 @@ import torch
 from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
-from telefuser.core.config import AttentionConfig, ModelRuntimeConfig, ParallelConfig
+from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
 from telefuser.models.t5_tokenizer import HuggingfaceTokenizer
@@ -53,7 +53,7 @@ class LingBotWorldFastPipelineConfig:
     vae_encode_config: ModelRuntimeConfig = field(default_factory=_default_vae_stage_runtime_config)
     vae_decode_config: ModelRuntimeConfig = field(default_factory=_default_vae_stage_runtime_config)
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
-    dit_torch_dtype: torch.dtype = torch.bfloat16
+    dit_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     control_type: str = "cam"
     orig_height: int = 480
     orig_width: int = 832
@@ -61,8 +61,6 @@ class LingBotWorldFastPipelineConfig:
     local_attn_size: int = -1
     sink_size: int = 0
     timestep_indices: tuple[int, ...] = (0, 179, 358, 679)
-    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
-    attention_config: AttentionConfig = field(default_factory=AttentionConfig)
 
 
 class LingBotWorldFastPipeline(BasePipeline):
@@ -137,27 +135,22 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae_encode_worker = ParallelWorker(vae_encode_stage)
         self.vae_decode_worker = ParallelWorker(vae_decode_stage)
 
-        dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
+        dit_runtime_config = config.dit_config
+        dit_device = "cpu" if dit_runtime_config.parallel_config.world_size > 1 else self.device
         self.dit = module_manager.fetch_module("lingbot_world_fast_dit")
         if self.dit is None:
             raise ValueError("LingBot requires a loaded lingbot_world_fast_dit module")
-        self.dit = self.dit.to(dit_device, dtype=config.dit_torch_dtype).eval().requires_grad_(False)
+        self.dit = self.dit.to(dit_device, dtype=dit_runtime_config.torch_dtype).eval().requires_grad_(False)
         if self.dit.control_type != config.control_type:
             raise ValueError(
                 f"DiT checkpoint control type is {self.dit.control_type!r}, not requested {config.control_type!r}"
             )
         self.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
-        pipeline_device = torch.device(self.device)
-        dit_runtime_config = ModelRuntimeConfig(
-            device_type=pipeline_device.type,
-            device_id=pipeline_device.index or 0,
-            torch_dtype=config.dit_torch_dtype,
-            attention_config=config.attention_config,
-            parallel_config=config.parallel_config,
-        )
         denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", module_manager, dit_runtime_config)
-        self.denoise_stage = ParallelWorker(denoise_stage) if config.parallel_config.world_size > 1 else denoise_stage
+        self.denoise_stage = (
+            ParallelWorker(denoise_stage) if dit_runtime_config.parallel_config.world_size > 1 else denoise_stage
+        )
 
     @staticmethod
     def _validate_vae_stage_runtime_config(runtime_config: ModelRuntimeConfig) -> None:
