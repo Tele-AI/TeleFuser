@@ -37,6 +37,7 @@ class DitDenoisingStage(BaseStage):
         super().__init__(name, model_runtime_config)
         self.dit: QwenImageDiT = module_manager.fetch_module("qwen_image_dit")
         self.dit.set_attention_config(model_runtime_config.attention_config)
+        self.apply_model_quantization(self.dit)
         if self.model_runtime_config.offload_config.offload_type == WeightOffloadType.ASYNC_CPU_OFFLOAD:
             self.dit.enable_async_offload(self.device, offload_config=self.model_runtime_config.offload_config)
 
