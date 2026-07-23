@@ -1014,6 +1014,25 @@ class LingBotWorldFastService:
                     ),
                 )
 
+            admitted_prefetch = False
+            while (
+                state.active
+                and submitted < runtime.chunk_count
+                and streaming_runtime.can_submit_chunk(streaming_session)
+            ):
+                item = self._next_realtime_control(
+                    state,
+                    control_context,
+                    control_builder,
+                    submitted,
+                    emit_status,
+                    block=False,
+                )
+                if item is None:
+                    break
+                submit_chunk(item)
+                admitted_prefetch = True
+
             if runtime.current_chunk_index >= runtime.chunk_count or not state.active:
                 break
             if submitted == runtime.current_chunk_index:
@@ -1030,7 +1049,7 @@ class LingBotWorldFastService:
                 if not streaming_runtime.can_submit_chunk(streaming_session):
                     raise RuntimeError("LingBot actor ingress remained blocked without in-flight work")
                 submit_chunk(item)
-            elif not outputs:
+            elif not outputs and not admitted_prefetch:
                 streaming_runtime.wait_until_idle(streaming_session, timeout=0.05)
 
     def _worker_loop(self, session_id: str) -> None:

@@ -157,7 +157,7 @@ def test_actor_worker_does_not_submit_after_close_during_initialization() -> Non
     assert state.generation_session is runtime
 
 
-def test_actor_worker_does_not_prefetch_directional_chunks() -> None:
+def test_actor_worker_prefetches_directional_chunks_within_ingress_capacity() -> None:
     pipeline = MagicMock()
     runtime = LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)), chunk_size=1),
@@ -188,9 +188,10 @@ def test_actor_worker_does_not_prefetch_directional_chunks() -> None:
     with patch.object(service, "_next_realtime_control", return_value=(object(), ["w"])):
         service._run_actor_worker_loop(state, state.control_context, MagicMock(), MagicMock())
 
-    streaming_runtime.try_submit_chunk.assert_called_once_with(
-        streaming_session, 0, pipeline._resolve_control.return_value
-    )
+    assert streaming_runtime.try_submit_chunk.call_args_list == [
+        ((streaming_session, 0, pipeline._resolve_control.return_value), {}),
+        ((streaming_session, 1, pipeline._resolve_control.return_value), {}),
+    ]
 
 
 def test_direction_action_updates_state_and_wakes_worker() -> None:

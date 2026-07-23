@@ -5,6 +5,7 @@ from PIL import Image
 from click.testing import CliRunner
 
 from examples.lingbot import lingbot_world_v2_image_to_video_h100 as offline_example
+from telefuser.core.config import AttnImplType
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig
 
 
@@ -29,7 +30,7 @@ def test_v2_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -
     assert config.local_attn_size == 18
     assert config.sink_size == 6
     assert config.timestep_indices == (0, 250, 500, 750)
-    assert config.attention_config.attn_impl == offline_example.PPL_CONFIG["attn_impl"]
+    assert config.attention_config.attn_impl == AttnImplType.TORCH_CUDNN
     assert config.parallel_config.device_ids == [0, 1, 2, 3]
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
