@@ -12,7 +12,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from telefuser.core.model_registry import register_model_config
 from telefuser.ops.moe import fp8_expert_forward, grouped_expert_forward, quantize_expert_weight_fp8, route_topk
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 from .lingbot_video_dit import LingBotVideoBlock, LingBotVideoMLP, LingBotVideoTransformer3DModel
 
@@ -280,8 +282,68 @@ class LingBotVideoMoeTransformer3DModel(LingBotVideoTransformer3DModel):
             if isinstance(module, LingBotVideoGroupedExperts):
                 module.set_execution_backend(backend)
 
+    @staticmethod
+    def state_dict_converter() -> "LingBotVideoMoeStateDictConverter":
+        """Return the Diffusers checkpoint converter used by ModuleManager."""
+        return LingBotVideoMoeStateDictConverter()
+
     def quantize_experts_fp8_(self) -> None:
         """Quantize every routed expert while keeping dense/shared layers in BF16."""
         for module in self.modules():
             if isinstance(module, LingBotVideoGroupedExperts):
                 module.quantize_fp8_()
+
+
+class LingBotVideoMoeStateDictConverter:
+    """Instantiate the registered MoE LingBot-Video checkpoint from Diffusers weights."""
+
+    _CONFIGS = {
+        "65b83aa625cd362ff5ff3409fb367a6f": {
+            "patch_size": (1, 2, 2),
+            "in_channels": 16,
+            "out_channels": 16,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "depth": 48,
+            "intermediate_size": 6144,
+            "text_dim": 2560,
+            "freq_dim": 256,
+            "norm_eps": 1e-6,
+            "rope_theta": 256.0,
+            "axes_dims": (32, 48, 48),
+            "qkv_bias": False,
+            "out_bias": True,
+            "patch_embed_bias": True,
+            "timestep_mlp_bias": True,
+            "num_experts": 128,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 768,
+            "decoder_sparse_step": 1,
+            "mlp_only_layers": (),
+            "n_group": 4,
+            "topk_group": 2,
+            "routed_scaling_factor": 2.5,
+            "n_shared_experts": 1,
+        }
+    }
+
+    def from_diffusers(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Return unchanged Diffusers weights and their registered architecture."""
+        state_dict_hash = hash_state_dict_keys(state_dict, with_shape=True)
+        try:
+            return state_dict, self._CONFIGS[state_dict_hash]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported LingBot-Video MoE checkpoint hash: {state_dict_hash}") from exc
+
+    def from_official(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """LingBot checkpoints use the same parameter names in both supported layouts."""
+        return self.from_diffusers(state_dict)
+
+
+register_model_config(
+    None,
+    "65b83aa625cd362ff5ff3409fb367a6f",
+    ["lingbot_video_moe_transformer"],
+    [LingBotVideoMoeTransformer3DModel],
+    "diffusers",
+)

@@ -12,7 +12,6 @@ from safetensors.torch import load_file
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.lingbot_video.denoising import LingBotVideoDenoisingStage
-from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_moe_transformer
 from telefuser.pipelines.lingbot_video.refiner import (
     LingBotVideoRefinerStage,
     compute_refiner_sigmas,
@@ -129,10 +128,13 @@ def main() -> None:
     gc.collect()
     torch.cuda.empty_cache()
 
-    local = load_lingbot_video_moe_transformer(DIRECTORY, device=DEVICE, torch_dtype=torch.bfloat16)
+    module_manager = ModuleManager(device=str(DEVICE), torch_dtype=torch.bfloat16)
+    module_manager.load_model(str(DIRECTORY), name="transformer")
+    local = module_manager.fetch_module("transformer")
+    if local is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {DIRECTORY}")
+    local.promote_stability_layers_to_fp32()
     local_scheduler = FlowUniPCMultistepScheduler.from_pretrained(ROOT / "scheduler")
-    module_manager = ModuleManager(device="cuda", torch_dtype=torch.bfloat16)
-    module_manager.add_module(local, name="transformer")
     stage = LingBotVideoRefinerStage(
         denoising_stage=LingBotVideoDenoisingStage(
             "refiner", module_manager, ModelRuntimeConfig(device_type="cuda", torch_dtype=torch.bfloat16)

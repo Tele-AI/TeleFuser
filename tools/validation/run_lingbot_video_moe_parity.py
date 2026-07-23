@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 
-from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_moe_transformer
+from telefuser.core.module_manager import ModuleManager
 
 
 def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
@@ -83,7 +83,12 @@ def main() -> None:
     del upstream
     torch.cuda.empty_cache()
 
-    telefuser = load_lingbot_video_moe_transformer(directory, device=device, torch_dtype=torch.bfloat16)
+    module_manager = ModuleManager(device=str(device), torch_dtype=torch.bfloat16)
+    module_manager.load_model(str(directory), name="transformer")
+    telefuser = module_manager.fetch_module("transformer")
+    if telefuser is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {directory}")
+    telefuser.promote_stability_layers_to_fp32()
     with torch.no_grad():
         candidate = telefuser(latent.to(device), timestep.to(device), text.to(device)).float().cpu()
     metrics = _metrics(reference, candidate)

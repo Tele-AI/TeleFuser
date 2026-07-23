@@ -12,11 +12,7 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
-from telefuser.pipelines.lingbot_video.loading import (
-    checkpoint_key_coverage,
-    load_lingbot_video_dense_transformer,
-    load_lingbot_video_moe_transformer,
-)
+from telefuser.core.module_manager import ModuleManager
 
 _DENSE_CONFIG_KEYS = (
     "patch_size",
@@ -61,6 +57,21 @@ def checkpoint_keys(checkpoint_dir: Path) -> set[str]:
     checkpoint_path = checkpoint_dir / "diffusion_pytorch_model.safetensors"
     with safe_open(checkpoint_path, framework="pt", device="cpu") as handle:
         return set(handle.keys())
+
+
+def checkpoint_key_coverage(model: torch.nn.Module, available_keys: set[str]) -> dict[str, Any]:
+    """Report exact checkpoint key coverage without retaining checkpoint tensors."""
+    expected = set(model.state_dict())
+    matched = expected & available_keys
+    return {
+        "expected_key_count": len(expected),
+        "checkpoint_key_count": len(available_keys),
+        "matched_key_count": len(matched),
+        "coverage": len(matched) / len(expected) if expected else 1.0,
+        "missing_keys": sorted(expected - available_keys),
+        "unexpected_keys": sorted(available_keys - expected),
+        "matched_numel": sum(model.state_dict()[name].numel() for name in matched),
+    }
 
 
 def _parameter_report(model: torch.nn.Module) -> dict[str, Any]:
@@ -139,8 +150,12 @@ def main() -> None:
         torch.cuda.memory_allocated(args.device) if torch.cuda.is_available() and "cuda" in args.device else None
     )
     started = time.perf_counter()
-    loader = load_lingbot_video_dense_transformer if args.variant == "dense" else load_lingbot_video_moe_transformer
-    model = loader(checkpoint_dir, device=args.device, torch_dtype=_dtype(args.dtype))
+    module_manager = ModuleManager(device=args.device, torch_dtype=_dtype(args.dtype))
+    module_manager.load_model(str(checkpoint_dir), name="transformer")
+    model = module_manager.fetch_module("transformer")
+    if model is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {checkpoint_dir}")
+    model.promote_stability_layers_to_fp32()
     report = build_load_report(
         model,
         checkpoint_dir=checkpoint_dir,

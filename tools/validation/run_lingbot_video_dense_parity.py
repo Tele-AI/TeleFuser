@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_model
 
-from telefuser.pipelines.lingbot_video.loading import load_lingbot_video_dense_transformer
+from telefuser.core.module_manager import ModuleManager
 
 
 def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
@@ -65,7 +65,12 @@ def main() -> None:
     device = torch.device("cuda")
     upstream = UpstreamTransformer(**{field: config[field] for field in fields}).to(device, torch.bfloat16).eval()
     load_model(upstream, args.transformer_dir / "diffusion_pytorch_model.safetensors", strict=True, device=str(device))
-    telefuser = load_lingbot_video_dense_transformer(args.transformer_dir)
+    module_manager = ModuleManager(device=str(device), torch_dtype=torch.bfloat16)
+    module_manager.load_model(str(args.transformer_dir), name="transformer")
+    telefuser = module_manager.fetch_module("transformer")
+    if telefuser is None:
+        raise RuntimeError(f"Unable to load LingBot-Video transformer from {args.transformer_dir}")
+    telefuser.promote_stability_layers_to_fp32()
     torch.manual_seed(args.seed)
     latent = torch.randn(1, 16, 1, args.height, args.width, device=device, dtype=torch.bfloat16)
     text = torch.randn(1, args.text_length, config["text_dim"], device=device, dtype=torch.bfloat16)

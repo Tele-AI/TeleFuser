@@ -14,8 +14,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
+from telefuser.core.model_registry import register_model_config
 from telefuser.distributed.ulysses_comm import ulysses_all_to_all_split_cat
 from telefuser.ops.attention import attention
+from telefuser.utils.model_weight import hash_state_dict_keys
 
 
 class LingBotVideoPatchEmbed(nn.Module):
@@ -346,6 +348,35 @@ class LingBotVideoTransformer3DModel(nn.Module):
         for block in self.blocks:
             block.attn.set_attention_config(attention_config)
 
+    @staticmethod
+    def state_dict_converter() -> "LingBotVideoStateDictConverter":
+        """Return the Diffusers checkpoint converter used by ModuleManager."""
+        return LingBotVideoStateDictConverter()
+
+    def promote_stability_layers_to_fp32(self) -> None:
+        """Keep source FP32 normalization, modulation, and routing-adjacent layers."""
+        fp32_names = {
+            "time_embedder",
+            "time_modulation",
+            "scale_shift_table",
+            "norm",
+            "norm1",
+            "norm2",
+            "norm_q",
+            "norm_k",
+            "norm_post_attn",
+            "norm_post_ffn",
+            "norm_out",
+            "norm_out_modulation",
+            "router",
+        }
+        for name, module in self.named_modules():
+            if any(part in fp32_names for part in name.split(".")):
+                module.float()
+        for name, parameter in self.named_parameters():
+            if any(part in fp32_names for part in name.split(".")):
+                parameter.data = parameter.data.float()
+
     def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
         """Enable source-order Ulysses sequence parallelism for the joint token stream."""
         self.ulysses_group = group
@@ -481,3 +512,49 @@ class LingBotVideoTransformer3DModel(nn.Module):
             projected = projected[:, :video_tokens]
         output = projected.reshape(batch, grid_t, grid_h, grid_w, patch_t, patch_h, patch_w, self.out_channels)
         return output.permute(0, 7, 1, 4, 2, 5, 3, 6).reshape(batch, self.out_channels, frames, height, width)
+
+
+class LingBotVideoStateDictConverter:
+    """Instantiate the registered Dense LingBot-Video checkpoint from Diffusers weights."""
+
+    _CONFIGS = {
+        "2bcf511fe5e0000519394d242b4d8abd": {
+            "patch_size": (1, 2, 2),
+            "in_channels": 16,
+            "out_channels": 16,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "depth": 24,
+            "intermediate_size": 6144,
+            "text_dim": 2560,
+            "freq_dim": 256,
+            "norm_eps": 1e-6,
+            "rope_theta": 256.0,
+            "axes_dims": (32, 48, 48),
+            "qkv_bias": False,
+            "out_bias": True,
+            "patch_embed_bias": True,
+            "timestep_mlp_bias": True,
+        }
+    }
+
+    def from_diffusers(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Return unchanged Diffusers weights and their registered architecture."""
+        state_dict_hash = hash_state_dict_keys(state_dict, with_shape=True)
+        try:
+            return state_dict, self._CONFIGS[state_dict_hash]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported LingBot-Video Dense checkpoint hash: {state_dict_hash}") from exc
+
+    def from_official(self, state_dict: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """LingBot checkpoints use the same parameter names in both supported layouts."""
+        return self.from_diffusers(state_dict)
+
+
+register_model_config(
+    None,
+    "2bcf511fe5e0000519394d242b4d8abd",
+    ["lingbot_video_transformer"],
+    [LingBotVideoTransformer3DModel],
+    "diffusers",
+)
