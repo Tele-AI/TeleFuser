@@ -15,6 +15,7 @@ from telefuser.utils.hf_utils import load_module_from_huggingface
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys, init_weights_on_device, load_state_dict
 
+from .config import QuantConfig, QuantType
 from .model_registry import ModelRegistry
 
 
@@ -27,7 +28,7 @@ def load_model_from_single_file(
     device: str | torch.device,
     low_cpu_mem_usage: bool = False,
     converter_kwargs: dict[str, Any] | None = None,
-    strict: bool = True,
+    quant_config: QuantConfig | None = None,
 ) -> tuple[list[str], list[nn.Module]]:
     """Load models from state dict with format conversion.
 
@@ -40,7 +41,6 @@ def load_model_from_single_file(
         device: Target device for model
         low_cpu_mem_usage: If True, keep weights in CPU memory until moved to device
         converter_kwargs: Extra kwargs passed to state_dict_converter()
-        strict: Whether checkpoint keys must exactly match the model.
 
     Returns:
         Tuple of (model_names, loaded_models)
@@ -67,8 +67,14 @@ def load_model_from_single_file(
         with init_weights_on_device("meta"):
             model = model_class(**extra_kwargs)
 
-        # Enable quantization if needed
-        if torch_dtype == torch.float8_e4m3fn:
+        # Enable quantization if needed. Keep the legacy FP8 dtype path for
+        # existing examples, but prefer explicit QuantConfig for new modes.
+        if quant_config is not None and quant_config.enabled:
+            if quant_config.quant_type in (QuantType.BNB_NF4, QuantType.TORCHAO_FP8):
+                logger.info("Deferring TorchAO quantization until runtime stage initialization")
+            else:
+                model.enable_quant(quant_config)
+        elif torch_dtype == torch.float8_e4m3fn:
             model.enable_quant(torch_dtype)
         if hasattr(model, "eval"):
             model = model.eval()
@@ -79,7 +85,7 @@ def load_model_from_single_file(
             model_state_dict = {k: v.to("cpu").clone() for k, v in model_state_dict.items()}
 
         # Load weights and move to target device/dtype
-        model.load_state_dict(model_state_dict, strict=strict, assign=True)
+        model.load_state_dict(model_state_dict, assign=True)
         if torch_dtype != torch.float8_e4m3fn:
             model = model.to(dtype=torch_dtype)
         model = model.to(device)
@@ -135,6 +141,7 @@ class ModelDetectorFromSingleFile:
         torch_dtype: torch.dtype = torch.float16,
         low_cpu_mem_usage: bool = False,
         converter_kwargs: dict[str, Any] | None = None,
+        quant_config: QuantConfig | None = None,
     ) -> tuple[list[str], list[nn.Module]]:
         """Load model from file with automatic type detection."""
         if not state_dict:
@@ -153,6 +160,7 @@ class ModelDetectorFromSingleFile:
                 device,
                 low_cpu_mem_usage,
                 converter_kwargs,
+                quant_config,
             )
 
         # Fall back to key-only hash
@@ -168,6 +176,7 @@ class ModelDetectorFromSingleFile:
                 device,
                 low_cpu_mem_usage,
                 converter_kwargs,
+                quant_config,
             )
 
         return [], []
@@ -190,9 +199,10 @@ class ModuleManager:
         device: str | None = None,
         torch_dtype: torch.dtype | None = None,
         low_cpu_mem_usage: bool = False,
+        quant_config: QuantConfig | None = None,
     ) -> None:
         for file_path in file_path_list:
-            self.load_model(file_path, device, torch_dtype, low_cpu_mem_usage)
+            self.load_model(file_path, device, torch_dtype, low_cpu_mem_usage, quant_config=quant_config)
 
     def load_model(
         self,
@@ -204,7 +214,7 @@ class ModuleManager:
         model_class: type[nn.Module] | None = None,
         model_resource: str = "official",
         converter_kwargs: dict[str, Any] | None = None,
-        strict: bool = True,
+        quant_config: QuantConfig | None = None,
     ) -> None:
         """Load model from file path with automatic type detection.
 
@@ -221,8 +231,6 @@ class ModuleManager:
             converter_kwargs: Extra kwargs passed to model_class.state_dict_converter().
                 Used to provide explicit config overrides when hash-based config detection
                 may not work (e.g., MoE distilled checkpoints).
-            strict: Whether checkpoint keys must exactly match the model when an
-                explicit ``model_class`` is supplied.
         """
         device = device or self.device
         torch_dtype = torch_dtype or self.torch_dtype
@@ -273,7 +281,7 @@ class ModuleManager:
                 device,
                 low_cpu_mem_usage,
                 converter_kwargs,
-                strict,
+                quant_config,
             )
             for mn, model in zip(model_names, models):
                 self.modules.append(model)
@@ -284,7 +292,9 @@ class ModuleManager:
 
         for detector in self.model_detectors:
             if detector.match(file_path, state_dict):
-                model_names, models = detector.load(file_path, state_dict, device, torch_dtype, low_cpu_mem_usage)
+                model_names, models = detector.load(
+                    file_path, state_dict, device, torch_dtype, low_cpu_mem_usage, quant_config=quant_config
+                )
                 # Override model name if specified
                 if name is not None:
                     model_names = [name] * len(models)

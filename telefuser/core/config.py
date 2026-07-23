@@ -333,6 +333,8 @@ class QuantType(Enum):
         MXFP6: Microscaling FP6 (OCP standard).
         MXFP4: Microscaling FP4 (OCP standard).
         NVFP4: NVIDIA FP4 format (Blackwell+).
+        BNB_NF4: bitsandbytes weight-only NF4 linear path.
+        TORCHAO_FP8: TorchAO dynamic-activation FP8 linear path.
     """
 
     FP8 = auto()
@@ -341,6 +343,8 @@ class QuantType(Enum):
     MXFP6 = auto()
     MXFP4 = auto()
     NVFP4 = auto()
+    BNB_NF4 = auto()
+    TORCHAO_FP8 = auto()
 
 
 class QuantKernelBackend(Enum):
@@ -350,6 +354,8 @@ class QuantKernelBackend(Enum):
     TF_KERNEL = auto()  # TeleFuser custom kernel
     VLLM = auto()  # vLLM kernel
     CUTLASS = auto()  # NVIDIA CUTLASS
+    TORCHAO = auto()  # TorchAO quantization backends
+    BITSANDBYTES = auto()  # bitsandbytes quantization backends
 
 
 @dataclass
@@ -391,6 +397,10 @@ class QuantConfig:
     quant_type: QuantType = QuantType.FP8
     kernel_backend: QuantKernelBackend = QuantKernelBackend.AUTO
     weight_block_size: tuple[int, int] | None = None
+    group_size: int = 16
+    quantize_modules: tuple[str, ...] | None = None
+    skip_modules: tuple[str, ...] = ("head", "time_embedding", "time_projection", "patch_embedding")
+    keep_fp16_weight: bool = False
 
 
 @dataclass
