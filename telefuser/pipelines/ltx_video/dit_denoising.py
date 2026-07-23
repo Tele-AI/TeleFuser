@@ -560,7 +560,6 @@ class DitDenoisingStage(BaseStage):
         self.dit: LTXVideoTransformer = module_manager.fetch_module(model_name)
         if self.dit is not None and hasattr(self.dit, "set_attention_config"):
             self.dit.set_attention_config(model_runtime_config.attention_config)
-        self.apply_model_quantization(self.dit)
         self.model_names = ["dit"]
         self.scheduler = scheduler
         self.flow_match_scheduler = FlowMatchScheduler(template="LTX.2")
