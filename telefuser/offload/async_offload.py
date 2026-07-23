@@ -67,6 +67,7 @@ class AsyncOffloadManager:
         self._gpu_buffer_pool: Dict[torch.dtype, List[torch.Tensor]] = {}
         self._gpu_buffer_sizes: Dict[torch.dtype, List[int]] = {}
         self._layer_to_gpu_buffer: Dict[int, Dict[torch.dtype, torch.Tensor]] = {}
+        self._gpu_buffer_ready_events: Dict[int, torch.cuda.Event] = {}
 
         self._named_parameters: Dict[str, torch.nn.Parameter] = {}
         self._named_buffers: Dict[str, torch.Tensor] = {}
@@ -224,9 +225,11 @@ class AsyncOffloadManager:
                 if layer_idx < self.num_resident_layers:
                     gpu_buffer = torch.empty(cpu_buffer.shape, dtype=dtype, device=self.device)
                 else:
-                    gpu_buffer = self._get_gpu_buffer(dtype, cpu_buffer.numel())
+                    gpu_buffer, ready_event = self._get_gpu_buffer(dtype, cpu_buffer.numel())
                     if gpu_buffer is None:
                         gpu_buffer = torch.empty(cpu_buffer.shape, dtype=dtype, device=self.device)
+                    elif ready_event is not None:
+                        self.copy_stream.wait_event(ready_event)
 
                 if gpu_buffer.numel() == cpu_buffer.numel():
                     gpu_buffer.copy_(cpu_buffer, non_blocking=non_blocking)
@@ -267,7 +270,9 @@ class AsyncOffloadManager:
 
         if layer_idx >= self.num_resident_layers and layer_idx in self._layer_to_gpu_buffer:
             for dtype, gpu_buffer in self._layer_to_gpu_buffer[layer_idx].items():
-                self._return_gpu_buffer(dtype, gpu_buffer)
+                compute_done = torch.cuda.Event()
+                compute_done.record(torch.cuda.current_stream(self.device))
+                self._return_gpu_buffer(dtype, gpu_buffer, ready_event=compute_done)
             del self._layer_to_gpu_buffer[layer_idx]
 
         for name, meta in self._weight_metadata.get(layer_idx, {}).items():
@@ -276,26 +281,32 @@ class AsyncOffloadManager:
 
         self._gpu_layers.discard(layer_idx)
 
-    def _get_gpu_buffer(self, dtype: torch.dtype, required_size: int) -> torch.Tensor | None:
-        """Get a GPU buffer from the pool."""
+    def _get_gpu_buffer(
+        self, dtype: torch.dtype, required_size: int
+    ) -> tuple[torch.Tensor | None, torch.cuda.Event | None]:
+        """Get a GPU buffer and the event that makes it safe to overwrite."""
         if dtype not in self._gpu_buffer_pool:
-            return None
+            return None, None
 
         for i, (buffer, size) in enumerate(zip(self._gpu_buffer_pool[dtype], self._gpu_buffer_sizes[dtype])):
             if size >= required_size:
                 buffer = self._gpu_buffer_pool[dtype].pop(i)
                 self._gpu_buffer_sizes[dtype].pop(i)
-                return buffer
+                return buffer, self._gpu_buffer_ready_events.pop(id(buffer), None)
 
-        return None
+        return None, None
 
-    def _return_gpu_buffer(self, dtype: torch.dtype, buffer: torch.Tensor) -> None:
-        """Return a GPU buffer to the pool."""
+    def _return_gpu_buffer(
+        self, dtype: torch.dtype, buffer: torch.Tensor, ready_event: torch.cuda.Event | None = None
+    ) -> None:
+        """Return a GPU buffer to the pool after its compute-stream use completes."""
         if dtype not in self._gpu_buffer_pool:
             self._gpu_buffer_pool[dtype] = []
             self._gpu_buffer_sizes[dtype] = []
 
         self._gpu_buffer_pool[dtype].append(buffer)
+        if ready_event is not None:
+            self._gpu_buffer_ready_events[id(buffer)] = ready_event
         self._gpu_buffer_sizes[dtype].append(buffer.numel())
 
     @torch.compiler.disable
@@ -366,8 +377,6 @@ class AsyncOffloadManager:
 
         def make_pre_hook(i: int):
             def hook(module: torch.nn.Module, input: tuple[Any, ...]) -> None:
-                if i == 0:
-                    self.prepare_for_next_req(non_blocking=False)
                 if i in self._prefetch_events:
                     torch.cuda.current_stream().wait_event(self._prefetch_events[i])
 
@@ -408,6 +417,7 @@ class AsyncOffloadManager:
         self._gpu_buffer_pool.clear()
         self._gpu_buffer_sizes.clear()
         self._layer_to_gpu_buffer.clear()
+        self._gpu_buffer_ready_events.clear()
 
     def enable_offload(self) -> None:
         """Re-enable layerwise offload."""

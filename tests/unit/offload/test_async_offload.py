@@ -140,6 +140,25 @@ class TestAsyncOffloadPrefetchRelease:
         manager.release_layer(1)
         assert 1 not in manager._prefetch_events
 
+    def test_reused_buffer_waits_for_its_compute_stream(self, test_layers):
+        """Test that a reused H2D buffer depends on its prior compute work."""
+        manager = AsyncOffloadManager(test_layers)
+        dtype = torch.float32
+
+        manager.prefetch_layer(1, non_blocking=False)
+        buffer = manager._layer_to_gpu_buffer[1][dtype]
+        manager._gpu_buffer_pool[dtype].clear()
+        manager._gpu_buffer_sizes[dtype].clear()
+
+        buffer.add_(1)
+        manager.release_layer(1)
+        assert id(buffer) in manager._gpu_buffer_ready_events
+
+        manager.prefetch_layer(2, non_blocking=True)
+        assert id(buffer) not in manager._gpu_buffer_ready_events
+
+        torch.cuda.current_stream().wait_event(manager._prefetch_events[2])
+
     def test_prepare_for_next_req(self, test_layers):
         """Test prepare_for_next_req functionality."""
         manager = AsyncOffloadManager(test_layers)

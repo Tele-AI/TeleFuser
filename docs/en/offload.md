@@ -224,6 +224,56 @@ The `prefetch_size` parameter affects the overlap between data transfer and comp
 pipe_config.dit_config.offload_config.prefetch_size = 2
 ```
 
+### Qwen-Image H100 Benchmark Evidence
+
+The following measurements validate the prefetch and compute-overlap path in
+`AsyncOffloadManager`; they are not general performance guarantees for other models, GPUs,
+or CPU-GPU interconnects. Tests used one NVIDIA H100 80GB and PyTorch 2.11.0+cu130. Each
+configuration ran one complete warmup followed by one complete generation. DiT time was measured
+with explicit CUDA synchronization at stage entry and exit, so it includes asynchronous weight
+transfer, computation, and offload in that stage.
+
+#### FP8 Lightning
+
+Qwen-Image-2512-Lightning FP8 weights, 1328×1328, 16 steps, CFG=1, and
+`offload_ratio=0.5`:
+
+| Mode / `prefetch_size` | DiT time | Peak allocated VRAM |
+|---|---:|---:|
+| `NO_CPU_OFFLOAD` | 4.360 s | 40.55 GiB |
+| `ASYNC_CPU_OFFLOAD`, 1 | 5.184 s | 31.61 GiB |
+| `ASYNC_CPU_OFFLOAD`, 2 | 4.966 s | 32.24 GiB |
+| `ASYNC_CPU_OFFLOAD`, 4 | 4.570 s | 33.50 GiB |
+| `ASYNC_CPU_OFFLOAD`, 8 | 4.469 s | 36.04 GiB |
+| `ASYNC_CPU_OFFLOAD`, 12 | 4.465 s | 38.57 GiB |
+
+`prefetch_size=8` is only 2.5% slower than no offload while using 4.51 GiB less VRAM;
+increasing it to 12 provides essentially no speed benefit. As an overlap control, forcing the
+compute stream to wait for the copy stream after every prefetch made the same FP8
+`prefetch_size=2` configuration take 6.039 s, versus 4.966 s on the normal asynchronous path.
+This demonstrates effective H2D/compute overlap in the normal path.
+
+#### Base BF16 Qwen-Image
+
+Qwen-Image-2512 BF16 weights, 1664×928, 50 steps, and CFG=4:
+
+| `offload_ratio` | `prefetch_size` | DiT time | Peak allocated VRAM |
+|---:|---:|---:|---:|
+| No offload | — | 26.990 s | 55.84 GiB |
+| 0.5 | 2 | 46.253 s | 39.00 GiB |
+| 0.5 | 4 | 42.470 s | 44.81 GiB |
+| 0.5 | 8 | 39.954 s | 49.88 GiB |
+| 0.6 | 8 | 47.473 s | 46.08 GiB |
+| 0.75 | 8 | 56.335 s | 40.38 GiB |
+
+For this model, increasing prefetch depth improves speed: at 50% offload, moving from two to
+eight prefetched blocks reduces DiT time by 13.6% but raises peak VRAM by 10.88 GiB. Raising
+`offload_ratio` reduces resident layers and VRAM, but also increases the H2D bytes required by
+every denoising step. Even with eight prefetched blocks, 60% and 75% offload are slower than the
+50%/two-block baseline. Tune `prefetch_size` first at a fixed `offload_ratio`, then choose the
+memory-speed trade-off within the VRAM budget.
+
+
 ### Pinned Memory
 
 Setting `pin_cpu_memory=True` (default) uses page-locked memory for faster H2D transfers:

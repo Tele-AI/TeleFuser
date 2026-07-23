@@ -223,6 +223,51 @@ pipe_config.text_encoding_config.offload_config.offload_type = WeightOffloadType
 pipe_config.dit_config.offload_config.prefetch_size = 2
 ```
 
+### Qwen-Image H100 实测证据
+
+以下数据用于验证 `AsyncOffloadManager` 的预取和计算重叠路径，并不是对所有模型、GPU 或
+CPU-GPU 互联的通用性能承诺。测试使用单张 NVIDIA H100 80GB，PyTorch 2.11.0+cu130；
+每个配置先运行一次完整 warmup，再运行一次完整生成。DiT 时间在 stage 入口和出口显式同步
+CUDA 后测量，因此包含该阶段的异步权重传输、计算和卸载。
+
+#### FP8 Lightning
+
+Qwen-Image-2512-Lightning FP8 权重，1328×1328，16 steps，CFG=1，`offload_ratio=0.5`：
+
+| 模式 / `prefetch_size` | DiT 时间 | 峰值已分配显存 |
+|---|---:|---:|
+| `NO_CPU_OFFLOAD` | 4.360 s | 40.55 GiB |
+| `ASYNC_CPU_OFFLOAD`, 1 | 5.184 s | 31.61 GiB |
+| `ASYNC_CPU_OFFLOAD`, 2 | 4.966 s | 32.24 GiB |
+| `ASYNC_CPU_OFFLOAD`, 4 | 4.570 s | 33.50 GiB |
+| `ASYNC_CPU_OFFLOAD`, 8 | 4.469 s | 36.04 GiB |
+| `ASYNC_CPU_OFFLOAD`, 12 | 4.465 s | 38.57 GiB |
+
+`prefetch_size=8` 比无卸载只慢 2.5%，同时少用 4.51 GiB 显存；增至 12 已基本没有速度
+收益。作为重叠对照，在同一 FP8、`prefetch_size=2` 配置中，强制计算流在每次预取后等待
+copy stream 的 DiT 时间为 6.039 s，而正常异步路径为 4.966 s。这证明 H2D 传输与计算在正常
+路径中存在有效重叠。
+
+#### BF16 基础 Qwen-Image
+
+Qwen-Image-2512 BF16 权重，1664×928，50 steps，CFG=4：
+
+| `offload_ratio` | `prefetch_size` | DiT 时间 | 峰值已分配显存 |
+|---:|---:|---:|---:|
+| 无卸载 | — | 26.990 s | 55.84 GiB |
+| 0.5 | 2 | 46.253 s | 39.00 GiB |
+| 0.5 | 4 | 42.470 s | 44.81 GiB |
+| 0.5 | 8 | 39.954 s | 49.88 GiB |
+| 0.6 | 8 | 47.473 s | 46.08 GiB |
+| 0.75 | 8 | 56.335 s | 40.38 GiB |
+
+该模型中，增加预取深度能够加速：50% offload 下从 2 提升到 8 个预取 block，DiT 时间缩短
+13.6%，但增加 10.88 GiB 峰值显存。提高 `offload_ratio` 会减少常驻层和显存，但也会增加
+每个 denoising step 的 H2D 数据量；即使保留 8 个预取 block，60% 和 75% offload 都比
+50%/2-block 基线更慢。因此应先在固定 `offload_ratio` 下调大 `prefetch_size`，再根据显存
+预算选择折中点。
+
+
 ### 固定内存
 
 设置 `pin_cpu_memory=True`（默认）使用页锁定内存以实现更快的 H2D 传输：
