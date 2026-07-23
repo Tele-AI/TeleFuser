@@ -573,6 +573,10 @@ class LingBotWorldFastService:
         emit_status: Callable[..., None],
     ) -> None:
         try:
+            if bool(getattr(self.pipeline, "async_vae_enabled", False)):
+                self._run_worker_loop_async_vae(session_id, state, emit_status)
+                return
+
             self._emit_preview_frame(state)
             control_context = state.control_context or self.pipeline.control_context(state.config)
             control_builder = LingBotWorldFastControlBuilder(control_context)
@@ -675,6 +679,134 @@ class LingBotWorldFastService:
             state.active = False
             self._put_output(state, {"type": "done"})
             self._release_generation_session(state)
+
+    def _run_worker_loop_async_vae(
+        self,
+        session_id: str,
+        state: LingBotWorldFastSessionState,
+        emit_status: Callable[..., None],
+    ) -> None:
+        self._emit_preview_frame(state)
+        control_context = state.control_context or self.pipeline.control_context(state.config)
+        control_builder = LingBotWorldFastControlBuilder(control_context)
+        state.generation_session = LingBotWorldFastGenerationSession(config=state.config)
+        runtime = state.generation_session
+        emit_status(
+            "runtime_ready",
+            width=control_context.width,
+            height=control_context.height,
+            latent_frames=control_context.latent_frames,
+            total_chunks=control_context.latent_frames // control_context.chunk_size,
+            enable_async_vae=True,
+            enable_condition_prefetch=bool(getattr(self.pipeline, "condition_prefetch_enabled", False)),
+        )
+
+        pending_handle = None
+        pending_controls = None
+        stop_requested = False
+
+        def runtime_finished() -> bool:
+            return runtime.chunk_size > 0 and runtime.current_chunk_index >= runtime.chunk_count
+
+        def flush_pending() -> None:
+            nonlocal pending_handle, pending_controls
+            if pending_handle is None:
+                return
+            frames = self.pipeline.wait_async_vae_chunk(runtime, pending_handle, progress_callback=emit_status)
+            if frames:
+                if state.config.show_control_hud:
+                    frames = self._overlay_control_hud(frames, pending_controls)
+                payload = {
+                    "type": "chunk",
+                    "index": pending_handle.chunk_id,
+                    "fps": state.config.fps,
+                    "timestamp": time.time(),
+                    "frames_b64": self._encode_frames_to_b64(frames),
+                }
+                self._put_output(state, payload)
+                emit_status("chunk_sent", index=pending_handle.chunk_id, frames=len(frames))
+            pending_handle = None
+            pending_controls = None
+
+        while state.active:
+            if pending_handle is not None:
+                with state.control_lock:
+                    controls_held = bool(state.pressed_controls)
+                if not controls_held and state.pending_inputs.empty():
+                    flush_pending()
+                    if runtime_finished():
+                        break
+
+            if runtime_finished():
+                break
+
+            with state.control_lock:
+                controls_held = bool(state.pressed_controls)
+            if controls_held:
+                try:
+                    incoming = state.pending_inputs.get_nowait()
+                except queue.Empty:
+                    incoming = {"type": "direction_control"}
+            else:
+                incoming = state.pending_inputs.get()
+            if incoming.get("type") == "stop":
+                stop_requested = True
+                break
+
+            explicit_control = incoming if self._is_explicit_control_chunk(incoming) else None
+            applied_controls = None
+            while True:
+                try:
+                    next_item = state.pending_inputs.get_nowait()
+                except queue.Empty:
+                    break
+                if next_item.get("type") == "stop":
+                    incoming = next_item
+                    break
+                if self._is_explicit_control_chunk(next_item):
+                    explicit_control = next_item
+
+            if incoming and incoming.get("type") == "stop":
+                stop_requested = True
+                break
+            if explicit_control is not None:
+                control = control_builder.defer(explicit_control)
+            else:
+                directional_chunk = self._build_directional_control_chunk(state, control_context)
+                if directional_chunk is None:
+                    continue
+                applied_controls = directional_chunk["controls"]
+                emit_status(
+                    "applying_direction_control",
+                    index=runtime.current_chunk_index,
+                    controls=applied_controls,
+                    move_step=state.config.control_move_step,
+                    yaw_step_degrees=state.config.control_yaw_step_degrees,
+                    lateral_step=state.config.control_lateral_step,
+                    pitch_step_degrees=state.config.control_pitch_step_degrees,
+                )
+                control = control_builder.defer(directional_chunk)
+
+            submit_index = runtime.current_chunk_index
+            emit_status("generating_chunk", index=submit_index)
+            current_handle = self.pipeline.submit_async_vae_chunk(
+                runtime,
+                LingBotWorldFastChunkRequest(
+                    chunk_index=submit_index,
+                    session_id=session_id,
+                    control=control,
+                ),
+                progress_callback=emit_status,
+            )
+            if pending_handle is not None:
+                flush_pending()
+            pending_handle = current_handle
+            pending_controls = applied_controls
+            if current_handle.is_last_clip:
+                break
+
+        if not stop_requested and pending_handle is not None:
+            flush_pending()
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)

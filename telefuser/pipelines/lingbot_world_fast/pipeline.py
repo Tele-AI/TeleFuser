@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,11 +22,13 @@ from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
 
+from .async_vae import AsyncVAEChunkHandle, AsyncVAEDecodeTask, AsyncVAEManager
 from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
 from .denoising import LingBotWorldFastDenoisingStage
 from .session import (
     LingBotWorldFastChunkRequest,
     LingBotWorldFastChunkResult,
+    LingBotWorldFastConditionPrefetch,
     LingBotWorldFastGenerationSession,
     LingBotWorldFastSessionConfig,
     LingBotWorldFastSessionStatus,
@@ -37,6 +41,7 @@ class LingBotWorldFastPipelineConfig:
     checkpoint_dir: str = ""
     fast_checkpoint_path: str = "lingbot_world_fast"
     vae_config: ModelRuntimeConfig = field(default_factory=lambda: ModelRuntimeConfig(torch_dtype=torch.float32))
+    async_vae_config: ModelRuntimeConfig | None = None
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     dit_torch_dtype: torch.dtype = torch.bfloat16
     control_type: str = "cam"
@@ -48,6 +53,9 @@ class LingBotWorldFastPipelineConfig:
     timestep_indices: tuple[int, ...] = (0, 179, 358, 679)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     attention_config: AttentionConfig = field(default_factory=AttentionConfig)
+    enable_async_vae: bool = False
+    vae_queue_size: int = 1
+    enable_condition_prefetch: bool = False
 
 
 class LingBotWorldFastPipeline(BasePipeline):
@@ -59,6 +67,11 @@ class LingBotWorldFastPipeline(BasePipeline):
         super().__init__(device=device, torch_dtype=torch_dtype)
         self.height_division_factor = 16
         self.width_division_factor = 16
+        self._async_vae_manager: AsyncVAEManager | None = None
+        self._async_vae_runtimes: dict[int, LingBotWorldFastGenerationSession] = {}
+        self._next_async_vae_generation_id = 1
+        self.async_vae: WanVideoVAE | None = None
+        self.async_vae_device: torch.device | None = None
 
     def _get_stages(self) -> list:
         return [self.denoise_stage] if hasattr(self, "denoise_stage") else []
@@ -83,6 +96,73 @@ class LingBotWorldFastPipeline(BasePipeline):
             return torch.device(f"cuda:{runtime_config.device_id}")
         return torch.device(runtime_config.device_type)
 
+    @property
+    def async_vae_enabled(self) -> bool:
+        return bool(getattr(getattr(self, "config", None), "enable_async_vae", False))
+
+    @property
+    def condition_prefetch_enabled(self) -> bool:
+        return bool(getattr(getattr(self, "config", None), "enable_condition_prefetch", False))
+
+    def _ensure_async_vae_manager(self) -> AsyncVAEManager:
+        if not self.async_vae_enabled:
+            raise RuntimeError("LingBot async VAE is disabled")
+        manager = getattr(self, "_async_vae_manager", None)
+        if manager is None:
+            queue_size = int(getattr(self.config, "vae_queue_size", 1))
+            manager = AsyncVAEManager(self, queue_size=queue_size)
+            self._async_vae_manager = manager
+        return manager
+
+    def _assign_async_vae_generation(self, session: LingBotWorldFastGenerationSession) -> int:
+        generation_id = session.async_vae_generation_id
+        if generation_id is None:
+            generation_id = self._next_async_vae_generation_id
+            self._next_async_vae_generation_id += 1
+            session.async_vae_generation_id = generation_id
+            self._async_vae_runtimes[generation_id] = session
+        return generation_id
+
+    def _async_vae_runtime(self, generation_id: int) -> LingBotWorldFastGenerationSession:
+        try:
+            return self._async_vae_runtimes[generation_id]
+        except KeyError as exc:
+            raise RuntimeError(f"Unknown LingBot async VAE generation_id={generation_id}") from exc
+
+    def _cancel_async_vae_generation(self, session: LingBotWorldFastGenerationSession) -> None:
+        generation_id = session.async_vae_generation_id
+        if generation_id is None:
+            return
+        manager = getattr(self, "_async_vae_manager", None)
+        if manager is not None:
+            manager.cancel_generation(generation_id)
+        self._async_vae_runtimes.pop(generation_id, None)
+        session.async_vae_generation_id = None
+
+    def _record_latent_ready_event(self, latent: torch.Tensor) -> torch.cuda.Event | None:
+        if not latent.is_cuda or not torch.cuda.is_available():
+            return None
+        with torch.cuda.device(latent.device):
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream(latent.device))
+            return event
+
+    @staticmethod
+    def _build_vae(
+        vae_state_dict: dict[str, torch.Tensor],
+        vae_cfg: dict[str, object],
+        *,
+        device: torch.device,
+        torch_dtype: torch.dtype,
+    ) -> WanVideoVAE:
+        vae = WanVideoVAE(**vae_cfg)
+        vae.load_state_dict(vae_state_dict, strict=False)
+        return vae.to(device=device, dtype=torch_dtype).eval()
+
+    @property
+    def has_separate_async_vae(self) -> bool:
+        return getattr(self, "async_vae", None) is not None and self.async_vae is not self.vae
+
     def init(self, config: LingBotWorldFastPipelineConfig) -> None:
         if config.control_type not in {"cam", "act"}:
             raise ValueError(f"Unsupported LingBot control_type: {config.control_type!r}")
@@ -91,6 +171,10 @@ class LingBotWorldFastPipeline(BasePipeline):
         self._model_info = [{"name": "lingbot_world_fast", "path": str(checkpoint_root)}]
         self.text_device = self._runtime_device(config.text_encoding_config)
         self.vae_device = self._runtime_device(config.vae_config)
+        async_vae_config = config.async_vae_config
+        self.async_vae_device = (
+            self._runtime_device(async_vae_config) if async_vae_config is not None else self.vae_device
+        )
 
         self.text_encoder = WanTextEncoder()
         self.text_encoder.load_state_dict(load_state_dict(str(checkpoint_root / "models_t5_umt5-xxl-enc-bf16.pth")))
@@ -103,9 +187,26 @@ class LingBotWorldFastPipeline(BasePipeline):
         vae_state_dict, vae_cfg = WanVideoVAE.state_dict_converter().from_official(
             load_state_dict(str(checkpoint_root / "Wan2.1_VAE.pth"))
         )
-        self.vae = WanVideoVAE(**vae_cfg)
-        self.vae.load_state_dict(vae_state_dict, strict=False)
-        self.vae = self.vae.to(device=self.vae_device, dtype=config.vae_config.torch_dtype).eval()
+        self.vae = self._build_vae(
+            vae_state_dict,
+            vae_cfg,
+            device=self.vae_device,
+            torch_dtype=config.vae_config.torch_dtype,
+        )
+        if async_vae_config is None:
+            self.async_vae = self.vae
+        else:
+            self.async_vae = self._build_vae(
+                vae_state_dict,
+                vae_cfg,
+                device=self.async_vae_device,
+                torch_dtype=async_vae_config.torch_dtype,
+            )
+            logger.info(
+                "LingBot async VAE decoder loaded separately: "
+                f"encode_device={self.vae_device} decode_device={self.async_vae_device}"
+            )
+        del vae_state_dict
 
         fast_path = checkpoint_root / config.fast_checkpoint_path
         dit_device = "cpu" if config.parallel_config.world_size > 1 else self.device
@@ -128,6 +229,9 @@ class LingBotWorldFastPipeline(BasePipeline):
         denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", self.dit, dit_runtime_config)
         self.denoise_stage = ParallelWorker(denoise_stage) if config.parallel_config.world_size > 1 else denoise_stage
         self._next_cache_handle = 0
+        self._async_vae_manager = None
+        self._async_vae_runtimes = {}
+        self._next_async_vae_generation_id = 1
 
     @staticmethod
     def _build_dit_config(config: LingBotWorldFastPipelineConfig) -> dict[str, object]:
@@ -172,6 +276,24 @@ class LingBotWorldFastPipeline(BasePipeline):
         return self.vae.cached_decode_withflag(
             latents,
             device=self.vae_device,
+            is_first_clip=is_first_clip,
+            is_last_clip=is_last_clip,
+            decode_state=session.decoder_state,
+        )
+
+    @torch.inference_mode()
+    def decode_video_cached_async(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        latents: torch.Tensor,
+        is_first_clip: bool,
+        is_last_clip: bool,
+    ) -> torch.Tensor:
+        async_vae = self.async_vae or self.vae
+        async_vae_device = self.async_vae_device or self.vae_device
+        return async_vae.cached_decode_withflag(
+            latents,
+            device=async_vae_device,
             is_first_clip=is_first_clip,
             is_last_clip=is_last_clip,
             decode_state=session.decoder_state,
@@ -273,9 +395,14 @@ class LingBotWorldFastPipeline(BasePipeline):
         tensor = torch.nn.functional.interpolate(tensor.unsqueeze(0), size=(height, width), mode="bicubic").squeeze(0)
         return tensor.to(self.vae_device, dtype=self.config.vae_config.torch_dtype)
 
-    def _encode_condition_chunk(self, session: LingBotWorldFastGenerationSession) -> torch.Tensor:
+    def _encode_condition_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        *,
+        chunk_index: int | None = None,
+    ) -> torch.Tensor:
         """Encode only the current image-conditioning chunk with a persistent VAE cache."""
-        chunk_index = session.current_chunk_index
+        chunk_index = session.current_chunk_index if chunk_index is None else int(chunk_index)
         is_first_chunk = chunk_index == 0
         is_last_chunk = chunk_index == session.chunk_count - 1
         pixel_frames = 1 + 4 * (session.chunk_size - 1) if is_first_chunk else 4 * session.chunk_size
@@ -311,6 +438,133 @@ class LingBotWorldFastPipeline(BasePipeline):
             session.condition_image = None
         return torch.cat([mask, latent], dim=0).unsqueeze(0)
 
+    def _encode_condition_chunk_profiled(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        *,
+        chunk_index: int,
+        progress_callback: Callable[..., None] | None = None,
+        condition_prefetched: bool = False,
+        synchronize: bool = False,
+    ) -> tuple[torch.Tensor, float]:
+        self._notify_progress(
+            progress_callback,
+            "encoding_condition_chunk",
+            index=chunk_index,
+            condition_prefetched=condition_prefetched,
+        )
+        condition_start_ns = time.perf_counter_ns()
+        condition_chunk = self._encode_condition_chunk(session, chunk_index=chunk_index)
+        if synchronize and self.vae_device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(self.vae_device)
+        condition_end_ns = time.perf_counter_ns()
+        condition_encode_ms = (condition_end_ns - condition_start_ns) / 1_000_000.0
+        self._notify_progress(
+            progress_callback,
+            "condition_chunk_encoded",
+            index=chunk_index,
+            condition_encode_ms=condition_encode_ms,
+            condition_prefetched=condition_prefetched,
+        )
+        return condition_chunk, condition_encode_ms
+
+    def _wait_for_condition_prefetch(self, prefetch: LingBotWorldFastConditionPrefetch, timeout: float = 0.1) -> None:
+        while not prefetch.done.wait(timeout=timeout):
+            continue
+
+    def _consume_or_encode_condition_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        *,
+        chunk_index: int,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> tuple[torch.Tensor, dict[str, object]]:
+        prefetch = session.condition_prefetch
+        if prefetch is None:
+            condition_chunk, condition_encode_ms = self._encode_condition_chunk_profiled(
+                session,
+                chunk_index=chunk_index,
+                progress_callback=progress_callback,
+            )
+            return condition_chunk, {
+                "condition_encode_ms": condition_encode_ms,
+                "condition_prefetched": False,
+                "condition_prefetch_wait_ms": 0.0,
+            }
+        if prefetch.chunk_index != chunk_index:
+            raise RuntimeError(
+                f"LingBot condition prefetch order violation: expected chunk {chunk_index}, "
+                f"got prefetched chunk {prefetch.chunk_index}"
+            )
+
+        wait_start_ns = time.perf_counter_ns()
+        self._wait_for_condition_prefetch(prefetch)
+        wait_ms = (time.perf_counter_ns() - wait_start_ns) / 1_000_000.0
+        session.condition_prefetch = None
+        if prefetch.exception is not None:
+            raise RuntimeError(
+                f"LingBot condition prefetch failed for chunk {chunk_index}: {prefetch.exception}"
+            ) from prefetch.exception
+        if prefetch.condition_chunk is None:
+            raise RuntimeError(f"LingBot condition prefetch for chunk {chunk_index} produced no tensor")
+        self._notify_progress(
+            progress_callback,
+            "condition_prefetch_consumed",
+            index=chunk_index,
+            condition_encode_ms=prefetch.condition_encode_ms,
+            condition_prefetch_wait_ms=wait_ms,
+        )
+        return prefetch.condition_chunk, {
+            "condition_encode_ms": prefetch.condition_encode_ms,
+            "condition_prefetched": True,
+            "condition_prefetch_wait_ms": wait_ms,
+        }
+
+    def _start_condition_prefetch(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        *,
+        chunk_index: int,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> None:
+        if not self.condition_prefetch_enabled or chunk_index >= session.chunk_count:
+            return
+        if session.condition_prefetch is not None:
+            raise RuntimeError(
+                f"LingBot condition prefetch already in flight for chunk {session.condition_prefetch.chunk_index}"
+            )
+
+        prefetch = LingBotWorldFastConditionPrefetch(chunk_index=chunk_index)
+        session.condition_prefetch = prefetch
+
+        def worker() -> None:
+            prefetch.start_ns = time.perf_counter_ns()
+            self._notify_progress(progress_callback, "condition_prefetch_start", index=chunk_index)
+            try:
+                condition_chunk, condition_encode_ms = self._encode_condition_chunk_profiled(
+                    session,
+                    chunk_index=chunk_index,
+                    progress_callback=progress_callback,
+                    condition_prefetched=True,
+                    synchronize=True,
+                )
+                prefetch.condition_chunk = condition_chunk
+                prefetch.condition_encode_ms = condition_encode_ms
+            except BaseException as exc:
+                prefetch.exception = exc
+            finally:
+                prefetch.end_ns = time.perf_counter_ns()
+                self._notify_progress(
+                    progress_callback,
+                    "condition_prefetch_done",
+                    index=chunk_index,
+                    condition_encode_ms=prefetch.condition_encode_ms,
+                    failed=prefetch.exception is not None,
+                )
+                prefetch.done.set()
+
+        threading.Thread(target=worker, daemon=True, name=f"lingbot-condition-prefetch-{chunk_index}").start()
+
     def _release_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
         cache_handle = session.cache_handle
         if cache_handle is None:
@@ -329,6 +583,10 @@ class LingBotWorldFastPipeline(BasePipeline):
     def release_session(self, session: LingBotWorldFastGenerationSession) -> None:
         """Idempotently release cache and decoder state owned by a session."""
         with session.transaction_lock:
+            self._cancel_async_vae_generation(session)
+            if session.condition_prefetch is not None:
+                self._wait_for_condition_prefetch(session.condition_prefetch, timeout=0.1)
+                session.condition_prefetch = None
             cache_released = self._release_session_cache(session)
             session.decoder_state.feat_cache = []
             session.decoder_state.feat_idx = [0]
@@ -343,7 +601,11 @@ class LingBotWorldFastPipeline(BasePipeline):
                 session.status = LingBotWorldFastSessionStatus.RELEASED
 
     def close(self) -> None:
-        """Deterministically close the multi-process denoising worker group."""
+        """Deterministically close async VAE and multi-process denoising workers."""
+        async_vae_manager = getattr(self, "_async_vae_manager", None)
+        if async_vae_manager is not None:
+            async_vae_manager.close()
+            self._async_vae_manager = None
         denoise_stage = getattr(self, "denoise_stage", None)
         if isinstance(denoise_stage, ParallelWorker):
             denoise_stage.close()
@@ -632,6 +894,98 @@ class LingBotWorldFastPipeline(BasePipeline):
             dtype=torch.float32,
         )
 
+    def _generate_chunk_latent(
+        self,
+        runtime: LingBotWorldFastGenerationSession,
+        control: torch.Tensor,
+        progress_callback: Callable[..., None] | None = None,
+        *,
+        return_profile: bool = False,
+    ) -> tuple[int, torch.Tensor, dict[str, object]]:
+        idx = runtime.current_chunk_index
+        chunk_start_ns = time.perf_counter_ns()
+        latent_chunk = self._next_noise_chunk(runtime)
+        condition_chunk, condition_profile = self._consume_or_encode_condition_chunk(
+            runtime,
+            chunk_index=idx,
+            progress_callback=progress_callback,
+        )
+        self._start_condition_prefetch(runtime, chunk_index=idx + 1, progress_callback=progress_callback)
+        control_chunk = control
+
+        self._notify_progress(progress_callback, "dit_start", index=idx)
+        current_start = idx * runtime.chunk_size * runtime.frame_tokens
+        cached_latent = runtime.world_kv_cached_latents.pop(idx, None) if runtime.world_kv_cached_latents else None
+        profile: dict[str, object] = {
+            "chunk_id": idx,
+            "chunk_start_ns": chunk_start_ns,
+            "cached_latent": cached_latent is not None,
+        }
+        profile.update(condition_profile)
+        if cached_latent is not None:
+            self._notify_progress(progress_callback, "decoding_cached_chunk", index=idx)
+            denoised = cached_latent.to(device=self.device, dtype=self.torch_dtype)
+            profile["dit_total_ms"] = 0.0
+            profile["kv_update_ms"] = 0.0
+        else:
+            with ProfilingContext4Debug("denoise_chunk"):
+                denoise_kwargs = dict(
+                    cache_handle=runtime.cache_handle,
+                    latent_chunk=latent_chunk,
+                    condition_chunk=condition_chunk,
+                    prompt_emb=runtime.prompt_emb,
+                    control_chunk=control_chunk,
+                    current_start=current_start,
+                    max_attention_size=runtime.max_attention_size,
+                    chunk_id=idx,
+                    return_profile=return_profile,
+                )
+                self._notify_progress(progress_callback, "kv_update_start", index=idx)
+                dit_start_ns = time.perf_counter_ns()
+                if isinstance(self.denoise_stage, ParallelWorker):
+                    denoise_result = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs, sync=True)
+                else:
+                    denoise_result = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs)
+                dit_end_ns = time.perf_counter_ns()
+
+            if return_profile and isinstance(denoise_result, tuple):
+                denoised, worker_profile = denoise_result
+                profile.update(worker_profile)
+            else:
+                denoised = denoise_result
+            profile.setdefault("dit_total_ms", (dit_end_ns - dit_start_ns) / 1_000_000.0)
+            profile.setdefault("kv_update_ms", profile.get("kv_update_gpu_ms", 0.0))
+            self._notify_progress(progress_callback, "dit_end", index=idx, profile=profile)
+            self._notify_progress(progress_callback, "kv_update_end", index=idx, profile=profile)
+
+            if runtime.world_kv_binding is not None:
+                try:
+                    runtime.world_kv_binding.on_chunk_finalized(runtime, idx, denoised)
+                except Exception as exc:
+                    logger.warning(f"world_kv on_chunk_finalized failed at chunk {idx}: {exc}")
+
+        profile["chunk_period_ms"] = (time.perf_counter_ns() - chunk_start_ns) / 1_000_000.0
+        return idx, denoised, profile
+
+    def _decode_latent_to_images(
+        self,
+        runtime: LingBotWorldFastGenerationSession,
+        idx: int,
+        denoised: torch.Tensor,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> list[Image.Image]:
+        self._notify_progress(progress_callback, "decoding_chunk", index=idx, device=str(self.vae_device))
+        with ProfilingContext4Debug("vae_decode"):
+            frames = self.decode_video_cached(
+                runtime,
+                denoised,
+                is_first_clip=(idx == 0),
+                is_last_clip=(idx == runtime.chunk_count - 1),
+            )
+            images = self.tensor2video(frames)
+        self._notify_progress(progress_callback, "chunk_decoded", index=idx, frames=len(images))
+        return images
+
     @torch.inference_mode()
     def generate_next_chunk(
         self,
@@ -643,53 +997,166 @@ class LingBotWorldFastPipeline(BasePipeline):
             return []
 
         with ProfilingContext4Debug("generate_next_chunk"):
-            idx = runtime.current_chunk_index
-            latent_chunk = self._next_noise_chunk(runtime)
-            self._notify_progress(progress_callback, "encoding_condition_chunk", index=idx)
-            condition_chunk = self._encode_condition_chunk(runtime)
-            self._notify_progress(progress_callback, "condition_chunk_encoded", index=idx)
-            control_chunk = control
-
-            self._notify_progress(progress_callback, "denoising_chunk", index=idx)
-            current_start = idx * runtime.chunk_size * runtime.frame_tokens
-            cached_latent = runtime.world_kv_cached_latents.pop(idx, None) if runtime.world_kv_cached_latents else None
-            if cached_latent is not None:
-                # On a world_kv fast-forward hit, KV is already seeded and the latent comes
-                # from the cached skeleton. Decode it directly and skip clean-KV rewrite.
-                self._notify_progress(progress_callback, "decoding_cached_chunk", index=idx)
-                denoised = cached_latent.to(device=self.device, dtype=self.torch_dtype)
-            else:
-                with ProfilingContext4Debug("denoise_chunk"):
-                    denoise_kwargs = dict(
-                        cache_handle=runtime.cache_handle,
-                        latent_chunk=latent_chunk,
-                        condition_chunk=condition_chunk,
-                        prompt_emb=runtime.prompt_emb,
-                        control_chunk=control_chunk,
-                        current_start=current_start,
-                        max_attention_size=runtime.max_attention_size,
-                    )
-                    if isinstance(self.denoise_stage, ParallelWorker):
-                        denoised = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs, sync=True)
-                    else:
-                        denoised = self.denoise_stage.denoise_and_update_cache(**denoise_kwargs)
-
-                if runtime.world_kv_binding is not None:
-                    try:
-                        runtime.world_kv_binding.on_chunk_finalized(runtime, idx, denoised)
-                    except Exception as exc:
-                        logger.warning(f"world_kv on_chunk_finalized failed at chunk {idx}: {exc}")
-
-            self._notify_progress(progress_callback, "decoding_chunk", index=idx, device=str(self.vae_device))
-            with ProfilingContext4Debug("vae_decode"):
-                frames = self.decode_video_cached(
-                    runtime,
-                    denoised,
-                    is_first_clip=(idx == 0),
-                    is_last_clip=(idx == runtime.chunk_count - 1),
-                )
-                images = self.tensor2video(frames)
-            self._notify_progress(progress_callback, "chunk_decoded", index=idx, frames=len(images))
+            idx, denoised, _profile = self._generate_chunk_latent(
+                runtime,
+                control=control,
+                progress_callback=progress_callback,
+            )
+            images = self._decode_latent_to_images(runtime, idx, denoised, progress_callback)
             runtime.current_chunk_index += 1
             runtime.emitted_frames += len(images)
             return images
+
+    @torch.inference_mode()
+    def submit_async_vae_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        request: LingBotWorldFastChunkRequest,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> AsyncVAEChunkHandle:
+        """Generate one latent chunk, enqueue VAE decode, and return its completion handle."""
+        manager = self._ensure_async_vae_manager()
+        manager.raise_if_failed()
+        if not session.transaction_lock.acquire(blocking=False):
+            raise RuntimeError("LingBot session already has a chunk in progress")
+        try:
+            self._validate_chunk_request(session, request)
+            resolved_control: torch.Tensor | None = None
+            if session.status == LingBotWorldFastSessionStatus.NEW:
+                try:
+
+                    def materialize_first_control() -> None:
+                        nonlocal resolved_control
+                        resolved_control = self._resolve_control(request.control)
+
+                    initialized = self._create_initialized_session(
+                        session.config,
+                        progress_callback,
+                        before_cache=materialize_first_control,
+                    )
+                    session.__dict__.update(
+                        (key, value) for key, value in initialized.__dict__.items() if key != "transaction_lock"
+                    )
+                except Exception as exc:
+                    session.status = LingBotWorldFastSessionStatus.POISONED
+                    session.poisoned_reason = f"{type(exc).__name__}: {exc}"
+                    self.release_session(session)
+                    raise
+            if resolved_control is None:
+                resolved_control = self._resolve_control(request.control)
+            self._validate_control(session, resolved_control)
+
+            session.status = LingBotWorldFastSessionStatus.RUNNING
+            try:
+                idx, denoised, profile = self._generate_chunk_latent(
+                    session,
+                    control=resolved_control,
+                    progress_callback=progress_callback,
+                    return_profile=True,
+                )
+                generation_id = self._assign_async_vae_generation(session)
+                enqueue_ns = time.perf_counter_ns()
+                handle = AsyncVAEChunkHandle(
+                    session_id=request.session_id,
+                    generation_id=generation_id,
+                    chunk_id=idx,
+                    is_last_clip=(idx == session.chunk_count - 1),
+                    enqueue_ns=enqueue_ns,
+                    denoise_profile=profile,
+                )
+                task = AsyncVAEDecodeTask(
+                    session_id=request.session_id,
+                    generation_id=generation_id,
+                    chunk_id=idx,
+                    latent=denoised,
+                    latent_ready_event=self._record_latent_ready_event(denoised),
+                    is_first_clip=(idx == 0),
+                    is_last_clip=(idx == session.chunk_count - 1),
+                    handle=handle,
+                )
+                self._notify_progress(progress_callback, "vae_enqueue", index=idx, generation_id=generation_id)
+                manager.enqueue(task)
+                self._notify_progress(
+                    progress_callback,
+                    "vae_enqueued",
+                    index=idx,
+                    generation_id=generation_id,
+                    vae_queue_wait_ms=handle.queue_wait_ms,
+                    vae_queue_depth=handle.queue_depth_after_enqueue,
+                )
+            except Exception as exc:
+                session.status = LingBotWorldFastSessionStatus.POISONED
+                session.poisoned_reason = f"{type(exc).__name__}: {exc}"
+                self.release_session(session)
+                raise
+
+            session.current_chunk_index += 1
+            session.status = LingBotWorldFastSessionStatus.COMMITTED
+            logger.info(
+                f"Submitted LingBot async VAE chunk {idx + 1}/{session.chunk_count}: "
+                f"queue_wait_ms={handle.queue_wait_ms:.3f}"
+            )
+            return handle
+        finally:
+            session.transaction_lock.release()
+
+    def wait_async_vae_chunk(
+        self,
+        session: LingBotWorldFastGenerationSession,
+        handle: AsyncVAEChunkHandle,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> list[Image.Image]:
+        """Wait for one async VAE chunk and return frames if it still belongs to the session."""
+        manager = getattr(self, "_async_vae_manager", None)
+        while not handle.done.wait(timeout=0.1):
+            if manager is not None:
+                manager.raise_if_failed()
+        if handle.exception is not None:
+            session.status = LingBotWorldFastSessionStatus.POISONED
+            session.poisoned_reason = f"{type(handle.exception).__name__}: {handle.exception}"
+            self.release_session(session)
+            raise RuntimeError(session.poisoned_reason) from handle.exception
+        if handle.canceled or handle.generation_id != session.async_vae_generation_id:
+            logger.info(
+                "Dropped stale LingBot async VAE output: "
+                f"generation_id={handle.generation_id} chunk_id={handle.chunk_id}"
+            )
+            return []
+
+        frames = handle.frames or []
+        session.emitted_frames += len(frames)
+        output_ready_ns = handle.output_ready_ns or time.perf_counter_ns()
+        chunk_start_ns = int(handle.denoise_profile.get("chunk_start_ns", handle.enqueue_ns))
+        chunk_period_ms = (output_ready_ns - chunk_start_ns) / 1_000_000.0
+        vae_ms = None
+        if handle.vae_start_ns is not None and handle.vae_end_ns is not None:
+            vae_ms = (handle.vae_end_ns - handle.vae_start_ns) / 1_000_000.0
+        overlap_ratio = None
+        if handle.overlap_ms is not None:
+            dit_ms = float(handle.denoise_profile.get("dit_total_ms", 0.0) or 0.0)
+            overlap_vae_ms = vae_ms
+            if overlap_vae_ms is None:
+                overlap_vae_ms = (
+                    (handle.vae_end_ns or output_ready_ns) - (handle.vae_start_ns or handle.enqueue_ns)
+                ) / 1_000_000.0
+            denom = min(dit_ms, overlap_vae_ms)
+            overlap_ratio = handle.overlap_ms / denom if denom > 0 else None
+        self._notify_progress(
+            progress_callback,
+            "output_ready",
+            index=handle.chunk_id,
+            frames=len(frames),
+            vae_queue_wait_ms=handle.queue_wait_ms,
+            vae_ms=vae_ms,
+            vae_gpu_ms=handle.vae_gpu_ms,
+            chunk_period_ms=chunk_period_ms,
+            overlap_ms=handle.overlap_ms,
+            overlap_ratio=overlap_ratio,
+        )
+        logger.info(
+            "LingBot async VAE chunk ready: "
+            f"chunk_id={handle.chunk_id} frames={len(frames)} chunk_period_ms={chunk_period_ms:.3f} "
+            f"queue_wait_ms={handle.queue_wait_ms:.3f} overlap_ms={handle.overlap_ms} "
+            f"overlap_ratio={overlap_ratio}"
+        )
+        return frames

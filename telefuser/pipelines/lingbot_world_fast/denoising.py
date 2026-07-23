@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -217,12 +218,29 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         control_chunk: torch.Tensor | None,
         current_start: int,
         max_attention_size: int,
-    ) -> torch.Tensor:
+        chunk_id: int | None = None,
+        return_profile: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, object]]:
         """Denoise a chunk and commit its clean KV state inside each worker."""
         try:
             state = self._cache_registry[cache_handle]
         except KeyError as exc:
             raise KeyError(f"Unknown cache handle {cache_handle}") from exc
+
+        device = torch.device(self.device)
+        use_cuda_events = return_profile and device.type == "cuda" and torch.cuda.is_available()
+        profile: dict[str, object] = {"chunk_id": chunk_id} if return_profile else {}
+        denoise_start_event = denoise_end_event = None
+        kv_start_event = kv_end_event = None
+        if use_cuda_events:
+            with torch.cuda.device(device):
+                denoise_start_event = torch.cuda.Event(enable_timing=True)
+                denoise_end_event = torch.cuda.Event(enable_timing=True)
+                kv_start_event = torch.cuda.Event(enable_timing=True)
+                kv_end_event = torch.cuda.Event(enable_timing=True)
+                denoise_start_event.record()
+
+        denoise_start_ns = time.perf_counter_ns()
         denoised = self.denoise_chunk(
             latent_chunk=latent_chunk,
             condition_chunk=condition_chunk,
@@ -236,6 +254,12 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             max_attention_size=max_attention_size,
             generator=state.generator,
         )
+        denoise_end_ns = time.perf_counter_ns()
+        if use_cuda_events and denoise_end_event is not None and kv_start_event is not None:
+            denoise_end_event.record()
+            kv_start_event.record()
+
+        kv_start_ns = time.perf_counter_ns()
         with torch.amp.autocast(
             self.device.type,
             dtype=self.torch_dtype,
@@ -252,6 +276,41 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 current_start=current_start,
                 max_attention_size=max_attention_size,
             )
+        kv_end_ns = time.perf_counter_ns()
+
+        if return_profile:
+            profile.update(
+                {
+                    "dit_denoise_ms": (denoise_end_ns - denoise_start_ns) / 1_000_000.0,
+                    "kv_update_ms": (kv_end_ns - kv_start_ns) / 1_000_000.0,
+                    "dit_total_ms": (kv_end_ns - denoise_start_ns) / 1_000_000.0,
+                }
+            )
+            if use_cuda_events and all(
+                event is not None for event in (denoise_start_event, denoise_end_event, kv_start_event, kv_end_event)
+            ):
+                assert denoise_start_event is not None
+                assert denoise_end_event is not None
+                assert kv_start_event is not None
+                assert kv_end_event is not None
+                kv_end_event.record()
+                kv_end_event.synchronize()
+                profile.update(
+                    {
+                        "dit_denoise_gpu_ms": denoise_start_event.elapsed_time(denoise_end_event),
+                        "kv_update_gpu_ms": kv_start_event.elapsed_time(kv_end_event),
+                        "dit_total_gpu_ms": denoise_start_event.elapsed_time(kv_end_event),
+                    }
+                )
+            if chunk_id is not None:
+                logger.info(
+                    "lingbot_async_vae dit_end "
+                    f"chunk_id={chunk_id} dit_total_ms={profile.get('dit_total_ms'):.3f} "
+                    f"kv_update_ms={profile.get('kv_update_ms'):.3f} "
+                    f"dit_total_gpu_ms={profile.get('dit_total_gpu_ms')} "
+                    f"kv_update_gpu_ms={profile.get('kv_update_gpu_ms')}"
+                )
+            return denoised, profile
         return denoised
 
     def has_cache(self, cache_handle: int) -> bool:

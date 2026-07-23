@@ -2,7 +2,7 @@ import asyncio
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -72,6 +72,51 @@ def test_online_worker_waits_for_external_action_before_generating() -> None:
     assert not worker.is_alive()
     assert pipeline.call_count == 1
     builder.defer.assert_called_once_with({"type": "control", "control_tensor": control})
+    pipeline.release_session.assert_called_once()
+
+
+def test_async_worker_initializes_session_before_finish_check() -> None:
+    pipeline = MagicMock()
+    pipeline.async_vae_enabled = True
+    control_context = SimpleNamespace(
+        control_type="cam",
+        chunk_size=4,
+        width=8,
+        height=8,
+        latent_frames=4,
+    )
+    pipeline.control_context.return_value = control_context
+    service = LingBotWorldFastService(pipeline)
+    state = LingBotWorldFastSessionState(
+        config=LingBotWorldFastSessionConfig(
+            prompt="test",
+            image=Image.new("RGB", (8, 8)),
+            frame_num=13,
+            chunk_size=4,
+            show_control_hud=False,
+        ),
+        control_context=control_context,
+    )
+    state.pending_inputs.put({"type": "control", "control_tensor": torch.ones(1)})
+    handle = SimpleNamespace(chunk_id=0, is_last_clip=True)
+
+    def submit_chunk(runtime, request, progress_callback=None):
+        assert runtime.chunk_size == 0
+        runtime.chunk_size = 4
+        runtime.latent_f = 4
+        runtime.current_chunk_index = 1
+        return handle
+
+    pipeline.submit_async_vae_chunk.side_effect = submit_chunk
+    pipeline.wait_async_vae_chunk.return_value = [Image.new("RGB", (8, 8))]
+    builder = MagicMock()
+    builder.defer.return_value = MagicMock(return_value=torch.ones(1))
+
+    with patch("telefuser.pipelines.lingbot_world_fast.service.LingBotWorldFastControlBuilder", return_value=builder):
+        service._run_worker_loop("session-a", state, MagicMock())
+
+    pipeline.submit_async_vae_chunk.assert_called_once()
+    pipeline.wait_async_vae_chunk.assert_called_once_with(ANY, handle, progress_callback=ANY)
     pipeline.release_session.assert_called_once()
 
 

@@ -58,8 +58,19 @@ def _create_runtime(frame_num: int, seed: int = 42):
 def test_v1_and_v2_defaults_match_the_shared_source_contract() -> None:
     image = Image.new("RGB", (16, 16))
 
-    assert LingBotWorldFastPipelineConfig().vae_config.torch_dtype == torch.float32
-    assert LingBotWorldV2PipelineConfig().vae_config.torch_dtype == torch.float32
+    fast_config = LingBotWorldFastPipelineConfig()
+    v2_config = LingBotWorldV2PipelineConfig()
+
+    assert fast_config.vae_config.torch_dtype == torch.float32
+    assert v2_config.vae_config.torch_dtype == torch.float32
+    assert fast_config.enable_async_vae is False
+    assert v2_config.enable_async_vae is False
+    assert fast_config.async_vae_config is None
+    assert v2_config.async_vae_config is None
+    assert fast_config.enable_condition_prefetch is False
+    assert v2_config.enable_condition_prefetch is False
+    assert fast_config.vae_queue_size == 1
+    assert v2_config.vae_queue_size == 1
     assert LingBotWorldFastSessionConfig(prompt="v1", image=image).frame_policy == "truncate"
 
 

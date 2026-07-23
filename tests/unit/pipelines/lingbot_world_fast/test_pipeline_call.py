@@ -1,4 +1,5 @@
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -46,7 +47,15 @@ def _control() -> torch.Tensor:
 
 def _pipeline() -> LingBotWorldFastPipeline:
     pipeline = LingBotWorldFastPipeline(device="cpu")
-    pipeline.config = SimpleNamespace(control_type="cam")
+    pipeline.config = SimpleNamespace(
+        control_type="cam",
+        enable_async_vae=False,
+        vae_queue_size=1,
+        async_vae_config=None,
+        enable_condition_prefetch=False,
+    )
+    pipeline.vae_device = torch.device("cpu")
+    pipeline.async_vae_device = torch.device("cpu")
     return pipeline
 
 
@@ -290,3 +299,98 @@ def test_pipeline_close_delegates_to_parallel_worker() -> None:
     pipeline.close()
 
     worker.close.assert_called_once_with()
+
+
+def test_async_vae_submit_wait_returns_ordered_frames_without_sync_path_changes() -> None:
+    pipeline = _pipeline()
+    pipeline.config.enable_async_vae = True
+    runtime = _session(chunk_count=2)
+    expected = [Image.new("RGB", (8, 8), "blue")]
+    latent = torch.zeros(1, 16, 1, 1, 1)
+    pipeline._generate_chunk_latent = MagicMock(
+        return_value=(0, latent, {"dit_total_ms": 1.0, "chunk_start_ns": time.perf_counter_ns()})
+    )
+    pipeline.decode_video_cached_async = MagicMock(return_value=torch.zeros(3, 1, 8, 8))
+    pipeline.tensor2video = MagicMock(return_value=expected)
+
+    try:
+        handle = pipeline.submit_async_vae_chunk(
+            runtime,
+            LingBotWorldFastChunkRequest(chunk_index=0, session_id="session-a", control=_control()),
+        )
+        frames = pipeline.wait_async_vae_chunk(runtime, handle)
+    finally:
+        pipeline.close()
+
+    assert frames == expected
+    assert handle.chunk_id == 0
+    assert runtime.current_chunk_index == 1
+    assert runtime.emitted_frames == 1
+    assert runtime.async_vae_generation_id is not None
+    pipeline._generate_chunk_latent.assert_called_once()
+    pipeline.decode_video_cached_async.assert_called_once()
+    pipeline.tensor2video.assert_called_once()
+
+
+def test_async_decode_uses_separate_vae_decoder_when_configured() -> None:
+    pipeline = _pipeline()
+    session = _session()
+    latent = torch.zeros(1, 16, 1, 1, 1)
+    expected = torch.ones(3, 1, 8, 8)
+    pipeline.vae = MagicMock()
+    pipeline.async_vae = MagicMock()
+    pipeline.async_vae_device = torch.device("cpu")
+    pipeline.async_vae.cached_decode_withflag.return_value = expected
+
+    actual = pipeline.decode_video_cached_async(session, latent, is_first_clip=True, is_last_clip=False)
+
+    assert actual is expected
+    pipeline.async_vae.cached_decode_withflag.assert_called_once_with(
+        latent,
+        device=torch.device("cpu"),
+        is_first_clip=True,
+        is_last_clip=False,
+        decode_state=session.decoder_state,
+    )
+    pipeline.vae.cached_decode_withflag.assert_not_called()
+
+
+def test_condition_prefetch_consumes_next_chunk_without_reencoding() -> None:
+    pipeline = _pipeline()
+    pipeline.config.enable_condition_prefetch = True
+    runtime = _session(chunk_count=3)
+    calls: list[int] = []
+
+    def encode_condition(_session, *, chunk_index=None):
+        calls.append(int(chunk_index))
+        return torch.full((1,), int(chunk_index), dtype=torch.float32)
+
+    pipeline._encode_condition_chunk = MagicMock(side_effect=encode_condition)
+
+    pipeline._start_condition_prefetch(runtime, chunk_index=1)
+    condition_chunk, profile = pipeline._consume_or_encode_condition_chunk(runtime, chunk_index=1)
+
+    torch.testing.assert_close(condition_chunk, torch.tensor([1.0]))
+    assert calls == [1]
+    assert profile["condition_prefetched"] is True
+    assert profile["condition_prefetch_wait_ms"] >= 0.0
+    assert runtime.condition_prefetch is None
+
+
+def test_release_session_cancels_async_vae_generation_before_clearing_decoder_state() -> None:
+    pipeline = _pipeline()
+    pipeline.denoise_stage = MagicMock()
+    pipeline._async_vae_manager = MagicMock()
+    session = _session()
+    session.async_vae_generation_id = 44
+    pipeline._async_vae_runtimes = {44: session}
+    session.decoder_state.feat_cache = [object()]
+    session.decoder_state.feat_idx = [3]
+
+    pipeline.release_session(session)
+
+    pipeline._async_vae_manager.cancel_generation.assert_called_once_with(44)
+    assert session.async_vae_generation_id is None
+    assert 44 not in pipeline._async_vae_runtimes
+    assert session.decoder_state.feat_cache == []
+    assert session.decoder_state.feat_idx == [0]

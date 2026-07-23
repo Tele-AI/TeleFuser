@@ -100,6 +100,19 @@ class LingBotWorldFastSessionStatus(str, Enum):
 
 
 @dataclass
+class LingBotWorldFastConditionPrefetch:
+    """One in-flight condition chunk encoded ahead of its DiT use."""
+
+    chunk_index: int
+    done: threading.Event = field(default_factory=threading.Event, repr=False)
+    condition_chunk: torch.Tensor | None = field(default=None, repr=False)
+    condition_encode_ms: float = 0.0
+    start_ns: int | None = None
+    end_ns: int | None = None
+    exception: BaseException | None = field(default=None, repr=False)
+
+
+@dataclass
 class LingBotWorldFastGenerationSession:
     """Externally owned state for one chunked LingBot generation."""
 
@@ -126,6 +139,8 @@ class LingBotWorldFastGenerationSession:
     # CacheSeek world_kv binding and decode-only latents for fast-forward hits.
     world_kv_binding: object | None = None
     world_kv_cached_latents: dict[int, torch.Tensor] = field(default_factory=dict)
+    async_vae_generation_id: int | None = None
+    condition_prefetch: LingBotWorldFastConditionPrefetch | None = field(default=None, repr=False)
 
     @property
     def chunk_count(self) -> int:
