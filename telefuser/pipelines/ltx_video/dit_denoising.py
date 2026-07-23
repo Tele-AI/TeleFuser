@@ -1008,4 +1008,3 @@ class DitDenoisingStage(BaseStage):
     def stage2_sigmas(device: torch.device) -> torch.Tensor:
         """Return the fixed distilled sigma schedule used by stage 2."""
         return torch.tensor(STAGE_2_DISTILLED_SIGMA_VALUES, device=device, dtype=torch.float32)
-
