@@ -4,12 +4,6 @@ Telefuser users torchao as its backend of FP8 weight-only linear quantization.
 
 First, install Telefuser as [here](https://github.com/Tele-AI/TeleFuser#install).
 
-Then, install torchao:
-
-```bash
-pip install torchao
-```
-
 Next, download `Qwen-Image-2512` model to your `TF_MODEL_ZOO_PATH` (or specify the model path to `--model_root`), and run the NF4 `Qwen-Image-2512` example:
 
 ```bash

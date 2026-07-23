@@ -54,6 +54,8 @@ dependencies = [
     "transformers==4.57.3",
     "triton",
     "uvicorn>=0.30,<1.0",
+    "torchao",
+    "bitsandbytes",
 ]
 
 [project.optional-dependencies]
