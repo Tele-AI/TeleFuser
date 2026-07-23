@@ -142,27 +142,6 @@ class BaseStage(ABC):
         """Apply parallelization to models. Override in subclass."""
         pass
 
-    def apply_model_quantization(self, model: Any, runtime_config: ModelRuntimeConfig | None = None) -> None:
-        """Apply explicit runtime quantization config to a model if requested."""
-        runtime_config = runtime_config or self.model_runtime_config
-        quant_config = runtime_config.quant_config
-        if not quant_config.enabled:
-            return
-        if not hasattr(model, "enable_quant"):
-            logger.warning(f"Quantization requested for {self.name}, but model has no enable_quant()")
-            return
-
-        from .config import QuantType
-
-        if quant_config.quant_type in (QuantType.BNB_NF4, QuantType.TORCHAO_FP8):
-            if runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
-                raise ValueError("Runtime quantization requires NO_CPU_OFFLOAD because tensor must stay on device")
-            logger.info(f"onload {self.name} model to {self.device} before runtime quantization")
-            model.to(self.device)
-            self.onload_models_flag = True
-
-        model.enable_quant(quant_config)
-
     def setup_feature_cache(
         self,
         model: Any,

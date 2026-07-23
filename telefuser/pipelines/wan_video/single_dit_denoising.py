@@ -39,7 +39,6 @@ class SingleDitDenoisingStage(BaseStage):
         self.dit: WanModel = module_manager.fetch_module("wan_video_dit")
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.load_loras()
-        self.apply_model_quantization(self.dit)
         self.model_names = ["dit"]
         self.scheduler = scheduler
         if model_runtime_config.offload_config.offload_type == WeightOffloadType.SEQUENTIAL_CPU_OFFLOAD:

@@ -15,7 +15,7 @@ from telefuser.utils.hf_utils import load_module_from_huggingface
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys, init_weights_on_device, load_state_dict
 
-from .config import QuantConfig, QuantType
+from .config import QuantConfig
 from .model_registry import ModelRegistry
 
 
@@ -67,15 +67,6 @@ def load_model_from_single_file(
         with init_weights_on_device("meta"):
             model = model_class(**extra_kwargs)
 
-        # Enable quantization if needed. Keep the legacy FP8 dtype path for
-        # existing examples, but prefer explicit QuantConfig for new modes.
-        if quant_config is not None and quant_config.enabled:
-            if quant_config.quant_type in (QuantType.BNB_NF4, QuantType.TORCHAO_FP8):
-                logger.info("Deferring TorchAO quantization until runtime stage initialization")
-            else:
-                model.enable_quant(quant_config)
-        elif torch_dtype == torch.float8_e4m3fn:
-            model.enable_quant(torch_dtype)
         if hasattr(model, "eval"):
             model = model.eval()
         model.requires_grad_(False)
@@ -84,11 +75,21 @@ def load_model_from_single_file(
         if not low_cpu_mem_usage:
             model_state_dict = {k: v.to("cpu").clone() for k, v in model_state_dict.items()}
 
-        # Load weights and move to target device/dtype
+        # Load weights and move to target device/dtype first. Runtime quantization
+        # backends such as TorchAO FP8 and BNB NF4 need real assigned weights on
+        # the target device before replacing Linear layers.
         model.load_state_dict(model_state_dict, assign=True)
         if torch_dtype != torch.float8_e4m3fn:
             model = model.to(dtype=torch_dtype)
         model = model.to(device)
+
+        # Enable quantization after weights are assigned and the model is on device.
+        # This preserves the original ModuleManager ownership of quantization while
+        # allowing online backends to inspect/convert real parameters.
+        if quant_config is not None and quant_config.enabled:
+            model.enable_quant(quant_config)
+        elif torch_dtype == torch.float8_e4m3fn:
+            model.enable_quant(torch_dtype)
 
         loaded_model_names.append(model_name)
         loaded_models.append(model)
