@@ -18,7 +18,8 @@ How to Contribute
 Reporting Bugs
 --------------
 
-Please use the `GitHub Issues <https://github.com/YOUR_ORG/tf-kernel/issues>`_ to report bugs.
+Please use the `TeleFuser GitHub Issues <https://github.com/Tele-AI/TeleFuser/issues>`_ to report bugs and include
+``tf-kernel`` in the title.
 
 When filing a bug report, please include:
 
@@ -41,7 +42,8 @@ Feature requests are also welcome via GitHub Issues. Please:
 Code of Conduct
 ---------------
 
-Please note that this project is released with a `Contributor Code of Conduct <https://github.com/YOUR_ORG/tf-kernel/blob/main/CODE_OF_CONDUCT.md>`_.
+Please note that this project is released with the
+`TeleFuser Contributor Code of Conduct <https://github.com/Tele-AI/TeleFuser/blob/main/tf-kernel/CODE_OF_CONDUCT.md>`_.
 By participating in this project you agree to abide by its terms.
 
 License

@@ -2,9 +2,6 @@ GEMM Operations
 ===============
 
 .. automodule:: tf_kernel.gemm
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
 Quantized Matrix Multiplication
 -------------------------------
@@ -24,7 +21,7 @@ FP8
 FP4 (Blackwell)
 ^^^^^^^^^^^^^^^
 
-.. autofunction:: tf_kernel.cutlass_scaled_fp4_mm
+.. autofunction:: tf_kernel.gemm.cutlass_scaled_fp4_mm
 
 Quantization Functions
 ----------------------

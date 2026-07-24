@@ -6,18 +6,18 @@ This guide is for developers who want to contribute to tf-kernel.
 Setting up Development Environment
 ----------------------------------
 
-1. Clone the repository:
+1. Clone the TeleFuser monorepo and enter the kernel project:
 
    .. code-block:: bash
 
-      git clone https://github.com/YOUR_ORG/tf-kernel.git
-      cd tf-kernel
+      git clone https://github.com/Tele-AI/TeleFuser.git
+      cd TeleFuser/tf-kernel
 
 2. Install development dependencies:
 
    .. code-block:: bash
 
-      pip install scikit-build-core ninja isort black ruff pre-commit
+      python -m pip install -e ".[dev]"
 
 3. Install pre-commit hooks:
 
@@ -29,7 +29,7 @@ Setting up Development Environment
 
    .. code-block:: bash
 
-      make build-auto
+      make build-auto PYTHON=/path/to/venv/bin/python
 
 Project Structure
 -----------------

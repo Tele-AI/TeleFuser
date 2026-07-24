@@ -4,26 +4,22 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
-import sys
-
-# -- Path setup --------------------------------------------------------------
-sys.path.insert(0, os.path.abspath('../..'))
+import re
+from pathlib import Path
 
 # -- Mock modules for autodoc on ReadTheDocs/CI (no CUDA) --------------------
 autodoc_mock_imports = os.environ.get('SPHINX_AUTODOC_MOCK_MODULES', '').split(',')
 autodoc_mock_imports = [m.strip() for m in autodoc_mock_imports if m.strip()]
 
-# Always mock these CUDA-dependent modules for doc building
-autodoc_mock_imports.extend([
-    'torch',
-    'tf_kernel',
-])
-
 # -- Project information -----------------------------------------------------
 project = 'tf-kernel'
 copyright = '2026, TeleFuser Team'
 author = 'TeleFuser Team'
-release = '0.1.0'
+pyproject_contents = (Path(__file__).resolve().parents[2] / 'pyproject.toml').read_text(encoding='utf-8')
+version_match = re.search(r'^version = "([^"]+)"$', pyproject_contents, re.MULTILINE)
+if version_match is None:
+    raise RuntimeError('Could not read tf-kernel version from pyproject.toml')
+release = version_match.group(1)
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -41,7 +37,7 @@ exclude_patterns = []
 
 # -- Options for HTML output -------------------------------------------------
 html_theme = 'sphinx_rtd_theme'
-html_static_path = ['_static']
+html_static_path = []
 
 # -- Extension configuration -------------------------------------------------
 autodoc_member_order = 'bysource'
@@ -64,14 +60,9 @@ napoleon_type_aliases = None
 # Intersphinx mapping
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
-    'torch': ('https://pytorch.org/docs/stable', None),
+    'torch': ('https://docs.pytorch.org/docs/stable', None),
     'numpy': ('https://numpy.org/doc/stable', None),
 }
 
 # Todo settings
 todo_include_todos = True
-
-# -- Read the Docs specific configuration ------------------------------------
-# Use Read the Docs theme locally as well
-import sphinx_rtd_theme  # noqa: F401
-html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]

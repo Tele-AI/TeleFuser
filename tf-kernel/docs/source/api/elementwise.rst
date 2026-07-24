@@ -2,9 +2,6 @@ Elementwise Operations
 ======================
 
 .. automodule:: tf_kernel.elementwise
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
 Activation Functions
 --------------------

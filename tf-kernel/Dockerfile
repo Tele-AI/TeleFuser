@@ -79,10 +79,10 @@ RUN set -eux; \
 RUN --mount=type=cache,id=tf-kernel-pip,target=/root/.cache/pip \
     set -eux; \
     case "${CUDA_VERSION}" in \
-      13.0) TORCH_VER=2.9.1; CU_TAG=cu130 ;; \
-      12.9) TORCH_VER=2.9.1; CU_TAG=cu128 ;; \
-      12.8) TORCH_VER=2.9.1; CU_TAG=cu128 ;; \
-      *)    TORCH_VER=2.9.1; CU_TAG=cu126 ;; \
+      13.0) TORCH_VER=2.11.0; CU_TAG=cu130 ;; \
+      12.9) TORCH_VER=2.11.0; CU_TAG=cu128 ;; \
+      12.8) TORCH_VER=2.11.0; CU_TAG=cu128 ;; \
+      *) echo "Unsupported CUDA version: ${CUDA_VERSION}; expected 12.8, 12.9, or 13.0" >&2; exit 1 ;; \
     esac; \
     ${PYTHON_ROOT_PATH}/bin/pip install torch==${TORCH_VER} --index-url https://${PYTORCH_MIRROR}/whl/${CU_TAG}; \
     ${PYTHON_ROOT_PATH}/bin/pip install ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url ${PIP_DEFAULT_INDEX}
@@ -129,7 +129,7 @@ RUN --mount=type=cache,id=tf-kernel-ccache,target=/ccache \
       export CMAKE_ARGS="--profiling-output=/tf-kernel/cmake-profile.json --profiling-format=google-trace"; \
     fi; \
     ${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation; \
-    ./rename_wheels.sh; \
+    PYTHON=${PYTHON_ROOT_PATH}/bin/python ./rename_wheels.sh; \
     if [ -n "${ENABLE_BUILD_PROFILE:-}" ] && [ -f /tf-kernel/build/.ninja_log ]; then \
       echo "Ninja build profiling enabled - will save to /tf-kernel/build-trace.json"; \
       wget --progress=dot https://raw.githubusercontent.com/cradleapps/ninjatracing/084212eaf68f25c70579958a2ed67fb4ec2a9ca4/ninjatracing -O /tmp/ninjatracing; \

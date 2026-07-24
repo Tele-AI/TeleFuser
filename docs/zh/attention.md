@@ -379,45 +379,34 @@ pip install -e .
 
 ### tf-kernel
 
-tf-kernel 是 TeleFuser 推荐的内核库，提供优化的注意力实现：
+`tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供优化的 SageAttention 和块稀疏注意力实现。从当前配置
+的包索引安装已发布版本：
 
 ```bash
-git clone <tf-kernel-repo>
-cd tf-kernel
-pip install -e ".[dev]" --no-build-isolation
+python -m pip install -e ".[kernel]"
 ```
 
-**为特定 GPU 架构编译：**
+如需随 TeleFuser 编译仓库内源码：
 
 ```bash
-# 编译所有支持的 SM 架构（默认）
-make build
-
-# 自动检测本地 GPU 架构（单机使用推荐）
-make build-auto
-
-# 仅编译特定 SM 架构
-make build-sm80   # Ampere (A100, RTX 3090)
-make build-sm90   # Hopper (H100)
-make build-sm100  # Blackwell (RTX 5090, B100/B200)
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
 ```
 
-**限制编译资源占用：**
+`kernel` extra 不会编译 `tf-kernel/`。需要指定架构源码编译时，在 `tf-kernel/` 目录执行：
 
 ```bash
-# 限制并行作业数
-make build MAX_JOBS=2
-
-# 额外限制 NVCC 内部线程数（减少 CPU 和峰值内存占用）
-make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+make build-auto PYTHON=/path/to/venv/bin/python
+make build-sm80 PYTHON=/path/to/venv/bin/python   # Ampere 和 Ada
+make build-sm90 PYTHON=/path/to/venv/bin/python   # Hopper
+make build-sm100 PYTHON=/path/to/venv/bin/python  # Blackwell
 ```
 
-**编译要求：**
-- CMake ≥3.31
-- Python ≥3.10
-- PyTorch 2.9.1
-- scikit-build-core
-- ninja（可选，用于更快编译）
+源码编译要求 Python 3.10+、PyTorch 2.11.0、CUDA Toolkit 12.8+ 和 CMake 3.26+；FP4 内核仅在 SM100+
+可用。完整兼容矩阵、H100 编译命令、安装验证、使用示例和常见问题见
+[tf-kernel 安装与使用指南](./tf_kernel.md)。
+
+当前验证的 H100 wheel 在架构选择的 SM90 SageAttention 路径存在已知 `misaligned address` 错误；部署的
+wheel 通过专项 SM90 GPU 测试前，应选择其他注意力后端。
 
 ### 检查可用后端
 

@@ -69,6 +69,19 @@ telefuser/
 └── client/           # Python SDK
 ```
 
+### TF-Kernel Packaging Boundary
+
+- `telefuser` and `tf-kernel` are separate Python distributions in one repository. Keep independent
+  `pyproject.toml` files, versions, wheels, tests, and releases.
+- `pip install -e ".[kernel]"` installs the released `tf-kernel` wheel. For changes spanning both source trees, use
+  `scripts/install_dev.sh --kernel` or install both local projects explicitly with pip.
+- Do not make the TeleFuser build backend invoke pip or compile `tf-kernel` as a side effect. Do not add a local-path
+  dependency to published project metadata.
+- Release kernel versions with `tf-kernel-v<version>` tags. Kernel Actions workflows belong under the repository-root
+  `.github/workflows/`, with commands scoped to `tf-kernel/`.
+- Keep the kernel's Torch/CUDA compatibility declaration aligned with its wheel build matrix before updating the
+  root `kernel` extra pin.
+
 ### LingBot Streaming State
 
 - Long-running LingBot sessions generate noise and VAE condition latents per chunk; do not retain duration-sized chunk lists.

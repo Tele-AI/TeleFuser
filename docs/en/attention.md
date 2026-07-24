@@ -379,45 +379,35 @@ pip install -e .
 
 ### tf-kernel
 
-tf-kernel is the recommended kernel library for TeleFuser, providing optimized attention implementations:
+`tf-kernel` is TeleFuser's optional CUDA extension package and provides optimized SageAttention and block-sparse
+attention implementations. Install the released package from the configured package index with:
 
 ```bash
-git clone <tf-kernel-repo>
-cd tf-kernel
-pip install -e ".[dev]" --no-build-isolation
+python -m pip install -e ".[kernel]"
 ```
 
-**Build for specific GPU architecture:**
+To compile the in-tree source together with TeleFuser instead:
 
 ```bash
-# Build for all supported SM architectures (default)
-make build
-
-# Auto-detect local GPU architecture (recommended for single-machine)
-make build-auto
-
-# Build for specific SM architecture only
-make build-sm80   # Ampere (A100, RTX 3090)
-make build-sm90   # Hopper (H100)
-make build-sm100  # Blackwell (RTX 5090, B100/B200)
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
 ```
 
-**Limit build resource usage:**
+The `kernel` extra does not compile `tf-kernel/`. For an architecture-specific source build, run one of these commands
+from the `tf-kernel/` directory:
 
 ```bash
-# Limit parallel jobs
-make build MAX_JOBS=2
-
-# Additionally limit NVCC internal threads (reduce CPU and peak memory)
-make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+make build-auto PYTHON=/path/to/venv/bin/python
+make build-sm80 PYTHON=/path/to/venv/bin/python   # Ampere and Ada
+make build-sm90 PYTHON=/path/to/venv/bin/python   # Hopper
+make build-sm100 PYTHON=/path/to/venv/bin/python  # Blackwell
 ```
 
-**Build Requirements:**
-- CMake ≥3.31
-- Python ≥3.10
-- PyTorch 2.9.1
-- scikit-build-core
-- ninja (optional, for faster builds)
+Source builds require Python 3.10+, PyTorch 2.11.0, CUDA Toolkit 12.8+, and CMake 3.26+. FP4 kernels are available only
+on SM100+. See the [tf-kernel installation and usage guide](./tf_kernel.md) for the complete compatibility matrix,
+H100 build command, installation verification, usage examples, and troubleshooting.
+
+The currently validated H100 wheel has a known `misaligned address` failure in the architecture-selected SM90
+SageAttention path. Use another attention backend until the focused SM90 GPU test passes on the deployed wheel.
 
 ### Checking Available Backends
 

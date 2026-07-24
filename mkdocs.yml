@@ -132,6 +132,7 @@ plugins:
             Service Metadata: 服务元数据
             Adding New Example: 新增示例
             Model Loading: 模型加载
+            TF-Kernel: TF-Kernel
             CPU Offloading: CPU卸载
             Attention: 注意力机制
             Feature Cache: 特征缓存
@@ -163,6 +164,7 @@ nav:
       - service_metadata.md
       - adding_new_example.md
       - model_loading.md
+      - TF-Kernel: tf_kernel.md
       - offload.md
   - Benchmarks:
       - TeleFuser and AIPerf: benchmark_aiperf.md

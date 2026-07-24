@@ -68,6 +68,15 @@ distributed = [
     "ray",
 ]
 
+livekit = [
+    "livekit-api>=1.0.0",
+    "livekit>=1.0.0",
+]
+
+kernel = [
+    "tf-kernel",
+]
+
 dev = [
     "gradio==5.50",
     "ray",
@@ -230,3 +239,4 @@ known-first-party = ["telefuser"]
 case-sensitive = true
 [tool.setuptools_scm]
 write_to = "telefuser/_version.py"
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"]

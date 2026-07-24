@@ -170,6 +170,19 @@ set(TF_KERNEL_SM100_CUDA_FLAGS
     "-gencode=arch=compute_120a,code=sm_120a"
 )
 
+# CMake cannot represent architecture-specific targets such as sm_90a through
+# CUDA_ARCHITECTURES. Disable its default architecture (often sm_52) and pass
+# the same explicit -gencode flags to the separable device-link step.
+function(tf_kernel_configure_device_link target cuda_flags_var)
+    set_target_properties(${target} PROPERTIES CUDA_ARCHITECTURES OFF)
+    foreach(cuda_flag IN LISTS ${cuda_flags_var})
+        if(cuda_flag MATCHES "^-gencode=")
+            string(REPLACE "," "$<COMMA>" device_link_flag "${cuda_flag}")
+            target_link_options(${target} PRIVATE "$<DEVICE_LINK:${device_link_flag}>")
+        endif()
+    endforeach()
+endfunction()
+
 set(TF_KERNEL_COMPILE_THREADS 32 CACHE STRING "Set compilation threads, default 32")
 
 # When TF_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
@@ -417,6 +430,7 @@ if(BUILD_SM90)
     target_compile_options(common_ops_sm90_build PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS}  ${TF_KERNEL_SM90_CUDA_FLAGS} -use_fast_math>
     )
+    tf_kernel_configure_device_link(common_ops_sm90_build TF_KERNEL_SM90_CUDA_FLAGS)
     target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
     # Set output name and separate build directory to avoid conflicts
     set_target_properties(common_ops_sm90_build PROPERTIES
@@ -434,6 +448,7 @@ if(BUILD_SM80)
     target_compile_options(common_ops_sm80_build PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS} ${TF_KERNEL_BELOW_SM90_FLAGS}>
     )
+    tf_kernel_configure_device_link(common_ops_sm80_build TF_KERNEL_BELOW_SM90_FLAGS)
     target_include_directories(common_ops_sm80_build PRIVATE ${INCLUDES})
     # Set output name and separate build directory to avoid conflicts
     set_target_properties(common_ops_sm80_build PROPERTIES
@@ -451,6 +466,7 @@ if(BUILD_SM100)
     target_compile_options(common_ops_sm100_build PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS} ${TF_KERNEL_SM100_CUDA_FLAGS}>
     )
+    tf_kernel_configure_device_link(common_ops_sm100_build TF_KERNEL_SM100_CUDA_FLAGS)
     target_include_directories(common_ops_sm100_build PRIVATE ${INCLUDES})
     # Set output name and separate build directory to avoid conflicts
     set_target_properties(common_ops_sm100_build PROPERTIES

@@ -21,12 +21,12 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 1. **Fork the repository** on GitHub
 2. **Clone your fork** locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/tf-kernel.git
-   cd tf-kernel
+   git clone https://github.com/YOUR_USERNAME/TeleFuser.git
+   cd TeleFuser/tf-kernel
    ```
 3. **Set up the upstream remote**:
    ```bash
-   git remote add upstream https://github.com/ORIGINAL_OWNER/tf-kernel.git
+   git remote add upstream https://github.com/Tele-AI/TeleFuser.git
    ```
 
 ## Development Setup
@@ -35,8 +35,8 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 
 - Python >= 3.10
 - CMake >= 3.26
-- CUDA Toolkit 11.8+ or 12.x
-- PyTorch == 2.9.1
+- CUDA Toolkit 12.8+
+- PyTorch == 2.11.0
 
 ### Setup Development Environment
 
@@ -46,7 +46,7 @@ This installs all development, testing, documentation, and linting dependencies:
 
 ```bash
 # Install with all development dependencies
-pip install -e ".[dev]" --no-build-isolation
+pip install -e ".[dev]"
 
 # Install pre-commit hooks
 pre-commit install

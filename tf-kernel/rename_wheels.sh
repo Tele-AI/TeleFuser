@@ -1,91 +1,48 @@
 #!/usr/bin/env bash
-set -ex
+set -euxo pipefail
 
-WHEEL_DIR="dist"
+WHEEL_DIR="${WHEEL_DIR:-dist}"
+PYTHON_BIN="${PYTHON:-python3}"
+MANYLINUX_TAG="${MANYLINUX_TAG:-manylinux_2_28}"
 
-# Get PyTorch version
-torch_version=$(python -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "unknown")
+torch_version=$("${PYTHON_BIN}" -c "import torch; print(torch.__version__.split('+')[0])")
+torch_tag="${torch_version//[^a-zA-Z0-9]/_}"
 
-# Note: Git commit hash is no longer included in wheel names
-# Version is managed by setuptools-scm based on git tags
+torch_cuda_version=$("${PYTHON_BIN}" -c "import torch; print(torch.version.cuda or '')")
+case "${torch_cuda_version}" in
+    12.4*) cuda_tag="cu124" ;;
+    12.8* | 12.9*) cuda_tag="cu128" ;;
+    13.0*) cuda_tag="cu130" ;;
+    "") cuda_tag="cpu" ;;
+    *)
+        echo "Unsupported PyTorch CUDA version: ${torch_cuda_version}" >&2
+        exit 1
+        ;;
+esac
 
-wheel_files=($WHEEL_DIR/*.whl)
+# Keep the project version identical to METADATA. Encode build compatibility in
+# the PEP 427 build tag, and let wheel update WHEEL and RECORD while retagging.
+build_tag="0torch${torch_tag}_${cuda_tag}"
+
+wheel_files=("${WHEEL_DIR}"/*.whl)
 for wheel in "${wheel_files[@]}"; do
-    # Skip if not a file
-    [ -f "$wheel" ] || continue
+    [ -f "${wheel}" ] || continue
 
-    # Replace 'linux' with 'manylinux2014' (only once)
-    # Handle pattern: -linux_x86_64.whl -> -manylinux2014_x86_64.whl
-    intermediate_wheel="${wheel/-linux_/-manylinux2014_}"
+    case "${wheel}" in
+        *-linux_x86_64.whl) platform_tag="${MANYLINUX_TAG}_x86_64" ;;
+        *-linux_aarch64.whl) platform_tag="${MANYLINUX_TAG}_aarch64" ;;
+        *)
+            echo "Unsupported wheel platform tag: ${wheel}" >&2
+            exit 1
+            ;;
+    esac
 
-    # Extract the current python version from the wheel name
-    if [[ $intermediate_wheel =~ -cp([0-9]+)- ]]; then
-        cp_version="${BASH_REMATCH[1]}"
-    else
-        echo "Could not extract Python version from wheel name: $intermediate_wheel"
-        continue
-    fi
-
-    # Extract full version string (including any dev/rc suffix and local version)
-    # Example: tf_kernel-0.1.1.dev4+gbfcfb42cf.d20260310-cp310-abi3-linux_x86_64.whl
-    # We need to extract: 0.1.1.dev4+gbfcfb42cf.d20260310
-    if [[ $intermediate_wheel =~ tf_kernel-([0-9]+\.[0-9]+\.[0-9]+\.[a-z]+[0-9]*)(\+[a-z0-9.]+)?- ]]; then
-        # Version like 0.1.1.dev4 (without local tag)
-        base_version="${BASH_REMATCH[1]}"  # e.g., 0.1.1.dev4
-        # Local version tag (after +), if any
-        local_tag="${BASH_REMATCH[2]}"  # e.g., +gbfcfb42cf.d20260310
-        # Full version including local tag
-        full_version="${base_version}${local_tag}"
-        # Extract existing local version tag (after +), if any
-        if [[ -n "$local_tag" ]]; then
-            existing_local="${local_tag:1}"  # Remove leading '+'
-        else
-            existing_local=""
-        fi
-    elif [[ $intermediate_wheel =~ tf_kernel-([0-9]+\.[0-9]+\.[0-9]+)(\+[a-z0-9.]+)?- ]]; then
-        # Version like 0.1.1 (without dev/rc suffix)
-        base_version="${BASH_REMATCH[1]}"  # e.g., 0.1.1
-        local_tag="${BASH_REMATCH[2]}"  # e.g., +gbfcfb42cf.d20260310
-        full_version="${base_version}${local_tag}"
-        if [[ -n "$local_tag" ]]; then
-            existing_local="${local_tag:1}"
-        else
-            existing_local=""
-        fi
-    else
-        echo "Could not extract version from wheel name: $intermediate_wheel"
-        continue
-    fi
-
-    # Detect CUDA version
-    cuda_tag=""
-    if ls /usr/local/ 2>/dev/null | grep -q "12.4"; then
-        cuda_tag="cu124"
-    elif ls /usr/local/ 2>/dev/null | grep -q "12.8"; then
-        cuda_tag="cu128"
-    elif ls /usr/local/ 2>/dev/null | grep -q "13.0"; then
-        cuda_tag="cu130"
-    fi
-
-    # Build the new local version tag
-    # PEP 440: local version label can only have one '+' separator
-    # Format: torch{version}.{cuda_tag}.{git_info}
-    local_version="torch${torch_version}"
-    if [[ -n "$cuda_tag" ]]; then
-        local_version="${local_version}.${cuda_tag}"
-    fi
-    if [[ -n "$existing_local" ]]; then
-        local_version="${local_version}.${existing_local}"
-    fi
-
-    # Construct new wheel name
-    # Replace the full version part with version+new_local_version
-    new_wheel="${intermediate_wheel/tf_kernel-${full_version}/tf_kernel-${base_version}+${local_version}}"
-
-    if [[ "$wheel" != "$new_wheel" ]]; then
-        echo "Renaming $wheel to $new_wheel"
-        mv -- "$wheel" "$new_wheel"
-    fi
+    "${PYTHON_BIN}" -m wheel tags \
+        --remove \
+        --build "${build_tag}" \
+        --platform-tag "${platform_tag}" \
+        "${wheel}"
 done
-echo "Wheel renaming completed."
-echo "Note: Version is managed by setuptools-scm based on git tags"
+
+echo "Wheel retagging completed."
+echo "Public version is managed in pyproject.toml; Torch/CUDA compatibility uses the wheel build tag."

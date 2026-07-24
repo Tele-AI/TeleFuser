@@ -4,7 +4,7 @@ Essential information for AI coding agents working on `tf-kernel` - a high-perfo
 
 ## Tech Stack
 
-- **Python**: >= 3.10 | **PyTorch**: == 2.9.1 | **CUDA**: 11.8+ to 13.0+ | **CMake**: >= 3.26
+- **Python**: >= 3.10 | **PyTorch**: == 2.11.0 | **CUDA**: 12.8+ to 13.0+ | **CMake**: >= 3.26
 - **Dependencies**: CUTLASS, FlashInfer, cuBLAS, cuBLASLt, libtorch
 
 ## Project Structure
@@ -58,6 +58,18 @@ make format         # Format code
 ```
 
 CMake options: `TF_KERNEL_TARGET_SM` (ALL/AUTO/SM80/SM90/SM100), `TF_KERNEL_ENABLE_BF16`, `TF_KERNEL_ENABLE_FP8`, `TF_KERNEL_ENABLE_FP4`
+
+## Packaging and Releases
+
+- `tf-kernel` is a separate Python distribution inside the TeleFuser monorepo. Its version is declared explicitly in
+  `pyproject.toml` and must not be derived from TeleFuser release tags.
+- Use `make update <version>` and release from a matching `tf-kernel-v<version>` tag. GitHub Actions workflows must
+  live under the repository-root `.github/workflows/` directory.
+- `pip install -e ".[kernel]"` at the repository root selects the released wheel. Joint source development installs
+  both editable projects with `scripts/install_dev.sh --kernel`.
+- Never trigger a nested pip install from the TeleFuser or tf-kernel build backend. Keep local source paths out of
+  published dependency metadata.
+- Keep the exact PyTorch requirement, Docker build version, wheel build tag, and tested ABI synchronized.
 
 ## Key Kernels
 

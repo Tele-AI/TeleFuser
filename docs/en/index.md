@@ -100,6 +100,7 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 <a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
 <a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch, stream, baseline, and history workflows.</span></a>
 <a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
+<a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
 <a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
 <a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
 <a href="profiler/"><strong>Profiler</strong><span>Performance analysis tools.</span></a>

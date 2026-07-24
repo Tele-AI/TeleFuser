@@ -1,16 +1,17 @@
 [build-system]
 requires = [
   "scikit-build-core>=0.10",
-  "torch>=2.8.0",
+  "torch==2.11.0",
   "wheel",
-  "setuptools-scm>=8.0",
 ]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "tf-kernel"
-dynamic = ["version"]
-authors = []
+version = "0.1.0"
+authors = [
+  { name = "TeleAI Team" },
+]
 description = "Kernel Library for TeleFuser"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +21,14 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Environment :: GPU :: NVIDIA CUDA"
 ]
-dependencies = []
+dependencies = [
+  "torch==2.11.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Tele-AI/TeleFuser/tree/main/tf-kernel"
+Repository = "https://github.com/Tele-AI/TeleFuser"
+Issues = "https://github.com/Tele-AI/TeleFuser/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -44,10 +52,6 @@ lint = [
   "clang-format>=18.0",
 ]
 
-[tool.setuptools-scm]
-# Use git tags for version generation
-# Tags should follow semantic versioning, e.g., v0.1.0
-
 [tool.wheel]
 exclude = [
   "dist*",
@@ -61,10 +65,6 @@ minimum-version = "build-system.requires"
 wheel.py-api = "cp310"
 wheel.license-files = []
 wheel.packages = ["tf_kernel"]
-
-# Use setuptools-scm for dynamic version generation
-# See: https://scikit-build-core.readthedocs.io/en/latest/configuration.html#dynamic-metadata
-metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -84,6 +84,9 @@ markers = [
   "sm90: marks tests that require SM90+ GPU",
   "sm100: marks tests that require SM100+ GPU (Blackwell)",
 ]
+
+[tool.isort]
+known_first_party = ["tf_kernel"]
 
 [tool.coverage.run]
 source = ["tf_kernel"]

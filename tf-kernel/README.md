@@ -5,7 +5,7 @@ English | [中文](README_zh.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-12.8%2B-green)](https://developer.nvidia.com/cuda-toolkit)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.9.1-orange)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange)](https://pytorch.org/)
 
 **tf-kernel** is a high-performance CUDA kernel library for TeleFuser, providing optimized GPU operations for transformer and diffusion models. It implements custom CUDA kernels using CUTLASS and FlashInfer, with PyTorch bindings for Python accessibility.
 
@@ -21,34 +21,64 @@ English | [中文](README_zh.md)
 
 ## Installation
 
-Requires torch == 2.9.1
+`tf-kernel` requires PyTorch 2.11.0 and an NVIDIA CUDA environment. Install the independent package with:
 
 ```bash
-# Latest version
-pip3 install tf-kernel --upgrade
+python -m pip install --upgrade tf-kernel
 ```
+
+From a TeleFuser checkout, `python -m pip install -e ".[kernel]"` installs the published package from the configured
+index. It does not compile this source directory. To develop both projects together, use:
+
+```bash
+cd /path/to/TeleFuser
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
+```
+
+See the [full TeleFuser installation and usage guide](../docs/en/tf_kernel.md) for compatibility, verification,
+runnable API examples, and troubleshooting.
 
 ## Building from Source
 
 ### Requirements
 
-- CMake ≥3.31
+- CUDA Toolkit ≥12.8
+- CMake ≥3.26
 - Python ≥3.10
-- PyTorch == 2.9.1
+- PyTorch == 2.11.0
 - scikit-build-core
 - ninja (optional)
 
 ### Development Installation
 
-For development, install with all dev dependencies:
+`tf-kernel` is an independently versioned Python distribution stored in the TeleFuser monorepo. For joint
+development, clone TeleFuser and install both editable projects with the same interpreter:
 
 ```bash
-git clone https://github.com/YOUR_ORG/tf-kernel.git
-cd tf-kernel
-pip install -e ".[dev]" --no-build-isolation
+git clone https://github.com/Tele-AI/TeleFuser.git
+cd TeleFuser
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
+
+# Equivalent command:
+/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
 ```
 
 Dependency groups available: `dev` (all), `test`, `docs`, `lint`.
+
+To work on `tf-kernel` without installing TeleFuser's development dependencies:
+
+```bash
+cd tf-kernel
+python -m pip install -e ".[dev]"
+```
+
+### Independent Releases
+
+The package version is declared in `pyproject.toml` and is independent of the TeleFuser version. Update it with
+`make update <version>`, then create a matching `tf-kernel-v<version>` tag. The root-level release workflow builds
+the CUDA 12.8 wheel and publishes it separately from the `telefuser` distribution. Configure PyPI trusted publishing
+for the `tf-kernel-pypi` GitHub environment before the first release; after publishing, update the root `kernel` extra
+only if TeleFuser needs an explicit compatibility bound. The root extra is intentionally unpinned by default.
 
 ### Use Makefile to build tf-kernel
 
@@ -63,6 +93,19 @@ make build-auto
 make build-sm80   # Ampere (A100, RTX 3090, etc.)
 make build-sm90   # Hopper (H100)
 make build-sm100  # Blackwell (RTX 5090, B100/B200)
+```
+
+Each target writes a wheel to `dist/` and installs it into the interpreter selected by `PYTHON`. For example, a
+resource-bounded H100 build is:
+
+```bash
+PATH=/usr/local/cuda-12.8/bin:$PATH \
+CUDA_HOME=/usr/local/cuda-12.8 \
+make build-sm90 \
+  PYTHON=/path/to/venv/bin/python \
+  MAX_JOBS=2 \
+  CMAKE_BUILD_PARALLEL_LEVEL=2 \
+  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
 ```
 
 ### Target SM Architecture Selection
@@ -96,6 +139,31 @@ make build MAX_JOBS=2
 # Additionally limit NVCC internal threads (reduces CPU and peak memory)
 make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
 ```
+
+### Verify the installed extension
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+import tf_kernel
+
+print("tf-kernel:", tf_kernel.__version__)
+print("PyTorch:", torch.__version__)
+print("GPU:", torch.cuda.get_device_name())
+print("extension:", Path(tf_kernel.common_ops.__file__).resolve())
+
+x = torch.randn(8, 1024, device="cuda", dtype=torch.float16)
+weight = torch.ones(1024, device="cuda", dtype=torch.float16)
+assert torch.isfinite(tf_kernel.rmsnorm(x, weight)).all()
+print("RMSNorm smoke test: OK")
+PY
+```
+
+On Ampere or Hopper, the import message that FP4 operators are unavailable is expected; FP4 requires SM100+.
+Run `python -m pip check` after installation to detect packages that require an incompatible PyTorch version.
+The currently validated H100 wheel has a known `misaligned address` failure in the architecture-selected SM90
+SageAttention path; use another TeleFuser attention backend until the focused SM90 test passes.
 
 ## Contribution
 

@@ -10,8 +10,12 @@ if ! "${PYTHON_BIN}" -c "import sys; raise SystemExit(0 if sys.version_info >= (
     exit 1
 fi
 
-if ! git -C "${ROOT_DIR}" describe --exact-match --tags HEAD >/dev/null 2>&1; then
+RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --exact-match --tags HEAD 2>/dev/null || true)"
+if [[ ! "${RELEASE_TAG}" =~ ^v[0-9] ]]; then
     echo "Refusing to build a PyPI release: HEAD is not exactly on a git tag." >&2
+    if [[ -n "${RELEASE_TAG}" ]]; then
+        echo "Tag ${RELEASE_TAG} is not a TeleFuser release tag; expected v<version>." >&2
+    fi
     echo "Create a release tag first, for example: git tag -a v0.1.0 -m 'Release v0.1.0'" >&2
     echo "For a local smoke build only, run: SKIP_TAG_CHECK=1 ${0}" >&2
     if [[ "${SKIP_TAG_CHECK:-}" != "1" ]]; then

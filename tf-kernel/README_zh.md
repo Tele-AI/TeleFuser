@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-12.8%2B-green)](https://developer.nvidia.com/cuda-toolkit)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.9.1-orange)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.11.0-orange)](https://pytorch.org/)
 
 **tf-kernel** 是为 TeleFuser 设计的高性能 CUDA 内核库，为 Transformer 和扩散模型提供优化的 GPU 运算。它使用 CUTLASS 和 FlashInfer 实现自定义 CUDA 内核，并提供 PyTorch Python 绑定。
 
@@ -21,34 +21,64 @@
 
 ## 安装
 
-需要 torch == 2.9.1
+`tf-kernel` 要求 PyTorch 2.11.0 和 NVIDIA CUDA 环境。独立安装命令：
 
 ```bash
-# 安装最新版本
-pip3 install tf-kernel --upgrade
+python -m pip install --upgrade tf-kernel
 ```
+
+在 TeleFuser checkout 中，`python -m pip install -e ".[kernel]"` 会从当前配置的包索引安装已发布版本，
+不会编译本源码目录。如需联合开发两个项目：
+
+```bash
+cd /path/to/TeleFuser
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
+```
+
+兼容性、验证方法、可运行 API 示例和常见问题见
+[TeleFuser 完整安装与使用指南](../docs/zh/tf_kernel.md)。
 
 ## 源码编译
 
 ### 环境要求
 
-- CMake ≥3.31
+- CUDA Toolkit ≥12.8
+- CMake ≥3.26
 - Python ≥3.10
-- PyTorch == 2.9.1
+- PyTorch == 2.11.0
 - scikit-build-core
 - ninja（可选）
 
 ### 开发环境安装
 
-开发时建议安装所有开发依赖：
+`tf-kernel` 是存放在 TeleFuser 单仓库中的独立版本 Python distribution。如需联合开发，请克隆 TeleFuser
+并使用同一个解释器安装两个 editable 项目：
 
 ```bash
-git clone https://github.com/YOUR_ORG/tf-kernel.git
-cd tf-kernel
-pip install -e ".[dev]" --no-build-isolation
+git clone https://github.com/Tele-AI/TeleFuser.git
+cd TeleFuser
+PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
+
+# 等价命令：
+/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
 ```
 
 可选依赖组：`dev`（全部）、`test`（测试）、`docs`（文档）、`lint`（代码检查）。
+
+如果只开发 `tf-kernel`，不安装 TeleFuser 的开发依赖：
+
+```bash
+cd tf-kernel
+python -m pip install -e ".[dev]"
+```
+
+### 独立发布
+
+包版本在 `pyproject.toml` 中声明，与 TeleFuser 版本相互独立。使用 `make update <version>` 更新版本，然后
+创建匹配的 `tf-kernel-v<version>` tag。仓库根目录的发布工作流会构建 CUDA 12.8 wheel，并与
+`telefuser` distribution 分别发布。首次发布前，需要为 GitHub 的 `tf-kernel-pypi` environment 配置
+PyPI trusted publishing。只有 TeleFuser 需要显式兼容性边界时才约束根目录的 `kernel` extra；默认
+保持不固定版本。
 
 ### 使用 Makefile 编译 tf-kernel
 
@@ -63,6 +93,18 @@ make build-auto
 make build-sm80   # Ampere（A100、RTX 3090 等）
 make build-sm90   # Hopper（H100）
 make build-sm100  # Blackwell（RTX 5090、B100/B200）
+```
+
+每个目标都会将 wheel 写入 `dist/`，并安装到 `PYTHON` 指定的解释器。例如，在 H100 上限制资源占用：
+
+```bash
+PATH=/usr/local/cuda-12.8/bin:$PATH \
+CUDA_HOME=/usr/local/cuda-12.8 \
+make build-sm90 \
+  PYTHON=/path/to/venv/bin/python \
+  MAX_JOBS=2 \
+  CMAKE_BUILD_PARALLEL_LEVEL=2 \
+  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
 ```
 
 ### 目标 SM 架构选择
@@ -96,6 +138,31 @@ make build MAX_JOBS=2
 # 额外限制 NVCC 内部线程数（减少 CPU 和峰值内存占用）
 make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
 ```
+
+### 验证已安装扩展
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+import tf_kernel
+
+print("tf-kernel:", tf_kernel.__version__)
+print("PyTorch:", torch.__version__)
+print("GPU:", torch.cuda.get_device_name())
+print("extension:", Path(tf_kernel.common_ops.__file__).resolve())
+
+x = torch.randn(8, 1024, device="cuda", dtype=torch.float16)
+weight = torch.ones(1024, device="cuda", dtype=torch.float16)
+assert torch.isfinite(tf_kernel.rmsnorm(x, weight)).all()
+print("RMSNorm smoke test: OK")
+PY
+```
+
+在 Ampere 或 Hopper 上，导入时提示 FP4 算子不可用属于预期行为；FP4 要求 SM100+。安装后运行
+`python -m pip check` 可检查是否有其他包要求不兼容的 PyTorch 版本。
+当前验证的 H100 wheel 在架构选择的 SM90 SageAttention 路径存在已知 `misaligned address` 错误；专项
+SM90 测试通过前应改用其他 TeleFuser 注意力后端。
 
 ## 贡献代码
 
