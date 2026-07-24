@@ -77,8 +77,8 @@ telefuser/
   `scripts/install_dev.sh --kernel` or install both local projects explicitly with pip.
 - Do not make the TeleFuser build backend invoke pip or compile `tf-kernel` as a side effect. Do not add a local-path
   dependency to published project metadata.
-- Release kernel versions with `tf-kernel-v<version>` tags. Kernel Actions workflows belong under the repository-root
-  `.github/workflows/`, with commands scoped to `tf-kernel/`.
+- Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Kernel wheels require an explicitly
+  provisioned CUDA/NVCC build host and are built, validated, and uploaded manually.
 - Keep the kernel's Torch/CUDA compatibility declaration aligned with its wheel build matrix before updating the
   root `kernel` extra pin.
 

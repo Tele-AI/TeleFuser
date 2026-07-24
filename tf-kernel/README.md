@@ -74,11 +74,21 @@ python -m pip install -e ".[dev]"
 
 ### Independent Releases
 
-The package version is declared in `pyproject.toml` and is independent of the TeleFuser version. Update it with
-`make update <version>`, then create a matching `tf-kernel-v<version>` tag. The root-level release workflow builds
-the CUDA 12.8 wheel and publishes it separately from the `telefuser` distribution. Configure PyPI trusted publishing
-for the `tf-kernel-pypi` GitHub environment before the first release; after publishing, update the root `kernel` extra
-only if TeleFuser needs an explicit compatibility bound. The root extra is intentionally unpinned by default.
+The package version is declared in `pyproject.toml` and is independent of the TeleFuser version. tf-kernel does not
+provide GitHub Actions workflows for automatic CUDA compilation or publication. Every release must be built,
+validated, and uploaded manually from an explicitly provisioned CUDA/NVCC host:
+
+```bash
+make update <version>
+make build-sm90 PYTHON=/path/to/venv/bin/python  # Select the required target.
+python -m pip install twine
+python -m twine check dist/*.whl
+python -m twine upload dist/*.whl
+```
+
+Create a matching `tf-kernel-v<version>` tag only as a source provenance marker after the artifact is validated; the
+tag does not trigger a build or publication. Constrain the root `kernel` extra only when TeleFuser needs an explicit
+compatibility bound. It is intentionally unpinned by default.
 
 ### Use Makefile to build tf-kernel
 

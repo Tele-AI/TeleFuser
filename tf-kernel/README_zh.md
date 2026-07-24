@@ -74,11 +74,19 @@ python -m pip install -e ".[dev]"
 
 ### 独立发布
 
-包版本在 `pyproject.toml` 中声明，与 TeleFuser 版本相互独立。使用 `make update <version>` 更新版本，然后
-创建匹配的 `tf-kernel-v<version>` tag。仓库根目录的发布工作流会构建 CUDA 12.8 wheel，并与
-`telefuser` distribution 分别发布。首次发布前，需要为 GitHub 的 `tf-kernel-pypi` environment 配置
-PyPI trusted publishing。只有 TeleFuser 需要显式兼容性边界时才约束根目录的 `kernel` extra；默认
-保持不固定版本。
+包版本在 `pyproject.toml` 中声明，与 TeleFuser 版本相互独立。tf-kernel 不提供 GitHub Actions 自动
+CUDA 编译或发布 workflow。每次发布都必须在明确配置好 CUDA/NVCC 的构建机上手动构建、验证和上传：
+
+```bash
+make update <version>
+make build-sm90 PYTHON=/path/to/venv/bin/python  # 按需选择目标架构。
+python -m pip install twine
+python -m twine check dist/*.whl
+python -m twine upload dist/*.whl
+```
+
+产物验证完成后，可以创建匹配的 `tf-kernel-v<version>` tag 作为源码追溯标记；该 tag 不会触发构建或
+发布。只有 TeleFuser 需要显式兼容性边界时才约束根目录的 `kernel` extra；默认保持不固定版本。
 
 ### 使用 Makefile 编译 tf-kernel
 

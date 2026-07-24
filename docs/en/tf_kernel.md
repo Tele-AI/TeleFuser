@@ -2,7 +2,8 @@
 
 `tf-kernel` is TeleFuser's optional CUDA extension package. It provides fused elementwise operations, quantized
 GEMM, SageAttention, and block-sparse attention kernels. The package lives in the `tf-kernel/` directory of this
-repository, but it has its own package metadata, version, wheel, CI, and release tag.
+repository, but it has its own package metadata, version, and wheel. CUDA wheels are built and published manually;
+the repository does not provide tf-kernel automatic build or release workflows.
 
 TeleFuser can run without `tf-kernel`: the `telefuser.ops` layer keeps native PyTorch or Triton fallbacks where they
 are implemented. Install `tf-kernel` when a pipeline uses one of its optimized CUDA paths.
@@ -79,8 +80,24 @@ The CUDA extension can be installed and upgraded without installing TeleFuser:
 python -m pip install --upgrade tf-kernel
 ```
 
-The package version is independent of the TeleFuser version. A source tag named `tf-kernel-v<version>` produces the
-standalone release artifact.
+The package version is independent of the TeleFuser version. Published wheels are produced manually on a CUDA/NVCC
+build host; no GitHub Actions workflow builds or publishes them.
+
+### Publish a release manually
+
+Select the required architecture and run the release from the provisioned build host:
+
+```bash
+cd tf-kernel
+make update <version>
+make build-sm90 PYTHON=/path/to/venv/bin/python  # Or build-sm80/build-sm100.
+python -m pip install twine
+python -m twine check dist/*.whl
+python -m twine upload dist/*.whl
+```
+
+Run the documented GPU smoke tests before upload. A `tf-kernel-v<version>` tag may be created afterward as a source
+provenance marker, but it does not trigger compilation or publication.
 
 ## Build from source
 
