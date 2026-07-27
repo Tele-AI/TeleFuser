@@ -89,7 +89,7 @@ if [[ -n "${AIPERF_REF}" ]]; then
     git -C "${AIPERF_DIR}" checkout "${AIPERF_REF}"
 fi
 
-"${UV_BIN}" sync --no-dev --project "${AIPERF_DIR}" --extra streaming-webrtc
+"${UV_BIN}" sync --no-dev --project "${AIPERF_DIR}"
 mkdir -p "${ROOT_DIR}/artifacts"
 
 echo "AIPerf ready: ${AIPERF_DIR}"
