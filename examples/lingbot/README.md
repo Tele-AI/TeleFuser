@@ -160,9 +160,10 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Real-Time Streaming
 
-The same examples expose both offline generation and a stream-server `get_service()` entry point. Configure topology
-through `PPL_CONFIG`; `stream-serve --gpu-num` is passed to `get_service(gpu_num=...)`. Use
-`CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because TeleFuser creates workers internally.
+The same examples expose both offline generation and a stream-server `get_service()` entry point. Configure the
+service topology with `stream-serve --worker-gpu-map`; the size of the assigned GPU group is passed to
+`get_service(gpu_num=...)`. Use `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because
+TeleFuser creates workers internally.
 
 ### Scheduler and Stage Placement
 
@@ -212,142 +213,72 @@ The four-GPU 20-second test used FSDP and Ulysses degree 4. Peak memory was appr
 41.6 GiB on GPUs 1-3. These are tested values, not universal limits; other resolutions and concurrent GPU users
 change the available capacity.
 
-### Start a Local TURN Server for VS Code Remote SSH
+### LiveKit Transport
 
-VS Code forwards TCP ports. For a laptop browser accessing a remote host, use TURN over TCP and force relay mode.
-The following development-only coturn command binds to loopback and uses a small relay range:
+LiveKit provides room lifecycle, signaling, reconnects, adaptive media transport, and reliable control messages.
+The Python clients are base TeleFuser dependencies; install the LiveKit Server and your platform's `coturn` package
+separately for local development:
 
 ```bash
-sudo apt-get install -y coturn
+curl -sSL https://get.livekit.io | bash
+```
 
+The checked-in browser page forces TCP TURN relay. Start its matching development coturn service in terminal 1:
+
+```bash
 turnserver -n -m 1 \
-    --listening-ip=127.0.0.1 \
-    --relay-ip=127.0.0.1 \
-    --listening-port=3478 \
-    --min-port=49160 --max-port=49200 \
-    --user=telefuser:telefuser-turn \
-    --realm=telefuser.local \
-    --fingerprint --lt-cred-mech \
-    --no-tls --no-dtls --no-cli \
-    --allow-loopback-peers \
-    --simple-log --log-file=/tmp/telefuser-turn.log
+    --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+    --listening-port=3478 --min-port=49160 --max-port=49200 \
+    --user=livekit-demo:livekit-demo-password --realm=livekit.local \
+    --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
+    --allow-loopback-peers
 ```
 
-Keep this command running in its own terminal. `--allow-loopback-peers` is required here because both TeleFuser and
-coturn run on the same remote host; do not copy this loopback configuration to an internet-facing production TURN
-server. Verify the credentials and TCP allocation locally:
+Start LiveKit in terminal 2:
 
 ```bash
-turnutils_uclient -t -y -c \
-    -u telefuser -w telefuser-turn -p 3478 127.0.0.1
+livekit-server --dev
 ```
 
-### Start the Four-GPU LingBot Service
+Start the four-GPU LingBot worker and its session API in terminal 3:
 
 ```bash
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
-TELEFUSER_TURN_USERNAME=telefuser \
-TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-    --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
+    --livekit-url ws://127.0.0.1:7880 \
+    --livekit-api-key devkey \
+    --livekit-api-secret secret \
+    --num-workers 1 \
+    --worker-gpu-map 0,1,2,3 \
+    --port 8088 \
+    --skip-validation
 ```
 
-Wait for `Starting stream server on 0.0.0.0:8088`, then verify readiness:
+Then start the bundled browser demo in terminal 4:
 
 ```bash
-curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
-```
-
-### Start the Browser Demo
-
-Run the demo on the remote TeleFuser host. It proxies signaling requests to port 8088, so the laptop browser does
-not need direct access to 8088.
-
-```bash
-python examples/stream_server/webrtc_bidirectional_demo.py \
+python examples/stream_server/livekit_bidirectional_demo.py \
     --server-url http://127.0.0.1:8088 \
-    --port 8091 \
-    --turn-url 'turn:localhost:3478?transport=tcp' \
-    --turn-username telefuser \
-    --turn-credential telefuser-turn \
-    --force-turn-relay \
-    --ice-gather-timeout-ms 30000 \
+    --port 8092 \
     --no-open
 ```
 
-In the VS Code **Ports** panel, forward these remote TCP ports:
+The demo proxies the TeleFuser session API, so VS Code Remote SSH needs TCP forwarding for demo port `8092`, LiveKit
+signaling port `7880`, and TURN listener `3478`; `8088` does not need forwarding. Open `http://127.0.0.1:8092`,
+select an initial image, and click **Start**. See the [Stream Server guide](../../docs/en/stream_server.md) for the API
+contract, control topics, shutdown order, troubleshooting, and production deployment notes.
 
-| Remote port | Required local port | Purpose |
-| --- | --- | --- |
-| `8091` | Any available port | Demo page and proxied SDP/session HTTP requests |
-| `3478` | `3478` | Browser TURN-over-TCP connection used by `turn:localhost:3478` |
+The current runtime supports exactly one `in-process` worker. One admitted LiveKit room owns one model pipeline
+instance until the session is closed or expires. Use separate service processes for additional workers until
+process-worker mode is implemented.
 
-Do not forward 8088 when proxying is enabled. Port 3478 must keep local port 3478 unless `--turn-url` is changed to
-the alternative local port. Open the forwarded 8091 URL shown by VS Code using `http://`, then hard-refresh the
-page after restarting the demo. Do not forward coturn's `49160-49200` relay range through VS Code: browser relay
-traffic remains inside the forwarded TURN TCP connection, while that range is used remotely between coturn and the
-WebRTC peer.
-
-If you connect with a normal SSH client instead of VS Code Remote SSH, run this command in a separate terminal on
-the laptop. Replace `USER` and `SERVER_HOST` with the SSH login used for the server:
-
-```bash
-ssh -N \
-    -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=30 \
-    -L 8091:127.0.0.1:8091 \
-    -L 3478:127.0.0.1:3478 \
-    USER@SERVER_HOST
-```
-
-Keep the command running and open `http://localhost:8091`. Add `-p SSH_PORT` or `-i /path/to/private_key` when the
-server requires a non-default SSH port or identity file. To obtain an interactive shell from the same connection,
-omit `-N`. If local port 8091 is occupied, change only the first mapping, for example
-`-L 18091:127.0.0.1:8091`, and open `http://localhost:18091`.
-
-If local port 3478 is occupied, map another local port such as `-L 13478:127.0.0.1:3478` and change the browser demo
-argument to `--turn-url 'turn:localhost:13478?transport=tcp'`. The server-side
-`TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp'` remains unchanged.
-
-### Run the Demo Entirely on One Machine
-
-If both the browser and the GPU service run on the same physical machine, neither coturn nor SSH forwarding is
-needed. This includes a browser opened directly on the workstation or through its remote desktop, VNC, or noVNC
-session. It does not include an SSH shell on the server with the browser still running on a laptop.
-
-Start the service in the first terminal with TURN variables explicitly removed:
-
-```bash
-env -u TELEFUSER_TURN_SERVER \
-    -u TELEFUSER_TURN_USERNAME \
-    -u TELEFUSER_TURN_CREDENTIAL \
-    TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-    CUDA_VISIBLE_DEVICES=0,1,2,3 \
-    telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-    --gpu-num 4 -p 8088 --host 127.0.0.1 --skip-validation
-```
-
-Start the demo in a second terminal without `--turn-url`, TURN credentials, or `--force-turn-relay`:
-
-```bash
-env -u TELEFUSER_TURN_SERVER \
-    -u TELEFUSER_TURN_USERNAME \
-    -u TELEFUSER_TURN_CREDENTIAL \
-    python examples/stream_server/webrtc_bidirectional_demo.py \
-    --server-url http://127.0.0.1:8088 \
-    --port 8091 \
-    --no-open
-```
-
-Open `http://localhost:8091` in the browser on that machine.
-
-Select the initial image in the browser before connecting; it is sent directly with the WebRTC offer. Real-time
-camera poses come from live controls. When the request omits camera intrinsics, the service centers the principal
-point on the selected image and uses its width as both focal lengths, preserving LingBot's default horizontal field
-of view for square, landscape, and portrait inputs. Requests with calibrated intrinsics should also send
-`intrinsics_width` and `intrinsics_height` so the service can transform them from calibration pixels to output pixels.
+Select the initial image in the browser before connecting; it is included in the session request. Real-time camera
+poses come from LiveKit control messages. The LingBot-World v2 service uses the bundled `intrinsics.npy` and its `832x480`
+calibration size by default, matching the offline example. A request can override that calibration. Other LingBot
+services with neither configured nor request-provided intrinsics center the principal point on the selected image and
+use its width as both focal lengths. Requests with calibrated intrinsics should also send `intrinsics_width` and
+`intrinsics_height` so the service can transform them from calibration pixels to output pixels.
 
 ### Camera Controls
 
@@ -421,16 +352,16 @@ not pass through the VAE; only the reference image and generated video use the V
 
 ### Troubleshooting
 
-- **Blank 8091 page:** confirm the demo process is listening, open the exact forwarded URL from the VS Code Ports
+- **Blank 8092 page:** confirm the demo process is listening, open the exact forwarded URL from the VS Code Ports
   panel using `http://`, and hard-refresh. The demo uses a threaded HTTP server so VS Code probe connections do not
   block page requests.
-- **No relay candidate:** confirm local port 3478 maps to remote 3478, the TURN credentials match, and the demo log
-  shows `iceTransportPolicy=relay`. Browser logs should report at least one `typ=relay` candidate.
-- **Static preview:** inspect the DataChannel log for `control_state` and `applying_direction_control`. If the server
+- **No relay candidate:** confirm the configured TURN listener is reachable and its credentials match the browser
+  RTC configuration. Browser logs should report at least one `typ=relay` candidate.
+- **Static preview:** inspect LiveKit messages for `control_state` and `applying_direction_control`. If the server
   logged CUDA OOM, restart the service because a failed parallel worker cannot process another session.
 - **Session already active:** click **Stop** or delete it with
-  `curl -X DELETE http://127.0.0.1:8088/v1/stream/webrtc/<session_id>`.
+  `curl -X DELETE http://127.0.0.1:8088/v1/stream/sessions/<session_id>`.
 - **Residual workers after a forced exit:** terminate stale `spawn_main` processes before restarting.
 
-For a production/public TURN deployment, TLS, firewall, and relay-port requirements, see the
-[stream server guide](../../docs/en/stream_server.md#public-network-deployment).
+For production TLS, firewall, media-port, and TURN requirements, see the
+[stream server guide](../../docs/en/stream_server.md#production-deployment).

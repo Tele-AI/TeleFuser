@@ -16,6 +16,7 @@ pre-commit run --all-files        # Linting checks
 pytest tests/                     # Run tests
 bash scripts/run_ci_tests.sh      # Full CI suite
 telefuser serve /path/to/pipeline.py --port 8000  # Start API server
+telefuser stream-serve /path/to/pipeline.py --port 8088  # LiveKit-backed streaming
 ```
 
 ## Troubleshooting
@@ -65,7 +66,7 @@ telefuser/
 ├── orchestrator/     # Request orchestration and actor-based streaming scheduler
 ├── worker/           # Distributed worker management
 ├── entrypoints/      # CLI entry points
-├── service/          # FastAPI service
+├── service/          # FastAPI request-response and LiveKit-backed streaming
 └── client/           # Python SDK
 ```
 
@@ -94,6 +95,14 @@ telefuser/
   and memory without retaining duration-sized tensor lists.
 - Interpret chunk period as output cadence: real-time operation requires p95 to stay
   below the media duration represented by one chunk, with margin for transport and encoding.
+- Treat `telefuser stream-serve` as the only streaming entrypoint. It must accept both
+  `ServerPushService` and `BidirectionalService` while preserving native frame/audio payloads.
+- LiveKit workers own one room and one pipeline session. Browser reconnects must not mutate
+  pipeline caches, and controller messages must remain on the reliable `tf.control` topic;
+  status uses reliable `tf.status`, while bounded telemetry uses unreliable `tf.metrics`.
+- Keep transport metrics distinct from model facts: output cadence measures adjacent emitted
+  chunks, pipeline residence measures actor admission to output, and applied-control latency
+  is bound to the control snapshot consumed by that output chunk.
 
 ### LingBot-Video Single-Process Runtime
 

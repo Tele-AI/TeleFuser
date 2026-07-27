@@ -17,6 +17,8 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
+- ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, worker admission, reconnect-friendly browser
+  transport, and support for both server-push and bidirectional pipeline contracts.
 - ✨ **2026-07-22**: **NEW** Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
@@ -39,10 +41,12 @@ The project treats a world model as more than a function that returns a single c
 - **World-model-oriented runtime**: Support for continuous video generation, interactive sessions, and bidirectional control loops.
 - **ADF (AI Dev First)**: Repository layers, pipeline contracts, examples, and docs are structured for coding agents to discover capabilities, follow project conventions, and extend pipelines efficiently.
 - **Streaming pipeline scheduler**: Actor-owned stateful stages, bounded artifact edges, per-session ordering, backpressure, lifecycle cleanup, and explicit resource groups.
-- **Streaming transport**: WebRTC-based streaming with media tracks plus DataChannel control for real-time inference.
+- **Streaming transport**: LiveKit-backed WebRTC for server-push media and resilient bidirectional sessions, with
+  room lifecycle, reconnect handling, participant roles, and reliable controls.
 - **Scalable GPU runtime**: Multi-GPU execution with tensor parallelism, sequence parallelism, optional Ray workers, and distributed service replicas.
 - **Inference optimization stack**: Triton kernels, optimized attention backends, quantization, offload, feature caching, and CacheSeek latent cache integration.
-- **Unified serving**: Local Python API, `telefuser serve` for task APIs, and `telefuser stream-serve` for continuous streaming services.
+- **Unified serving**: Local Python API, `telefuser serve` for task APIs, and `telefuser stream-serve` for LiveKit
+  rooms and media.
 
 ## Quick Start
 
@@ -62,7 +66,8 @@ TeleFuser does not require `tf-kernel` to run. No prebuilt tf-kernel package is 
 extension is built from source with the Makefile under `tf-kernel/`. See the [tf-kernel README](tf-kernel/README.md)
 and [installation and usage guide](docs/en/tf_kernel.md) for build, verification, and compatibility details.
 
-WebRTC streaming support is included in the default installation through `aiortc`.
+The base installation includes the LiveKit Python SDKs used by `telefuser stream-serve`. A LiveKit Cloud project or
+self-hosted LiveKit Server is operated separately.
 
 ### 1. Batch Video Inference
 
@@ -84,65 +89,76 @@ video = pipe(
 )
 ```
 
-### 2. Real-Time World Model Demo
+### 2. Real-Time World Model WebRTC Demo
 
-TeleFuser includes a bidirectional WebRTC demo for `LingBot-World v2`.
-LingBot-World v2 uses camera control and its v2 PPL defaults; its streaming example caps a session at two minutes.
+TeleFuser streams `LingBot-World v2` through LiveKit. LingBot-World v2 uses camera control and its v2 PPL defaults;
+its streaming example caps a session at two minutes.
 
 LingBot streaming uses the actor-based scheduler for both offline and service execution. Encode, DiT, and decode may
 overlap even on the same GPU; move stages only when memory placement requires it. See the
 [streaming scheduler guide](docs/en/stream_scheduler.md).
 
-For a laptop browser connected through VS Code Remote SSH, coturn is the only additional system package required;
-no extra Python package is needed. On Debian or Ubuntu, install it with:
+The checked-in browser page forces a TCP TURN relay so the same setup works through VS Code Remote SSH. The complete
+local development stack therefore has four processes: coturn, LiveKit Server, TeleFuser, and the browser page.
+Install the LiveKit Server and your platform's `coturn` package once:
 
 ```bash
+# Debian/Ubuntu; use the equivalent coturn package on other platforms.
 sudo apt-get update
 sudo apt-get install -y coturn
+
+# Install LiveKit Server once.
+curl -sSL https://get.livekit.io | bash
 ```
 
-The package provides both `turnserver` and the `turnutils_uclient` verification tool. Skip this step when both
-commands already exist, or when the browser and GPU service run on the same physical machine.
+Then run each command below in a separate terminal from the repository root.
+
+Terminal 1 — start the development-only TCP TURN relay:
+
+```bash
+turnserver -n -m 1 \
+  --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+  --listening-port=3478 --min-port=49160 --max-port=49200 \
+  --user=livekit-demo:livekit-demo-password \
+  --realm=livekit.local --fingerprint --lt-cred-mech \
+  --no-tls --no-dtls --no-cli --allow-loopback-peers
+```
+
+Terminal 2 — start LiveKit with its development credentials (`devkey` / `secret`):
+
+```bash
+livekit-server --dev
+```
+
+Terminal 3 — load the four-GPU LingBot-World v2 service:
 
 ```bash
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478?transport=tcp' \
-TELEFUSER_TURN_USERNAME=telefuser \
-TELEFUSER_TURN_CREDENTIAL=telefuser-turn \
 telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
-  --gpu-num 4 -p 8088 --host 0.0.0.0 --skip-validation
-
-python examples/stream_server/webrtc_bidirectional_demo.py \
-  --server-url http://127.0.0.1:8088 \
-  --port 8091 \
-  --image-path examples/data/lingbot_world_fast/image.jpg \
-  --turn-url 'turn:localhost:3478?transport=tcp' \
-  --turn-username telefuser --turn-credential telefuser-turn \
-  --force-turn-relay --ice-gather-timeout-ms 30000 --no-open
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  --num-workers 1 --worker-gpu-map 0,1,2,3 \
+  --port 8088 --skip-validation
 ```
 
-This starts a continuous session where the client sends control messages over a WebRTC DataChannel and receives
-generated video frames over media tracks. When the browser runs on a laptop through VS Code Remote SSH, configure
-TURN over TCP and forward ports `8091` and `3478`; port `8088` does not need forwarding because the demo proxies
-signaling requests. Keep local port `3478` equal to remote port `3478`; the forwarded 8091 port may use any available
-local port. Without VS Code, run the equivalent tunnel from a terminal on the laptop:
+Terminal 4 — serve the browser controller and proxy its session API:
 
 ```bash
-ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-  -L 8091:127.0.0.1:8091 \
-  -L 3478:127.0.0.1:3478 \
-  USER@SERVER_HOST
+python examples/stream_server/livekit_bidirectional_demo.py \
+  --server-url http://127.0.0.1:8088 --port 8092 --no-open
 ```
 
-Then open `http://localhost:8091`. The TURN command and credentials above are development examples. See the
-[stream server guide](docs/en/stream_server.md) and the
-[LingBot example README](examples/lingbot/README.md) for coturn startup and the tested four-H100 setup.
+For VS Code Remote SSH, forward remote TCP ports `8092`, `7880`, and `3478` to the same local ports; `8088` does not
+need forwarding because the page proxies the TeleFuser API. Open `http://127.0.0.1:8092`, select an initial image,
+click **Start**, and use the on-page controls or `W/A/S/D` and arrow keys. A successful connection shows a video
+track plus `control_state`, generation-stage, and chunk status messages.
 
-If the browser runs on the same physical machine as TeleFuser, no SSH tunnel or TURN server is needed. Unset all
-`TELEFUSER_TURN_*` variables, start the service on `127.0.0.1:8088`, run the demo without any `--turn-*` or
-`--force-turn-relay` arguments, and open `http://localhost:8091`. This does not apply when only the shell is on the
-server through SSH but the browser still runs on a laptop.
+Check the server independently with `curl http://127.0.0.1:8088/v1/service/health`. To stop the stack, stop the
+browser session or close the page first, then press Ctrl+C in terminals 4, 3, 2, and 1. These loopback addresses,
+static credentials, disabled TURN TLS, and `--allow-loopback-peers` are for trusted development only. See the
+[stream server guide](docs/en/stream_server.md) for LiveKit Cloud, production networking, session APIs, and
+troubleshooting.
 
 ### 3. Batch Service Mode
 
@@ -162,7 +178,7 @@ See [docs/en/service.md](docs/en/service.md) for full API details.
 
 TeleFuser uses a layered runtime architecture that maps cleanly to the repository structure:
 
-1. **Access layer**: FastAPI task APIs and WebRTC streaming entrypoints.
+1. **Access layer**: FastAPI task APIs and LiveKit-backed stream room/session entrypoints.
 2. **Service layer**: request routing, task management, stream sessions, replica pools, and integration with pipeline execution.
 3. **Pipeline abstraction layer**: model-specific `BasePipeline` / `BaseStage` components, with an actor-based streaming orchestrator for bounded dataflow, session ordering, metrics, and cleanup.
 4. **Model and optimization layer**: model loading, attention selection, quantization, offload, LoRA, and cache integration.
@@ -172,7 +188,7 @@ Relevant directories:
 
 ```text
 telefuser/
-├── service/         # REST APIs, streaming APIs, WebRTC integration
+├── service/         # REST APIs and LiveKit-backed streaming
 ├── orchestrator/    # Request orchestration and actor-based streaming scheduler
 ├── pipelines/       # Model-specific pipelines
 ├── distributed/     # TP / SP / FSDP / Ray utilities
@@ -188,7 +204,7 @@ telefuser/
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
-| `LingBot-World v2` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
+| `LingBot-World v2` | Bidirectional world-model streaming | LiveKit control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 
@@ -215,7 +231,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 ## Documentation
 
 - [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
-- [docs/en/stream_server.md](docs/en/stream_server.md): continuous streaming and WebRTC protocols
+- [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
 - [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
 - [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration

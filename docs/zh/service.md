@@ -1,6 +1,7 @@
 # TeleFuser 服务指南
 
-本文档涵盖 TeleFuser API 服务器、CLI 命令行工具和 HTTP API 参考。关于 WebRTC 实时流式传输，请参阅[流式服务指南](stream_server.md)。
+本文档涵盖 TeleFuser API 服务器、CLI 命令行工具和 HTTP API 参考。关于 LiveKit-backed 实时流式传输，
+请参阅[流式服务指南](stream_server.md)。
 
 ## 目录
 
@@ -44,10 +45,17 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# 实时世界模型流式推理（默认安装已包含 WebRTC 支持）
+# LiveKit-backed 世界模型流服务
 # 在 examples/lingbot/lingbot_world_fast_image_to_video_h100.py 中设置
 # TF_MODEL_ZOO_PATH 和 PPL_CONFIG["parallelism"]
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088 --skip-validation
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+    --livekit-url ws://127.0.0.1:7880 \
+    --livekit-api-key devkey \
+    --livekit-api-secret secret \
+    --num-workers 1 \
+    --worker-gpu-map 0,1,2,3 \
+    -p 8088 \
+    --skip-validation
 ```
 
 ### 3. 创建任务
@@ -82,9 +90,10 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 
 用于实时世界模型、交互式生成、语音驱动动画和流式媒体。
 
-- Server-push WebRTC：渐进式视频输出
-- Bidirectional WebRTC：交互式控制循环（DataChannel + RTP）
+- LiveKit server-push track：渐进式视频/音频输出
+- LiveKit bidirectional session：交互式控制循环
 - 有状态会话，连续 chunk 生成
+- Worker 准入、controller/viewer 角色和重连处理
 
 完整流式文档请参阅[流式服务指南](stream_server.md)。
 
@@ -96,11 +105,11 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 
 | 管线 | 任务 | 说明 |
 |------|------|------|
-| `LingBot-World-Fast` | 双向世界模型流式推理 | 交互式 WebRTC 控制循环 — 参见[流式服务指南](stream_server.md) |
+| `LingBot-World-Fast` | 双向世界模型流式推理 | LiveKit 控制循环 — 参见[流式服务指南](stream_server.md) |
 | `LiveAct` | S2V（语音转视频） | 语音驱动说话人头部生成 |
 | `FlashVSR` | VSR | 流式视频超分辨率 |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成和续写 |
-| `LingBot-World v2` | 双向世界模型流式推理 | 相机控制的 WebRTC 闭环 — 参见[流式服务指南](stream_server.md) |
+| `LingBot-World v2` | 双向世界模型流式推理 | 相机控制的 LiveKit 闭环 — 参见[流式服务指南](stream_server.md) |
 
 ### 视频生成
 
@@ -130,6 +139,7 @@ TeleFuser CLI 提供启动 API 服务器、验证管道和扫描安全问题的�
 | 命令 | 描述 |
 |---------|-------------|
 | `serve` | 启动 TeleFuser API 服务器 |
+| `stream-serve` | 启动 LiveKit-backed server-push 或 bidirectional 流 API |
 | `validate` | 验证管道配置文件 |
 | `scan` | 扫描目录中的管道文件 |
 
@@ -292,7 +302,8 @@ TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 - 文件输入、生成输出和临时 `.part` 文件由本地 artifact store 管理，根目录来自配置的 cache/artifact root。
 - `artifact_storage_backend=s3` 只是后续远端后端的边界声明，当前尚未实现。显式配置为 `s3` 会在启动阶段报错，不会静默退回本地存储。
 - `telefuser serve` 只暴露请求-响应路由：`/v1/tasks/*`、`/v1/files/*`、`/v1/images/*`、`/v1/videos/*` 和 `/v1/service/*`。
-- `telefuser stream-serve` 只暴露流式路由：`/v1/stream/*`、`/v1/stream/webrtc/*` 和 `/v1/service/*`。它不会暴露任务、文件下载或 OpenAI 兼容的请求-响应路由。
+- `telefuser stream-serve` 暴露 `/v1/stream/*` 下的 LiveKit session 路由和 `/v1/service/*`。媒体与可靠
+  control 消息经配置的 LiveKit 部署传输；它不暴露 task、file-download、OpenAI 兼容请求-响应或直接 SDP 路由。
 
 ### Artifact 存储与清理
 

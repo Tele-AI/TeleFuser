@@ -36,7 +36,7 @@ Compile-aware ops with eager CUDA Triton kernels and PyTorch native fallbacks.
 <div class="feature-card" markdown>
 **Streaming Service**
 
-FastAPI batch serving plus WebRTC media tracks and DataChannel control.
+FastAPI batch serving and LiveKit-backed rooms for server-push and resilient interactive WebRTC.
 </div>
 <div class="feature-card" markdown>
 **Feature Cache**
@@ -56,8 +56,8 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via WebRTC |
-| LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast interactive world model via WebRTC DataChannel |
+| LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
+| LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
 
 ### Video Generation
 
@@ -88,17 +88,20 @@ pip install telefuser
 # Batch serving
 telefuser serve /path/to/pipeline.py --port 8000
 
-# Stream serving (WebRTC support is included in the default install)
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088
+# LiveKit-backed streaming (Python SDK included in the base install)
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  -p 8088
 ```
 
 ## Documentation Sections
 
 <div class="tf-link-grid">
 <a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
-<a href="stream_server/"><strong>Stream Server</strong><span>WebRTC streaming and bidirectional control.</span></a>
+<a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, media, data topics, and bidirectional control.</span></a>
 <a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
-<a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch, stream, baseline, and history workflows.</span></a>
+<a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch video and history workflows.</span></a>
 <a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
 <a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>

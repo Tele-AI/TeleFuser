@@ -1,6 +1,7 @@
 # TeleFuser Service Guide
 
-This guide covers the TeleFuser API server, CLI usage, and HTTP API reference. For real-time streaming via WebRTC, see the [Stream Server Guide](stream_server.md).
+This guide covers the TeleFuser API server, CLI usage, and HTTP API reference. For LiveKit-backed real-time
+streaming, see the [Stream Server Guide](stream_server.md).
 
 ## Table of Contents
 
@@ -44,10 +45,17 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# For real-time world model streaming (WebRTC support is included in the default install)
+# LiveKit-backed world-model streaming
 # Set TF_MODEL_ZOO_PATH and PPL_CONFIG["parallelism"] in
 # examples/lingbot/lingbot_world_fast_image_to_video_h100.py
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088 --skip-validation
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+    --livekit-url ws://127.0.0.1:7880 \
+    --livekit-api-key devkey \
+    --livekit-api-secret secret \
+    --num-workers 1 \
+    --worker-gpu-map 0,1,2,3 \
+    -p 8088 \
+    --skip-validation
 ```
 
 ### 3. Create a Task
@@ -82,9 +90,10 @@ Use for batch text-to-video, image-to-video, image generation, and super-resolut
 
 Use for real-time world models, interactive generation, speech-driven animation, and streaming media.
 
-- Server-push WebRTC for progressive video output
-- Bidirectional WebRTC for interactive control loops (DataChannel + RTP)
+- LiveKit server-push tracks for progressive video/audio output
+- LiveKit bidirectional sessions for interactive control loops
 - Stateful sessions with continuous chunk generation
+- Worker admission, controller/viewer roles, and reconnect handling
 
 See the [Stream Server Guide](stream_server.md) for full streaming documentation.
 
@@ -96,11 +105,11 @@ See the [Stream Server Guide](stream_server.md) for full streaming documentation
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
-| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop — see [Stream Server Guide](stream_server.md) |
+| `LingBot-World-Fast` | Bidirectional world-model streaming | LiveKit control loop — see [Stream Server Guide](stream_server.md) |
 | `LiveAct` | S2V (speech-to-video) | Speech-driven talking head generation |
 | `FlashVSR` | VSR | Streaming video super-resolution |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation |
-| `LingBot-World v2` | Bidirectional world-model streaming | Camera-controlled WebRTC loop — see [Stream Server Guide](stream_server.md) |
+| `LingBot-World v2` | Bidirectional world-model streaming | Camera-controlled LiveKit loop — see [Stream Server Guide](stream_server.md) |
 
 ### Video Generation
 
@@ -130,6 +139,7 @@ The TeleFuser CLI provides commands for starting API servers, validating pipelin
 | Command | Description |
 |---------|-------------|
 | `serve` | Start the TeleFuser API server |
+| `stream-serve` | Start the LiveKit-backed server-push or bidirectional stream API |
 | `validate` | Validate a pipeline configuration file |
 | `scan` | Scan a directory for pipeline files |
 
@@ -292,7 +302,9 @@ The request-response service is intentionally local and single-process by defaul
 - File inputs, generated outputs, and temporary `.part` files are managed by the local artifact store under the configured cache root.
 - `artifact_storage_backend=s3` is declared as a future backend boundary, but it is not implemented yet. Setting it to `s3` fails at startup instead of silently falling back to local storage.
 - `telefuser serve` exposes request-response routes only: `/v1/tasks/*`, `/v1/files/*`, `/v1/images/*`, `/v1/videos/*`, and `/v1/service/*`.
-- `telefuser stream-serve` exposes stream routes only: `/v1/stream/*`, `/v1/stream/webrtc/*`, and `/v1/service/*`. It does not expose task, file-download, or OpenAI-compatible request-response routes.
+- `telefuser stream-serve` exposes LiveKit session routes under `/v1/stream/*` and service routes under
+  `/v1/service/*`. Media and reliable control messages travel through the configured LiveKit deployment. It does
+  not expose task, file-download, OpenAI-compatible request-response, or direct SDP routes.
 
 ### Artifact Storage and Cleanup
 

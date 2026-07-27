@@ -56,7 +56,8 @@ session 关闭按以下顺序执行：
 4. 释放 scheduler artifact 引用，并确认没有遗留容量 slot。
 5. 记录清理失败；不得复用只完成部分释放的状态。
 
-LingBot 的离线 chunked generation 与双向 WebRTC session 均使用此生命周期。
+LingBot 的离线 chunked generation，以及通过 LiveKit 传输的双向 session，均使用此
+生命周期。传输层重连不会在 worker 之间迁移 actor-owned stage state。
 
 ## Resource Group 与放置
 

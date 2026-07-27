@@ -35,7 +35,7 @@ Ulysses、Ring Attention、张量并行、流水线并行和 FSDP。
 <div class="feature-card" markdown>
 **流式服务**
 
-FastAPI 批量服务，以及 WebRTC 媒体轨道和 DataChannel 控制。
+FastAPI 批量服务，以及同时支持 server-push 和稳定交互式 WebRTC 的 LiveKit room。
 </div>
 <div class="feature-card" markdown>
 **特征缓存**
@@ -55,8 +55,8 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| LingBot-World v2 | 双向流式推理 | 通过 WebRTC 的相机控制交互式世界模型 |
-| LingBot-World-Fast | 双向流式推理 | Legacy/causal-fast WebRTC 交互式世界模型 |
+| LingBot-World v2 | 双向流式推理 | 通过 LiveKit 进行相机控制的交互式世界模型 |
+| LingBot-World-Fast | 双向流式推理 | 通过 LiveKit 可靠数据消息控制的 legacy/causal-fast 模型 |
 
 ### 视频生成
 
@@ -87,17 +87,20 @@ pip install telefuser
 # 批量服务
 telefuser serve /path/to/pipeline.py --port 8000
 
-# 流式服务（默认安装已包含 WebRTC 支持）
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py -p 8088
+# LiveKit-backed 流服务（基础安装已包含 Python SDK）
+telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  -p 8088
 ```
 
 ## 文档分区
 
 <div class="tf-link-grid">
 <a href="service/"><strong>服务指南</strong><span>批量服务、任务 API 和 SDK。</span></a>
-<a href="stream_server/"><strong>流式服务</strong><span>WebRTC 流式传输和双向控制。</span></a>
+<a href="stream_server/"><strong>流式服务</strong><span>LiveKit session、媒体、data topic 和双向控制。</span></a>
 <a href="stream_scheduler/"><strong>流式调度器</strong><span>Actor 所有权、有界数据流、生命周期、指标和 GPU 卡位。</span></a>
-<a href="benchmark_aiperf/"><strong>AIPerf 基准测试</strong><span>Batch、stream、baseline 与历史指标工作流。</span></a>
+<a href="benchmark_aiperf/"><strong>AIPerf 基准测试</strong><span>Batch 视频与历史指标工作流。</span></a>
 <a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>安装、编译、验证和使用可选 CUDA 扩展。</span></a>
 <a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>

@@ -59,7 +59,8 @@ Session shutdown is ordered as follows:
 4. Release scheduler artifact references and verify that no capacity slots remain allocated.
 5. Record cleanup failures and do not reuse partially released state.
 
-LingBot uses this lifecycle for both offline chunked generation and bidirectional WebRTC sessions.
+LingBot uses this lifecycle for offline chunked generation and bidirectional sessions over either LiveKit or the
+LiveKit transport. Transport reconnects never transfer actor-owned stage state between workers.
 
 ## Resource Groups and Placement
 

@@ -68,6 +68,9 @@ that contract. Keep implementation details such as fixed distillation settings o
 See [docs/en/adding_new_example.md](../docs/en/adding_new_example.md) for the authoring pattern and
 [docs/en/service.md](../docs/en/service.md) for the runtime behavior.
 
+LiveKit server-push and bidirectional examples are documented in the
+[stream examples README](stream_server/README.md).
+
 ## Configuration
 
 Edit `example_config.yaml` to manage pipelines:
