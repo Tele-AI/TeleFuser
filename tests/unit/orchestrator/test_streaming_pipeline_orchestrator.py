@@ -45,6 +45,7 @@ def _wait_for_outputs(
 def _orchestrator(
     encode_calls: list[tuple[int, bool, bool]],
     denoise_calls: list[tuple[int, bool, bool]],
+    latency_anchor_artifact: str | None = None,
 ) -> StreamingPipelineOrchestrator:
     def encode(invocation):
         encode_calls.append((invocation.key.sequence_id, invocation.is_first, invocation.is_last))
@@ -65,6 +66,7 @@ def _orchestrator(
             StreamingEdgeSpec("control", "denoise"),
         ),
         output_artifacts=frozenset({"frames"}),
+        latency_anchor_artifact=latency_anchor_artifact,
     )
     return StreamingPipelineOrchestrator(
         spec,
@@ -123,6 +125,25 @@ def test_session_metrics_report_end_to_end_percentiles_after_output_polling() ->
         assert metrics.control_to_output_latency.p50_seconds is not None
         assert metrics.control_to_output_latency.p95_seconds is not None
         assert metrics.chunk_period.count == 1
+    finally:
+        orchestrator.close()
+
+
+def test_session_metrics_use_the_configured_ingress_latency_anchor() -> None:
+    orchestrator = _orchestrator([], [], latency_anchor_artifact="control")
+    try:
+        orchestrator.create_session("session", final_sequence_id=0)
+        orchestrator.push_input("session", 0, "image", "prefetched")
+        assert orchestrator.wait_until_idle("session")
+        assert orchestrator.session_metrics("session").ingress_accepted_at == ()
+
+        control_submitted_after = time.monotonic()
+        orchestrator.push_input("session", 0, "control", "left")
+        assert _wait_for_outputs(orchestrator, "session", 1)
+        metrics = orchestrator.session_metrics("session")
+        assert len(metrics.ingress_accepted_at) == 1
+        assert metrics.ingress_accepted_at[0][1] >= control_submitted_after
+        assert metrics.control_to_output_latency.count == 1
     finally:
         orchestrator.close()
 

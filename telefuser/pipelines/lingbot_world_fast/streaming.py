@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     from .pipeline import LingBotWorldFastPipeline
 
 
+_CONDITION_PREFETCH_DEPTH = 2
+
+
 @dataclass(frozen=True)
 class LingBotWorldFastStreamingSession:
     """Lightweight identity for one session in the shared streaming runtime."""
@@ -47,6 +50,8 @@ class _LingBotStreamingSessionEntry:
     runtime: LingBotWorldFastGenerationSession
     epoch: int
     progress_callback: Callable[..., None] | None
+    next_condition_index: int = 0
+    next_control_index: int = 0
 
 
 class LingBotWorldFastStreamingRuntime:
@@ -90,6 +95,7 @@ class LingBotWorldFastStreamingRuntime:
             ),
             output_artifacts=frozenset({"frames"}),
             output_capacity_per_session=2,
+            latency_anchor_artifact="control",
         )
         self.orchestrator = StreamingPipelineOrchestrator(spec, actors)
 
@@ -108,16 +114,28 @@ class LingBotWorldFastStreamingRuntime:
             if session_id in self._sessions:
                 raise ValueError(f"LingBot streaming session {session_id!r} already exists")
             epoch = self.orchestrator.create_session(session_id, final_sequence_id=runtime.chunk_count - 1)
-            self._sessions[session_id] = _LingBotStreamingSessionEntry(runtime, epoch, progress_callback)
-        return LingBotWorldFastStreamingSession(session_id, epoch, runtime.cache_handle)
+            entry = _LingBotStreamingSessionEntry(runtime, epoch, progress_callback)
+            self._sessions[session_id] = entry
+        session = LingBotWorldFastStreamingSession(session_id, epoch, runtime.cache_handle)
+        try:
+            self._prefetch_conditions(session_id, entry)
+        except BaseException:
+            self.close_session(session)
+            raise
+        return session
 
     def can_submit_chunk(self, session: LingBotWorldFastStreamingSession) -> bool:
-        """Return whether the session can atomically admit another chunk."""
-        self._require_session(session)
+        """Return whether the session can admit its next control chunk."""
+        entry = self._require_session(session)
         try:
-            if self.orchestrator.status(session.session_id) != StreamingSessionStatus.RUNNING:
-                return False
-            return self.orchestrator.can_push_inputs(session.session_id, ("encode_request", "control"))
+            with self._lock:
+                if self.orchestrator.status(session.session_id) != StreamingSessionStatus.RUNNING:
+                    return False
+                if entry.next_control_index >= entry.runtime.chunk_count:
+                    return False
+                if not self._ensure_next_condition_locked(session.session_id, entry):
+                    return False
+                return self.orchestrator.can_push_input(session.session_id, "control")
         except RuntimeError:
             if self.orchestrator.error(session.session_id) is not None:
                 return False
@@ -139,24 +157,87 @@ class LingBotWorldFastStreamingRuntime:
         chunk_index: int,
         control: torch.Tensor,
     ) -> bool:
-        """Atomically submit one chunk to the shared actor graph."""
+        """Submit the next control while condition encoding runs ahead independently."""
         entry = self._require_session(session)
         if chunk_index < 0 or chunk_index >= entry.runtime.chunk_count:
             raise ValueError("chunk_index exceeds the LingBot session length")
         try:
-            return self.orchestrator.try_push_inputs(
-                session.session_id,
-                chunk_index,
-                {
-                    "encode_request": None,
-                    "control": control,
-                },
-            )
+            with self._lock:
+                if chunk_index != entry.next_control_index:
+                    raise ValueError(f"Expected LingBot control chunk {entry.next_control_index}, got {chunk_index}")
+                if not self._ensure_next_condition_locked(session.session_id, entry):
+                    return False
+                accepted = self.orchestrator.try_push_inputs(
+                    session.session_id,
+                    chunk_index,
+                    {"control": control},
+                )
+                if accepted:
+                    entry.next_control_index += 1
+                return accepted
         except RuntimeError:
             error = self.orchestrator.error(session.session_id)
             if error is not None:
                 raise RuntimeError("LingBot streaming scheduler failed") from error
             raise
+
+    def _prefetch_conditions(
+        self,
+        session_id: str,
+        entry: _LingBotStreamingSessionEntry,
+    ) -> None:
+        with self._lock:
+            self._prefetch_conditions_locked(session_id, entry)
+
+    def _prefetch_conditions_locked(
+        self,
+        session_id: str,
+        entry: _LingBotStreamingSessionEntry,
+    ) -> None:
+        """Keep at most two condition chunks ahead of accepted controls."""
+        while (
+            entry.next_condition_index < entry.runtime.chunk_count
+            and entry.next_condition_index - entry.next_control_index < _CONDITION_PREFETCH_DEPTH
+        ):
+            if not self.orchestrator.try_push_inputs(
+                session_id,
+                entry.next_condition_index,
+                {"encode_request": None},
+            ):
+                return
+            entry.next_condition_index += 1
+
+    def _ensure_next_condition_locked(
+        self,
+        session_id: str,
+        entry: _LingBotStreamingSessionEntry,
+    ) -> bool:
+        """Ensure the next control has a matching condition without filling the lookahead window."""
+        if entry.next_condition_index > entry.next_control_index:
+            return True
+        if entry.next_condition_index >= entry.runtime.chunk_count:
+            return False
+        if not self.orchestrator.try_push_inputs(
+            session_id,
+            entry.next_condition_index,
+            {"encode_request": None},
+        ):
+            return False
+        entry.next_condition_index += 1
+        return True
+
+    def _refill_conditions_after_denoise(
+        self,
+        session_id: str,
+        entry: _LingBotStreamingSessionEntry,
+    ) -> None:
+        """Overlap future condition encoding with decode instead of current-chunk DiT work."""
+        with self._lock:
+            if self._sessions.get(session_id) is not entry:
+                return
+            if self.orchestrator.status(session_id) != StreamingSessionStatus.RUNNING:
+                return
+            self._prefetch_conditions_locked(session_id, entry)
 
     def poll_frames(self, session: LingBotWorldFastStreamingSession) -> list[tuple[int, list[Image.Image]]]:
         """Return decoded frame batches in chunk order."""
@@ -388,6 +469,7 @@ class LingBotWorldFastStreamingRuntime:
                 runtime.world_kv_binding.on_chunk_finalized(runtime, index, latent)
             except Exception as exc:
                 logger.warning(f"world_kv on_chunk_finalized failed at chunk {index}: {exc}")
+        self._refill_conditions_after_denoise(invocation.key.session_id, entry)
         return {"latent": latent}
 
     def _decode_inputs(self, invocation: StreamingStageInvocation) -> tuple[tuple[object, ...], dict[str, object]]:

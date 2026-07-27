@@ -141,10 +141,13 @@ class StreamingPipelineSpec:
     output_artifacts: frozenset[str] = frozenset()
     output_capacity_per_session: int = 1
     resource_groups: tuple[StreamingResourceGroupSpec, ...] = ()
+    latency_anchor_artifact: str | None = None
 
     def __post_init__(self) -> None:
         if self.output_capacity_per_session < 1:
             raise ValueError("output_capacity_per_session must be at least one")
+        if self.latency_anchor_artifact == "":
+            raise ValueError("latency_anchor_artifact must be non-empty when provided")
 
 
 @dataclass(frozen=True)
@@ -561,7 +564,8 @@ class StreamingPipelineOrchestrator:
                 for edge in edges
             ):
                 return False
-            runtime.ingress_accepted_at.setdefault(sequence_id, time.monotonic())
+            if self.spec.latency_anchor_artifact is None or self.spec.latency_anchor_artifact in inputs:
+                runtime.ingress_accepted_at.setdefault(sequence_id, time.monotonic())
             for artifact, value in inputs.items():
                 runtime.artifacts[(sequence_id, artifact)] = _ArtifactSlot(
                     value, {edge.target_stage for edge in edges_by_artifact[artifact]}
@@ -1033,6 +1037,11 @@ class StreamingPipelineOrchestrator:
         for artifact in self.spec.output_artifacts:
             if artifact not in declared_producers:
                 raise ValueError(f"Output artifact {artifact!r} has no producer")
+        if (
+            self.spec.latency_anchor_artifact is not None
+            and self.spec.latency_anchor_artifact not in external_artifacts
+        ):
+            raise ValueError(f"Latency anchor artifact {self.spec.latency_anchor_artifact!r} is not an external input")
 
         stage_positions = {stage.stage_id: index for index, stage in enumerate(self.spec.stages)}
         roots = deque(stage.stage_id for stage in self.spec.stages if indegree[stage.stage_id] == 0)

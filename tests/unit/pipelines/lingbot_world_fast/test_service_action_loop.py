@@ -157,6 +157,29 @@ def test_actor_worker_does_not_submit_after_close_during_initialization() -> Non
     assert state.generation_session is runtime
 
 
+def test_actor_worker_prefetches_conditions_before_waiting_for_first_control() -> None:
+    pipeline = MagicMock()
+    runtime = LingBotWorldFastGenerationSession(config=_state().config, latent_f=1, chunk_size=1, cache_handle=7)
+    pipeline._create_initialized_session.return_value = runtime
+    streaming_runtime = MagicMock()
+    streaming_runtime.create_session.return_value = SimpleNamespace(session_id="actor-session")
+    pipeline._get_streaming_runtime.return_value = streaming_runtime
+    service = LingBotWorldFastService(pipeline)
+    state = _state()
+
+    def stop_after_prefetch(*_args: object, **_kwargs: object) -> None:
+        assert pipeline._create_initialized_session.called
+        assert streaming_runtime.create_session.called
+        state.active = False
+        return None
+
+    with patch.object(service, "_next_realtime_control", side_effect=stop_after_prefetch):
+        service._run_actor_worker_loop(state, MagicMock(), MagicMock(), MagicMock())
+
+    streaming_runtime.create_session.assert_called_once()
+    streaming_runtime.try_submit_chunk.assert_not_called()
+
+
 def test_actor_worker_prefetches_directional_chunks_within_ingress_capacity() -> None:
     pipeline = MagicMock()
     runtime = LingBotWorldFastGenerationSession(

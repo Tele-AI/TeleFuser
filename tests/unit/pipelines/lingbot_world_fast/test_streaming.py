@@ -52,12 +52,20 @@ class _Denoise:
     def __init__(self, release_order: list[str]):
         self.release_order = release_order
         self.advance_calls: list[int] = []
+        self.calls: list[dict[str, object]] = []
         self.release_calls: list[int] = []
         self.fail_denoise = False
+        self.started: threading.Event | None = None
+        self.release: threading.Event | None = None
 
     def denoise_and_update_cache(self, **kwargs):
         if self.fail_denoise:
             raise RuntimeError("injected denoise failure")
+        self.calls.append(kwargs)
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None:
+            self.release.wait(timeout=1)
         return kwargs["condition_chunk"]
 
     def advance_noise(self, cache_handle: int):
@@ -159,6 +167,76 @@ def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
     assert pipeline.release_order == ["decode", "denoise", "encode"]
     assert pipeline.released == []
     assert runtime.cache_handle is None
+
+
+def test_streaming_session_prefetches_two_conditions_ahead_of_controls() -> None:
+    pipeline = _Pipeline()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=4,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=15,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    denoise_started = threading.Event()
+    release_denoise = threading.Event()
+    pipeline.denoise_stage.started = denoise_started
+    pipeline.denoise_stage.release = release_denoise
+    try:
+        assert streaming_runtime.wait_until_idle(session)
+        assert [call["chunk_index"] for call in pipeline.vae_encode_worker.calls] == [0, 1]
+        assert pipeline.denoise_stage.calls == []
+
+        streaming_runtime.submit_chunk(session, 0, torch.tensor([4.0]))
+        assert denoise_started.wait(timeout=1)
+        assert [call["chunk_index"] for call in pipeline.vae_encode_worker.calls] == [0, 1]
+        release_denoise.set()
+        assert streaming_runtime.wait_until_idle(session)
+        assert [call["chunk_index"] for call in pipeline.vae_encode_worker.calls] == [0, 1, 2]
+        assert len(pipeline.denoise_stage.calls) == 1
+        assert streaming_runtime.poll_frames(session)[0][0] == 0
+        metrics = streaming_runtime.session_metrics(session)
+        assert [index for index, _ in metrics.ingress_accepted_at] == [0]
+    finally:
+        release_denoise.set()
+        streaming_runtime.close_session(session)
+        streaming_runtime.close()
+
+
+def test_streaming_session_rejects_out_of_order_or_duplicate_controls() -> None:
+    pipeline = _Pipeline()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=2,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=16,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    try:
+        with pytest.raises(ValueError, match="Expected LingBot control chunk 0, got 1"):
+            streaming_runtime.try_submit_chunk(session, 1, torch.tensor([4.0]))
+        assert streaming_runtime.try_submit_chunk(session, 0, torch.tensor([4.0]))
+        with pytest.raises(ValueError, match="Expected LingBot control chunk 1, got 0"):
+            streaming_runtime.try_submit_chunk(session, 0, torch.tensor([4.0]))
+    finally:
+        streaming_runtime.close_session(session)
+        streaming_runtime.close()
 
 
 def test_streaming_runtime_shares_one_actor_graph_across_sessions() -> None:

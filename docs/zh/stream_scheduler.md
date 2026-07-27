@@ -102,3 +102,6 @@ LingBot 的 `vae_encode_config` 和 `vae_decode_config` 是两个独立且完整
 - session state 必须隔离，并通过 owning actor 释放。
 - 只为真实且明确的部署约束声明 resource group。
 - 应验证 session 交错、backpressure、取消、actor failure 和 cleanup failure。
+
+LingBot-World-Fast 的完整 condition/control 流水、最终时序和本次优化前后对比见
+[LingBot-World-Fast Condition 预取流水设计](design_lingbot_condition_prefetch.md)。

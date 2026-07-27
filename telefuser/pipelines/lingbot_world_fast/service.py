@@ -895,9 +895,6 @@ class LingBotWorldFastService:
         emit_status: Callable[..., None],
     ) -> None:
         """Drive dynamic control ingress and ordered output through the shared actor graph."""
-        first_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
-        if first_item is None:
-            return
         runtime_measurement = self._start_benchmark_measurement(state)
         try:
             runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
@@ -921,6 +918,9 @@ class LingBotWorldFastService:
             runtime=self._runtime_metadata(runtime),
             **({"measurement": {"name": "runtime_creation", **runtime_facts}} if runtime_facts is not None else {}),
         )
+        first_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
+        if first_item is None:
+            return
 
         submitted = 0
         controls_by_chunk: dict[int, list[str] | None] = {}
