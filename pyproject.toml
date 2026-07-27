@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     # Default install follows vLLM-style inference readiness: service runtime
     # plus the core PyTorch/model/distributed stack needed by standard pipelines.
+    "av>=14.0.0,<17.0.0",
     "click",
     "diffusers>=0.36.0",
     "einops",
