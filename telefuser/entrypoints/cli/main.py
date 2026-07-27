@@ -134,14 +134,23 @@ def serve(
 
 @main.command(name="stream-serve")
 @click.argument("pipe_path")
-@click.option("--port", "-p", default=8088, type=int, help="Server port")
-@click.option("--host", default="0.0.0.0", type=str, help="Server host")
+@click.option("--host", default="0.0.0.0", type=str, help="HTTP API bind host")
+@click.option("--port", "-p", default=8088, type=int, help="HTTP API bind port")
+@click.option("--livekit-url", default=None, type=str, help="LiveKit server URL")
+@click.option("--livekit-api-key", default=None, type=str, help="LiveKit API key")
+@click.option("--livekit-api-secret", default=None, type=str, help="LiveKit API secret")
+@click.option("--num-workers", default=1, type=int, help="Number of TeleFuser model workers")
+@click.option("--worker-gpu-map", default=None, type=str, help="GPU groups, for example '0,1;2,3'")
+@click.option("--queue-size", default=0, type=int, help="Maximum queued sessions; 0 rejects when busy")
+@click.option("--session-timeout", default=1800, type=int, help="Maximum session lifetime in seconds")
+@click.option("--token-ttl", default=3600, type=int, help="LiveKit join token TTL in seconds")
+@click.option("--controller-timeout", default=60, type=int, help="Seconds to keep a session after controller leaves")
+@click.option("--room-empty-timeout", default=30, type=int, help="Seconds to keep a session after room becomes empty")
 @click.option(
-    "--gpu-num",
-    "-g",
-    default=1,
-    type=click.IntRange(min=1),
-    help="Number of GPUs passed to a stream pipeline get_service(gpu_num=...) factory",
+    "--worker-mode",
+    type=click.Choice(["in-process", "process"], case_sensitive=False),
+    default="in-process",
+    help="Worker isolation mode",
 )
 @click.option(
     "--security-level",
@@ -157,22 +166,27 @@ def serve(
 )
 def stream_serve(
     pipe_path: str,
-    port: int,
     host: str,
-    gpu_num: int,
+    port: int,
+    livekit_url: str | None,
+    livekit_api_key: str | None,
+    livekit_api_secret: str | None,
+    num_workers: int,
+    worker_gpu_map: str | None,
+    queue_size: int,
+    session_timeout: int,
+    token_ttl: int,
+    controller_timeout: int,
+    room_empty_timeout: int,
+    worker_mode: str,
     security_level: str,
     skip_validation: bool,
 ) -> None:
-    """Start the TeleFuser stream server (WebRTC / WebSocket).
+    """Start the LiveKit-backed TeleFuser stream server.
 
     \b
     PIPE_PATH is a Python file that defines get_service() returning
-    a ServerPushService (WebRTC) or BidirectionalService (WebSocket).
-
-    \b
-    Examples:
-        telefuser stream-serve examples/stream_video_replay.py
-        telefuser stream-serve examples/stream_video_replay.py -p 8000 --host 0.0.0.0
+    a ServerPushService or BidirectionalService stream service.
     """
     if not skip_validation:
         level = SecurityLevel[security_level.upper()]
@@ -184,13 +198,23 @@ def stream_serve(
             click.echo(f"\nTo bypass: telefuser stream-serve {pipe_path} --skip-validation", err=True)
             raise click.Abort()
 
-    from telefuser.service.main import run_stream_server
+    from telefuser.service.livekit.main import run_stream_server
 
     run_stream_server(
-        pipe_path,
-        port,
-        host,
-        gpu_num=gpu_num,
+        pipe_path=pipe_path,
+        host=host,
+        port=port,
+        livekit_url=livekit_url,
+        livekit_api_key=livekit_api_key,
+        livekit_api_secret=livekit_api_secret,
+        num_workers=num_workers,
+        worker_gpu_map=worker_gpu_map,
+        queue_size=queue_size,
+        session_timeout=session_timeout,
+        token_ttl=token_ttl,
+        controller_timeout=controller_timeout,
+        room_empty_timeout=room_empty_timeout,
+        worker_mode=worker_mode.lower(),
         skip_validation=skip_validation,
         security_level=security_level,
     )

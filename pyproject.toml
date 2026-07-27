@@ -38,6 +38,8 @@ dependencies = [
     "httpx",
     "imageio[ffmpeg]>=2.37.2",
     "loguru",
+    "livekit-api>=1.2.0,<2.0",
+    "livekit>=1.1.13,<2.0",
     "numpy",
     "opencv-python-headless>=4.0",
     "pillow",
