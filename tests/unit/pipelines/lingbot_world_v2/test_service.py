@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
 from PIL import Image
 from click.testing import CliRunner
@@ -116,8 +117,14 @@ def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> N
     assert session_config.chunk_size == 4
     assert session_config.frame_policy == "truncate"
     assert session_config.sample_shift == 10.0
+    assert session_config.control_translation_scale == 1.0
+    np.testing.assert_array_equal(session_config.intrinsics, np.load(offline_example.DEFAULT_INTRINSICS_PATH))
+    assert session_config.intrinsics_width == 832
+    assert session_config.intrinsics_height == 480
     assert service.default_fps == 16
     assert service.max_generation_seconds == 120.0
+    assert service.default_session_config["control_translation_scale"] == 1.0
+    assert service.default_session_config["intrinsics_path"] == offline_example.DEFAULT_INTRINSICS_PATH
     assert session_id in service._sessions
 
 

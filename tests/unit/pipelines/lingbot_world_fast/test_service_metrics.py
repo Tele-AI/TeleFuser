@@ -62,7 +62,7 @@ def test_lingbot_actor_service_emits_runtime_and_chunk_measurements() -> None:
         statuses.append({"stage": stage, **data})
 
     with (
-        patch.object(service, "_next_realtime_control", return_value=(object(), None)),
+        patch.object(service, "_next_realtime_control", return_value=(object(), None, None)),
         patch.object(service, "_put_output"),
         patch(
             "telefuser.pipelines.lingbot_world_fast.service.start_runtime_measurement",

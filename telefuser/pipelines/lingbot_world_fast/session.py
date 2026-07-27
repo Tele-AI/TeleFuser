@@ -113,6 +113,7 @@ class LingBotWorldFastDirectionCommand:
 
     revision: int
     controls: frozenset[str]
+    received_at_monotonic: float
 
 
 @dataclass
@@ -131,8 +132,8 @@ class LingBotWorldFastSessionState:
     active: bool = True
     created_at_monotonic: float = field(default_factory=time.monotonic)
     worker_started_at_monotonic: float | None = None
-    last_control_at_monotonic: float | None = None
     first_chunk_sent_at_monotonic: float | None = None
+    last_chunk_sent_at_monotonic: float | None = None
     chunk_started_at_monotonic: dict[int, float] = field(default_factory=dict)
     output_queue_high_watermark: int = 0
     dropped_video_payloads: int = 0
@@ -144,6 +145,7 @@ class LingBotWorldFastSessionState:
     last_applied_control_revision: int | None = None
     overwritten_direction_commands: int = 0
     latest_explicit_control: dict | None = None
+    latest_explicit_control_received_at_monotonic: float | None = None
     overwritten_explicit_controls: int = 0
     dropped_control_signals: int = 0
     scheduler_metrics: dict[str, object] | None = None

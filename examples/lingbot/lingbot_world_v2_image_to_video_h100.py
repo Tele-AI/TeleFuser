@@ -6,9 +6,11 @@ Single GPU:
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4
 Multi-GPU runs configure the VAE worker and DiT SP group independently in PPL_CONFIG.
-WebRTC streaming service:
+LiveKit streaming service:
     telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
-        --gpu-num 4 -p 8088 --skip-validation
+        --livekit-url ws://127.0.0.1:7880 \
+        --livekit-api-key devkey --livekit-api-secret secret \
+        --worker-gpu-map 0,1,2,3 -p 8088 --skip-validation
 
 """
 
@@ -83,7 +85,7 @@ PPL_CONFIG = dict(
     max_attention_size=None,
     control_move_step=0.10,
     control_lateral_step=0.10,
-    control_translation_scale=3.0,
+    control_translation_scale=1.0,
     control_yaw_step_degrees=0.5,
     control_pitch_step_degrees=0.5,
     vae_torch_dtype=torch.float32,
@@ -200,6 +202,9 @@ def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastSer
             "frame_policy": PPL_CONFIG["frame_policy"],
             "sample_shift": PPL_CONFIG["sample_shift"],
             "max_attention_size": PPL_CONFIG["max_attention_size"],
+            "intrinsics_path": DEFAULT_INTRINSICS_PATH,
+            "intrinsics_width": 832,
+            "intrinsics_height": 480,
             "control_move_step": PPL_CONFIG["control_move_step"],
             "control_lateral_step": PPL_CONFIG["control_lateral_step"],
             "control_translation_scale": PPL_CONFIG["control_translation_scale"],

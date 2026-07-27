@@ -77,11 +77,13 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     state.control_context = SimpleNamespace()
     control_builder = MagicMock()
     emit_status = MagicMock()
-    first_control = (object(), ["w"])
+    first_control = (object(), ["w"], 8.0)
+    state.last_chunk_sent_at_monotonic = 9.0
 
     with (
         patch.object(service, "_next_realtime_control", return_value=first_control),
         patch.object(service, "_put_output") as put_output,
+        patch("telefuser.pipelines.lingbot_world_fast.service.time.monotonic", side_effect=[10.0, 12.0, 13.0]),
     ):
         service._run_actor_worker_loop(state, state.control_context, control_builder, emit_status)
 
@@ -94,6 +96,12 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     assert runtime.current_chunk_index == 1
     assert runtime.emitted_frames == 1
     assert state.streaming_session is streaming_session
+    chunk_sent = next(call for call in emit_status.call_args_list if call.args[0] == "chunk_sent")
+    assert chunk_sent.kwargs["output_cadence_seconds"] == 3.0
+    assert chunk_sent.kwargs["pipeline_residence_seconds"] == 2.0
+    assert chunk_sent.kwargs["applied_control_latency_seconds"] == 4.0
+    assert chunk_sent.kwargs["chunk_elapsed_seconds"] == 2.0
+    assert chunk_sent.kwargs["control_to_chunk_seconds"] == 4.0
 
 
 def test_chunk_hud_and_metadata_use_the_control_snapshot_submitted_to_the_model() -> None:
@@ -127,7 +135,7 @@ def test_chunk_hud_and_metadata_use_the_control_snapshot_submitted_to_the_model(
     state = LingBotWorldFastSessionState(config=runtime.config, control_context=SimpleNamespace())
     emit_status = MagicMock()
     with (
-        patch.object(service, "_next_realtime_control", return_value=(object(), ["w", "j"])),
+        patch.object(service, "_next_realtime_control", return_value=(object(), ["w", "j"], None)),
         patch.object(service, "_overlay_control_hud", return_value=frames) as overlay,
         patch.object(service, "_put_output") as put_output,
     ):
@@ -150,7 +158,7 @@ def test_actor_worker_does_not_submit_after_close_during_initialization() -> Non
         return runtime
 
     pipeline._create_initialized_session.side_effect = initialize
-    with patch.object(service, "_next_realtime_control", return_value=(object(), None)):
+    with patch.object(service, "_next_realtime_control", return_value=(object(), None, None)):
         service._run_actor_worker_loop(state, MagicMock(), MagicMock(), MagicMock())
 
     pipeline._get_streaming_runtime.assert_not_called()
@@ -208,7 +216,7 @@ def test_actor_worker_prefetches_directional_chunks_within_ingress_capacity() ->
     streaming_runtime.wait_until_idle.side_effect = stop_wait
     pipeline._get_streaming_runtime.return_value = streaming_runtime
 
-    with patch.object(service, "_next_realtime_control", return_value=(object(), ["w"])):
+    with patch.object(service, "_next_realtime_control", return_value=(object(), ["w"], None)):
         service._run_actor_worker_loop(state, state.control_context, MagicMock(), MagicMock())
 
     assert streaming_runtime.try_submit_chunk.call_args_list == [
@@ -222,14 +230,16 @@ def test_direction_action_updates_state_and_wakes_worker() -> None:
     state = _state()
     service._sessions["session-a"] = state
 
-    service.push_chunk(
-        "session-a",
-        {"type": "control", "direction": "up", "event": "press"},
-    )
+    with patch("telefuser.pipelines.lingbot_world_fast.service.time.monotonic", return_value=123.0):
+        service.push_chunk(
+            "session-a",
+            {"type": "control", "direction": "up", "event": "press"},
+        )
 
     assert state.pressed_controls == {"w"}
     assert state.pending_direction_command is not None
     assert (state.pending_direction_command.revision, state.pending_direction_command.controls) == (1, frozenset({"w"}))
+    assert state.pending_direction_command.received_at_monotonic == 123.0
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
 
 
@@ -357,6 +367,40 @@ def test_control_state_supports_combined_translation_and_rotation() -> None:
     assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["j", "w"]]
 
 
+def test_control_state_release_replaces_pending_combined_snapshot() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(control_type="cam", chunk_size=3)
+    service._sessions["session-a"] = state
+    control_builder = MagicMock()
+
+    service.push_chunk("session-a", {"type": "control_state", "controls": ["j"]})
+    service._next_realtime_control(state, state.control_context, control_builder, 0, MagicMock(), block=True)
+    service.push_chunk("session-a", {"type": "control_state", "controls": ["j", "w"]})
+    service.push_chunk("session-a", {"type": "control_state", "controls": ["w"]})
+    service._next_realtime_control(state, state.control_context, control_builder, 1, MagicMock(), block=True)
+
+    assert state.pressed_controls == {"w"}
+    assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["j"], ["w"]]
+
+
+def test_direction_release_replaces_pending_combined_snapshot() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(control_type="cam", chunk_size=3)
+    service._sessions["session-a"] = state
+    control_builder = MagicMock()
+
+    service.push_chunk("session-a", {"type": "control", "direction": "left", "event": "press"})
+    service._next_realtime_control(state, state.control_context, control_builder, 0, MagicMock(), block=True)
+    service.push_chunk("session-a", {"type": "control", "direction": "forward", "event": "press"})
+    service.push_chunk("session-a", {"type": "control", "direction": "left", "event": "release"})
+    service._next_realtime_control(state, state.control_context, control_builder, 1, MagicMock(), block=True)
+
+    assert state.pressed_controls == {"w"}
+    assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["a"], ["w"]]
+
+
 def test_held_direction_continues_only_after_a_chunk_is_completed() -> None:
     service = LingBotWorldFastService(MagicMock())
     state = _state()
@@ -394,10 +438,12 @@ def test_explicit_controls_keep_only_the_latest_pending_value() -> None:
 
     first = {"control_tensor": "first"}
     second = {"control_tensor": "second"}
-    service.push_chunk("session-a", first)
-    service.push_chunk("session-a", second)
+    with patch("telefuser.pipelines.lingbot_world_fast.service.time.monotonic", side_effect=[10.0, 20.0]):
+        service.push_chunk("session-a", first)
+        service.push_chunk("session-a", second)
 
     assert state.latest_explicit_control == second
+    assert state.latest_explicit_control_received_at_monotonic == 20.0
     assert state.overwritten_explicit_controls == 1
     assert state.pending_inputs.qsize() == 1
 
@@ -609,6 +655,28 @@ def test_create_session_initializes_fixed_intrinsics_from_intrinsics_path() -> N
     assert session_config.intrinsics_width == 8
     assert session_config.intrinsics_height == 8
     assert service._sessions[session_id].control_context is pipeline.control_context.return_value
+
+
+def test_create_session_inherits_fixed_intrinsics_from_service_defaults() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(
+        pipeline,
+        default_session_config={
+            "intrinsics_path": "/controls/default-intrinsics.npy",
+            "intrinsics_width": 832,
+            "intrinsics_height": 480,
+        },
+    )
+    intrinsics = np.asarray([[415.0, 416.0, 415.5, 239.5]])
+
+    with patch("telefuser.pipelines.lingbot_world_fast.service.np.load", return_value=intrinsics) as load:
+        service.create_session({"image": Image.new("RGB", (16, 9))})
+
+    load.assert_called_once_with(Path("/controls/default-intrinsics.npy"))
+    session_config = pipeline.control_context.call_args.args[0]
+    assert session_config.intrinsics is intrinsics
+    assert session_config.intrinsics_width == 832
+    assert session_config.intrinsics_height == 480
 
 
 def test_pull_chunks_drains_terminal_messages_after_session_becomes_inactive() -> None:

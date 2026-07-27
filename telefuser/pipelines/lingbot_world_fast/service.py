@@ -190,9 +190,10 @@ class LingBotWorldFastService:
 
         session_id = config.get("session_id") or str(uuid.uuid4())
         image = self._load_image(config)
-        intrinsics = config.get("intrinsics")
-        if intrinsics is None and config.get("intrinsics_path"):
-            intrinsics = np.load(Path(config["intrinsics_path"]))
+        intrinsics = config.get("intrinsics", defaults.get("intrinsics"))
+        intrinsics_path = config.get("intrinsics_path", defaults.get("intrinsics_path"))
+        if intrinsics is None and intrinsics_path:
+            intrinsics = np.load(Path(intrinsics_path))
 
         fps_value = config.get("fps", defaults.get("fps", self.default_fps))
         if fps_value is None:
@@ -672,7 +673,10 @@ class LingBotWorldFastService:
         return result
 
     @staticmethod
-    def _queue_direction_snapshot(state: LingBotWorldFastSessionState) -> None:
+    def _queue_direction_snapshot(
+        state: LingBotWorldFastSessionState,
+        received_at_monotonic: float,
+    ) -> None:
         """Store only the newest short-press snapshot for the next chunk."""
         if not state.pressed_controls:
             return
@@ -683,6 +687,7 @@ class LingBotWorldFastService:
         state.pending_direction_command = LingBotWorldFastDirectionCommand(
             revision=state.next_control_revision,
             controls=frozenset(state.pressed_controls),
+            received_at_monotonic=received_at_monotonic,
         )
 
     @staticmethod
@@ -696,7 +701,12 @@ class LingBotWorldFastService:
             return None
         return controls
 
-    def _update_direction_controls(self, state: LingBotWorldFastSessionState, chunk: dict) -> bool:
+    def _update_direction_controls(
+        self,
+        state: LingBotWorldFastSessionState,
+        chunk: dict,
+        received_at_monotonic: float,
+    ) -> bool:
         if chunk.get("type") == "control_state":
             controls = self._controls_from_snapshot(chunk)
             if controls is None:
@@ -705,8 +715,8 @@ class LingBotWorldFastService:
             with state.control_lock:
                 previous_controls = set(state.pressed_controls)
                 state.pressed_controls = controls
-                if controls - previous_controls:
-                    self._queue_direction_snapshot(state)
+                if controls and controls != previous_controls:
+                    self._queue_direction_snapshot(state, received_at_monotonic)
                 active_controls = sorted(state.pressed_controls)
                 pending_count = int(state.pending_direction_command is not None)
                 revision = state.next_control_revision
@@ -732,6 +742,7 @@ class LingBotWorldFastService:
             logger.warning(f"Ignoring LingBot direction control with unsupported event={event!r}")
             return False
         with state.control_lock:
+            previous_controls = set(state.pressed_controls)
             if event in {"release", "keyup", "end"}:
                 state.pressed_controls.discard(direction)
             elif event == "reset":
@@ -744,9 +755,13 @@ class LingBotWorldFastService:
                 state.control_pitch = 0.0
                 state.control_initialized = False
             else:
-                if direction not in state.pressed_controls:
-                    state.pressed_controls.add(direction)
-                    self._queue_direction_snapshot(state)
+                state.pressed_controls.add(direction)
+            if (
+                event not in {"reset", "reset_pose"}
+                and state.pressed_controls
+                and state.pressed_controls != previous_controls
+            ):
+                self._queue_direction_snapshot(state, received_at_monotonic)
             controls = sorted(state.pressed_controls)
             pending_count = int(state.pending_direction_command is not None)
             revision = state.next_control_revision
@@ -794,12 +809,14 @@ class LingBotWorldFastService:
         chunk_index: int,
         emit_status: Callable[..., None],
         block: bool,
-    ) -> tuple[object, list[str] | None] | None:
+    ) -> tuple[object, list[str] | None, float | None] | None:
         """Select one queued tap or continue a direction that remains held."""
         while state.active:
             with state.control_lock:
                 explicit_control = state.latest_explicit_control
+                explicit_control_received_at = state.latest_explicit_control_received_at_monotonic
                 state.latest_explicit_control = None
+                state.latest_explicit_control_received_at_monotonic = None
                 held_controls = frozenset(state.pressed_controls)
                 direction_command = None
                 if explicit_control is None and state.pending_direction_command is not None:
@@ -807,14 +824,16 @@ class LingBotWorldFastService:
                     state.pending_direction_command = None
 
             if explicit_control is not None:
-                return control_builder.defer(explicit_control), None
+                return control_builder.defer(explicit_control), None, explicit_control_received_at
 
             if direction_command is not None:
                 controls = set(direction_command.controls)
                 revision: int | None = direction_command.revision
+                control_received_at: float | None = direction_command.received_at_monotonic
             elif held_controls and block:
                 controls = set(held_controls)
                 revision = None
+                control_received_at = None
             else:
                 if not block:
                     return None
@@ -844,7 +863,7 @@ class LingBotWorldFastService:
                 lateral_step=state.config.control_lateral_step,
                 pitch_step_degrees=state.config.control_pitch_step_degrees,
             )
-            return control_builder.defer(directional_chunk), applied_controls
+            return control_builder.defer(directional_chunk), applied_controls, control_received_at
         return None
 
     def _benchmark_devices(self) -> tuple[str | torch.device, ...]:
@@ -924,6 +943,7 @@ class LingBotWorldFastService:
 
         submitted = 0
         controls_by_chunk: dict[int, list[str] | None] = {}
+        control_received_at_by_chunk: dict[int, float | None] = {}
         measurements_by_chunk: dict[int, RuntimeMeasurement] = {}
 
         def raise_scheduler_error() -> None:
@@ -931,9 +951,9 @@ class LingBotWorldFastService:
             if error is not None:
                 raise RuntimeError("LingBot streaming scheduler failed") from error
 
-        def submit_chunk(item: tuple[object, list[str] | None]) -> None:
+        def submit_chunk(item: tuple[object, list[str] | None, float | None]) -> None:
             nonlocal submitted
-            deferred_control, applied_controls = item
+            deferred_control, applied_controls, control_received_at = item
             control = self.pipeline._resolve_control(deferred_control)
             self.pipeline._validate_control(runtime, control)
             chunk_measurement = self._start_benchmark_measurement(state)
@@ -941,6 +961,7 @@ class LingBotWorldFastService:
                 self._finish_benchmark_measurement(chunk_measurement)
                 raise RuntimeError("LingBot streaming ingress became unavailable after capacity check")
             controls_by_chunk[submitted] = applied_controls
+            control_received_at_by_chunk[submitted] = control_received_at
             if chunk_measurement is not None:
                 measurements_by_chunk[submitted] = chunk_measurement
             emit_status(
@@ -965,6 +986,7 @@ class LingBotWorldFastService:
                 if not frames:
                     raise RuntimeError(f"LingBot actor emitted no frames for chunk {result_index}")
                 applied_controls = controls_by_chunk.pop(result_index, None)
+                control_received_at = control_received_at_by_chunk.pop(result_index, None)
                 chunk_facts = self._finish_benchmark_measurement(measurements_by_chunk.pop(result_index, None))
                 if state.config.show_control_hud:
                     frames = self._overlay_control_hud(frames, applied_controls)
@@ -984,9 +1006,14 @@ class LingBotWorldFastService:
                     started_at = state.chunk_started_at_monotonic.pop(result_index, now)
                     if state.first_chunk_sent_at_monotonic is None:
                         state.first_chunk_sent_at_monotonic = now
-                    control_to_chunk_seconds = (
-                        now - state.last_control_at_monotonic if state.last_control_at_monotonic is not None else None
+                    output_cadence_seconds = (
+                        now - state.last_chunk_sent_at_monotonic
+                        if state.last_chunk_sent_at_monotonic is not None
+                        else None
                     )
+                    state.last_chunk_sent_at_monotonic = now
+                pipeline_residence_seconds = now - started_at
+                applied_control_latency_seconds = now - control_received_at if control_received_at is not None else None
                 runtime.current_chunk_index += 1
                 runtime.emitted_frames += len(frames)
                 emit_status(
@@ -994,9 +1021,21 @@ class LingBotWorldFastService:
                     index=result_index,
                     controls=applied_controls or [],
                     frames=len(frames),
-                    chunk_elapsed_seconds=round(now - started_at, 6),
+                    output_cadence_seconds=(
+                        round(output_cadence_seconds, 6) if output_cadence_seconds is not None else None
+                    ),
+                    pipeline_residence_seconds=round(pipeline_residence_seconds, 6),
+                    applied_control_latency_seconds=(
+                        round(applied_control_latency_seconds, 6)
+                        if applied_control_latency_seconds is not None
+                        else None
+                    ),
+                    # Backward-compatible aliases for clients that have not adopted the explicit metric names.
+                    chunk_elapsed_seconds=round(pipeline_residence_seconds, 6),
                     control_to_chunk_seconds=(
-                        round(control_to_chunk_seconds, 6) if control_to_chunk_seconds is not None else None
+                        round(applied_control_latency_seconds, 6)
+                        if applied_control_latency_seconds is not None
+                        else None
                     ),
                     runtime_metrics=self._runtime_metrics(state),
                     stream_progress=self._stream_progress(state, runtime),
@@ -1140,10 +1179,11 @@ class LingBotWorldFastService:
         state = self._sessions.get(session_id)
         if state is None or not state.active:
             return
-        with state.metrics_lock:
-            state.last_control_at_monotonic = time.monotonic()
+        received_at_monotonic = time.monotonic()
         is_direction_action = chunk.get("type") in {"control", "control_state"} and self._update_direction_controls(
-            state, chunk
+            state,
+            chunk,
+            received_at_monotonic,
         )
         if is_direction_action:
             self._wake_control_worker(state, {"type": "direction_control"})
@@ -1153,6 +1193,7 @@ class LingBotWorldFastService:
                 with state.metrics_lock:
                     state.overwritten_explicit_controls += 1
             state.latest_explicit_control = chunk
+            state.latest_explicit_control_received_at_monotonic = received_at_monotonic
         self._wake_control_worker(state)
 
     async def pull_chunks(self, session_id: str) -> AsyncGenerator[dict, None]:

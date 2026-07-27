@@ -5,9 +5,11 @@ Single GPU:
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --gpu_num 4
-WebRTC streaming service:
+LiveKit streaming service:
     telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-        --gpu-num 4 -p 8088 --skip-validation
+        --livekit-url ws://127.0.0.1:7880 \
+        --livekit-api-key devkey --livekit-api-secret secret \
+        --worker-gpu-map 0,1,2,3 -p 8088 --skip-validation
 
 """
 
