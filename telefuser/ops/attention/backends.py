@@ -88,15 +88,13 @@ def _try_import_sage_attn() -> None:
     """Import Sage Attention."""
     global SAGE_ATTN_AVAILABLE, sageattention
 
-    for module_name in ["tf_kernel.sageattn2", "sageattention"]:
-        try:
-            if importlib.util.find_spec(module_name) is not None:
-                sageattention = importlib.import_module(module_name)
-                SAGE_ATTN_AVAILABLE = True
-                logger.debug(f"Sage Attention loaded from {module_name}")
-                return
-        except (ModuleNotFoundError, ImportError):
-            continue
+    try:
+        if importlib.util.find_spec("sageattention") is not None:
+            sageattention = importlib.import_module("sageattention")
+            SAGE_ATTN_AVAILABLE = True
+            logger.debug("Sage Attention available")
+    except (ModuleNotFoundError, ImportError):
+        pass
 
 
 def _try_import_sparge_attn() -> None:

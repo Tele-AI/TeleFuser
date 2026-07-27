@@ -4,15 +4,15 @@ from unittest.mock import patch
 from telefuser.ops.attention import backends
 
 
-def test_sage_attention_prefers_tf_kernel() -> None:
+def test_sage_attention_uses_standalone_package() -> None:
     imported_modules: list[str] = []
-    tf_kernel_module = ModuleType("tf_kernel.sageattn2")
+    sageattention_module = ModuleType("sageattention")
     previous_available = backends.SAGE_ATTN_AVAILABLE
     previous_backend = backends.sageattention
 
     def import_module(name: str) -> ModuleType:
         imported_modules.append(name)
-        return tf_kernel_module
+        return sageattention_module
 
     try:
         backends.SAGE_ATTN_AVAILABLE = False
@@ -23,9 +23,9 @@ def test_sage_attention_prefers_tf_kernel() -> None:
         ):
             backends._try_import_sage_attn()
 
-        assert imported_modules == ["tf_kernel.sageattn2"]
+        assert imported_modules == ["sageattention"]
         assert backends.SAGE_ATTN_AVAILABLE is True
-        assert backends.sageattention is tf_kernel_module
+        assert backends.sageattention is sageattention_module
     finally:
         backends.SAGE_ATTN_AVAILABLE = previous_available
         backends.sageattention = previous_backend
