@@ -40,7 +40,7 @@ fi
 
 # Install dependencies if needed
 print_section "Installing dependencies"
-pip install -e ".[dev,webrtc]" -q
+pip install -e ".[dev]" -q
 pip install torch --index-url https://download.pytorch.org/whl/cpu -q
 check_result "Dependencies installation"
 

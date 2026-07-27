@@ -29,7 +29,6 @@ classifiers = [
 dependencies = [
     # Default install follows vLLM-style inference readiness: service runtime
     # plus the core PyTorch/model/distributed stack needed by standard pipelines.
-    "aiortc>=1.9.0",
     "click",
     "diffusers>=0.36.0",
     "einops",
@@ -68,11 +67,6 @@ ui = [
 
 distributed = [
     "ray",
-]
-
-livekit = [
-    "livekit-api>=1.0.0",
-    "livekit>=1.0.0",
 ]
 
 dev = [

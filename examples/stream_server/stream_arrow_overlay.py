@@ -5,7 +5,10 @@ events via ``push_chunk()`` and yields video frames with a D-pad HUD
 overlay via ``pull_chunks()``.
 
 Usage:
-    telefuser stream-serve examples/stream_server/stream_arrow_overlay.py -p 8088 --skip-validation
+    telefuser stream-serve examples/stream_server/stream_arrow_overlay.py \
+        --livekit-url ws://127.0.0.1:7880 \
+        --livekit-api-key devkey --livekit-api-secret secret \
+        -p 8088 --skip-validation
 """
 
 from __future__ import annotations

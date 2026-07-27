@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from telefuser.utils.logging import logger
@@ -25,7 +24,6 @@ from .task_application_service import TaskApplicationService
 
 if TYPE_CHECKING:
     from ..core.pipeline_service import PipelineService
-    from ..core.stream_pipeline_service import StreamPipelineService
 
 
 class ApiServer:
@@ -46,7 +44,6 @@ class ApiServer:
         enable_logging: bool = False,
         enable_openai_api: bool = True,
         config: ServerConfig | None = None,
-        route_profile: str = "all",
     ) -> None:
         self.server_config = config or server_config
         self.app = app or FastAPI(
@@ -60,8 +57,6 @@ class ApiServer:
         )
         self.file_service: FileService | None = None
         self.inference_service: PipelineService | None = None
-        self.stream_service: StreamPipelineService | None = None
-        self._webrtc_routes: object | None = None
         self.media_service: MediaGenerationService | None = None
         self.task_app_service = TaskApplicationService(self)
         self.cache_service: Any | None = None
@@ -70,7 +65,6 @@ class ApiServer:
         self.configured_max_concurrent_tasks = configured_max_concurrent_tasks or max_concurrent_tasks
         self._task_manager = task_manager
         self.enable_openai_api = enable_openai_api
-        self.route_profile = route_profile
 
         self.task_processor: AsyncTaskProcessor | None = None
         self._task_processor_lock = asyncio.Lock()
@@ -99,25 +93,12 @@ class ApiServer:
         service_router = routers.service.setup_routes(self)
         self.app.include_router(service_router)
 
-        if self.route_profile in {"all", "request_response"}:
-            tasks_router = routers.tasks.setup_routes(self)
-            files_router = routers.files.setup_routes(self)
-            self.app.include_router(tasks_router)
-            self.app.include_router(files_router)
+        tasks_router = routers.tasks.setup_routes(self)
+        files_router = routers.files.setup_routes(self)
+        self.app.include_router(tasks_router)
+        self.app.include_router(files_router)
 
-        if self.route_profile in {"all", "stream"}:
-            stream_router = routers.setup_stream_routes(self)
-            self.app.include_router(stream_router)
-
-            if routers.setup_webrtc_routes is not None:
-                try:
-                    webrtc_router = routers.setup_webrtc_routes(self)
-                    self.app.include_router(webrtc_router)
-                    logger.info("WebRTC routes enabled at /v1/stream/webrtc")
-                except Exception as e:
-                    logger.info(f"WebRTC routes not available: {e}")
-
-        if self.enable_openai_api and self.route_profile in {"all", "request_response"}:
+        if self.enable_openai_api:
             try:
                 from .openai import image_routes, video_routes
 
@@ -363,16 +344,6 @@ class ApiServer:
             max_concurrent=self.max_concurrent_tasks,
         )
 
-    def initialize_stream_service(self, stream_service: StreamPipelineService) -> None:
-        """Initialize stream pipeline service for stream-mode endpoints."""
-        self.stream_service = stream_service
-        self.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
     async def cleanup(self) -> None:
         """Cleanup resources and stop processing workers."""
         if self._artifact_cleanup_task is not None:
@@ -385,12 +356,6 @@ class ApiServer:
 
         if self.task_processor is not None:
             await self.task_processor.stop()
-
-        if self._webrtc_routes is not None:
-            await self._webrtc_routes.cleanup()
-
-        if self.stream_service is not None:
-            await self.stream_service.aclose()
 
         if self.file_service:
             try:

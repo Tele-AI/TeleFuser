@@ -85,37 +85,3 @@ def run_server(
 
     logger.info("All services initialized successfully")
     _run("server", container, enable_rate_limit)
-
-
-def run_stream_server(
-    pipe_path: str,
-    port: int,
-    host: str,
-    enable_rate_limit: bool = True,
-    skip_validation: bool = False,
-    security_level: str | None = None,
-    gpu_num: int = 1,
-) -> None:
-    """Run the TeleFuser stream server.
-
-    Unlike run_server (request-response), this loads a stream pipeline
-    that exposes get_service() and serves via WebRTC or WebSocket.
-    """
-    server_config.host = host
-    server_config.port = port
-    if security_level is not None:
-        from .security.security_validator import SecurityLevel
-
-        server_config.security_level = SecurityLevel[security_level.upper()]
-
-    container = ServiceContainer.create(config=server_config)
-
-    if not container.initialize_stream_service(
-        pipe_path=pipe_path,
-        gpu_num=gpu_num,
-        skip_validation=skip_validation,
-    ):
-        raise RuntimeError("Failed to initialize stream service")
-
-    logger.info("Stream service initialized successfully")
-    _run("stream server", container, enable_rate_limit)

@@ -36,10 +36,6 @@ class ServiceRoutes:
             status["pool"] = pool_status
         else:
             status["execution_mode"] = "serial_single_pipeline"
-        webrtc_stats = self._webrtc_session_stats()
-        status.update(webrtc_stats)
-        if webrtc_stats.get("webrtc_active_sessions", 0) > 0 and status.get("service_status") == "idle":
-            status["service_status"] = "active"
         return status
 
     def _pipeline_pool_status(self) -> list[dict] | None:
@@ -54,13 +50,6 @@ class ServiceRoutes:
             return None
         return pool_status
 
-    def _webrtc_session_stats(self) -> dict:
-        """Return WebRTC session stats if available."""
-        routes = self.api._webrtc_routes
-        if routes is None:
-            return {}
-        return routes._session_manager.session_stats()
-
     async def get_metadata(self) -> dict:
         """Get service metadata."""
         if self.api.inference_service is not None:
@@ -68,12 +57,6 @@ class ServiceRoutes:
             metadata["service_effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
             metadata["service_configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
             metadata["max_queue_size"] = self.api.max_queue_size
-            return metadata
-
-        if self.api.stream_service is not None:
-            metadata = self.api.stream_service.server_metadata()
-            metadata["max_queue_size"] = self.api.max_queue_size
-            metadata.update(self._webrtc_session_stats())
             return metadata
 
         raise HTTPException(status_code=503, detail="No service is initialized")
@@ -92,11 +75,6 @@ class ServiceRoutes:
         if self.api.inference_service:
             status["pipeline_ready"] = self.api.inference_service.is_running
 
-        if self.api.stream_service:
-            status["stream_ready"] = self.api.stream_service.is_running
-            status["stream_mode"] = self.api.stream_service.stream_mode
-            status.update(self._webrtc_session_stats())
-
         return status
 
     def _is_ready(self) -> bool:
@@ -106,9 +84,6 @@ class ServiceRoutes:
             if pool_status is not None:
                 return any(replica.get("status") != "dead" for replica in pool_status)
             return bool(getattr(self.api.inference_service, "is_running", False))
-
-        if self.api.stream_service is not None:
-            return bool(getattr(self.api.stream_service, "is_running", False))
 
         return False
 
@@ -174,7 +149,6 @@ def create_router(api_server: ApiServer) -> APIRouter:
             "metrics_count": len(registry.list_metrics()),
             "registered_stages": registry.list_stages(),
         }
-        result["webrtc"] = routes._webrtc_session_stats()
         return result
 
     return new_router

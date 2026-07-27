@@ -20,7 +20,6 @@ from .config import ServerConfig, server_config
 from .file_service import FileService
 from .pipeline_pool import PipelinePool
 from .pipeline_service import PipelineService
-from .stream_pipeline_service import StreamPipelineService
 from .task_manager import TaskManager
 from .task_service import MediaGenerationService
 
@@ -39,7 +38,6 @@ class ServiceContainer:
     task_manager: TaskManager
     file_service: FileService | None = None
     pipeline_service: PipelineService | None = None
-    stream_pipeline_service: StreamPipelineService | None = None
     media_service: MediaGenerationService | None = None
     cache_service: Any | None = None
     cache_adapter: Any | None = None  # cacheseek.adapters.telefuser.TeleFuserCacheAdapter
@@ -246,26 +244,8 @@ class ServiceContainer:
 
         return True
 
-    def initialize_stream_service(
-        self,
-        pipe_path: str,
-        skip_validation: bool = False,
-        gpu_num: int = 1,
-    ) -> bool:
-        """Initialize stream pipeline service (alternative to initialize_all)."""
-        self.stream_pipeline_service = StreamPipelineService(
-            security_level=self.config.security_level,
-            config=self.config,
-        )
-        return self.stream_pipeline_service.start_service(
-            ppl_file=pipe_path,
-            gpu_num=gpu_num,
-            skip_validation=skip_validation,
-        )
-
     def get_api_app(self, enable_rate_limit: bool = True) -> FastAPI:
         """Get FastAPI application with all services initialized."""
-        route_profile = "stream" if self.stream_pipeline_service and not self.pipeline_service else "request_response"
         api_server = ApiServer(
             max_queue_size=self.config.max_queue_size,
             max_concurrent_tasks=self.config.effective_max_concurrent_tasks,
@@ -274,7 +254,6 @@ class ServiceContainer:
             enable_rate_limit=enable_rate_limit,
             enable_logging=False,
             config=self.config,
-            route_profile=route_profile,
         )
 
         if self.file_service and self.pipeline_service:
@@ -285,9 +264,6 @@ class ServiceContainer:
                 cache_adapter=self.cache_adapter,  # forward adapter to api_server
                 file_service=self.file_service,
             )
-
-        if self.stream_pipeline_service:
-            api_server.initialize_stream_service(self.stream_pipeline_service)
 
         return api_server.get_app()
 
@@ -313,10 +289,6 @@ class ServiceContainer:
         if self.pipeline_service:
             await self.pipeline_service.aclose()
             self.pipeline_service = None
-
-        if self.stream_pipeline_service:
-            await self.stream_pipeline_service.aclose()
-            self.stream_pipeline_service = None
 
         if self.cache_service is not None:
             try:

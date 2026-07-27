@@ -187,37 +187,6 @@ class ServerConfig(BaseSettings):
         default="auto", description="GPU platform for metrics collection"
     )
 
-    # Stream settings
-    webrtc_max_sessions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent WebRTC sessions")
-    webrtc_video_codec: Literal["H264", "VP8"] = Field(
-        default="H264",
-        description="Preferred WebRTC video codec. Other supported codecs remain available as fallbacks.",
-    )
-    webrtc_video_bitrate: int = Field(
-        default=8_000_000,
-        ge=500_000,
-        le=50_000_000,
-        description="Target WebRTC video bitrate in bits per second.",
-    )
-    webrtc_video_buffer_seconds: float = Field(
-        default=1.0,
-        ge=0.1,
-        le=10.0,
-        description="Maximum buffered WebRTC video duration before oldest frames are dropped.",
-    )
-    webrtc_data_channel_timeout_seconds: float = Field(
-        default=10.0,
-        gt=0,
-        le=120.0,
-        description="Time to wait for the required bidirectional WebRTC DataChannel to open.",
-    )
-    webrtc_disconnected_grace_seconds: float = Field(
-        default=5.0,
-        ge=0,
-        le=120.0,
-        description="Grace period for transient WebRTC disconnected states before the session is closed.",
-    )
-
     # Pipeline replication settings
     num_replicas: int = Field(
         default=1,
@@ -225,15 +194,6 @@ class ServerConfig(BaseSettings):
         le=16,
         description="Number of independent pipeline replicas for concurrent serving.",
     )
-
-    # WebRTC ICE settings (for public network deployment)
-    stun_servers: list[str] = Field(
-        default_factory=lambda: ["stun:stun.l.google.com:19302"],
-        description="STUN server URLs (e.g. stun:stun.l.google.com:19302)",
-    )
-    turn_server: str | None = Field(default=None, description="TURN server URL (e.g. turn:your-domain.com:3478)")
-    turn_username: str | None = Field(default=None, description="TURN server username")
-    turn_credential: str | None = Field(default=None, description="TURN server credential")
 
     @field_validator("port")
     @classmethod

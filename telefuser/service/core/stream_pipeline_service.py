@@ -6,8 +6,8 @@ expose get_service() which returns an object with start/stop/serve methods.
 
 Two interaction modes are supported:
 
-* SERVER_PUSH   – single request in, continuous chunks out  (WebRTC media tracks)
-* BIDIRECTIONAL – continuous input & output                 (WebRTC DataChannel + media tracks)
+* SERVER_PUSH   – single request in, continuous chunks out
+* BIDIRECTIONAL – continuous input and output
 
 Pipeline ``serve()`` methods may contain blocking calls (GPU inference,
 ``time.sleep``, etc.). ``stream_task()`` runs them on a dedicated thread
@@ -220,7 +220,7 @@ class StreamPipelineService:
         etc.) do not stall the server's main loop.
 
         A ``threading.Event`` stop flag is set when the consumer stops
-        iterating (e.g. WebRTC disconnect), so the producer thread can
+        iterating (for example after a transport disconnect), so the producer thread can
         break out of the pipeline's ``serve()`` loop promptly instead of
         running to completion.
         """

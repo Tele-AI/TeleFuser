@@ -5,7 +5,12 @@ frame chunks at configurable pacing.  Audio is included as raw PCM16
 base64 when the source contains an audio track.
 
 Usage:
-    telefuser stream-serve examples/stream_video_replay.py -p 8088 --skip-validation
+    telefuser stream-serve examples/stream_server/stream_video_replay.py \
+        --livekit-url ws://127.0.0.1:7880 \
+        --livekit-api-key devkey \
+        --livekit-api-secret secret \
+        -p 8088 \
+        --skip-validation
 """
 
 from __future__ import annotations
@@ -23,11 +28,7 @@ import numpy as np
 VIDEO_PATH = str(Path(__file__).parent / "data" / "liveact_1.mp4")
 FRAMES_PER_CHUNK = 32
 OUTPUT_FPS = 24
-
-try:
-    from telefuser.service.webrtc.track import AUDIO_SAMPLE_RATE
-except ImportError:
-    AUDIO_SAMPLE_RATE = 48_000
+AUDIO_SAMPLE_RATE = 48_000
 
 
 class VideoReplayService:
