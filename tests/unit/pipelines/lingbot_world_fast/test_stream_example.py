@@ -4,28 +4,35 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from examples.lingbot import lingbot_world_fast_image_to_video_h100 as offline_example
-from examples.stream_server import webrtc_bidirectional_demo as webrtc_demo
+from examples.stream_server import livekit_bidirectional_demo as stream_demo
 from telefuser.core.config import AttnImplType
 
 
-def test_webrtc_demo_uses_stream_service_defaults() -> None:
-    source = inspect.getsource(webrtc_demo)
+def test_livekit_demo_uses_stream_service_defaults() -> None:
+    source = inspect.getsource(stream_demo)
+    html = stream_demo._render_html("")
 
-    assert webrtc_demo.DEFAULT_IMAGE_PATH == offline_example.DEFAULT_IMAGE_PATH
-    assert webrtc_demo.DEFAULT_PROMPT == offline_example.DEFAULT_PROMPT
-    assert source.count("HTML_TEMPLATE =") == 1
+    assert stream_demo.DEFAULT_IMAGE_PATH == offline_example.DEFAULT_IMAGE_PATH
+    assert stream_demo.DEFAULT_PROMPT == offline_example.DEFAULT_PROMPT
     assert "DEFAULT_OPTIONS" not in source
     assert "--intrinsics-path" not in source
     assert "--image-path" not in source
-    assert 'type="file"' in webrtc_demo.HTML_TEMPLATE
-    assert 'id="image-preview" src="/default-image"' in webrtc_demo.HTML_TEMPLATE
-    assert '$("image-preview").src = imagePreviewObjectUrl' in webrtc_demo.HTML_TEMPLATE
-    assert "requestBody.image = image" in webrtc_demo.HTML_TEMPLATE
-    assert "requestBody.image_path = DEFAULT_IMAGE_PATH" in webrtc_demo.HTML_TEMPLATE
-    assert 'type: "control_state"' in webrtc_demo.HTML_TEMPLATE
-    assert 'window.addEventListener("blur", () => releaseAllControls(true))' in webrtc_demo.HTML_TEMPLATE
-    assert 'document.addEventListener("visibilitychange"' in webrtc_demo.HTML_TEMPLATE
-    assert 'id="reset-pose"' in webrtc_demo.HTML_TEMPLATE
+    assert 'type="file"' in html
+    assert 'id="image-preview" src="/default-image"' in html
+    assert '$("image-preview").src = imagePreviewObjectUrl' in html
+    assert "requestBody.config = image" not in html
+    assert "config: image ? { image } : {}" in html
+    assert "requestBody.image_path = DEFAULT_IMAGE_PATH" in html
+    assert 'type: "control_state"' in html
+    assert 'window.addEventListener("blur", () => releaseAllControls(true))' in html
+    assert 'document.addEventListener("visibilitychange"' in html
+    assert 'id="reset-pose"' in html
+    assert '<span>Output cadence</span><output id="telemetry-cadence">--</output>' in html
+    assert '<span>Pipeline residence</span><output id="telemetry-residence">--</output>' in html
+    assert '<span>Applied control latency</span><output id="telemetry-control">--</output>' in html
+    assert "metrics.output_cadence_seconds" in html
+    assert "metrics.pipeline_residence_seconds ?? metrics.chunk_elapsed_seconds" in html
+    assert "metrics.applied_control_latency_seconds ?? metrics.control_to_chunk_seconds" in html
 
 
 def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
