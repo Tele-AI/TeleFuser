@@ -1032,6 +1032,19 @@ def _emit_result(data: dict) -> None:
     print(f"{_RESULT_MARKER}{json.dumps(data)}", flush=True)
 
 
+def _close_pipeline(pipeline: object | None) -> None:
+    """Release pipeline-owned workers without masking the regression result."""
+    if pipeline is None:
+        return
+    close = getattr(pipeline, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        print(f"Warning: failed to close pipeline: {exc}", file=sys.stderr, flush=True)
+
+
 def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | None) -> None:
     """Subprocess entry point: load, run, save one pipeline.
 
@@ -1102,106 +1115,104 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         )
         sys.exit(1)
 
-    # Phase 2: Inference
-    output = None
     try:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-
-        output = _call_run(module, pipeline, runner_config)
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            gpu_mem_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)
-    except Exception as e:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            gpu_mem_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)
-        tb = traceback.format_exc()
-        category = "OOM_ERROR" if _is_oom(e) else "INFERENCE_ERROR"
-        _emit_result(
-            {
-                "status": "ERROR",
-                "error": f"{e}\n{tb}",
-                "error_category": category,
-                "elapsed": round(time.time() - start, 2),
-                "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
-            }
-        )
-        del pipeline
-        gc.collect()
-        sys.exit(1)
-
-    # Phase 3: Validation & Save
-    warnings = _validate_output(output)
-    ppl_config = getattr(module, "PPL_CONFIG", {})
-    num_steps = ppl_config.get("num_inference_steps")
-    if isinstance(num_steps, list):
-        num_steps = sum(num_steps)
-    output_fps = ppl_config.get("target_fps", 15)
-
-    # First save to temp location to get resolution
-    temp_dir = os.path.join(output_root, "temp", timestamp)
-    try:
-        temp_path, num_frames, resolution = _save_output(output, temp_dir, ppl_cfg.output_type, fps=output_fps)
-    except Exception as e:
-        tb = traceback.format_exc()
-        _emit_result(
-            {
-                "status": "ERROR",
-                "error": f"{e}\n{tb}",
-                "error_category": "OUTPUT_ERROR",
-                "elapsed": round(time.time() - start, 2),
-                "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
-            }
-        )
-        pipeline = None  # noqa: F841
-        gc.collect()
-        sys.exit(1)
-
-    # Move to final location with correct filename
-    final_filename = _generate_output_filename(ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type)
-    final_path = os.path.join(target_dir, final_filename)
-
-    if temp_path and os.path.exists(temp_path):
-        shutil.move(temp_path, final_path)
-        # Clean up temp directory
+        # Phase 2: Inference
+        output = None
         try:
-            os.rmdir(temp_dir)
-            parent_temp = os.path.dirname(temp_dir)
-            if not os.listdir(parent_temp):
-                os.rmdir(parent_temp)
-        except OSError:
-            pass  # Directory not empty or other error
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
 
-    elapsed = time.time() - start
-    status = "PASS"
-    error_msg = ""
-    if warnings:
-        severe = [w for w in warnings if "NaN" in w or "Inf" in w or "is None" in w]
-        if severe:
-            status = "ERROR"
-            error_msg = "; ".join(warnings)
+            output = _call_run(module, pipeline, runner_config)
 
-    _emit_result(
-        {
-            "status": status,
-            "output_path": final_path,
-            "error": error_msg,
-            "elapsed": round(elapsed, 2),
-            "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
-            "num_frames": num_frames,
-            "resolution": resolution,
-            "num_steps": num_steps,
-            "script": ppl_cfg.script,
-        }
-    )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                gpu_mem_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        except Exception as e:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                gpu_mem_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)
+            tb = traceback.format_exc()
+            category = "OOM_ERROR" if _is_oom(e) else "INFERENCE_ERROR"
+            _emit_result(
+                {
+                    "status": "ERROR",
+                    "error": f"{e}\n{tb}",
+                    "error_category": category,
+                    "elapsed": round(time.time() - start, 2),
+                    "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
+                }
+            )
+            sys.exit(1)
 
-    del pipeline  # noqa: F821
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        # Phase 3: Validation & Save
+        warnings = _validate_output(output)
+        ppl_config = getattr(module, "PPL_CONFIG", {})
+        num_steps = ppl_config.get("num_inference_steps")
+        if isinstance(num_steps, list):
+            num_steps = sum(num_steps)
+        output_fps = ppl_config.get("target_fps", 15)
+
+        # First save to temp location to get resolution
+        temp_dir = os.path.join(output_root, "temp", timestamp)
+        try:
+            temp_path, num_frames, resolution = _save_output(output, temp_dir, ppl_cfg.output_type, fps=output_fps)
+        except Exception as e:
+            tb = traceback.format_exc()
+            _emit_result(
+                {
+                    "status": "ERROR",
+                    "error": f"{e}\n{tb}",
+                    "error_category": "OUTPUT_ERROR",
+                    "elapsed": round(time.time() - start, 2),
+                    "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
+                }
+            )
+            sys.exit(1)
+
+        # Move to final location with correct filename
+        final_filename = _generate_output_filename(ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type)
+        final_path = os.path.join(target_dir, final_filename)
+
+        if temp_path and os.path.exists(temp_path):
+            shutil.move(temp_path, final_path)
+            # Clean up temp directory
+            try:
+                os.rmdir(temp_dir)
+                parent_temp = os.path.dirname(temp_dir)
+                if not os.listdir(parent_temp):
+                    os.rmdir(parent_temp)
+            except OSError:
+                pass  # Directory not empty or other error
+
+        elapsed = time.time() - start
+        status = "PASS"
+        error_msg = ""
+        if warnings:
+            severe = [w for w in warnings if "NaN" in w or "Inf" in w or "is None" in w]
+            if severe:
+                status = "ERROR"
+                error_msg = "; ".join(warnings)
+
+        _emit_result(
+            {
+                "status": status,
+                "output_path": final_path,
+                "error": error_msg,
+                "elapsed": round(elapsed, 2),
+                "peak_gpu_memory_mb": round(gpu_mem_peak, 2),
+                "num_frames": num_frames,
+                "resolution": resolution,
+                "num_steps": num_steps,
+                "script": ppl_cfg.script,
+            }
+        )
+    finally:
+        _close_pipeline(pipeline)
+        pipeline = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # =============================================================================

@@ -110,8 +110,8 @@ control 准入必须同时满足：
 3. control edge 仍有容量。
 
 只有 scheduler 接受 control 后，control cursor 才递增。重复、跳号和乱序 control 直接失败。
-`_ensure_next_condition_locked()` 只在预取被 backpressure 暂时耗尽时补齐当前 control 所需的一个 condition；
-正常窗口补充由当前 chunk denoise 完成后的 refill 触发。
+如果预取因 backpressure 暂时耗尽，`try_submit_chunk()` 会把当前 control 与其缺失的 condition 作为同一次原子
+ingress 提交；正常窗口补充仍由当前 chunk denoise 完成后的 refill 触发。纯容量查询不会提交 condition。
 
 预取深度 `2` 是内部常量，不是用户配置。condition、control、latent 和 output edge 也都具有显式的 per-session
 容量，因此长 session 不会形成 duration-sized tensor 列表。Condition actor 自身仍然串行执行；两级预取表示

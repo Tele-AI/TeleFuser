@@ -125,7 +125,7 @@ class LingBotWorldFastStreamingRuntime:
         return session
 
     def can_submit_chunk(self, session: LingBotWorldFastStreamingSession) -> bool:
-        """Return whether the session can admit its next control chunk."""
+        """Return whether the next control can be admitted without mutating ingress."""
         entry = self._require_session(session)
         try:
             with self._lock:
@@ -133,9 +133,10 @@ class LingBotWorldFastStreamingRuntime:
                     return False
                 if entry.next_control_index >= entry.runtime.chunk_count:
                     return False
-                if not self._ensure_next_condition_locked(session.session_id, entry):
-                    return False
-                return self.orchestrator.can_push_input(session.session_id, "control")
+                artifacts = ["control"]
+                if entry.next_condition_index <= entry.next_control_index:
+                    artifacts.append("encode_request")
+                return self.orchestrator.can_push_inputs(session.session_id, artifacts)
         except RuntimeError:
             if self.orchestrator.error(session.session_id) is not None:
                 return False
@@ -165,14 +166,20 @@ class LingBotWorldFastStreamingRuntime:
             with self._lock:
                 if chunk_index != entry.next_control_index:
                     raise ValueError(f"Expected LingBot control chunk {entry.next_control_index}, got {chunk_index}")
-                if not self._ensure_next_condition_locked(session.session_id, entry):
-                    return False
+                if entry.next_condition_index < entry.next_control_index:
+                    raise RuntimeError("LingBot condition cursor fell behind the control cursor")
+                needs_condition = entry.next_condition_index == entry.next_control_index
+                inputs: dict[str, object] = {"control": control}
+                if needs_condition:
+                    inputs["encode_request"] = None
                 accepted = self.orchestrator.try_push_inputs(
                     session.session_id,
                     chunk_index,
-                    {"control": control},
+                    inputs,
                 )
                 if accepted:
+                    if needs_condition:
+                        entry.next_condition_index += 1
                     entry.next_control_index += 1
                 return accepted
         except RuntimeError:
@@ -206,25 +213,6 @@ class LingBotWorldFastStreamingRuntime:
             ):
                 return
             entry.next_condition_index += 1
-
-    def _ensure_next_condition_locked(
-        self,
-        session_id: str,
-        entry: _LingBotStreamingSessionEntry,
-    ) -> bool:
-        """Ensure the next control has a matching condition without filling the lookahead window."""
-        if entry.next_condition_index > entry.next_control_index:
-            return True
-        if entry.next_condition_index >= entry.runtime.chunk_count:
-            return False
-        if not self.orchestrator.try_push_inputs(
-            session_id,
-            entry.next_condition_index,
-            {"encode_request": None},
-        ):
-            return False
-        entry.next_condition_index += 1
-        return True
 
     def _refill_conditions_after_denoise(
         self,
@@ -446,6 +434,7 @@ class LingBotWorldFastStreamingRuntime:
             "max_attention_size": runtime.max_attention_size,
         }
 
+    @torch.inference_mode()
     def _denoise(self, invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
         runtime = entry.runtime
