@@ -61,6 +61,7 @@ def running_server(pipeline_path, temp_cache_dir):
     env = os.environ.copy()
     env["TELEFUSER_SECURITY_LEVEL"] = "NONE"
 
+    server_log = (Path(temp_cache_dir) / "server.log").open("w+b")
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -72,36 +73,47 @@ def running_server(pipeline_path, temp_cache_dir):
             "--cache-dir",
             temp_cache_dir,
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=server_log,
+        stderr=subprocess.STDOUT,
         env=env,
     )
 
     # Wait for server to be ready
     server_info = {"base_url": base_url, "ready": False, "proc": proc}
+    health_session = requests.Session()
+    health_session.trust_env = False
     max_wait = 30
     start_time = time.time()
 
     while time.time() - start_time < max_wait:
         try:
-            response = requests.get(f"{base_url}/v1/service/status", timeout=1)
+            response = health_session.get(f"{base_url}/v1/service/status", timeout=1)
             if response.status_code == 200:
                 server_info["ready"] = True
                 break
         except Exception:
             # Check if process died
             if proc.poll() is not None:
-                stdout, stderr = proc.communicate()
-                print(f"Server process exited early:\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}")
+                server_log.flush()
+                server_log.seek(0)
+                output = server_log.read().decode(errors="replace")
+                print(f"Server process exited early:\n{output}")
+                server_log.close()
+                health_session.close()
                 pytest.skip(f"Server process exited with code {proc.returncode}")
         time.sleep(0.5)
 
+    health_session.close()
     if not server_info["ready"]:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        server_log.flush()
+        server_log.seek(0)
+        print(f"Server failed to start:\n{server_log.read().decode(errors='replace')}")
+        server_log.close()
         pytest.skip("Server failed to start within timeout")
 
     yield server_info
@@ -112,3 +124,4 @@ def running_server(pipeline_path, temp_cache_dir):
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+    server_log.close()
