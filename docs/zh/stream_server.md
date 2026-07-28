@@ -142,6 +142,22 @@ curl -X POST http://127.0.0.1:8088/v1/stream/sessions \
   }'
 ```
 
+如需执行一分钟 LingBot-World v2 回放，启动
+`examples/lingbot/lingbot_world_v2_image_to_video_h100.py` 并使用：
+
+```json
+{
+  "fps": 16,
+  "chunk_size": 4,
+  "frame_num": 957,
+  "max_duration_seconds": 60.0
+}
+```
+
+完整 chunk 策略把该请求映射为 60 个 chunk 和 59.75 秒输出媒体。v2 示例使用 `local_attn_size=18` 与
+`sink_size=6`，因此 KV 容量保持固定，session 自有的 noise 与 VAE 状态增量推进。可复现 LiveKit workload
+和日期化的四卡实测见 [TeleFuser 与 AIPerf](benchmark_aiperf.md)。
+
 成功响应包含 `session_id`、`room`、`livekit_url`、`token`、`worker_id` 和 `status`。排队时返回 HTTP 202
 和 `queue_position`；队列长度为零且 worker 全忙时返回 HTTP 429。
 
@@ -218,8 +234,8 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 - 在 LiveKit 中配置 TLS、advertised node address、UDP/TCP media port 和 TURN。
 - 通过部署层的鉴权与网络策略限制 TeleFuser HTTP API。
 - 监控 `/v1/service/ready`、worker failure、queue depth 和 session expiration。
-- Chunk period 表示输出 cadence；实时运行要求 p95 compute time 小于一个 chunk 的媒体时长，并为编码和传输
-  留出余量。
+- Chunk period 表示相邻输出 cadence；实时运行要求 p95 cadence 小于一个 chunk 的媒体时长，并为传输和编码
+  留出余量。Pipeline residence 和客户端 delivery FPS 是不同指标。
 
 ## 故障排查
 

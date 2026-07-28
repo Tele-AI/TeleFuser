@@ -66,6 +66,7 @@ DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"chunk", "preview"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"done", "error"})
 _MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
+_CONTROL_PREFETCH_DEPTH = 1
 
 
 class LingBotWorldFastService:
@@ -810,7 +811,7 @@ class LingBotWorldFastService:
         emit_status: Callable[..., None],
         block: bool,
     ) -> tuple[object, list[str] | None, float | None] | None:
-        """Select one queued tap or continue a direction that remains held."""
+        """Select one queued tap or snapshot a direction that remains held."""
         while state.active:
             with state.control_lock:
                 explicit_control = state.latest_explicit_control
@@ -830,7 +831,7 @@ class LingBotWorldFastService:
                 controls = set(direction_command.controls)
                 revision: int | None = direction_command.revision
                 control_received_at: float | None = direction_command.received_at_monotonic
-            elif held_controls and block:
+            elif held_controls:
                 controls = set(held_controls)
                 revision = None
                 control_received_at = None
@@ -1057,6 +1058,7 @@ class LingBotWorldFastService:
             while (
                 state.active
                 and submitted < runtime.chunk_count
+                and submitted <= runtime.current_chunk_index + _CONTROL_PREFETCH_DEPTH
                 and streaming_runtime.can_submit_chunk(streaming_session)
             ):
                 item = self._next_realtime_control(

@@ -1,100 +1,125 @@
 # TeleFuser 与 AIPerf
 
 TeleFuser 只暴露目标侧原始事实；AIPerf 负责 workload 执行、聚合、资源采集、产物、GreptimeDB 历史服务和
-展示。仓库内当前集成只覆盖通过 OpenAI 兼容 `/v1/videos` API 执行的 batch 视频生成。
+展示。仓库内集成覆盖 OpenAI 兼容 `/v1/videos` API 的 batch 视频生成，以及通过 LiveKit 执行的 LingBot
+streaming benchmark。
 
-随旧传输后端一起删除的内容包括 LingBot 直接 WebRTC adapter 和 SGLang 对比资产。AIPerf 目前
-尚未集成 LiveKit benchmark adapter，因此本仓库不会把不受支持的 stream benchmark 标记为可运行。流服务
-输出的 target compute 指标仍可供未来 LiveKit-aware benchmark client 使用。
+AIPerf stream runner 与结果 schema 不感知具体传输。LiveKit adapter 由 TeleFuser 维护，在进程启动时从源码
+注册，并生成 AIPerf 标准 session result。Contract 将 WebRTC 记录为媒体 transport，将 LiveKit 记录为
+provider；这既保留 SFU 拓扑信息，也无需在 AIPerf 中加入 LiveKit 代码。
 
-## 仓库边界
+安装方法、workload 配置、运行命令、历史服务和专项测试统一维护在
+[`benchmarks/telefuser_aiperf/README.md`](https://github.com/Tele-AI/TeleFuser/tree/main/benchmarks/telefuser_aiperf#readme)。AIPerf 通过 `pip` 安装固定的 Git
+commit，不保留 AIPerf checkout 或 adapter `pyproject.toml`。
 
-```text
-benchmarks/
-├── telefuser_aiperf/   # Batch contract、配置、数据和 launcher
-└── aiperf/             # 被 Git 忽略的外部 AIPerf checkout
-```
+## 快速开始
 
-TeleFuser 不 vendoring AIPerf。安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 后，在仓库
-根目录执行：
+以下命令都在 TeleFuser 仓库根目录执行。先把支持 streaming 的 AIPerf Git commit 安装到独立环境：
 
 ```bash
-bash scripts/setup_aiperf_repo.sh
+bash scripts/setup_aiperf.sh
 ```
 
-脚本把 AIPerf clone 到 `benchmarks/aiperf`，安装其非开发运行环境，并创建 `artifacts/`。正式实验应固定
-commit：
+在终端 1 启动本地 LiveKit 开发服务器：
 
 ```bash
-AIPERF_REF=<commit> bash scripts/setup_aiperf_repo.sh
+livekit-server --dev --bind 127.0.0.1
 ```
 
-`AIPERF_REPO_URL`、`AIPERF_BRANCH` 和 `AIPERF_REF` 可以选择来源与 revision，但不改变 checkout 位置。
-
-## Batch 视频测试
-
-启动固定 Wan2.1 I2V target：
+在终端 2 启动四卡 LingBot-World v2 target，并替换实际模型目录：
 
 ```bash
-telefuser serve \
-  examples/wan_video/wan21_14b_image_to_video_480p_service.py \
-  --port 8000 \
-  --task i2v
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+  TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --livekit-url ws://127.0.0.1:7880 \
+    --livekit-api-key devkey \
+    --livekit-api-secret secret \
+    --num-workers 1 \
+    --worker-gpu-map 0,1,2,3 \
+    --port 8088 \
+    --skip-validation
 ```
 
-执行 smoke profile 或固定对比 workload：
+模型加载和 pipeline warmup 可能需要几分钟。等待健康接口同时出现 `"ready":true`、
+`"workers_idle":1` 和 `"workers_failed":0`：
 
 ```bash
-bash benchmarks/telefuser_aiperf/scripts/run_video_bench.sh
-
-bash benchmarks/telefuser_aiperf/scripts/run_video_bench.sh \
-  benchmarks/telefuser_aiperf/configs/video_generation_wan21_i2v_480p_compare.yaml
+curl --noproxy '*' --fail --silent --show-error \
+  http://127.0.0.1:8088/v1/service/health
 ```
 
-Launcher 会先检查 `/v1/service/health`。常用覆盖变量包括 `TELEFUSER_AIPERF_URL`、
-`TELEFUSER_AIPERF_CONCURRENCY`、`TELEFUSER_AIPERF_REQUESTS`、`TELEFUSER_AIPERF_SIZE` 和
-`TELEFUSER_AIPERF_SECONDS`。
-
-| 配置 | 用途 |
-|---|---|
-| `video_generation_quick.yaml` | 连通性和时延 smoke test |
-| `video_generation_e2e.yaml` | Warmup、trace、records 和服务指标 |
-| `video_generation_rate.yaml` | Poisson 到达负载 |
-| `video_generation_wan21_i2v_480p_compare.yaml` | 固定 Wan I2V 对比 |
-
-## 主动资源上报与历史曲线
-
-启动持久化 GreptimeDB：
+空闲时 `"livekit_connected":false` 是正常状态。在终端 3 启动测试：
 
 ```bash
-docker volume create aiperf-greptime-data
-docker run -d --name aiperf-greptime --restart unless-stopped \
-  -p 127.0.0.1:4000:4000 \
-  -v aiperf-greptime-data:/greptimedb_data \
-  greptime/greptimedb:latest \
-  standalone start \
-  --http-addr 0.0.0.0:4000 \
-  --data-home /greptimedb_data
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 ```
 
-再启动 AIPerf history API 与内置 dashboard：
+请求媒体时长为 59.75 秒，但 AIPerf active window 配置为 240 秒，因此命令通常约 4 分钟完成，不要在模型
+停止生成后提前中断。成功输出为 `Stream profile sessions: 1/1 succeeded`，报告写入
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`。模型文件布局、手动选择 Python 环境、历史服务和故障
+排查见上面的 canonical README。
 
-```bash
-uv run --frozen --no-dev --project benchmarks/aiperf aiperf history serve \
-  --greptime-url http://127.0.0.1:4000 \
-  --greptime-database public \
-  --artifact-root artifacts \
-  --host 127.0.0.1 \
-  --port 8095
-```
+## 职责与指标语义
 
-如需采集目标进程树，在执行 batch launcher 前设置 `AIPERF_HISTORY_URL` 和
-`AIPERF_RESOURCE_TARGET_PID`。History 与主动上报强依赖 GreptimeDB；失败时不会静默回退到内存或文件数据库。
+| 组件 | 归属 | 职责 |
+|---|---|---|
+| TeleFuser runtime | TeleFuser | 输出同步的 phase、chunk、runtime、cache 和环境原始事实 |
+| Batch target adapter | AIPerf | 将 `/v1/videos` HTTP 事件转为标准 request 时间线 |
+| LiveKit 源码 adapter | TeleFuser | 将 room、track、status、metrics 和 control 事件转为 session result |
+| 聚合与历史 | AIPerf | 负责 warmup、percentile、throughput、artifact、GreptimeDB 和展示 |
+| Contract 与 workload | TeleFuser | 固定 target 能力、输入、设置和可复现启动命令 |
+
+Target 原始事实遵守以下规则：
+
+- Duration 使用单调时钟；跨进程样本同时保留源端 UTC 时间戳。
+- CUDA phase 在开始和结束边界同步目标设备。
+- 数值必须有限且非负；不可用值省略或使用 `null`，不能伪造为零。
+- Memory 在原始协议中使用 bytes，只在展示层转换单位。
+- Target 不排除 warmup、不计算 percentile，也不生成跨 run 结论。
+
+| Scope | 示例 | 聚合规则 |
+|---|---|---|
+| Event | frame 或 response arrival | 保留事件时间线 |
+| Request/session | first output、session latency | 对每个 request 或 session 独立计算 |
+| Run | success rate、throughput、percentile | AIPerf 排除 warmup 后聚合 |
+
+客户端交付、target pipeline residence、target phase time 和资源利用率保持为不同维度。无法等价的字段保留为
+private 或 unavailable，不强行映射为同一指标。
+
+## LingBot-World v2 一分钟回放实测
+
+2026-07-28 使用 4 张 H100 80 GB 验证了 `stream_lingbot_world_v2_1min.json`：DiT 为 BF16，VAE 为 FP32，
+启用 SageAttention SM90 和 `torch.compile`，禁用 FSDP，`chunk_size=4`，输出 16 FPS。60 秒请求按完整 latent
+chunk 截断为 60 个 chunk、957 帧，对应 59.75 秒媒体时长。LingBot-World v2 使用固定
+`local_attn_size=18`、`sink_size=6` 窗口，因此 240 latent frame 的请求仍只分配 27,144 token KV 容量，
+不会改为时长规模的全局 KV cache。
+
+| 指标 | 结果 |
+|---|---:|
+| 成功 session | 1 / 1 |
+| Target chunk / 生成帧 | 60 / 957 |
+| 客户端收到帧数 | 947 |
+| Target 稳态 chunk / 帧 | 59 / 944 |
+| 配置的 session runtime | 242.255 s |
+| 首帧延迟 | 6,252.773 ms |
+| 客户端交付速率（`stream_fps`） | 9.397 FPS |
+| 稳态 chunk 加权计算速率 | 4.708 FPS |
+| Chunk pipeline residence mean / p99 | 3.399 / 3.901 s |
+
+Target 实际生成了全部 957 帧，LiveKit 客户端收到 947 帧。AIPerf 在 target 稳态计算聚合中排除了首个
+chunk，剩余 59 个 chunk 共生成 944 帧。242 秒 session runtime 是 240 秒 active window 上限加连接开销，
+不是 59.75 秒媒体内容的模型生成耗时。
+
+Chunk pipeline residence 从 actor 准入计到输出，包含相互重叠的 encode、DiT、decode 工作，所以可以大于相邻
+交付间隔；报告中的 4.708 稳态 chunk 加权计算 FPS 不能当作客户端推流吞吐。本次 Git 安装的 AIPerf
+运行退出码为 0。回放报告位于
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260728_083948_fc4344ba/stream_report.html`。
 
 ## 复现要求
 
-每个结果都应保留 TeleFuser/AIPerf commit、模型 revision、加速器型号/数量、driver、CUDA、PyTorch、dtype、
-完整 workload、warmup 规则、成功/失败数量，以及 offload/cache/attention 设置。动态结果保存在 GreptimeDB
-和可重放产物中，不写入稳定文档。
-
-稳定职责与指标边界见 [AIPerf benchmark 设计](benchmark_aiperf_design.md)。
+每个结果都应保留 TeleFuser commit、AIPerf 包版本、模型 revision、加速器型号/数量、driver、CUDA、
+PyTorch、dtype、完整 workload、warmup 规则、成功/失败数量，以及 offload/cache/attention 设置。上面的日期化
+实测只代表单次验证，不是通用性能保证；持续对比结果应保存在 GreptimeDB 和可重放产物中。
+OOM 是被测配置的结果，不能用 mock 或改变 offload 策略后的结果替代。

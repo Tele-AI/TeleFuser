@@ -128,6 +128,27 @@ def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> N
     assert session_id in service._sessions
 
 
+def test_v2_service_resolves_one_minute_to_complete_latent_chunks() -> None:
+    pipeline = MagicMock()
+
+    with patch.object(offline_example, "get_pipeline", return_value=pipeline):
+        service = offline_example.get_service(gpu_num=4)
+
+    session_id = service.create_session(
+        {
+            "image": Image.new("RGB", (8, 8)),
+            "fps": 16,
+            "chunk_size": 4,
+            "max_duration_seconds": 60.0,
+        }
+    )
+    session_config = pipeline.control_context.call_args.args[0]
+
+    assert session_config.frame_num == 957
+    assert session_config.frame_num == 4 * (60 * session_config.chunk_size - 1) + 1
+    assert session_id in service._sessions
+
+
 def test_v2_offline_cli_forwards_only_supported_run_arguments(tmp_path) -> None:
     image_path = tmp_path / "input.png"
     Image.new("RGB", (8, 8)).save(image_path)

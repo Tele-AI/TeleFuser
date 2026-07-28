@@ -188,11 +188,11 @@ def test_actor_worker_prefetches_conditions_before_waiting_for_first_control() -
     streaming_runtime.try_submit_chunk.assert_not_called()
 
 
-def test_actor_worker_prefetches_directional_chunks_within_ingress_capacity() -> None:
+def test_actor_worker_prefetches_only_one_directional_chunk_ahead_of_output() -> None:
     pipeline = MagicMock()
     runtime = LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)), chunk_size=1),
-        latent_f=2,
+        latent_f=3,
         chunk_size=1,
         cache_handle=7,
     )
@@ -256,7 +256,7 @@ def test_release_stops_control_without_scheduling_stationary_generation() -> Non
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
 
 
-def test_held_direction_does_not_synthesize_another_chunk_without_an_event() -> None:
+def test_held_direction_supplies_a_nonblocking_prefetch_snapshot() -> None:
     service = LingBotWorldFastService(MagicMock())
     state = _state()
     state.pressed_controls.add("j")
@@ -271,8 +271,9 @@ def test_held_direction_does_not_synthesize_another_chunk_without_an_event() -> 
         block=False,
     )
 
-    assert item is None
-    control_builder.defer.assert_not_called()
+    assert item is not None
+    assert item[1] == control_builder.defer.call_args.args[0]["controls"]
+    assert item[1] == ["j"]
 
 
 def test_new_short_press_overwrites_stale_direction_snapshot() -> None:
@@ -401,25 +402,22 @@ def test_direction_release_replaces_pending_combined_snapshot() -> None:
     assert [call.args[0]["controls"] for call in control_builder.defer.call_args_list] == [["a"], ["w"]]
 
 
-def test_held_direction_continues_only_after_a_chunk_is_completed() -> None:
+def test_held_direction_can_supply_blocking_and_prefetched_chunks() -> None:
     service = LingBotWorldFastService(MagicMock())
     state = _state()
     state.pressed_controls.add("j")
     control_builder = MagicMock()
 
-    assert (
-        service._next_realtime_control(
-            state,
-            SimpleNamespace(control_type="cam", chunk_size=3),
-            control_builder,
-            chunk_index=1,
-            emit_status=MagicMock(),
-            block=False,
-        )
-        is None
+    prefetched = service._next_realtime_control(
+        state,
+        SimpleNamespace(control_type="cam", chunk_size=3),
+        control_builder,
+        chunk_index=1,
+        emit_status=MagicMock(),
+        block=False,
     )
 
-    item = service._next_realtime_control(
+    blocking = service._next_realtime_control(
         state,
         SimpleNamespace(control_type="cam", chunk_size=3),
         control_builder,
@@ -428,7 +426,8 @@ def test_held_direction_continues_only_after_a_chunk_is_completed() -> None:
         block=True,
     )
 
-    assert item is not None
+    assert prefetched is not None
+    assert blocking is not None
 
 
 def test_explicit_controls_keep_only_the_latest_pending_value() -> None:

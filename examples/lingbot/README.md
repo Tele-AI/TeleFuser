@@ -200,8 +200,9 @@ architecture, metric definitions, and lifecycle guarantees.
 
 ### Tested GPU and Duration Limits
 
-The global KV cache grows with the requested frame count even when FSDP is enabled. The following 832x480 limits
-were verified on H100 80 GB GPUs with `chunk_size=3`, `16 FPS`, and `sample_shift=10.0`:
+LingBot-World-Fast uses a global KV cache that grows with the requested frame count even when FSDP is enabled. The
+following 832x480 limits were verified on H100 80 GB GPUs with `chunk_size=3`, `16 FPS`, and
+`sample_shift=10.0`:
 
 | GPUs | Duration selected in the page | Frame count | Result |
 | --- | --- | --- | --- |
@@ -212,6 +213,26 @@ were verified on H100 80 GB GPUs with `chunk_size=3`, `16 FPS`, and `sample_shif
 The four-GPU 20-second test used FSDP and Ulysses degree 4. Peak memory was approximately 58.6 GiB on GPU 0 and
 41.6 GiB on GPUs 1-3. These are tested values, not universal limits; other resolutions and concurrent GPU users
 change the available capacity.
+
+LingBot-World v2 instead uses the fixed `local_attn_size=18`, `sink_size=6` sliding window configured by its
+example. A four-H100, one-minute AIPerf replay on 2026-07-28 resolved to 60 complete chunks, 957 output frames, and
+59.75 seconds of media. Its runtime metadata reported 240 latent frames but a fixed 27,144-token KV capacity.
+
+| One-minute v2 measurement | Result |
+| --- | ---: |
+| Successful sessions | 1 / 1 |
+| Target chunks / generated frames | 60 / 957 |
+| Client frames / steady frames | 946 / 944 |
+| Output cadence mean / p50 / p95 | 1.666 / 1.661 / 1.865 s |
+| First / middle / last 20-chunk mean | 1.694 / 1.646 / 1.658 s |
+| Session runtime | 104.031 s |
+
+During initial WebRTC track startup, the client received 2 of the first chunk's 13 frames and then received all
+`59 * 16 = 944` steady frames. Similar cadence in the first, middle, and last thirds confirms that the fixed attention
+window avoided duration-driven degradation in this run. It did not reach real time: each chunk represents 1.0 second
+of media, while p95 cadence was 1.865 seconds. See the
+[AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the workload,
+metric boundary, artifact path, and the observed client cleanup issue.
 
 ### LiveKit Transport
 
@@ -254,6 +275,9 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
     --port 8088 \
     --skip-validation
 ```
+
+For the fixed-window v2 model, replace the pipeline path in that command with
+`examples/lingbot/lingbot_world_v2_image_to_video_h100.py`; the LiveKit and worker options stay the same.
 
 Then start the bundled browser demo in terminal 4:
 

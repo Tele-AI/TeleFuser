@@ -83,7 +83,8 @@ sequenceDiagram
 最终结构中有三条必须分开的路径：
 
 - `condition`：只依赖 session 图像、VAE causal state 和 chunk 位置，可以在 control 之前计算；
-- `control`：来自真实交互输入，必须按 chunk 严格有序，不能预测或跨 chunk 复用；
+- `control`：来自真实交互输入，必须按 chunk 严格有序；新的按键事件不能预测，短按 snapshot 只消费一次，
+  但仍保持按下的完整 control state 可以复制为不可变 snapshot，最多提前供给下一个输出 chunk；
 - `latent/frames`：只有同一 sequence ID 的 condition 与 control join 后才能产生。
 
 VAE Encode、DiT 和 VAE Decode 分别由唯一 actor 管理。它们即使放在同一张 GPU 上也可以重叠；调度器不会根据
@@ -116,6 +117,12 @@ ingress 提交；正常窗口补充仍由当前 chunk denoise 完成后的 refil
 预取深度 `2` 是内部常量，不是用户配置。condition、control、latent 和 output edge 也都具有显式的 per-session
 容量，因此长 session 不会形成 duration-sized tensor 列表。Condition actor 自身仍然串行执行；两级预取表示
 最多允许一个任务执行、另一个任务或结果停留在有界路径中，不表示同一个 VAE worker 同时运行两个 encode。
+
+Service 侧另有深度为 `1` 的 control snapshot 窗口，它与 orchestrator 的两级 condition 预取不是同一个
+边界。只有非阻塞路径可从当前 held control state 复制 snapshot，并且已提交 control 数必须满足
+`submitted <= current_chunk_index + 1`。因此 scheduler 最多同时拥有“当前输出中的 control”和“下一 chunk
+已准入的 control”；release、reset 或更新后的 control state 会替换后续 snapshot，不会修改已经提交给模型的
+不可变 snapshot。
 
 ## 3. 本次 Diff：优化前后时序对比
 

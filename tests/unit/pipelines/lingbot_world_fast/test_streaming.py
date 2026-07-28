@@ -214,6 +214,79 @@ def test_streaming_session_prefetches_two_conditions_ahead_of_controls() -> None
         streaming_runtime.close()
 
 
+def test_streaming_session_overlaps_encode_denoise_and_decode() -> None:
+    pipeline = _Pipeline()
+    encode_started = threading.Event()
+    denoise_started = threading.Event()
+    decode_started = threading.Event()
+    release_stages = threading.Event()
+
+    original_encode = pipeline.vae_encode_worker.encode_condition_chunk
+    original_decode = pipeline.vae_decode_worker.decode_chunk
+    original_denoise = pipeline.denoise_stage.denoise_and_update_cache
+
+    def encode_condition_chunk(**kwargs):
+        result = original_encode(**kwargs)
+        if kwargs["chunk_index"] != 2:
+            return result
+
+        def wait_for_release():
+            encode_started.set()
+            release_stages.wait(timeout=1)
+            return result()
+
+        return wait_for_release
+
+    def denoise_and_update_cache(**kwargs):
+        if kwargs["current_start"] == 1:
+            denoise_started.set()
+            release_stages.wait(timeout=1)
+        return original_denoise(**kwargs)
+
+    def decode_chunk(**kwargs):
+        result = original_decode(**kwargs)
+        if not kwargs["is_first_clip"]:
+            return result
+
+        def wait_for_release():
+            decode_started.set()
+            release_stages.wait(timeout=1)
+            return result()
+
+        return wait_for_release
+
+    pipeline.vae_encode_worker.encode_condition_chunk = encode_condition_chunk
+    pipeline.denoise_stage.denoise_and_update_cache = denoise_and_update_cache
+    pipeline.vae_decode_worker.decode_chunk = decode_chunk
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=3,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=3,
+        cache_handle=17,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    try:
+        assert streaming_runtime.wait_until_idle(session)
+        streaming_runtime.submit_chunk(session, 0, torch.tensor([4.0]))
+        streaming_runtime.submit_chunk(session, 1, torch.tensor([5.0]))
+
+        assert encode_started.wait(timeout=1)
+        assert denoise_started.wait(timeout=1)
+        assert decode_started.wait(timeout=1)
+    finally:
+        release_stages.set()
+        streaming_runtime.close_session(session)
+        streaming_runtime.close()
+
+
 def test_capacity_poll_is_pure_and_control_fallback_is_atomic() -> None:
     pipeline = _Pipeline()
     runtime = LingBotWorldFastGenerationSession(

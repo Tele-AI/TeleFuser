@@ -149,6 +149,23 @@ curl -X POST http://127.0.0.1:8088/v1/stream/sessions \
   }'
 ```
 
+For a one-minute LingBot-World v2 replay, start
+`examples/lingbot/lingbot_world_v2_image_to_video_h100.py` and use:
+
+```json
+{
+  "fps": 16,
+  "chunk_size": 4,
+  "frame_num": 957,
+  "max_duration_seconds": 60.0
+}
+```
+
+The complete-chunk policy maps this request to 60 chunks and 59.75 seconds of output media. The v2 example uses
+`local_attn_size=18` and `sink_size=6`; its KV capacity therefore remains fixed while the session-owned noise and
+VAE state advance incrementally. The reproducible LiveKit workload and dated four-H100 result are documented in
+[TeleFuser and AIPerf](benchmark_aiperf.md).
+
 A successful response includes `session_id`, `room`, `livekit_url`, `token`, `worker_id`, and `status`. A queued
 session returns HTTP 202 with `queue_position`; a full zero-length queue returns HTTP 429.
 
@@ -225,8 +242,8 @@ process-worker isolation is implemented. `--skip-validation` is intended for tru
 - Configure TLS, advertised node addresses, UDP/TCP media ports, and TURN in LiveKit itself.
 - Restrict TeleFuser's HTTP API with the deployment's authentication and network policy.
 - Monitor `/v1/service/ready`, worker failures, queue depth, and session expiration.
-- Interpret chunk period as output cadence: p95 compute time must remain below one chunk's media duration with
-  margin for encoding and transport.
+- Interpret chunk period as adjacent output cadence: p95 cadence must remain below one chunk's media duration with
+  margin for transport and encoding. Pipeline residence and client delivery FPS are separate measurements.
 
 ## Troubleshooting
 

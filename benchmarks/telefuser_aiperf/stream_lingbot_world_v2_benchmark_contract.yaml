@@ -1,0 +1,68 @@
+# Benchmark contract for the LiveKit-backed LingBot-World v2 stream target.
+contract_version: v1
+name: telefuser_lingbot_world_v2_stream
+mode: stream_world
+implementation: telefuser
+model_family: lingbot_world_v2
+model: LingBot-World-v2-14B-Causal-Fast
+supported_tasks:
+  - bidirectional
+transport: webrtc
+adapter: telefuser_livekit
+transport_provider: livekit
+endpoint:
+  health_path: /v1/service/health
+  metadata_path: /v1/service/metadata
+  offer_path: /v1/stream/sessions
+  delete_path_template: /v1/stream/sessions/{session_id}
+request_encoding:
+  content_type: application/json
+  create_required_fields:
+    - identity
+    - role
+    - prompt
+    - config
+  control_topic: tf.control
+  control_reliable: true
+result_delivery:
+  media: livekit_video_track
+  status_topic: tf.status
+  metrics_topic: tf.metrics
+  session_log: sessions.jsonl
+  event_log: events/{phase}_{logical_session_index}_{session_id}.jsonl
+workload:
+  mode: bidirectional
+  task: bidirectional
+  fps: 16
+  session_count: 1
+  warmup_sessions: 0
+  session_duration_s: 240.0
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  request_extra:
+    chunk_size: 4
+    frame_num: 957
+    max_duration_seconds: 60.0
+    sample_shift: 10.0
+    control_mode: cam
+    show_control_hud: false
+    benchmark_metrics: true
+metrics:
+  - offer_rtt_ms
+  - connected_latency_ms
+  - first_frame_latency_ms
+  - first_metadata_latency_ms
+  - stream_fps
+  - session_runtime_s
+  - frames_received
+  - control_ack_latency_ms
+  - control_to_next_frame_latency_ms
+  - runtime_creation_seconds
+  - chunk_compute_seconds
+  - chunk_compute_fps
+  - success_rate
+limits:
+  active_sessions: 1
+artifacts:
+  config: benchmarks/telefuser_aiperf/configs/stream_lingbot_world_v2_1min.json
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  runner: benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh

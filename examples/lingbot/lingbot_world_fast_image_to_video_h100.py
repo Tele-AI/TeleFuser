@@ -121,7 +121,6 @@ def get_pipeline(
         model_class=WanVideoVAE,
         torch_dtype=PPL_CONFIG["vae_torch_dtype"],
         low_cpu_mem_usage=True,
-        strict=False,
     )
     module_manager.load_model(
         text_encoder_path,
