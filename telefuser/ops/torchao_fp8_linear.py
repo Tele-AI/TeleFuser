@@ -1,7 +1,7 @@
 """TorchAO FP8 helpers for TeleFuser DiT linear layers.
 
-The selected mode depends on the APIs exported by the installed TorchAO
-version. Dynamic activation and weight FP8 uses W8A8; the weight-only fallback
+TorchAO auto switches between two modes depending on hardware paltform:
+Dynamic activation and weight FP8 uses W8A8; the weight-only fallback
 uses W8A16 for BF16 inputs.
 """
 
