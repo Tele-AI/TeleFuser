@@ -36,9 +36,9 @@ $$
 
 ## 在线 Linear 量化
 
-### TorchAO FP8：取决于版本
+### TorchAO FP8:
 
-TeleFuser 会探测 TorchAO 的动态激活与仅权重 FP8 API，首先找到的 API 决定实际模式：动态激活和权重
+TorchAO会根据硬件平台选择支持的内核：动态激活/仅权重 FP8 。TeleFuser会根据TorchAO选择的 API 决定实际模式：动态激活和权重
 FP8 是 W8A8；BF16 输入配合 `Float8WeightOnlyConfig` 是 W8A16。应检查转换日志并运行真实前向，
 不能只根据 `QuantType.TORCHAO_FP8` 推断模式。
 
