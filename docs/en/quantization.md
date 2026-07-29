@@ -36,9 +36,9 @@ The scale can cover a tensor, an output channel, a token, or a small block. Smal
 
 ## Online Linear quantization
 
-### TorchAO FP8: version-dependent
+### TorchAO FP8:
 
-TeleFuser probes TorchAO's dynamic-activation and weight-only FP8 APIs. The first available API determines the mode:
+TorchAO automatically selects FP8 kernels depending on your hardware paltform, between dynamic-activation and weight-only FP8s. TeleFuser determines the mode according to the selection of TorchAO:
 dynamic activation and weight FP8 is W8A8, while `Float8WeightOnlyConfig` with BF16 inputs is W8A16. Check the
 conversion log and run a real forward instead of inferring the mode from `QuantType.TORCHAO_FP8`.
 
