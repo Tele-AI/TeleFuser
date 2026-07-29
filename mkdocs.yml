@@ -101,6 +101,10 @@ markdown_extensions:
   - pymdownx.tasklist:
       custom_checkbox: true
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
+
 # Plugins
 plugins:
   - search:
@@ -130,13 +134,13 @@ plugins:
             Stream Scheduler: 流式调度器
             TeleFuser and AIPerf: TeleFuser 与 AIPerf
             Service Metadata: 服务元数据
+            Quantization: 量化
             Adding New Example: 新增示例
             Model Loading: 模型加载
             TF-Kernel: TF-Kernel
             CPU Offloading: CPU卸载
             Attention: 注意力机制
             Feature Cache: 特征缓存
-            Quantization: 量化
             Latent Cache: 潜空间缓存
             Adding New Model: 新增模型
             Adding New Stage: 新增阶段

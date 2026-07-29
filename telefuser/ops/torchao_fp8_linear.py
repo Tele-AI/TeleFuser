@@ -1,8 +1,8 @@
 """TorchAO FP8 helpers for TeleFuser DiT linear layers.
 
-This backend applies TorchAO dynamic-activation FP8 + FP8 weight quantization
-to selected ``nn.Linear`` modules. It targets W8A8 inference on Hopper/H100
-and keeps the integration close to TorchAO's native ``quantize_`` API.
+The selected mode depends on the APIs exported by the installed TorchAO
+version. Dynamic activation and weight FP8 uses W8A8; the weight-only fallback
+uses W8A16 for BF16 inputs.
 """
 
 from __future__ import annotations
@@ -87,7 +87,8 @@ def replace_linear_layers_with_torchao_fp8(
     """Quantize selected ``nn.Linear`` modules with TorchAO FP8.
 
     Returns the number of selected Linear layers. TorchAO performs in-place
-    conversion through ``quantize_``.
+    conversion through ``quantize_``. The first available dynamic or
+    weight-only API determines the activation precision.
     """
     _check_torchao_fp8_available()
 

@@ -314,7 +314,7 @@ def quantize_model(
     adapter_keys=None,
     key_idx=2,
     ignore_key=None,
-    linear_type="int8",
+    linear_dtype="int8",
     non_linear_dtype=torch.float,
     comfyui_mode=False,
     comfyui_keys=[],
@@ -382,7 +382,7 @@ def quantize_model(
             original_size += original_tensor_size
 
             # Quantize tensor and store results
-            quantizer = CONVERT_WEIGHT_REGISTER[linear_type](tensor)
+            quantizer = CONVERT_WEIGHT_REGISTER[linear_dtype](tensor)
             w_q, scales, extra = quantizer.weight_quant_func(tensor, comfyui_mode)
             weight_global_scale = extra.get("weight_global_scale", None)  # For nvfp4
 
@@ -590,9 +590,10 @@ def convert_weights(args):
     if args.quantized:
         if args.full_quantized and args.comfyui_mode:
             logger.info("Quant all tensors...")
-            assert args.linear_dtype, "Error: only support 'torch.int8' and 'torch.float8_e4m3fn'."
+            target_dtype = dtype_mapping.get(args.linear_dtype)
+            assert target_dtype, "Error: full quantization only supports int8 and fp8."
             for k in converted_weights.keys():
-                converted_weights[k] = converted_weights[k].float().to(args.linear_dtype)
+                converted_weights[k] = converted_weights[k].float().to(target_dtype)
         else:
             converted_weights = quantize_model(
                 converted_weights,
@@ -601,7 +602,7 @@ def convert_weights(args):
                 adapter_keys=args.adapter_keys,
                 key_idx=args.key_idx,
                 ignore_key=args.ignore_key,
-                linear_type=args.linear_type,
+                linear_dtype=args.linear_dtype,
                 non_linear_dtype=args.non_linear_dtype,
                 comfyui_mode=args.comfyui_mode,
                 comfyui_keys=args.comfyui_keys,
@@ -734,6 +735,14 @@ def copy_non_weight_files(source_dir, target_dir):
     logger.info("Non-weight files and subdirectories copied")
 
 
+def _normalize_linear_dtype(value: str) -> str:
+    aliases = {
+        "torch.int8": "int8",
+        "torch.float8_e4m3fn": "fp8",
+    }
+    return aliases.get(value, value)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Model weight format converter")
     parser.add_argument("-s", "--source", required=True, help="Input path (file or directory)")
@@ -783,10 +792,10 @@ def main():
         help="Device to use for quantization (cpu/cuda)",
     )
     parser.add_argument(
-        "--linear_type",
-        type=str,
+        "--linear_dtype",
+        type=_normalize_linear_dtype,
         choices=["int8", "fp8", "nvfp4", "mxfp4", "mxfp6", "mxfp8"],
-        help="Quant type for linear",
+        help="Data type used to quantize linear weights",
     )
     parser.add_argument(
         "--non_linear_dtype",
@@ -848,7 +857,6 @@ def main():
         logger.warning("--chunk_size is ignored when using --single_file option.")
 
     if args.quantized:
-        args.linear_dtype = dtype_mapping.get(args.linear_type, None)
         args.non_linear_dtype = eval(args.non_linear_dtype)
 
         model_type_keys_map = {

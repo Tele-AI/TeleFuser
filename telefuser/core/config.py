@@ -334,7 +334,8 @@ class QuantType(Enum):
         MXFP4: Microscaling FP4 (OCP standard).
         NVFP4: NVIDIA FP4 format (Blackwell+).
         BNB_NF4: bitsandbytes weight-only NF4 linear path.
-        TORCHAO_FP8: TorchAO dynamic-activation FP8 linear path.
+        TORCHAO_FP8: TorchAO FP8 linear path; activation precision depends on
+            the TorchAO API selected at runtime.
     """
 
     FP8 = auto()
@@ -360,15 +361,11 @@ class QuantKernelBackend(Enum):
 
 @dataclass
 class QuantConfig:
-    """Configuration for online quantization during model loading.
+    """Configuration for model quantization during loading.
 
     .. warning::
-        This is an interface definition only. The actual quantization
-        functionality is NOT yet implemented. This config serves as a
-        placeholder for future online quantization support.
-
-    Online quantization converts bf16/fp16 weights to lower precision (FP8/INT8/MXFP4/etc.)
-    at load time, reducing memory footprint without requiring pre-quantized checkpoint files.
+        Supported values depend on the model. Wan, Qwen-Image, and LTX currently
+        implement ``TORCHAO_FP8`` and ``BNB_NF4`` for transformer Linear layers.
 
     Attributes:
         enabled: Whether to enable online quantization.
