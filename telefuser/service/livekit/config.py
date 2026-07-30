@@ -25,6 +25,12 @@ class LiveKitServeConfig(BaseSettings):
     livekit_api_secret: str = Field(default="", description="LiveKit API secret")
 
     num_workers: int = Field(default=1, ge=1, le=64, description="Number of TeleFuser LiveKit workers")
+    max_sessions_per_worker: int = Field(
+        default=1,
+        ge=1,
+        le=64,
+        description="Maximum retained sessions per model worker",
+    )
     worker_gpu_map: str | None = Field(
         default=None,
         description="Semicolon-separated worker GPU groups, for example '0,1;2,3'",
@@ -35,6 +41,11 @@ class LiveKitServeConfig(BaseSettings):
     )
 
     queue_size: int = Field(default=0, ge=0, le=10000, description="Maximum queued sessions")
+    control_idle_timeout: float = Field(
+        default=10.0,
+        gt=0,
+        description="Seconds without control activity before a LingBot execution lease may yield",
+    )
     session_timeout: int = Field(default=1800, ge=1, description="Maximum session lifetime in seconds")
     token_ttl: int = Field(default=3600, ge=1, description="LiveKit token TTL in seconds")
     controller_timeout: int = Field(

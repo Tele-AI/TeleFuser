@@ -16,6 +16,13 @@ import requests
 os.environ["TELEFUSER_SECURITY_LEVEL"] = "NONE"
 
 
+@pytest.fixture(autouse=True)
+def disable_proxy_for_local_server_tests(monkeypatch):
+    """Keep localhost integration requests out of process-level proxies."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(scope="session")
 def pipeline_path():
     """Get the path to the fake pipeline."""

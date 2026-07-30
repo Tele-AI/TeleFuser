@@ -366,6 +366,7 @@ const DEFAULT_IMAGE_PATH = __DEFAULT_IMAGE_PATH__;
 const DEFAULT_PROMPT = __PROMPT__;
 const ICE_GATHER_TIMEOUT_MS = __ICE_GATHER_TIMEOUT_MS__;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const CONTROL_HEARTBEAT_MS = 1000;
 
 let pc = null;
 let dc = null;
@@ -513,11 +514,11 @@ function setControlActive(control, active) {
   if (btn) btn.classList.toggle("active", active);
 }
 
-function sendControlState() {
+function sendControlState(logMessage = true) {
   if (!dc || dc.readyState !== "open") return;
   const msg = JSON.stringify({ type: "control_state", controls: Array.from(pressedControls).sort() });
   dc.send(msg);
-  log("out", msg);
+  if (logMessage) log("out", msg);
 }
 
 function setControlPressed(control, active) {
@@ -576,6 +577,9 @@ window.addEventListener("blur", () => releaseAllControls(true));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) releaseAllControls(true);
 });
+setInterval(() => {
+  if (pressedControls.size > 0) sendControlState(false);
+}, CONTROL_HEARTBEAT_MS);
 window.addEventListener("pagehide", () => {
   releaseAllControls(true);
   if (dc && dc.readyState === "open") dc.send(JSON.stringify({ type: "stop" }));

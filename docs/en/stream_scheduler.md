@@ -45,6 +45,22 @@ Edges and outputs have explicit capacities. When a downstream stage cannot accep
 backpressure rather than retaining unbounded tensors. Pipeline implementations must therefore treat submission as
 admission-controlled, not as an unbounded queue.
 
+## Relationship to stream-service scheduling
+
+Three schedulers operate at different boundaries and must not be treated as one queue:
+
+| Boundary | Owner | Purpose |
+| --- | --- | --- |
+| Retained-session admission | LiveKit runtime | Assign an HTTP session to capacity on a model worker, or place it in the bounded HTTP admission queue. |
+| Cross-session model execution | LingBot service instance | Grant one execution lease so only one retained LingBot session submits a whole chunk at a time. |
+| Intra-pipeline dataflow | `StreamingPipelineOrchestrator` | Schedule encode, denoise, and decode stage work with bounded artifacts and per-session ordering. |
+
+The current LiveKit runtime loads one service instance in one in-process model worker. Multiple LiveKit room runners
+and their pipeline sessions share it. `max_sessions_per_worker` changes retained-session admission only; it neither
+loads more service instances nor changes graph edge capacity. For LingBot, the service-level lease surrounds one
+session chunk, while the streaming orchestrator may still overlap that chunk's independent stages. Other
+`BidirectionalService` implementations must define their own cross-session concurrency policy.
+
 ## LingBot Condition Prefetch
 
 LingBot condition encoding is independent of the corresponding control input. The session therefore keeps a fixed
@@ -65,9 +81,10 @@ session cleanup still runs through the owning actors.
 
 ## Actor Ownership and Session Lifecycle
 
-A state-owning worker has exactly one actor owner for its entire lifetime. In particular, one `ParallelWorker` must
-not be invoked directly by a session facade or shared by multiple stage actors. This preserves result ordering and
-ensures that cache mutation and release occur in one well-defined execution context.
+A state-owning stage worker has exactly one actor owner for its entire lifetime. This pipeline-level stage worker is
+not the LiveKit model worker that owns retained-session capacity. In particular, one `ParallelWorker` must not be
+invoked directly by a session facade or shared by multiple stage actors. This preserves result ordering and ensures
+that cache mutation and release occur in one well-defined execution context.
 
 Session shutdown is ordered as follows:
 

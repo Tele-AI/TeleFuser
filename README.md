@@ -17,8 +17,8 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
-- ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, worker admission, reconnect-friendly browser
-  transport, and support for both server-push and bidirectional pipeline contracts.
+- ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, retained multi-session admission, LingBot
+  chunk-boundary time slicing, reconnect-friendly browser transport, and server-push/bidirectional contracts.
 - ✨ **2026-07-22**: **NEW** Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
@@ -140,8 +140,13 @@ telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py 
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey --livekit-api-secret secret \
   --num-workers 1 --worker-gpu-map 0,1,2,3 \
+  --max-sessions-per-worker 2 --control-idle-timeout 10 \
   --port 8088 --skip-validation
 ```
+
+This is one four-GPU model worker and one loaded LingBot service instance, not four replicas. It can retain two
+independent user sessions; the shared LingBot execution lease runs at most one session chunk at a time and yields at
+a chunk boundary after the active controller becomes idle while another session waits.
 
 Terminal 4 — serve the browser controller and proxy its session API:
 

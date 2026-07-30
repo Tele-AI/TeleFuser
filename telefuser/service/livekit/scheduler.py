@@ -30,6 +30,8 @@ class WorkerState(BaseModel):
     worker_id: str
     status: WorkerStatus
     gpu_ids: list[str] = Field(default_factory=list)
+    session_ids: list[str] = Field(default_factory=list)
+    session_capacity: int = 1
     session_id: str | None = None
     room_name: str | None = None
     last_heartbeat_at: float
@@ -41,6 +43,7 @@ class SchedulerAdmission(BaseModel):
 
     status: AdmissionStatus
     worker_id: str | None = None
+    session_id: str | None = None
     queue_position: int | None = None
     reason: str | None = None
 
@@ -51,13 +54,22 @@ class _QueuedSession(BaseModel):
 
 
 class LiveKitScheduler:
-    """Simple FIFO scheduler with one active session per worker."""
+    """FIFO scheduler with bounded retained-session capacity per worker."""
 
-    def __init__(self, *, num_workers: int, gpu_groups: list[list[str]] | None = None, queue_size: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        num_workers: int,
+        gpu_groups: list[list[str]] | None = None,
+        queue_size: int = 0,
+        max_sessions_per_worker: int = 1,
+    ) -> None:
         if num_workers < 1:
             raise ValueError("num_workers must be >= 1")
         if queue_size < 0:
             raise ValueError("queue_size must be >= 0")
+        if max_sessions_per_worker < 1:
+            raise ValueError("max_sessions_per_worker must be >= 1")
 
         now = utc_timestamp()
         groups = gpu_groups or [[] for _ in range(num_workers)]
@@ -69,25 +81,29 @@ class LiveKitScheduler:
                 worker_id=f"worker-{idx}",
                 status="idle",
                 gpu_ids=list(groups[idx]),
+                session_capacity=max_sessions_per_worker,
                 last_heartbeat_at=now,
             )
             for idx in range(num_workers)
         }
         self._queue_size = queue_size
         self._queue: deque[_QueuedSession] = deque()
+        self._room_names: dict[str, str] = {}
         self._lock = threading.RLock()
 
     def assign(self, *, session_id: str, room_name: str) -> SchedulerAdmission:
-        """Assign an idle worker or enqueue/reject the session."""
+        """Assign a worker with capacity or enqueue/reject the session."""
         with self._lock:
-            worker = self._first_idle_worker()
+            worker = self._first_available_worker()
             if worker is not None:
                 worker.status = "assigned"
+                worker.session_ids.append(session_id)
+                self._room_names[session_id] = room_name
                 worker.session_id = session_id
                 worker.room_name = room_name
                 worker.error = None
                 worker.last_heartbeat_at = utc_timestamp()
-                return SchedulerAdmission(status="assigned", worker_id=worker.worker_id)
+                return SchedulerAdmission(status="assigned", worker_id=worker.worker_id, session_id=session_id)
 
             if self._queue_size == 0:
                 return SchedulerAdmission(status="rejected", reason="no_idle_worker")
@@ -105,21 +121,27 @@ class LiveKitScheduler:
                 self._queue = deque(item for item in self._queue if item.session_id != session_id)
                 return None
 
-            worker.session_id = None
-            worker.room_name = None
-            worker.error = None
-            worker.status = "idle"
+            worker.session_ids.remove(session_id)
+            self._room_names.pop(session_id, None)
+            worker.session_id = worker.session_ids[-1] if worker.session_ids else None
+            worker.room_name = self._room_names.get(worker.session_id) if worker.session_id is not None else None
+            worker_failed = worker.status in {"failed", "stopped"}
+            if not worker_failed:
+                worker.error = None
+                worker.status = "assigned" if worker.session_ids else "idle"
             worker.last_heartbeat_at = utc_timestamp()
 
-            if not self._queue:
+            if not self._queue or worker_failed:
                 return None
 
             queued = self._queue.popleft()
             worker.status = "assigned"
+            worker.session_ids.append(queued.session_id)
+            self._room_names[queued.session_id] = queued.room_name
             worker.session_id = queued.session_id
             worker.room_name = queued.room_name
             worker.last_heartbeat_at = utc_timestamp()
-            return SchedulerAdmission(status="assigned", worker_id=worker.worker_id)
+            return SchedulerAdmission(status="assigned", worker_id=worker.worker_id, session_id=queued.session_id)
 
     def update_worker_status(self, worker_id: str, status: WorkerStatus) -> WorkerState:
         """Update a worker lifecycle status."""
@@ -154,23 +176,22 @@ class LiveKitScheduler:
         """Return scheduler capacity counts."""
         with self._lock:
             workers = list(self._workers.values())
-            busy_statuses = {"assigned", "joining_room", "starting_pipeline", "running", "draining"}
             return {
                 "workers_total": len(workers),
-                "workers_idle": sum(1 for worker in workers if worker.status == "idle"),
-                "workers_busy": sum(1 for worker in workers if worker.status in busy_statuses),
+                "workers_idle": sum(1 for worker in workers if worker.status != "failed" and not worker.session_ids),
+                "workers_busy": sum(1 for worker in workers if bool(worker.session_ids)),
                 "workers_failed": sum(1 for worker in workers if worker.status == "failed"),
                 "queued_sessions": len(self._queue),
             }
 
-    def _first_idle_worker(self) -> WorkerState | None:
+    def _first_available_worker(self) -> WorkerState | None:
         for worker in self._workers.values():
-            if worker.status == "idle":
+            if worker.status not in {"failed", "stopped"} and len(worker.session_ids) < worker.session_capacity:
                 return worker
         return None
 
     def _worker_for_session(self, session_id: str) -> WorkerState | None:
         for worker in self._workers.values():
-            if worker.session_id == session_id:
+            if session_id in worker.session_ids:
                 return worker
         return None

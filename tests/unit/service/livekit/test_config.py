@@ -29,3 +29,13 @@ def test_require_livekit_credentials_reports_missing_fields() -> None:
 
     with pytest.raises(ValueError, match="livekit_api_key, livekit_api_secret"):
         config.require_livekit_credentials()
+
+
+def test_multi_session_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEFUSER_LIVEKIT_MAX_SESSIONS_PER_WORKER", "3")
+    monkeypatch.setenv("TELEFUSER_LIVEKIT_CONTROL_IDLE_TIMEOUT", "7.5")
+
+    config = LiveKitServeConfig()
+
+    assert config.max_sessions_per_worker == 3
+    assert config.control_idle_timeout == 7.5

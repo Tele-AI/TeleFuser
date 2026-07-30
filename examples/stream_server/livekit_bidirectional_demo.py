@@ -48,6 +48,7 @@ const SERVER_URL = __SERVER_URL__;
 const DEFAULT_IMAGE_PATH = __DEFAULT_IMAGE_PATH__;
 const DEFAULT_PROMPT = __PROMPT__;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const CONTROL_HEARTBEAT_MS = 1000;
 const CONTROL_TOPIC = "tf.control";
 const STATUS_TOPIC = "tf.status";
 const METRICS_TOPIC = "tf.metrics";

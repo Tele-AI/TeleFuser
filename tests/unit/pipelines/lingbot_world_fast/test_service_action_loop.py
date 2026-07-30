@@ -83,7 +83,7 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     with (
         patch.object(service, "_next_realtime_control", return_value=first_control),
         patch.object(service, "_put_output") as put_output,
-        patch("telefuser.pipelines.lingbot_world_fast.service.time.monotonic", side_effect=[10.0, 12.0, 13.0]),
+        patch("telefuser.pipelines.lingbot_world_fast.service.time.monotonic", side_effect=[10.0, 12.0, 13.0, 14.0]),
     ):
         service._run_actor_worker_loop(state, state.control_context, control_builder, emit_status)
 
@@ -91,6 +91,7 @@ def test_actor_worker_submits_control_and_emits_ordered_chunk() -> None:
     streaming_runtime.try_submit_chunk.assert_called_once_with(
         streaming_session, 0, pipeline._resolve_control.return_value
     )
+    streaming_runtime.wait_until_idle.assert_called_once_with(streaming_session, timeout=service.close_timeout)
     assert put_output.call_args.args[1]["index"] == 0
     assert put_output.call_args.args[1]["frames"][0].size == (8, 8)
     assert runtime.current_chunk_index == 1
@@ -165,7 +166,7 @@ def test_actor_worker_does_not_submit_after_close_during_initialization() -> Non
     assert state.generation_session is runtime
 
 
-def test_actor_worker_prefetches_conditions_before_waiting_for_first_control() -> None:
+def test_actor_worker_waits_for_first_control_before_initializing_runtime() -> None:
     pipeline = MagicMock()
     runtime = LingBotWorldFastGenerationSession(config=_state().config, latent_f=1, chunk_size=1, cache_handle=7)
     pipeline._create_initialized_session.return_value = runtime
@@ -175,20 +176,20 @@ def test_actor_worker_prefetches_conditions_before_waiting_for_first_control() -
     service = LingBotWorldFastService(pipeline)
     state = _state()
 
-    def stop_after_prefetch(*_args: object, **_kwargs: object) -> None:
-        assert pipeline._create_initialized_session.called
-        assert streaming_runtime.create_session.called
+    def stop_before_control(*_args: object, **_kwargs: object) -> None:
+        assert not pipeline._create_initialized_session.called
+        assert not streaming_runtime.create_session.called
         state.active = False
         return None
 
-    with patch.object(service, "_next_realtime_control", side_effect=stop_after_prefetch):
+    with patch.object(service, "_next_realtime_control", side_effect=stop_before_control):
         service._run_actor_worker_loop(state, MagicMock(), MagicMock(), MagicMock())
 
-    streaming_runtime.create_session.assert_called_once()
+    streaming_runtime.create_session.assert_not_called()
     streaming_runtime.try_submit_chunk.assert_not_called()
 
 
-def test_actor_worker_prefetches_only_one_directional_chunk_ahead_of_output() -> None:
+def test_actor_worker_keeps_only_one_directional_chunk_in_flight() -> None:
     pipeline = MagicMock()
     runtime = LingBotWorldFastGenerationSession(
         config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8)), chunk_size=1),
@@ -221,7 +222,6 @@ def test_actor_worker_prefetches_only_one_directional_chunk_ahead_of_output() ->
 
     assert streaming_runtime.try_submit_chunk.call_args_list == [
         ((streaming_session, 0, pipeline._resolve_control.return_value), {}),
-        ((streaming_session, 1, pipeline._resolve_control.return_value), {}),
     ]
 
 
@@ -254,6 +254,18 @@ def test_release_stops_control_without_scheduling_stationary_generation() -> Non
     assert state.pressed_controls == set()
     assert state.pending_direction_command is None
     assert state.pending_inputs.get_nowait() == {"type": "direction_control"}
+
+
+def test_stop_chunk_terminates_the_worker_without_becoming_an_explicit_control() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    service._sessions["session-a"] = state
+
+    service.push_chunk("session-a", {"type": "stop"})
+
+    assert state.active is False
+    assert state.latest_explicit_control is None
+    assert state.pending_inputs.get_nowait() == {"type": "stop"}
 
 
 def test_held_direction_supplies_a_nonblocking_prefetch_snapshot() -> None:

@@ -29,6 +29,10 @@ def test_cli_stream_serve_forwards_livekit_options(monkeypatch) -> None:
             "2",
             "--worker-gpu-map",
             "0;1",
+            "--max-sessions-per-worker",
+            "4",
+            "--control-idle-timeout",
+            "12.5",
             "--queue-size",
             "3",
         ],
@@ -41,5 +45,7 @@ def test_cli_stream_serve_forwards_livekit_options(monkeypatch) -> None:
     assert captured["livekit_api_secret"] == "secret"
     assert captured["num_workers"] == 2
     assert captured["worker_gpu_map"] == "0;1"
+    assert captured["max_sessions_per_worker"] == 4
+    assert captured["control_idle_timeout"] == 12.5
     assert captured["queue_size"] == 3
     assert captured["skip_validation"] is True

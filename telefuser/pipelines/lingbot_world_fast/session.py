@@ -64,6 +64,7 @@ class LingBotWorldFastSessionConfig:
     control_pitch_limit_degrees: float = 85.0
     show_control_hud: bool = True
     benchmark_metrics: bool = False
+    control_idle_timeout: float = 10.0
 
 
 class LingBotWorldFastSessionStatus(str, Enum):

@@ -28,6 +28,8 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey \
   --livekit-api-secret secret \
+  --max-sessions-per-worker 2 \
+  --control-idle-timeout 10 \
   --port 8088 \
   --skip-validation
 
@@ -41,6 +43,11 @@ python examples/stream_server/livekit_bidirectional_demo.py \
 Open `http://127.0.0.1:8092`, choose an image, and click **Start**. For VS Code Remote SSH, forward TCP `8092`,
 `7880`, and `3478` to the same local ports; the API proxy means `8088` does not need forwarding. Stop the browser
 session first, then stop terminals 4 through 1 in reverse order.
+
+This command loads one LingBot service instance, not one instance per user. The one model worker retains up to two
+independent LiveKit/pipeline sessions and the LingBot execution lease time-slices their model chunks. The setting is
+not a generic replication option: server-push capacity remains one, and other bidirectional services must implement
+their own safe cross-session execution policy.
 
 The LiveKit Python SDK is part of TeleFuser's base dependencies; the LiveKit Server is installed and operated
 separately. See the [Stream Server guide](../../docs/en/stream_server.md) for the session API, data topics, worker

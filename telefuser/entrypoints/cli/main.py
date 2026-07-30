@@ -139,9 +139,30 @@ def serve(
 @click.option("--livekit-url", default=None, type=str, help="LiveKit server URL")
 @click.option("--livekit-api-key", default=None, type=str, help="LiveKit API key")
 @click.option("--livekit-api-secret", default=None, type=str, help="LiveKit API secret")
-@click.option("--num-workers", default=1, type=int, help="Number of TeleFuser model workers")
-@click.option("--worker-gpu-map", default=None, type=str, help="GPU groups, for example '0,1;2,3'")
-@click.option("--queue-size", default=0, type=int, help="Maximum queued sessions; 0 rejects when busy")
+@click.option(
+    "--num-workers",
+    default=1,
+    type=int,
+    help="Number of model workers; the current in-process runtime requires 1",
+)
+@click.option(
+    "--max-sessions-per-worker",
+    default=None,
+    type=int,
+    help="Maximum retained sessions per model worker",
+)
+@click.option(
+    "--worker-gpu-map", default=None, type=str, help="GPU group for the current worker, for example '0,1,2,3'"
+)
+@click.option(
+    "--queue-size", default=0, type=int, help="Maximum queued sessions; 0 rejects when retained slots are full"
+)
+@click.option(
+    "--control-idle-timeout",
+    default=None,
+    type=float,
+    help="Seconds without control activity before a LingBot execution lease may yield",
+)
 @click.option("--session-timeout", default=1800, type=int, help="Maximum session lifetime in seconds")
 @click.option("--token-ttl", default=3600, type=int, help="LiveKit join token TTL in seconds")
 @click.option("--controller-timeout", default=60, type=int, help="Seconds to keep a session after controller leaves")
@@ -150,7 +171,7 @@ def serve(
     "--worker-mode",
     type=click.Choice(["in-process", "process"], case_sensitive=False),
     default="in-process",
-    help="Worker isolation mode",
+    help="Worker isolation mode; the current runtime supports in-process only",
 )
 @click.option(
     "--security-level",
@@ -172,8 +193,10 @@ def stream_serve(
     livekit_api_key: str | None,
     livekit_api_secret: str | None,
     num_workers: int,
+    max_sessions_per_worker: int | None,
     worker_gpu_map: str | None,
     queue_size: int,
+    control_idle_timeout: float | None,
     session_timeout: int,
     token_ttl: int,
     controller_timeout: int,
@@ -208,8 +231,10 @@ def stream_serve(
         livekit_api_key=livekit_api_key,
         livekit_api_secret=livekit_api_secret,
         num_workers=num_workers,
+        max_sessions_per_worker=max_sessions_per_worker,
         worker_gpu_map=worker_gpu_map,
         queue_size=queue_size,
+        control_idle_timeout=control_idle_timeout,
         session_timeout=session_timeout,
         token_ttl=token_ttl,
         controller_timeout=controller_timeout,

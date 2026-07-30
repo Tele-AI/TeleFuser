@@ -87,6 +87,23 @@ def test_runtime_worker_callbacks_release_capacity() -> None:
     assert runtime.scheduler.health_snapshot()["workers_idle"] == 1
 
 
+def test_runtime_reports_livekit_connected_only_after_room_connection() -> None:
+    config = LiveKitServeConfig(livekit_url="wss://livekit.example", livekit_api_key="key", livekit_api_secret="secret")
+    runtime = LiveKitServeRuntime(
+        config=config,
+        pipeline_file="pipeline.py",
+        token_service=FakeTokenService(),
+        worker_pool=FakeWorkerPool(),
+    )
+    runtime.create_session(SessionCreateRequest(identity="controller-1"))
+
+    assert runtime.health().livekit_connected is False
+
+    runtime.on_worker_status("worker-0", "starting_pipeline")
+
+    assert runtime.health().livekit_connected is True
+
+
 def test_runtime_start_and_close_are_idempotent() -> None:
     async def _run() -> None:
         config = LiveKitServeConfig(

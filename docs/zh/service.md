@@ -54,6 +54,8 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
     --livekit-api-secret secret \
     --num-workers 1 \
     --worker-gpu-map 0,1,2,3 \
+    --max-sessions-per-worker 2 \
+    --control-idle-timeout 10 \
     -p 8088 \
     --skip-validation
 ```
@@ -94,6 +96,11 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 - LiveKit bidirectional session：交互式控制循环
 - 有状态会话，连续 chunk 生成
 - Worker 准入、controller/viewer 角色和重连处理
+
+当前流式 runtime 在唯一的进程内模型 worker 中加载一个服务实例。`0,1,2,3` 这样的 GPU map 是把四张卡
+分配给这个 worker，并不是创建四个服务实例。当实现能隔离各用户状态时，一个 `BidirectionalService` 实例
+可以保留多个 session；仓库中的 LingBot 服务还通过 execution lease 在 chunk 边界串行执行这些 session。
+容量与控制空闲语义见流式服务指南。
 
 完整流式文档请参阅[流式服务指南](stream_server.md)。
 
@@ -306,6 +313,8 @@ TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 - `telefuser serve` 只暴露请求-响应路由：`/v1/tasks/*`、`/v1/files/*`、`/v1/images/*`、`/v1/videos/*` 和 `/v1/service/*`。
 - `telefuser stream-serve` 暴露 `/v1/stream/*` 下的 LiveKit session 路由和 `/v1/service/*`。媒体与可靠
   control 消息经配置的 LiveKit 部署传输；它不暴露 task、file-download、OpenAI 兼容请求-响应或直接 SDP 路由。
+- 一个流服务进程当前拥有一个进程内模型 worker 和一个已加载服务实例。多个常驻 session 共享该实例；额外
+  模型副本需要独立进程和外部请求路由。
 
 ### Artifact 存储与清理
 

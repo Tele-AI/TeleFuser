@@ -8,6 +8,10 @@ LiveKit terminates browser WebRTC connections and provides rooms, reconnect hand
 data messages. TeleFuser owns model workers, admission, session state, pipeline execution, and token issuance. A
 LiveKit Cloud project or a self-hosted LiveKit Server is therefore required.
 
+This guide uses **service instance** for the single object returned by the pipeline file's `get_service()` function.
+It is loaded once by a model worker and may own multiple user sessions; a user session is not another service
+instance.
+
 ## Why LiveKit
 
 TeleFuser targets high-performance multimodal generation inference. Its streaming service must support continuous
@@ -118,24 +122,76 @@ the browser reconnecting while LiveKit and the model worker drain.
 ## Architecture and lifecycle
 
 ```text
-Browser ── HTTP /v1/stream/* ──> TeleFuser session API
-   │                                  │
-   └── LiveKit media/data ──> LiveKit room <── TeleFuser worker
-                                                   │
-                                                   └── stream pipeline actor graph
+Browser A ── HTTP API / LiveKit room A ── session runner A ─┐
+                                                            ├─ one model worker
+Browser B ── HTTP API / LiveKit room B ── session runner B ─┘        │
+                                                                     └─ one shared service instance
+                                                                            ├─ pipeline session A state
+                                                                            └─ pipeline session B state
 ```
 
+| Term | Lifetime and ownership |
+|---|---|
+| Service process | One `telefuser stream-serve` process containing the HTTP API, admission scheduler, and current in-process worker. |
+| Model worker | Loads one service instance and owns retained-session capacity. The current runtime creates exactly one. |
+| Service instance | The result of one `get_service()` call. Model weights and the pipeline actor graph are loaded once and shared by its sessions. |
+| Session runner | One LiveKit room connection and transport task for an admitted HTTP session. Runners share the worker's service instance. |
+| Pipeline session | Per-user state created through `BidirectionalService.create_session()`, including model/cache/control state owned by that session. |
+
+`--worker-gpu-map 0,1,2,3` assigns four devices to the one model worker and its one service instance. It does not
+create four workers or four model replicas.
+
 1. The controller creates a session through `POST /v1/stream/sessions`.
-2. The scheduler admits, queues, or rejects it and assigns one worker.
+2. The scheduler admits, queues, or rejects it and assigns one retained-session slot on a worker.
 3. TeleFuser creates the LiveKit room and returns a scoped controller token.
 4. The worker joins the room and starts the pipeline.
 5. Video and PCM16 audio are published as LiveKit tracks. Status and metrics use reliable data topics.
 6. For `BidirectionalService`, only the controller can send normalized control messages to the pipeline.
 7. Deletion, timeout, controller departure, or pipeline completion drains actor-owned state and closes the room.
 
-Each streaming stage worker remains owned by one pipeline actor. Reconnects do not move actor-owned cache state
-between workers. A server-push pipeline starts from its request config and produces chunks without incoming controls;
-a bidirectional pipeline additionally exposes create, pull, control, and close operations.
+Each streaming stage worker remains owned by one pipeline actor. Here, a stage worker is an internal pipeline
+execution object, not the LiveKit model worker in the table above. Reconnects do not move actor-owned cache state. A
+server-push pipeline starts from its request config and produces chunks without incoming controls; a bidirectional
+pipeline additionally exposes create, pull, control, and close operations.
+
+## LingBot multi-session time slicing
+
+`--max-sessions-per-worker` controls how many LiveKit sessions one model worker may retain; it does not create more
+service instances. Capacity above one requires a `BidirectionalService`, because server-push sessions do not have a
+control-idle signal. The framework provides the room runners and retained-session admission, but the underlying
+service must provide session isolation and any required compute serialization.
+
+The checked-in LingBot-World-Fast and LingBot-World v2 services implement that serialization with one execution lease
+inside their shared service instance. Enable two retained sessions with, for example:
+
+```bash
+telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+  --max-sessions-per-worker 2 --control-idle-timeout 10 --skip-validation
+```
+
+Each admitted LingBot room creates an independent pipeline session, control queue, noise state, VAE state, and model
+cache within the shared service instance. A valid `control_state`, `control`, `prompt`, or `reset` message renews that
+session's lease activity. When another session is waiting and the current holder has received no valid control for
+`control_idle_timeout` seconds, the holder stops admitting new chunks and yields after its current chunk completes.
+The waiting session is then granted the lease; the parked session can request the lease again when its controller
+sends a new control message.
+
+This is chunk-boundary time slicing, not continuous batching or replication: the LingBot service instance has at most
+one session chunk in flight. `control_idle_timeout` does not close the holder, release its retained-session slot, or
+free its cache; it only permits a waiting session to take the lease at a chunk boundary. A parked session therefore
+still consumes its per-session GPU memory. Set `max_sessions_per_worker` from measured memory headroom. Controllers
+that represent a held input must resend `control_state` periodically; the checked-in browser demo sends a one-second
+heartbeat while a control remains pressed.
+
+There are two separate FIFO waits:
+
+| Wait | Applies to | Capacity and observable result |
+|---|---|---|
+| HTTP admission queue | Requests made after all retained-session slots are occupied | Bounded by `queue_size`; returns HTTP 202 with `queue_position`, or HTTP 429 when disabled/full. |
+| LingBot execution-lease queue | Admitted sessions requesting model execution | Bounded by the number of retained LingBot sessions; emits `lease_queued`, `lease_granted`, and `lease_parked` status events. |
+
+Releasing the execution lease does not move a session back to the HTTP admission queue. Only terminal session cleanup
+releases its retained-session slot and admits the next HTTP-queued request.
 
 ## HTTP API
 
@@ -181,8 +237,14 @@ The complete-chunk policy maps this request to 60 chunks and 59.75 seconds of ou
 VAE state advance incrementally. The reproducible LiveKit workload and dated four-H100 result are documented in
 [TeleFuser and AIPerf](benchmark_aiperf.md).
 
-A successful response includes `session_id`, `room`, `livekit_url`, `token`, `worker_id`, and `status`. A queued
-session returns HTTP 202 with `queue_position`; a full zero-length queue returns HTTP 429.
+A successful response includes `session_id`, `room`, `livekit_url`, `token`, `worker_id`, and `status`. Sessions fill
+retained slots on the worker before entering the HTTP admission queue. A queued session returns HTTP 202 with
+`queue_position`; a full zero-length queue returns HTTP 429.
+
+In `/v1/stream/health`, `workers_busy` counts model workers with at least one retained session; it does not count
+sessions or currently executing chunks. `workers_idle` counts workers with no retained sessions, and `queued_sessions`
+is only the HTTP admission queue depth. `livekit_connected=false` is normal before any session runner has connected;
+it does not mean that the model or service instance failed to load.
 
 Create a viewer token without granting control permission:
 
@@ -229,7 +291,8 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 ```
 
 Important options are `--host`, `--port`, `--livekit-url`, `--livekit-api-key`, `--livekit-api-secret`,
-`--num-workers`, `--worker-gpu-map`, `--queue-size`, `--session-timeout`, `--token-ttl`,
+`--num-workers`, `--worker-gpu-map`, `--max-sessions-per-worker`, `--control-idle-timeout`, `--queue-size`,
+`--session-timeout`, `--token-ttl`,
 `--controller-timeout`, `--room-empty-timeout`, and `--worker-mode`.
 
 | Environment variable | Default | Meaning |
@@ -239,16 +302,20 @@ Important options are `--host`, `--port`, `--livekit-url`, `--livekit-api-key`, 
 | `TELEFUSER_LIVEKIT_API_SECRET` | required | API secret used to mint room tokens |
 | `TELEFUSER_LIVEKIT_HOST` | `0.0.0.0` | HTTP API bind host |
 | `TELEFUSER_LIVEKIT_PORT` | `8088` | HTTP API port |
-| `TELEFUSER_LIVEKIT_NUM_WORKERS` | `1` | Model workers |
-| `TELEFUSER_LIVEKIT_WORKER_GPU_MAP` | unset | Semicolon-separated GPU groups, such as `0,1;2,3` |
-| `TELEFUSER_LIVEKIT_QUEUE_SIZE` | `0` | Queued sessions; zero rejects when busy |
+| `TELEFUSER_LIVEKIT_NUM_WORKERS` | `1` | Model workers; the current in-process runtime requires exactly `1` |
+| `TELEFUSER_LIVEKIT_WORKER_GPU_MAP` | unset | GPU group assigned to the one worker, such as `0,1,2,3` |
+| `TELEFUSER_LIVEKIT_MAX_SESSIONS_PER_WORKER` | `1` | Retained bidirectional sessions per model worker |
+| `TELEFUSER_LIVEKIT_CONTROL_IDLE_TIMEOUT` | `10` | Inactive seconds before a waiting session may take the execution lease |
+| `TELEFUSER_LIVEKIT_QUEUE_SIZE` | `0` | Queued sessions; zero rejects when all retained-session slots are full |
 | `TELEFUSER_LIVEKIT_SESSION_TIMEOUT` | `1800` | Maximum session lifetime in seconds |
 | `TELEFUSER_LIVEKIT_TOKEN_TTL` | `3600` | Join-token lifetime in seconds |
 | `TELEFUSER_LIVEKIT_CONTROLLER_TIMEOUT` | `60` | Grace period after controller departure |
 | `TELEFUSER_LIVEKIT_ROOM_EMPTY_TIMEOUT` | `30` | Grace period after the room becomes empty |
 
-The current runtime supports one in-process worker. Use separate service processes for additional workers until
-process-worker isolation is implemented. `--skip-validation` is intended for trusted local files, not production.
+The current runtime requires `worker_mode=in-process` and starts exactly one model worker. Additional model replicas
+require separate `stream-serve` processes and external request routing until process-worker isolation is implemented;
+their admission queues and session state are independent. `--skip-validation` is intended for trusted local files,
+not production.
 
 ## Production deployment
 
@@ -266,7 +333,7 @@ process-worker isolation is implemented. `--skip-validation` is intended for tru
   inspect LiveKit participant/track logs.
 - **Browser reconnects repeatedly:** verify signaling, TURN, firewall, and advertised LiveKit node addresses.
 - **Controls are ignored:** ensure the sender used the controller token, topic `tf.control`, and a supported control.
-- **HTTP 429:** all workers are busy and `queue_size` is zero, or the queue is full.
+- **HTTP 429:** all retained-session slots are full and `queue_size` is zero, or the queue is full.
 - **Session remains active:** call the session DELETE endpoint and check controller/room timeout settings.
 - **Local LiveKit connection returns proxy HTTP 503:** some native SDK paths honor `HTTP_PROXY` but not
   `NO_PROXY`. Start TeleFuser with `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and their lowercase variants unset when

@@ -42,6 +42,21 @@ CUDA device placement 本身不代表串行执行或资源所有权。
 edge 和输出均有显式容量。下游 stage 无法继续接收任务时，调度器施加 backpressure，而不是无限保留 tensor。
 因此管线实现必须把提交视为受准入控制的操作，而不是无界队列。
 
+## 与流服务调度的关系
+
+系统中有三个边界不同的 scheduler，不能把它们视为同一条队列：
+
+| 边界 | 所有者 | 用途 |
+| --- | --- | --- |
+| 常驻 session 准入 | LiveKit runtime | 把 HTTP session 分配到模型 worker 的容量，或放入有界 HTTP 准入队列。 |
+| 跨 session 模型执行 | LingBot 服务实例 | 授予唯一 execution lease，使常驻 LingBot session 每次只提交一个完整 chunk。 |
+| Pipeline 内数据流 | `StreamingPipelineOrchestrator` | 以有界 artifact 和 per-session 顺序调度 encode、denoise、decode stage。 |
+
+当前 LiveKit runtime 在一个进程内模型 worker 中加载一个服务实例，多个 LiveKit room runner 及其 pipeline
+session 共享它。`max_sessions_per_worker` 只改变常驻 session 准入，不会加载更多服务实例，也不会改变图的
+edge capacity。对于 LingBot，服务级 lease 包围一个 session chunk；流式 orchestrator 仍可让这个 chunk 的独立
+stage 相互重叠。其他 `BidirectionalService` 实现必须自行定义跨 session 并发策略。
+
 ## LingBot Condition 预取
 
 LingBot 的 condition encode 不依赖对应 control，因此 session 使用固定深度为 2 的 lookahead，让 VAE encode
@@ -61,9 +76,9 @@ actor 执行。
 
 ## Actor 所有权与 Session 生命周期
 
-一个有状态 worker 在整个生命周期内只能有一个 actor owner。特别是，一个 `ParallelWorker` 不得由 session
-facade 直接调用，也不得被多个 stage actor 共享。该约束保证 result ordering，并让 cache 更新与释放发生在
-唯一、明确的执行上下文中。
+一个有状态 stage worker 在整个生命周期内只能有一个 actor owner。这里的 pipeline stage worker 不是拥有常驻
+session 容量的 LiveKit 模型 worker。特别是，一个 `ParallelWorker` 不得由 session facade 直接调用，也不得被
+多个 stage actor 共享。该约束保证 result ordering，并让 cache 更新与释放发生在唯一、明确的执行上下文中。
 
 session 关闭按以下顺序执行：
 

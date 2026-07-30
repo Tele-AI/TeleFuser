@@ -272,6 +272,8 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
     --livekit-api-secret secret \
     --num-workers 1 \
     --worker-gpu-map 0,1,2,3 \
+    --max-sessions-per-worker 2 \
+    --control-idle-timeout 10 \
     --port 8088 \
     --skip-validation
 ```
@@ -293,9 +295,16 @@ signaling port `7880`, and TURN listener `3478`; `8088` does not need forwarding
 select an initial image, and click **Start**. See the [Stream Server guide](../../docs/en/stream_server.md) for the API
 contract, control topics, shutdown order, troubleshooting, and production deployment notes.
 
-The current runtime supports exactly one `in-process` worker. One admitted LiveKit room owns one model pipeline
-instance until the session is closed or expires. Use separate service processes for additional workers until
-process-worker mode is implemented.
+The current runtime supports exactly one `in-process` model worker. That worker calls `get_service()` once and
+loads one LingBot service/model pipeline instance across its four-device group; it does not load one instance per GPU
+or per room. Every admitted LiveKit room creates independent pipeline-session state inside the shared instance.
+
+`max_sessions_per_worker=2` permits two such retained sessions. The LingBot service's single execution lease lets
+only one session run a model chunk at a time. If another session is waiting, a holder with no valid control activity
+for `control_idle_timeout` seconds yields after its current chunk; its cache and admission slot remain allocated.
+The browser sends a one-second `control_state` heartbeat while a key remains held. Size retained-session capacity
+from measured GPU memory, and use separate service processes plus external routing for additional model replicas
+until process-worker mode is implemented.
 
 Select the initial image in the browser before connecting; it is included in the session request. Real-time camera
 poses come from LiveKit control messages. The LingBot-World v2 service uses the bundled `intrinsics.npy` and its `832x480`

@@ -23,6 +23,7 @@ from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
 
 from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
+from .lease import ExecutionLeaseManager, ExecutionLeaseTransition
 from .pipeline import LingBotWorldFastPipeline
 from .session import (
     LingBotWorldFastDirectionCommand,
@@ -66,7 +67,7 @@ DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"chunk", "preview"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"done", "error"})
 _MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
-_CONTROL_PREFETCH_DEPTH = 1
+_CONTROL_PREFETCH_DEPTH = 0
 
 
 class LingBotWorldFastService:
@@ -94,6 +95,8 @@ class LingBotWorldFastService:
         self.output_queue_size = int(output_queue_size)
         self.close_timeout = float(close_timeout)
         self._sessions: dict[str, LingBotWorldFastSessionState] = {}
+        self._sessions_lock = threading.RLock()
+        self._lease_manager = ExecutionLeaseManager()
 
     def start(self) -> None:
         self.pipeline.warmup(self._warmup_session_config())
@@ -121,12 +124,16 @@ class LingBotWorldFastService:
         )
 
     def stop(self) -> None:
-        for session_id in list(self._sessions.keys()):
+        with self._sessions_lock:
+            session_ids = list(self._sessions)
+        for session_id in session_ids:
             self.close_session(session_id)
+        self._lease_manager.close()
         self.pipeline.close()
 
     def has_session(self, session_id: str) -> bool:
-        return session_id in self._sessions
+        with self._sessions_lock:
+            return session_id in self._sessions
 
     @staticmethod
     def _load_image(config: dict) -> Image.Image:
@@ -180,13 +187,11 @@ class LingBotWorldFastService:
         return 4 * (latent_frames - 1) + 1
 
     def create_session(self, config: dict) -> str:
-        for stale_session_id, stale_state in list(self._sessions.items()):
+        with self._sessions_lock:
+            existing_sessions = list(self._sessions.items())
+        for stale_session_id, stale_state in existing_sessions:
             if not stale_state.active:
                 self.close_session(stale_session_id)
-        if self._sessions:
-            raise RuntimeError(
-                "LingBotWorldFastService supports one active session at a time; stop it before reconnecting"
-            )
         defaults = self.default_session_config
 
         session_id = config.get("session_id") or str(uuid.uuid4())
@@ -220,6 +225,9 @@ class LingBotWorldFastService:
             raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
         if max_duration_seconds > self.max_generation_seconds:
             raise ValueError(f"max_duration_seconds must not exceed {self.max_generation_seconds:g}")
+        control_idle_timeout = float(config.get("control_idle_timeout", defaults.get("control_idle_timeout", 10.0)))
+        if control_idle_timeout <= 0:
+            raise ValueError(f"control_idle_timeout must be positive, got {control_idle_timeout}")
 
         frame_policy = str(config.get("frame_policy", defaults.get("frame_policy", "truncate")))
         requested_frame_num = config.get("frame_num")
@@ -277,6 +285,7 @@ class LingBotWorldFastService:
             ),
             show_control_hud=bool(config.get("show_control_hud", defaults.get("show_control_hud", True))),
             benchmark_metrics=bool(config.get("benchmark_metrics", defaults.get("benchmark_metrics", False))),
+            control_idle_timeout=control_idle_timeout,
         )
         control_context = self.pipeline.control_context(session_config)
         state = LingBotWorldFastSessionState(
@@ -284,9 +293,60 @@ class LingBotWorldFastService:
             control_context=control_context,
             output_queue=asyncio.Queue(maxsize=self.output_queue_size),
         )
-        self._sessions[session_id] = state
+        with self._sessions_lock:
+            if session_id in self._sessions:
+                raise ValueError(f"LingBotWorld session {session_id!r} already exists")
+            self._sessions[session_id] = state
+        try:
+            self._lease_manager.register(session_id, idle_timeout=control_idle_timeout)
+        except BaseException:
+            with self._sessions_lock:
+                self._sessions.pop(session_id, None)
+            raise
         logger.info(f"LingBotWorld session created: {session_id}")
         return session_id
+
+    def _session_state(self, session_id: str) -> LingBotWorldFastSessionState | None:
+        with self._sessions_lock:
+            return self._sessions.get(session_id)
+
+    def _ensure_execution_lease(
+        self,
+        session_id: str,
+        state: LingBotWorldFastSessionState,
+        *,
+        activate: bool = False,
+    ) -> None:
+        try:
+            self._lease_manager.snapshot(session_id)
+        except KeyError:
+            self._lease_manager.register(session_id, idle_timeout=state.config.control_idle_timeout)
+        if activate:
+            transitions = self._lease_manager.record_activity(session_id, now=0.0)
+            self._publish_lease_transitions(transitions)
+
+    def _publish_lease_transitions(self, transitions: tuple[ExecutionLeaseTransition, ...]) -> None:
+        stage_by_status = {
+            "queued": "lease_queued",
+            "active": "lease_granted",
+            "parked": "lease_parked",
+        }
+        for transition in transitions:
+            stage = stage_by_status.get(transition.status)
+            state = self._session_state(transition.session_id)
+            if stage is None or state is None:
+                continue
+            payload: dict[str, object] = {
+                "type": "status",
+                "stage": stage,
+                "timestamp": time.time(),
+            }
+            if transition.status == "queued":
+                try:
+                    payload["queue_position"] = self._lease_manager.snapshot(transition.session_id).queue_position
+                except KeyError:
+                    continue
+            self._put_output(state, payload)
 
     @staticmethod
     def _put_output(state: LingBotWorldFastSessionState, payload: dict) -> None:
@@ -810,6 +870,7 @@ class LingBotWorldFastService:
         chunk_index: int,
         emit_status: Callable[..., None],
         block: bool,
+        idle_callback: Callable[[], None] | None = None,
     ) -> tuple[object, list[str] | None, float | None] | None:
         """Select one queued tap or snapshot a direction that remains held."""
         while state.active:
@@ -839,8 +900,14 @@ class LingBotWorldFastService:
                 if not block:
                     return None
                 try:
-                    incoming = state.pending_inputs.get(block=True)
-                except queue.Empty:  # pragma: no cover - Queue.get blocks here
+                    incoming = state.pending_inputs.get(
+                        block=True,
+                        timeout=0.25 if idle_callback is not None else None,
+                    )
+                except queue.Empty:
+                    if idle_callback is not None:
+                        idle_callback()
+                        continue
                     return None
                 if incoming.get("type") == "stop":
                     state.active = False
@@ -913,11 +980,45 @@ class LingBotWorldFastService:
         control_context: LingBotWorldFastControlContext,
         control_builder: LingBotWorldFastControlBuilder,
         emit_status: Callable[..., None],
+        *,
+        session_id: str | None = None,
     ) -> None:
         """Drive dynamic control ingress and ordered output through the shared actor graph."""
+        if session_id is None:
+            with self._sessions_lock:
+                session_id = next(
+                    (candidate for candidate, current in self._sessions.items() if current is state),
+                    f"direct-{id(state)}",
+                )
+            self._ensure_execution_lease(session_id, state, activate=True)
+
+        def yield_idle_lease() -> None:
+            transitions = self._lease_manager.yield_if_idle(session_id)
+            self._publish_lease_transitions(transitions)
+
+        first_item = self._next_realtime_control(
+            state,
+            control_context,
+            control_builder,
+            0,
+            emit_status,
+            block=True,
+            idle_callback=yield_idle_lease,
+        )
+        if first_item is None:
+            return
+        if not self._lease_manager.wait_for_turn(session_id) or not state.active:
+            return
+        if not self._lease_manager.begin_chunk(session_id):
+            raise RuntimeError("LingBot execution lease changed before runtime initialization")
+
         runtime_measurement = self._start_benchmark_measurement(state)
         try:
-            runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
+            try:
+                runtime = self.pipeline._create_initialized_session(state.config, progress_callback=emit_status)
+            except BaseException:
+                self._lease_manager.abort_chunk(session_id)
+                raise
         finally:
             runtime_facts = self._finish_benchmark_measurement(runtime_measurement)
         state.generation_session = runtime
@@ -938,9 +1039,6 @@ class LingBotWorldFastService:
             runtime=self._runtime_metadata(runtime),
             **({"measurement": {"name": "runtime_creation", **runtime_facts}} if runtime_facts is not None else {}),
         )
-        first_item = self._next_realtime_control(state, control_context, control_builder, 0, emit_status, block=True)
-        if first_item is None:
-            return
 
         submitted = 0
         controls_by_chunk: dict[int, list[str] | None] = {}
@@ -952,14 +1050,28 @@ class LingBotWorldFastService:
             if error is not None:
                 raise RuntimeError("LingBot streaming scheduler failed") from error
 
-        def submit_chunk(item: tuple[object, list[str] | None, float | None]) -> None:
+        def submit_chunk(
+            item: tuple[object, list[str] | None, float | None],
+            *,
+            lease_reserved: bool = False,
+        ) -> None:
             nonlocal submitted
+            if not lease_reserved:
+                if not self._lease_manager.wait_for_turn(session_id) or not state.active:
+                    return
+                if not self._lease_manager.begin_chunk(session_id):
+                    raise RuntimeError("LingBot execution lease changed before chunk submission")
             deferred_control, applied_controls, control_received_at = item
-            control = self.pipeline._resolve_control(deferred_control)
-            self.pipeline._validate_control(runtime, control)
+            try:
+                control = self.pipeline._resolve_control(deferred_control)
+                self.pipeline._validate_control(runtime, control)
+            except BaseException:
+                self._lease_manager.abort_chunk(session_id)
+                raise
             chunk_measurement = self._start_benchmark_measurement(state)
             if not streaming_runtime.try_submit_chunk(streaming_session, submitted, control):
                 self._finish_benchmark_measurement(chunk_measurement)
+                self._lease_manager.abort_chunk(session_id)
                 raise RuntimeError("LingBot streaming ingress became unavailable after capacity check")
             controls_by_chunk[submitted] = applied_controls
             control_received_at_by_chunk[submitted] = control_received_at
@@ -975,7 +1087,7 @@ class LingBotWorldFastService:
                 state.chunk_started_at_monotonic[submitted] = time.monotonic()
             submitted += 1
 
-        submit_chunk(first_item)
+        submit_chunk(first_item, lease_reserved=True)
         while state.active and runtime.current_chunk_index < runtime.chunk_count:
             raise_scheduler_error()
             outputs = streaming_runtime.poll_frames(streaming_session)
@@ -1053,6 +1165,12 @@ class LingBotWorldFastService:
                         else {}
                     ),
                 )
+                if not streaming_runtime.wait_until_idle(streaming_session, timeout=self.close_timeout):
+                    raise TimeoutError(
+                        f"Timed out waiting for LingBot background work before yielding session {session_id!r}"
+                    )
+                transitions = self._lease_manager.finish_chunk(session_id)
+                self._publish_lease_transitions(transitions)
 
             admitted_prefetch = False
             while (
@@ -1084,6 +1202,7 @@ class LingBotWorldFastService:
                     submitted,
                     emit_status,
                     block=True,
+                    idle_callback=yield_idle_lease,
                 )
                 if item is None:
                     break
@@ -1094,7 +1213,7 @@ class LingBotWorldFastService:
                 streaming_runtime.wait_until_idle(streaming_session, timeout=0.05)
 
     def _worker_loop(self, session_id: str) -> None:
-        state = self._sessions.get(session_id)
+        state = self._session_state(session_id)
         if state is None or state.output_queue is None or state.loop is None:
             return
 
@@ -1123,7 +1242,7 @@ class LingBotWorldFastService:
             self._emit_preview_frame(state)
             control_context = state.control_context or self.pipeline.control_context(state.config)
             control_builder = LingBotWorldFastControlBuilder(control_context)
-            self._run_actor_worker_loop(state, control_context, control_builder, emit_status)
+            self._run_actor_worker_loop(state, control_context, control_builder, emit_status, session_id=session_id)
         except Exception as exc:
             logger.exception(f"LingBotWorld worker failed: session={session_id}, error={exc}")
             self._put_output(
@@ -1137,6 +1256,7 @@ class LingBotWorldFastService:
             )
         finally:
             state.active = False
+            self._lease_manager.deactivate(session_id)
             try:
                 self._release_generation_session(state)
             except Exception as exc:
@@ -1151,6 +1271,8 @@ class LingBotWorldFastService:
                     },
                 )
             finally:
+                transitions = self._lease_manager.release(session_id)
+                self._publish_lease_transitions(transitions)
                 self._put_output(
                     state,
                     {
@@ -1161,8 +1283,9 @@ class LingBotWorldFastService:
                     },
                 )
                 self._put_output(state, {"type": "done"})
-                if self._sessions.get(session_id) is state:
-                    self._sessions.pop(session_id, None)
+                with self._sessions_lock:
+                    if self._sessions.get(session_id) is state:
+                        self._sessions.pop(session_id, None)
 
     def _runtime_metadata(self, runtime: LingBotWorldFastGenerationSession) -> dict[str, int]:
         return {
@@ -1178,10 +1301,18 @@ class LingBotWorldFastService:
         }
 
     def push_chunk(self, session_id: str, chunk: dict) -> None:
-        state = self._sessions.get(session_id)
+        state = self._session_state(session_id)
         if state is None or not state.active:
             return
+        if chunk.get("type") == "stop":
+            state.active = False
+            self._lease_manager.deactivate(session_id)
+            self._stop_control_worker(state)
+            return
+        self._ensure_execution_lease(session_id, state)
         received_at_monotonic = time.monotonic()
+        transitions = self._lease_manager.record_activity(session_id, now=received_at_monotonic)
+        self._publish_lease_transitions(transitions)
         is_direction_action = chunk.get("type") in {"control", "control_state"} and self._update_direction_controls(
             state,
             chunk,
@@ -1199,7 +1330,7 @@ class LingBotWorldFastService:
         self._wake_control_worker(state)
 
     async def pull_chunks(self, session_id: str) -> AsyncGenerator[dict, None]:
-        state = self._sessions.get(session_id)
+        state = self._session_state(session_id)
         if state is None or state.output_queue is None:
             return
 
@@ -1231,10 +1362,11 @@ class LingBotWorldFastService:
         effective_timeout = self.close_timeout if timeout is None else timeout
         if effective_timeout <= 0:
             raise ValueError(f"timeout must be positive, got {effective_timeout}")
-        state = self._sessions.get(session_id)
+        state = self._session_state(session_id)
         if state is None:
             return
         state.active = False
+        self._lease_manager.deactivate(session_id)
         self._stop_control_worker(state)
         worker = state.worker_thread
         if worker is not None and worker.is_alive() and worker is not threading.current_thread():
@@ -1246,5 +1378,9 @@ class LingBotWorldFastService:
             return
         if worker is None or not worker.is_alive():
             self._release_generation_session(state)
-            self._sessions.pop(session_id, None)
+            transitions = self._lease_manager.release(session_id)
+            self._publish_lease_transitions(transitions)
+            with self._sessions_lock:
+                if self._sessions.get(session_id) is state:
+                    self._sessions.pop(session_id, None)
         logger.info(f"LingBotWorld session closed: {session_id}")

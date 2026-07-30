@@ -23,6 +23,8 @@ def test_stream_demo_preserves_controls_and_uses_livekit_transport() -> None:
         "{ rtcConfig: TURN_RTC_CONFIG }",
         "topic: CONTROL_TOPIC",
         'type: "control_state"',
+        "CONTROL_HEARTBEAT_MS = 1000",
+        "if (pressedControls.size > 0)",
         'event: "reset"',
         'event: "reset_pose"',
         'type: "stop"',

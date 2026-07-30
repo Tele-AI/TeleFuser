@@ -6,6 +6,9 @@ TeleFuser 仅使用 LiveKit 作为流式传输后端。`telefuser stream-serve` 
 LiveKit 负责浏览器 WebRTC 连接、room、重连、媒体传输和可靠数据消息；TeleFuser 负责模型 worker、准入、
 session 状态、pipeline 执行和 token 签发。因此必须使用 LiveKit Cloud 或自托管 LiveKit Server。
 
+本文中的**服务实例**特指 pipeline 文件的 `get_service()` 返回的单个对象。模型 worker 只加载它一次，它可以
+拥有多个用户 session；一个用户 session 并不是一个新的服务实例。
+
 ## 为什么选择 LiveKit
 
 TeleFuser 面向高性能多模态生成模型推理，流式服务需要同时支持持续媒体输出、双向控制和长时间运行的
@@ -108,23 +111,72 @@ listener、静态密码、禁用 TLS 和 `--allow-loopback-peers` 只适用于�
 ## 架构与生命周期
 
 ```text
-Browser ── HTTP /v1/stream/* ──> TeleFuser session API
-   │                                  │
-   └── LiveKit media/data ──> LiveKit room <── TeleFuser worker
-                                                   │
-                                                   └── stream pipeline actor graph
+Browser A ── HTTP API / LiveKit room A ── session runner A ─┐
+                                                            ├─ 一个模型 worker
+Browser B ── HTTP API / LiveKit room B ── session runner B ─┘       │
+                                                                    └─ 一个共享服务实例
+                                                                           ├─ pipeline session A 状态
+                                                                           └─ pipeline session B 状态
 ```
 
+| 术语 | 生命周期与所有权 |
+|---|---|
+| 服务进程 | 一个 `telefuser stream-serve` 进程，包含 HTTP API、准入 scheduler 和当前进程内 worker。 |
+| 模型 worker | 加载一个服务实例并拥有常驻 session 容量；当前 runtime 只创建一个。 |
+| 服务实例 | 一次 `get_service()` 的返回值；模型权重和 pipeline actor graph 只加载一次，由它的 session 共享。 |
+| Session runner | 一个已准入 HTTP session 对应的 LiveKit room 连接和传输任务；多个 runner 共享 worker 的服务实例。 |
+| Pipeline session | `BidirectionalService.create_session()` 创建的用户状态，包含该用户自有的模型/cache/control 状态。 |
+
+`--worker-gpu-map 0,1,2,3` 是把四张卡分配给一个模型 worker 及其一个服务实例，并不会创建四个 worker 或
+四个模型副本。
+
 1. Controller 通过 `POST /v1/stream/sessions` 创建 session。
-2. Scheduler 对其准入、排队或拒绝，并绑定一个 worker。
+2. Scheduler 对其准入、排队或拒绝，并分配 worker 上的一个常驻 session 槽位。
 3. TeleFuser 创建 LiveKit room，返回权限受限的 controller token。
 4. Worker 加入 room 并启动 pipeline。
 5. 视频和 PCM16 音频作为 LiveKit track 发布；状态与指标使用可靠 data topic。
 6. 对 `BidirectionalService`，只有 controller 可以把规范化 control 消息送入 pipeline。
 7. 删除、超时、controller 离开或 pipeline 完成时，按 actor 所有权释放状态并关闭 room。
 
-每个流式 stage worker 只属于一个 pipeline actor；重连不会在 worker 之间搬移 actor cache。Server-push
-pipeline 根据请求 config 启动并持续输出 chunk；bidirectional pipeline 额外提供 create、pull、control、close。
+每个流式 stage worker 只属于一个 pipeline actor。这里的 stage worker 是 pipeline 内部执行对象，不是上表中的
+LiveKit 模型 worker。重连不会搬移 actor cache。Server-push pipeline 根据请求 config 启动并持续输出 chunk；
+bidirectional pipeline 额外提供 create、pull、control、close。
+
+## LingBot 多 session 时分复用
+
+`--max-sessions-per-worker` 控制一个模型 worker 可以保留多少个 LiveKit session，不会创建更多服务实例。
+容量大于 1 时必须使用 `BidirectionalService`，因为 server-push session 没有控制空闲信号。框架负责 room
+runner 与常驻 session 准入；底层服务仍需自行保证 session 状态隔离，并在需要时串行化模型计算。
+
+仓库中的 LingBot-World-Fast 和 LingBot-World v2 服务在共享服务实例内使用一个 execution lease 完成串行化。
+例如，允许两个常驻 session：
+
+```bash
+telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+  --max-sessions-per-worker 2 --control-idle-timeout 10 --skip-validation
+```
+
+每个已准入 LingBot room 都会在共享服务实例中创建独立的 pipeline session、control queue、noise 状态、VAE
+状态和模型 cache。合法的 `control_state`、`control`、`prompt` 或 `reset` 消息会刷新该 session 的 lease
+活跃时间。当有其他 session 等待，且当前持有者超过 `control_idle_timeout` 秒没有收到合法控制消息时，当前
+持有者停止提交新 chunk，并在正在执行的 chunk 完成后交出 lease。等待 session 随后获得 lease；被挂起的
+session 在 controller 再次发送控制消息后可以重新申请 lease。
+
+这是 chunk 边界上的时分复用，不是 continuous batching 或模型副本：LingBot 服务实例最多只有一个 session
+chunk 在途。`control_idle_timeout` 不会关闭当前持有者、释放它的常驻 session 槽位或清除 cache；它只允许等待
+session 在 chunk 边界取得 lease。挂起 session 仍占用该用户状态对应的 GPU 显存，因此应根据实测显存余量设置
+`max_sessions_per_worker`。对于持续按住的输入，controller 必须周期性重发 `control_state`；仓库内浏览器
+demo 会在有按键按下时每秒发送一次心跳。
+
+系统中有两条相互独立的 FIFO 等待队列：
+
+| 等待 | 适用对象 | 容量与可观测结果 |
+|---|---|---|
+| HTTP 准入队列 | 所有常驻 session 槽位占满后到达的请求 | 由 `queue_size` 限制；返回带 `queue_position` 的 HTTP 202，禁用或满时返回 HTTP 429。 |
+| LingBot execution-lease 队列 | 已准入且正在申请模型执行权的 session | 上限为常驻 LingBot session 数；发出 `lease_queued`、`lease_granted`、`lease_parked` 状态。 |
+
+交出 execution lease 不会让 session 回到 HTTP 准入队列；只有 session 终态清理才释放常驻槽位，并准入下一条
+HTTP 排队请求。
 
 ## HTTP API
 
@@ -169,8 +221,13 @@ curl -X POST http://127.0.0.1:8088/v1/stream/sessions \
 `sink_size=6`，因此 KV 容量保持固定，session 自有的 noise 与 VAE 状态增量推进。可复现 LiveKit workload
 和日期化的四卡实测见 [TeleFuser 与 AIPerf](benchmark_aiperf.md)。
 
-成功响应包含 `session_id`、`room`、`livekit_url`、`token`、`worker_id` 和 `status`。排队时返回 HTTP 202
-和 `queue_position`；队列长度为零且 worker 全忙时返回 HTTP 429。
+成功响应包含 `session_id`、`room`、`livekit_url`、`token`、`worker_id` 和 `status`。session 会先占用
+worker 的常驻 session 槽位；槽位全部占满后才进入 HTTP 准入队列。排队时返回 HTTP 202 和
+`queue_position`；队列长度为零且槽位全满时返回 HTTP 429。
+
+在 `/v1/stream/health` 中，`workers_busy` 统计至少保留了一个 session 的模型 worker 数，不是 session 数或
+当前正在计算的 chunk 数；`workers_idle` 统计没有常驻 session 的 worker；`queued_sessions` 只表示 HTTP 准入
+队列深度。尚无 session runner 连接时，`livekit_connected=false` 是正常状态，并不表示模型或服务实例加载失败。
 
 创建没有控制权限的 viewer token：
 
@@ -217,7 +274,8 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 ```
 
 主要选项包括 `--host`、`--port`、`--livekit-url`、`--livekit-api-key`、`--livekit-api-secret`、
-`--num-workers`、`--worker-gpu-map`、`--queue-size`、`--session-timeout`、`--token-ttl`、
+`--num-workers`、`--worker-gpu-map`、`--max-sessions-per-worker`、`--control-idle-timeout`、`--queue-size`、
+`--session-timeout`、`--token-ttl`、
 `--controller-timeout`、`--room-empty-timeout` 和 `--worker-mode`。
 
 | 环境变量 | 默认值 | 含义 |
@@ -227,16 +285,19 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 | `TELEFUSER_LIVEKIT_API_SECRET` | 必填 | 用于签发 token 的 API secret |
 | `TELEFUSER_LIVEKIT_HOST` | `0.0.0.0` | HTTP API 监听地址 |
 | `TELEFUSER_LIVEKIT_PORT` | `8088` | HTTP API 端口 |
-| `TELEFUSER_LIVEKIT_NUM_WORKERS` | `1` | 模型 worker 数 |
-| `TELEFUSER_LIVEKIT_WORKER_GPU_MAP` | 未设置 | 分号分隔的 GPU group，如 `0,1;2,3` |
-| `TELEFUSER_LIVEKIT_QUEUE_SIZE` | `0` | 排队数量；零表示 busy 时立即拒绝 |
+| `TELEFUSER_LIVEKIT_NUM_WORKERS` | `1` | 模型 worker 数；当前进程内 runtime 必须为 `1` |
+| `TELEFUSER_LIVEKIT_WORKER_GPU_MAP` | 未设置 | 分配给唯一 worker 的 GPU group，如 `0,1,2,3` |
+| `TELEFUSER_LIVEKIT_MAX_SESSIONS_PER_WORKER` | `1` | 每个模型 worker 常驻的双向 session 数 |
+| `TELEFUSER_LIVEKIT_CONTROL_IDLE_TIMEOUT` | `10` | 有等待者时允许接管 execution lease 的控制空闲秒数 |
+| `TELEFUSER_LIVEKIT_QUEUE_SIZE` | `0` | 排队数量；零表示所有常驻 session 槽位满时立即拒绝 |
 | `TELEFUSER_LIVEKIT_SESSION_TIMEOUT` | `1800` | session 最大生命周期（秒） |
 | `TELEFUSER_LIVEKIT_TOKEN_TTL` | `3600` | join token 生命周期（秒） |
 | `TELEFUSER_LIVEKIT_CONTROLLER_TIMEOUT` | `60` | controller 离开后的宽限期 |
 | `TELEFUSER_LIVEKIT_ROOM_EMPTY_TIMEOUT` | `30` | room 为空后的宽限期 |
 
-当前 runtime 仅支持一个 in-process worker。在 process-worker 隔离实现之前，如需更多 worker，应启动独立服务
-进程。`--skip-validation` 只应用于可信本地文件，不建议生产使用。
+当前 runtime 要求 `worker_mode=in-process`，并只启动一个模型 worker。在实现 process-worker 隔离前，额外模型
+副本需要启动独立的 `stream-serve` 进程并在外部路由请求；各进程的准入队列与 session 状态彼此独立。
+`--skip-validation` 只应用于可信本地文件，不建议生产使用。
 
 ## 生产部署
 
@@ -253,7 +314,7 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 - **HTTP ready 但没有媒体：**确认浏览器和 worker 都能访问 LiveKit URL，并检查 participant/track 日志。
 - **浏览器反复重连：**检查 signaling、TURN、防火墙和 LiveKit advertised node address。
 - **控制无效：**确认发送者使用 controller token、topic 为 `tf.control`，且 control 受支持。
-- **HTTP 429：**所有 worker 都在忙且 `queue_size=0`，或队列已满。
+- **HTTP 429：**所有常驻 session 槽位都已占满且 `queue_size=0`，或队列已满。
 - **Session 未释放：**调用 session DELETE 接口并检查 controller/room timeout。
 - **本地 LiveKit 连接返回代理 HTTP 503：**部分 native SDK 路径会读取 `HTTP_PROXY`，但不会应用
   `NO_PROXY`。连接 `ws://127.0.0.1:7880` 时，启动 TeleFuser 前应取消 `HTTP_PROXY`、`HTTPS_PROXY`、
