@@ -160,10 +160,32 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Real-Time Streaming
 
-The same examples expose both offline generation and a stream-server `get_service()` entry point. Configure the
-service topology with `stream-serve --worker-gpu-map`; the size of the assigned GPU group is passed to
-`get_service(gpu_num=...)`. Use `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because
-TeleFuser creates workers internally.
+The same examples expose offline generation and a stream-server `get_service()` entry point. Use
+`CUDA_VISIBLE_DEVICES` to select physical devices; the logical group size from `--worker-gpu-map` is passed to
+`get_service(gpu_num=...)`. The map does not change GPU visibility. Do not use `torchrun` because TeleFuser creates
+workers internally. The runnable coturn, LiveKit, TeleFuser, browser, and VS Code forwarding workflow is maintained in
+the [stream examples README](../stream_server/README.md).
+
+Each admitted LingBot room owns independent pipeline-session state, but every session shares one service instance and
+one model-execution lease:
+
+```mermaid
+flowchart LR
+    R1[LiveKit room A] --> S1[Pipeline session A]
+    R2[LiveKit room B] --> S2[Pipeline session B]
+    S1 --> L[One LingBot execution lease]
+    S2 --> L
+    L --> O[StreamingPipelineOrchestrator]
+    O --> E[VAE encode actor]
+    O --> D[DiT actor]
+    O --> V[VAE decode actor]
+```
+
+`max_sessions_per_worker=2` retains two isolated session states; it does not create a second model replica. Only one
+session submits a model chunk at a time. With a waiter present, a holder that has no valid control activity for
+`control_idle_timeout` yields after its current chunk, while its cache and retained slot remain allocated. The
+browser sends a one-second `control_state` heartbeat while a key remains held. Use separate service processes and
+external routing for additional replicas.
 
 ### Scheduler and Stage Placement
 
@@ -234,86 +256,14 @@ of media, while p95 cadence was 1.865 seconds. See the
 [AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the workload,
 metric boundary, artifact path, and the observed client cleanup issue.
 
-### LiveKit Transport
-
-LiveKit provides room lifecycle, signaling, reconnects, adaptive media transport, and reliable control messages.
-The Python clients are base TeleFuser dependencies; install the LiveKit Server and your platform's `coturn` package
-separately for local development:
-
-```bash
-curl -sSL https://get.livekit.io | bash
-```
-
-The checked-in browser page forces TCP TURN relay. Start its matching development coturn service in terminal 1:
-
-```bash
-turnserver -n -m 1 \
-    --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
-    --listening-port=3478 --min-port=49160 --max-port=49200 \
-    --user=livekit-demo:livekit-demo-password --realm=livekit.local \
-    --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
-    --allow-loopback-peers
-```
-
-Start LiveKit in terminal 2:
-
-```bash
-livekit-server --dev
-```
-
-Start the four-GPU LingBot worker and its session API in terminal 3:
-
-```bash
-TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-    --livekit-url ws://127.0.0.1:7880 \
-    --livekit-api-key devkey \
-    --livekit-api-secret secret \
-    --num-workers 1 \
-    --worker-gpu-map 0,1,2,3 \
-    --max-sessions-per-worker 2 \
-    --control-idle-timeout 10 \
-    --port 8088 \
-    --skip-validation
-```
-
-For the fixed-window v2 model, replace the pipeline path in that command with
-`examples/lingbot/lingbot_world_v2_image_to_video_h100.py`; the LiveKit and worker options stay the same.
-
-Then start the bundled browser demo in terminal 4:
-
-```bash
-python examples/stream_server/livekit_bidirectional_demo.py \
-    --server-url http://127.0.0.1:8088 \
-    --port 8092 \
-    --no-open
-```
-
-The demo proxies the TeleFuser session API, so VS Code Remote SSH needs TCP forwarding for demo port `8092`, LiveKit
-signaling port `7880`, and TURN listener `3478`; `8088` does not need forwarding. Open `http://127.0.0.1:8092`,
-select an initial image, and click **Start**. See the [Stream Server guide](../../docs/en/stream_server.md) for the API
-contract, control topics, shutdown order, troubleshooting, and production deployment notes.
-
-The current runtime supports exactly one `in-process` model worker. That worker calls `get_service()` once and
-loads one LingBot service/model pipeline instance across its four-device group; it does not load one instance per GPU
-or per room. Every admitted LiveKit room creates independent pipeline-session state inside the shared instance.
-
-`max_sessions_per_worker=2` permits two such retained sessions. The LingBot service's single execution lease lets
-only one session run a model chunk at a time. If another session is waiting, a holder with no valid control activity
-for `control_idle_timeout` seconds yields after its current chunk; its cache and admission slot remain allocated.
-The browser sends a one-second `control_state` heartbeat while a key remains held. Size retained-session capacity
-from measured GPU memory, and use separate service processes plus external routing for additional model replicas
-until process-worker mode is implemented.
-
-Select the initial image in the browser before connecting; it is included in the session request. Real-time camera
-poses come from LiveKit control messages. The LingBot-World v2 service uses the bundled `intrinsics.npy` and its `832x480`
-calibration size by default, matching the offline example. A request can override that calibration. Other LingBot
-services with neither configured nor request-provided intrinsics center the principal point on the selected image and
-use its width as both focal lengths. Requests with calibrated intrinsics should also send `intrinsics_width` and
-`intrinsics_height` so the service can transform them from calibration pixels to output pixels.
-
 ### Camera Controls
+
+Select the initial image before connecting; it is included in the session request. Real-time camera poses arrive as
+LiveKit control messages. LingBot-World v2 uses the bundled `intrinsics.npy` and its `832x480` calibration size by
+default, matching the offline example. A request can override it. Services with no configured or request-provided
+intrinsics center the principal point on the selected image and use its width as both focal lengths. Calibrated
+requests should also send `intrinsics_width` and `intrinsics_height` so the service can transform calibration pixels
+to output pixels.
 
 The page has separate translation and rotation pads:
 

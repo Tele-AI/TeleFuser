@@ -1,211 +1,275 @@
 # Stream Server
 
-TeleFuser uses LiveKit as its only streaming transport. The `telefuser stream-serve` command accepts pipeline files
-whose `get_service()` returns either `ServerPushService` or `BidirectionalService`; there is no separate backend
-selector or direct SDP endpoint.
+`telefuser stream-serve` exposes TeleFuser's LiveKit-backed streaming API. It accepts a pipeline file whose
+`get_service()` returns either `ServerPushService` or `BidirectionalService`.
 
-LiveKit terminates browser WebRTC connections and provides rooms, reconnect handling, media delivery, and reliable
-data messages. TeleFuser owns model workers, admission, session state, pipeline execution, and token issuance. A
-LiveKit Cloud project or a self-hosted LiveKit Server is therefore required.
+LiveKit owns signaling, WebRTC connections, SFU media delivery, and transport reconnects. TeleFuser owns HTTP
+admission, tokens, model workers, pipeline sessions, execution policy, and model-state cleanup. A LiveKit Cloud
+project or self-hosted LiveKit Server is required; TeleFuser does not expose a direct SDP endpoint.
 
-This guide uses **service instance** for the single object returned by the pipeline file's `get_service()` function.
-It is loaded once by a model worker and may own multiple user sessions; a user session is not another service
-instance.
+Use the three service guides at different boundaries:
 
-## Why LiveKit
+- [Service](service.md) compares `serve` and `stream-serve`.
+- This guide defines the LiveKit API, room roles, capacity, lifecycle, and deployment behavior.
+- [Streaming Pipeline Scheduler](stream_scheduler.md) defines actor ownership and bounded intra-pipeline dataflow.
 
-TeleFuser targets high-performance multimodal generation inference. Its streaming service must support continuous
-media output, bidirectional control, and long-running stateful model sessions. LiveKit's realtime transport
-capabilities align with these goals:
+## Runtime topology
 
-- A room provides a stable transport boundary for a model session, keeping browser connections independent from
-  session-owned model state.
-- Media tracks carry progressive video and audio, while data topics carry controls, status, and bounded telemetry.
-- Scoped tokens distinguish controller, viewer, and worker roles, matching TeleFuser's session ownership and permission
-  model.
-- `ServerPushService` and `BidirectionalService` share one streaming entrypoint and client connection model.
-- LiveKit owns connections, reconnects, and media delivery so TeleFuser can focus on model workers, admission, pipeline
-  execution, and resource release.
+```mermaid
+flowchart LR
+    C[Controller] -->|create / delete session| API[TeleFuser HTTP API]
+    V[Viewers] -->|request viewer tokens| API
+    C <-->|WebRTC| LK[LiveKit signaling + SFU]
+    V <-->|WebRTC| LK
+    API --> A[Registry + admission]
+    A --> W[One in-process model worker]
+    W <-->|one room runner per session| LK
+    W --> S[One shared service instance]
+    S --> P1[Pipeline session A]
+    S --> P2[Pipeline session B]
+```
 
-## Install and start locally
+| Term | Meaning and ownership |
+|---|---|
+| Service process | One `telefuser stream-serve` process containing the HTTP API, registry, admission scheduler, and current in-process worker. |
+| Model worker | Loads the pipeline file once, owns one service instance, and accounts for retained-session capacity. |
+| Service instance | The single object returned by `get_service()`; model weights and its pipeline actor graph are loaded once. |
+| HTTP session | TeleFuser's public admission and lifecycle record. It maps one-to-one to a room name and, after admission, a room runner. |
+| Room runner | One task and one TeleFuser worker participant connected to a LiveKit room. Multiple runners share the service instance. |
+| Pipeline session | Per-user state returned by `BidirectionalService.create_session()`, such as control, noise, VAE, and model-cache state. |
+| Stage actor | An internal pipeline execution owner. It is not the model worker that owns retained-session capacity. |
 
-The LiveKit Python SDKs are included in the base TeleFuser installation:
+The current runtime supports exactly one `in-process` model worker and calls `get_service()` once. Multiple users do
+not load multiple model replicas. Additional replicas require separate `stream-serve` processes and external
+request routing; their registries, queues, health, and session state are independent.
+
+## Service contracts and capacity
+
+| Contract | Input and output | Retained-session capacity |
+|---|---|---|
+| `ServerPushService` | Starts from request configuration and publishes progressive video/audio without room controls. | Exactly one; startup rejects `max_sessions_per_worker > 1`. |
+| `BidirectionalService` | Creates per-user state, accepts normalized controls, and yields output chunks. | May exceed one only when the implementation isolates state and defines safe cross-session execution. |
+
+`max_sessions_per_worker` is an admission limit, not a replica count, batch size, or graph-edge capacity. The
+checked-in LingBot-World-Fast and LingBot-World v2 services support multiple retained sessions and serialize their
+model chunks with a shared execution lease. Other bidirectional services must provide their own concurrency policy.
+
+## Local development stack
+
+The LiveKit Python SDK is included in TeleFuser. Install the LiveKit Server and your platform's `coturn` package
+separately:
 
 ```bash
 pip install -e .
-```
 
-Install the development LiveKit Server and your platform's `coturn` package separately:
-
-```bash
-# Debian/Ubuntu; use the equivalent coturn package on other platforms.
+# Debian/Ubuntu; use the equivalent package on other platforms.
 sudo apt-get update
 sudo apt-get install -y coturn
 
 curl -sSL https://get.livekit.io | bash
-livekit-server --dev
 ```
 
-The development server listens on `ws://127.0.0.1:7880` and uses `devkey` / `secret`. Do not use development
-credentials in production.
-
-Start TeleFuser:
+The checked-in browser demo forces TCP TURN relay. Run the following development-only stack in four terminals:
 
 ```bash
+# Terminal 1: TURN relay matching the browser configuration
+turnserver -n -m 1 \
+  --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+  --listening-port=3478 --min-port=49160 --max-port=49200 \
+  --user=livekit-demo:livekit-demo-password --realm=livekit.local \
+  --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
+  --allow-loopback-peers
+
+# Terminal 2: signaling and SFU
+livekit-server --dev
+
+# Terminal 3: model, admission, and session API
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
 telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey \
   --livekit-api-secret secret \
+  --worker-gpu-map 0,1,2,3 \
+  --max-sessions-per-worker 2 \
+  --control-idle-timeout 10 \
   --port 8088 \
   --skip-validation
-```
 
-The same command serves server-push pipelines:
-
-```bash
-telefuser stream-serve examples/stream_server/stream_video_replay.py \
-  --livekit-url ws://127.0.0.1:7880 \
-  --livekit-api-key devkey \
-  --livekit-api-secret secret \
-  --port 8088 \
-  --skip-validation
-```
-
-Configuration may instead use `TELEFUSER_LIVEKIT_*` environment variables. Explicit CLI values take precedence.
-
-## Browser demo
-
-The checked-in page sets `iceTransportPolicy: relay`, so its matching TCP TURN service is required even though a
-production LiveKit deployment may provide TURN differently. Start this development-only coturn process first:
-
-```bash
-turnserver -n -m 1 \
-  --listening-ip=127.0.0.1 \
-  --relay-ip=127.0.0.1 \
-  --listening-port=3478 \
-  --min-port=49160 --max-port=49200 \
-  --user=livekit-demo:livekit-demo-password \
-  --realm=livekit.local \
-  --fingerprint --lt-cred-mech \
-  --no-tls --no-dtls --no-cli \
-  --allow-loopback-peers
-```
-
-Start the LingBot control page in a fourth terminal:
-
-```bash
+# Terminal 4: browser page and HTTP API proxy
 python examples/stream_server/livekit_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8092 \
   --no-open
 ```
 
-Open `http://127.0.0.1:8092`, select an initial image, and click **Start**. The demo proxies `/v1/stream/*` requests
-to TeleFuser, obtains a controller token, joins the assigned LiveKit room, renders the published video track, and
-sends the on-page or keyboard camera controls on `tf.control`.
+Open `http://127.0.0.1:8092`, select an image, and click **Start**. With VS Code Remote SSH, forward TCP ports
+`8092`, `7880`, and `3478` to the same local ports. The page proxies the session API, so `8088` does not need
+browser-side forwarding.
 
-For VS Code Remote SSH, forward the demo HTTP port, LiveKit signaling port, and the TURN listener configured for
-LiveKit. The checked-in demo uses TCP relay at `turn:127.0.0.1:3478?transport=tcp` with development credentials
-`livekit-demo` / `livekit-demo-password`. Change this browser configuration and the LiveKit deployment together for
-production.
+The loopback TURN listener, static password, disabled TLS, `--allow-loopback-peers`, LiveKit development
+credentials, and `--skip-validation` are for a trusted development host only. Stop the browser session before
+stopping terminals 4 through 1.
 
-Forward remote TCP ports `8092`, `7880`, and `3478` to the same local ports, then open
-`http://127.0.0.1:8092`. The loopback listener, static password, disabled TLS, and `--allow-loopback-peers` are only
-for a trusted development host reached through the tunnel. Do not copy them to a public deployment.
+## Session creation and room joining
 
-The complete browser stack is now coturn (`3478`), LiveKit (`7880`), TeleFuser (`8088`), and the page (`8092`).
-`curl http://127.0.0.1:8088/v1/service/health` should report a ready idle worker before a session starts. During a
-successful run, the page shows the video track and status messages including `control_state`, generation stages,
-and `chunk_sent`. Stop or close the browser session before stopping the four processes in reverse order; this avoids
-the browser reconnecting while LiveKit and the model worker drain.
+TeleFuser assigns a unique room name and mints scoped tokens. It does not call the LiveKit room-management API to
+create the room; LiveKit materializes it when the first participant joins.
 
-## Architecture and lifecycle
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant API as TeleFuser API
+    participant A as Admission scheduler
+    participant W as Room runner
+    participant S as Shared service instance
+    participant LK as LiveKit
 
-```text
-Browser A ── HTTP API / LiveKit room A ── session runner A ─┐
-                                                            ├─ one model worker
-Browser B ── HTTP API / LiveKit room B ── session runner B ─┘        │
-                                                                     └─ one shared service instance
-                                                                            ├─ pipeline session A state
-                                                                            └─ pipeline session B state
+    C->>API: POST /v1/stream/sessions
+    API->>A: reserve retained capacity
+    alt slot available
+        A-->>API: assigned
+        API-->>C: 200 session_id, room, controller token
+        W->>LK: join as worker
+        W->>S: create pipeline session or stream task
+        C->>LK: join with controller token
+    else HTTP queue has space
+        A-->>API: queued
+        API-->>C: 202 queue_position and token
+        A->>W: start after a slot is released
+    else no queue capacity
+        API-->>C: 429
+    end
 ```
 
-| Term | Lifetime and ownership |
-|---|---|
-| Service process | One `telefuser stream-serve` process containing the HTTP API, admission scheduler, and current in-process worker. |
-| Model worker | Loads one service instance and owns retained-session capacity. The current runtime creates exactly one. |
-| Service instance | The result of one `get_service()` call. Model weights and the pipeline actor graph are loaded once and shared by its sessions. |
-| Session runner | One LiveKit room connection and transport task for an admitted HTTP session. Runners share the worker's service instance. |
-| Pipeline session | Per-user state created through `BidirectionalService.create_session()`, including model/cache/control state owned by that session. |
+A queued response already contains a room name and controller token, but no room runner publishes output until
+admission. Token lifetime limits when a token may be used to join; it is separate from TeleFuser session cleanup.
 
-`--worker-gpu-map 0,1,2,3` assigns four devices to the one model worker and its one service instance. It does not
-create four workers or four model replicas.
+## One controller and multiple viewers
 
-1. The controller creates a session through `POST /v1/stream/sessions`.
-2. The scheduler admits, queues, or rejects it and assigns one retained-session slot on a worker.
-3. TeleFuser creates the LiveKit room and returns a scoped controller token.
-4. The worker joins the room and starts the pipeline.
-5. Video and PCM16 audio are published as LiveKit tracks. Status and metrics use reliable data topics.
-6. For `BidirectionalService`, only the controller can send normalized control messages to the pipeline.
-7. Deletion, timeout, controller departure, or pipeline completion drains actor-owned state and closes the room.
-
-Each streaming stage worker remains owned by one pipeline actor. Here, a stage worker is an internal pipeline
-execution object, not the LiveKit model worker in the table above. Reconnects do not move actor-owned cache state. A
-server-push pipeline starts from its request config and produces chunks without incoming controls; a bidirectional
-pipeline additionally exposes create, pull, control, and close operations.
-
-## LingBot multi-session time slicing
-
-`--max-sessions-per-worker` controls how many LiveKit sessions one model worker may retain; it does not create more
-service instances. Capacity above one requires a `BidirectionalService`, because server-push sessions do not have a
-control-idle signal. The framework provides the room runners and retained-session admission, but the underlying
-service must provide session isolation and any required compute serialization.
-
-The checked-in LingBot-World-Fast and LingBot-World v2 services implement that serialization with one execution lease
-inside their shared service instance. Enable two retained sessions with, for example:
-
-```bash
-telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
-  --max-sessions-per-worker 2 --control-idle-timeout 10 --skip-validation
+```mermaid
+flowchart LR
+    C[Controller] -->|reliable tf.control| R[One LiveKit room]
+    W[TeleFuser worker] -->|one media publication + tf.status| R
+    R -->|tracks + room data| C
+    R -->|same tracks + room data| V1[Viewer 1]
+    R -->|same tracks + room data| VN[Viewer N]
 ```
 
-Each admitted LingBot room creates an independent pipeline session, control queue, noise state, VAE state, and model
-cache within the shared service instance. A valid `control_state`, `control`, `prompt`, or `reset` message renews that
-session's lease activity. When another session is waiting and the current holder has received no valid control for
-`control_idle_timeout` seconds, the holder stops admitting new chunks and yields after its current chunk completes.
-The waiting session is then granted the lease; the parked session can request the lease again when its controller
-sends a new control message.
-
-This is chunk-boundary time slicing, not continuous batching or replication: the LingBot service instance has at most
-one session chunk in flight. `control_idle_timeout` does not close the holder, release its retained-session slot, or
-free its cache; it only permits a waiting session to take the lease at a chunk boundary. A parked session therefore
-still consumes its per-session GPU memory. Set `max_sessions_per_worker` from measured memory headroom. Controllers
-that represent a held input must resend `control_state` periodically; the checked-in browser demo sends a one-second
-heartbeat while a control remains pressed.
-
-There are two separate FIFO waits:
-
-| Wait | Applies to | Capacity and observable result |
+| Role | LiveKit grants | TeleFuser semantics |
 |---|---|---|
-| HTTP admission queue | Requests made after all retained-session slots are occupied | Bounded by `queue_size`; returns HTTP 202 with `queue_position`, or HTTP 429 when disabled/full. |
-| LingBot execution-lease queue | Admitted sessions requesting model execution | Bounded by the number of retained LingBot sessions; emits `lease_queued`, `lease_granted`, and `lease_parked` status events. |
+| Controller | Subscribe; publish data; no media-track publication | The session's configured controller identity. Only its `tf.control` messages are accepted. |
+| Viewer | Subscribe; publish neither data nor media tracks | Watches the same output and status without pipeline-control permission. |
+| Worker | Publish media and data; no subscription | Runs the session and publishes one output for LiveKit to fan out. |
 
-Releasing the execution lease does not move a session back to the HTTP admission queue. Only terminal session cleanup
-releases its retained-session slot and admits the next HTTP-queued request.
+Create the HTTP session once, then call `POST /v1/stream/sessions/{session_id}/tokens` with a distinct identity for
+each viewer. A viewer joins the existing room and does not create another HTTP session, runner, or pipeline session.
+Viewers do not consume `max_sessions_per_worker`, enter a TeleFuser queue, acquire an execution lease, duplicate
+model state, or trigger inference. LiveKit/SFU delivery bandwidth and subscriber work still grow with viewer count.
+
+Viewer joins and departures do not change TeleFuser admission or session state. Controller departure is also not
+currently observed; clients must explicitly close the session when control ends.
+
+## Admission, queues, and LingBot execution
+
+```mermaid
+flowchart TD
+    N[New HTTP session] --> C{Retained slot available?}
+    C -->|yes| R[Start room runner]
+    C -->|no| Q{HTTP queue has space?}
+    Q -->|yes| H[HTTP 202, FIFO wait]
+    H -->|slot released| R
+    Q -->|no| X[HTTP 429]
+    R --> P[Retained pipeline session]
+    P --> L{LingBot valid control?}
+    L -->|yes| E[Execution-lease FIFO]
+    E --> G[One active session submits a chunk]
+    G --> B[Chunk boundary]
+    B -->|idle timeout + waiter| K[Park holder, grant next]
+    B -->|otherwise| G
+```
+
+There are three independent scheduling boundaries:
+
+| Boundary | Capacity owner | What waiting means |
+|---|---|---|
+| HTTP admission queue | LiveKit runtime | All retained slots are occupied. `queue_size` bounds this FIFO; zero disables it. |
+| LingBot execution-lease queue | Shared LingBot service instance | An admitted session wants model execution while another session holds the lease. |
+| Pipeline artifact queues | `StreamingPipelineOrchestrator` | A stage or downstream bounded edge cannot yet admit another sequence item. |
+
+The execution lease is LingBot-specific. A valid `control_state`, `control`, `prompt`, or `reset` records
+activity and queues a waiting or parked session. If another session is waiting and the holder has been control-idle
+for `control_idle_timeout`, the holder completes its in-flight chunk, parks, and hands off the lease. Handoff never
+interrupts a chunk.
+
+```mermaid
+stateDiagram-v2
+    [*] --> waiting
+    waiting --> queued: valid control
+    queued --> active: lease granted
+    active --> parked: waiter + idle timeout + chunk boundary
+    parked --> queued: new valid control
+    active --> closing: session cleanup
+    queued --> closing: session cleanup
+    parked --> closing: session cleanup
+    closing --> [*]
+```
+
+Parking does not close the session, release its retained slot, or free its cache. Set
+`max_sessions_per_worker` from measured per-session memory headroom. Controllers representing held input must resend
+`control_state`; the checked-in browser sends it once per second while a key remains held. Releasing the execution
+lease never moves a session back to the HTTP queue.
+
+## Session lifecycle and current limits
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST session
+    pending --> assigned: slot available
+    pending --> queued: wait for slot
+    pending --> [*]: rejected
+    queued --> assigned: slot released
+    assigned --> joining_room
+    joining_room --> starting_pipeline
+    starting_pipeline --> running
+    queued --> draining: DELETE
+    assigned --> draining: DELETE
+    joining_room --> draining: DELETE
+    starting_pipeline --> draining: DELETE
+    running --> draining: DELETE
+    draining --> closed: cleanup complete
+    running --> closed: stop or normal completion
+    joining_room --> failed: runner error
+    starting_pipeline --> failed: pipeline error
+    running --> failed: runner or pipeline error
+```
+
+Cleanup stops new work, closes the pipeline session through its owner, disconnects the worker participant, releases
+the retained slot, and admits the next HTTP-queued session. TeleFuser does not explicitly delete the LiveKit room;
+remaining browser participants and the LiveKit deployment determine the transport room's later lifetime.
+
+The current runtime has these deliberate documentation-visible limitations:
+
+- `session_timeout` records `expires_at`, but no background task currently changes the session to `expired`.
+- `controller_timeout` and `room_empty_timeout` are accepted configuration values but are not enforced.
+- Participant events are not monitored, so `participant_count` remains `0` and departure does not trigger cleanup.
+- Terminal records remain in the in-memory registry for the lifetime of the process. They are not shared or restored.
+- A controller should send `stop` or call DELETE. Closing a browser tab alone does not release capacity.
 
 ## HTTP API
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/v1/stream/sessions` | POST | Create and admit a controller session |
-| `/v1/stream/sessions/{session_id}` | GET | Read session status |
-| `/v1/stream/sessions/{session_id}` | DELETE | Drain and close a session |
-| `/v1/stream/sessions/{session_id}/tokens` | POST | Create a viewer token |
-| `/v1/stream/health` | GET | LiveKit scheduler and worker health |
-| `/v1/service/health` | GET | Generic service health |
+| `/v1/stream/sessions/{session_id}` | GET | Read the in-memory session record |
+| `/v1/stream/sessions/{session_id}` | DELETE | Drain, close, and release the session |
+| `/v1/stream/sessions/{session_id}/tokens` | POST | Mint a subscribe-only viewer token |
+| `/v1/stream/health` | GET | Read scheduler and aggregate worker health |
+| `/v1/service/health` | GET | Read generic service health |
 | `/v1/service/ready` | GET | Readiness probe |
-| `/v1/service/metadata` | GET | Pipeline and transport metadata |
-| `/v1/service/metrics` | GET | Prometheus metrics |
+| `/v1/service/metadata` | GET | Runtime topology and service metadata |
+| `/v1/service/metrics` | GET | Prometheus text metrics |
+| `/v1/service/metrics/json` | GET | JSON service and LiveKit health metrics |
 
 Create a controller session:
 
@@ -220,33 +284,7 @@ curl -X POST http://127.0.0.1:8088/v1/stream/sessions \
   }'
 ```
 
-For a one-minute LingBot-World v2 replay, start
-`examples/lingbot/lingbot_world_v2_image_to_video_h100.py` and use:
-
-```json
-{
-  "fps": 16,
-  "chunk_size": 4,
-  "frame_num": 957,
-  "max_duration_seconds": 60.0
-}
-```
-
-The complete-chunk policy maps this request to 60 chunks and 59.75 seconds of output media. The v2 example uses
-`local_attn_size=18` and `sink_size=6`; its KV capacity therefore remains fixed while the session-owned noise and
-VAE state advance incrementally. The reproducible LiveKit workload and dated four-H100 result are documented in
-[TeleFuser and AIPerf](benchmark_aiperf.md).
-
-A successful response includes `session_id`, `room`, `livekit_url`, `token`, `worker_id`, and `status`. Sessions fill
-retained slots on the worker before entering the HTTP admission queue. A queued session returns HTTP 202 with
-`queue_position`; a full zero-length queue returns HTTP 429.
-
-In `/v1/stream/health`, `workers_busy` counts model workers with at least one retained session; it does not count
-sessions or currently executing chunks. `workers_idle` counts workers with no retained sessions, and `queued_sessions`
-is only the HTTP admission queue depth. `livekit_connected=false` is normal before any session runner has connected;
-it does not mean that the model or service instance failed to load.
-
-Create a viewer token without granting control permission:
+Create a viewer token for the same room:
 
 ```bash
 curl -X POST http://127.0.0.1:8088/v1/stream/sessions/<session_id>/tokens \
@@ -254,22 +292,26 @@ curl -X POST http://127.0.0.1:8088/v1/stream/sessions/<session_id>/tokens \
   -d '{"identity":"viewer-1"}'
 ```
 
-Close the session explicitly:
+Close and release the session:
 
 ```bash
 curl -X DELETE http://127.0.0.1:8088/v1/stream/sessions/<session_id>
 ```
 
+A direct admission returns HTTP 200. A bounded wait returns HTTP 202 with `queue_position`; a disabled or full queue
+returns HTTP 429. The one-minute LingBot-World v2 workload and observed four-H100 results are documented in
+[TeleFuser and AIPerf](benchmark_aiperf.md).
+
 ## LiveKit data protocol
 
-| Topic | Direction | Content |
-|---|---|---|
-| `tf.control` | controller to worker | Reliable JSON control messages |
-| `tf.status` | worker to room | Lifecycle and chunk status |
-| `tf.metrics` | worker to room | Bounded runtime metrics |
-| `tf.asset` | reserved | Future bounded asset messages |
+| Topic | Direction | Delivery | Current use |
+|---|---|---|---|
+| `tf.control` | Controller to worker | Reliable in the checked-in clients | `control_state`, `control`, `prompt`, `reset`, and `stop` |
+| `tf.status` | Worker to room | Reliable | Runner lifecycle, errors, chunk metadata, and completion |
+| `tf.metrics` | Worker to room | Lossy | Supported by the room client, but not emitted by the generic runner today |
+| `tf.asset` | Reserved | Not defined | Future bounded asset messages |
 
-Accepted control types are `control_state`, `control`, `prompt`, `reset`, and `stop`. For example:
+Example control:
 
 ```json
 {"type":"control_state","controls":["w","j"]}
@@ -281,61 +323,84 @@ An optional versioned envelope is also accepted:
 {"version":1,"session_id":"<id>","type":"control_state","payload":{"controls":["w"]}}
 ```
 
-Messages are bounded by `TELEFUSER_LIVEKIT_MAX_DATA_MESSAGE_BYTES` (12 KiB by default). Unknown controls, duplicate
-entries, invalid JSON, wrong topics, session mismatches, and control messages from viewers are rejected.
+Inbound messages are bounded by `max_data_message_bytes` (12 KiB by default). Wrong topics, non-controller senders,
+invalid JSON, unknown controls, duplicates, and session mismatches are rejected.
 
-## CLI and environment configuration
+## CLI, environment, and GPU placement
 
 ```text
 telefuser stream-serve PIPE_PATH [OPTIONS]
 ```
 
-Important options are `--host`, `--port`, `--livekit-url`, `--livekit-api-key`, `--livekit-api-secret`,
-`--num-workers`, `--worker-gpu-map`, `--max-sessions-per-worker`, `--control-idle-timeout`, `--queue-size`,
-`--session-timeout`, `--token-ttl`,
-`--controller-timeout`, `--room-empty-timeout`, and `--worker-mode`.
+Use `telefuser stream-serve --help` for the complete option list. The options with important runtime semantics are:
 
-| Environment variable | Default | Meaning |
+| Option | Default | Semantics |
 |---|---:|---|
-| `TELEFUSER_LIVEKIT_URL` | required | LiveKit WebSocket URL |
-| `TELEFUSER_LIVEKIT_API_KEY` | required | API key used to mint room tokens |
-| `TELEFUSER_LIVEKIT_API_SECRET` | required | API secret used to mint room tokens |
-| `TELEFUSER_LIVEKIT_HOST` | `0.0.0.0` | HTTP API bind host |
-| `TELEFUSER_LIVEKIT_PORT` | `8088` | HTTP API port |
-| `TELEFUSER_LIVEKIT_NUM_WORKERS` | `1` | Model workers; the current in-process runtime requires exactly `1` |
-| `TELEFUSER_LIVEKIT_WORKER_GPU_MAP` | unset | GPU group assigned to the one worker, such as `0,1,2,3` |
-| `TELEFUSER_LIVEKIT_MAX_SESSIONS_PER_WORKER` | `1` | Retained bidirectional sessions per model worker |
-| `TELEFUSER_LIVEKIT_CONTROL_IDLE_TIMEOUT` | `10` | Inactive seconds before a waiting session may take the execution lease |
-| `TELEFUSER_LIVEKIT_QUEUE_SIZE` | `0` | Queued sessions; zero rejects when all retained-session slots are full |
-| `TELEFUSER_LIVEKIT_SESSION_TIMEOUT` | `1800` | Maximum session lifetime in seconds |
-| `TELEFUSER_LIVEKIT_TOKEN_TTL` | `3600` | Join-token lifetime in seconds |
-| `TELEFUSER_LIVEKIT_CONTROLLER_TIMEOUT` | `60` | Grace period after controller departure |
-| `TELEFUSER_LIVEKIT_ROOM_EMPTY_TIMEOUT` | `30` | Grace period after the room becomes empty |
+| `--host`, `--port` | `0.0.0.0`, `8088` | HTTP bind address |
+| `--num-workers` | `1` | Must remain `1` in the current runtime |
+| `--worker-gpu-map` | unset | One logical GPU group for the current worker, for example `0,1,2,3` |
+| `--max-sessions-per-worker` | `1` | Retained bidirectional sessions; not replicas |
+| `--queue-size` | `0` | HTTP admission FIFO length; zero rejects at capacity |
+| `--control-idle-timeout` | `10` | LingBot lease idle threshold when another session waits |
+| `--session-timeout` | `1800` | Records `expires_at`; not currently enforced |
+| `--token-ttl` | `3600` | Join-token lifetime |
+| `--controller-timeout` | `60` | Reserved; not currently enforced |
+| `--room-empty-timeout` | `30` | Reserved; not currently enforced |
+| `--worker-mode` | `in-process` | `process` is accepted by the CLI but not implemented by the runtime |
 
-The current runtime requires `worker_mode=in-process` and starts exactly one model worker. Additional model replicas
-require separate `stream-serve` processes and external request routing until process-worker isolation is implemented;
-their admission queues and session state are independent. `--skip-validation` is intended for trusted local files,
-not production.
+The CLI can fall back to `TELEFUSER_LIVEKIT_URL`, `TELEFUSER_LIVEKIT_API_KEY`,
+`TELEFUSER_LIVEKIT_API_SECRET`, `TELEFUSER_LIVEKIT_WORKER_GPU_MAP`,
+`TELEFUSER_LIVEKIT_MAX_SESSIONS_PER_WORKER`, and `TELEFUSER_LIVEKIT_CONTROL_IDLE_TIMEOUT` when their matching CLI
+value is unset. Environment-only settings include `TELEFUSER_LIVEKIT_DEFAULT_FPS` (default `16`),
+`TELEFUSER_LIVEKIT_MAX_DATA_MESSAGE_BYTES` (default `12288`), and
+`TELEFUSER_LIVEKIT_CORS_ALLOW_ORIGINS` (default `["*"]`).
 
-## Production deployment
+Other Click options currently pass their displayed defaults explicitly, so use the CLI option rather than a
+same-named environment variable for those fields.
+
+In the current in-process runtime, `worker_gpu_map` records scheduler topology and its group size becomes the
+`gpu_num` passed to `get_service()`. It does not set `CUDA_VISIBLE_DEVICES`, isolate devices, or rewrite
+`ModelRuntimeConfig`. Select physical GPUs with `CUDA_VISIBLE_DEVICES` and ensure that the pipeline uses the
+corresponding process-local device indices. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+telefuser stream-serve PIPE_PATH --worker-gpu-map 0,1,2,3
+```
+
+This exposes physical GPUs 4-7 as local devices 0-3 and passes `gpu_num=4`; it still loads one service instance.
+
+## Observability
+
+| Signal | Exact interpretation |
+|---|---|
+| `workers_busy` | Model workers retaining at least one session; with the current runtime this is `0` or `1`. |
+| `workers_idle` | Non-failed model workers retaining no sessions. |
+| `workers_failed` | Workers whose aggregate state is failed. |
+| `queued_sessions` | HTTP admission queue depth only; it excludes LingBot lease and pipeline artifact waits. |
+| `livekit_connected` | Derived from aggregate worker status being `starting_pipeline`, `running`, or `draining`; it is not a direct LiveKit server probe. |
+| `participant_count` | Currently always `0` because participant events are not wired into the registry. |
+| `lease_queued`, `lease_granted`, `lease_parked` | LingBot execution-lease transitions published through `tf.status`. |
+
+`livekit_connected=false` is expected before any room runner reaches pipeline startup and does not mean model loading
+failed. For pipeline performance, keep target compute metrics distinct from client delivery metrics; see
+[Metrics](metrics.md) and [TeleFuser and AIPerf](benchmark_aiperf.md).
+
+## Production and troubleshooting
 
 - Use LiveKit Cloud or the official self-hosted deployment guidance; do not expose `livekit-server --dev`.
-- Use unique API credentials and keep the API secret only on the TeleFuser server.
-- Configure TLS, advertised node addresses, UDP/TCP media ports, and TURN in LiveKit itself.
-- Restrict TeleFuser's HTTP API with the deployment's authentication and network policy.
-- Monitor `/v1/service/ready`, worker failures, queue depth, and session expiration.
-- Interpret chunk period as adjacent output cadence: p95 cadence must remain below one chunk's media duration with
-  margin for transport and encoding. Pipeline residence and client delivery FPS are separate measurements.
+- Keep the LiveKit API secret on the TeleFuser server. Add deployment-layer authentication around the HTTP API.
+- Configure TLS, advertised node addresses, UDP/TCP media ports, and TURN in LiveKit.
+- Size retained-session capacity from GPU memory and LiveKit viewer capacity from SFU bandwidth.
+- Monitor readiness, worker failure, HTTP queue depth, pipeline cadence, and explicit session cleanup.
 
-## Troubleshooting
+Common failures:
 
-- **HTTP health is ready but no media arrives:** verify that both browser and worker can reach the LiveKit URL and
-  inspect LiveKit participant/track logs.
-- **Browser reconnects repeatedly:** verify signaling, TURN, firewall, and advertised LiveKit node addresses.
-- **Controls are ignored:** ensure the sender used the controller token, topic `tf.control`, and a supported control.
-- **HTTP 429:** all retained-session slots are full and `queue_size` is zero, or the queue is full.
-- **Session remains active:** call the session DELETE endpoint and check controller/room timeout settings.
-- **Local LiveKit connection returns proxy HTTP 503:** some native SDK paths honor `HTTP_PROXY` but not
-  `NO_PROXY`. Start TeleFuser with `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and their lowercase variants unset when
-  connecting to `ws://127.0.0.1:7880`.
-- **Stale GPU workers after a forced exit:** terminate remaining `spawn_main` processes before restarting.
+- **Ready but no media:** verify that the worker and browser can reach LiveKit and inspect participant/track logs.
+- **Repeated browser reconnects:** check signaling, TURN credentials, firewall, and advertised LiveKit addresses.
+- **Controls ignored:** use the controller token, `tf.control`, a supported type, and the configured identity.
+- **HTTP 429:** retained slots and the configured HTTP queue are full, or the queue is disabled.
+- **Session remains after clients leave:** departure cleanup is not implemented; send `stop` or call DELETE.
+- **Local LiveKit returns proxy HTTP 503:** unset upper- and lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`
+  for a local `ws://127.0.0.1:7880` deployment; some native SDK paths do not apply `NO_PROXY`.
+- **Workers remain after forced exit:** terminate stale `spawn_main` children before restarting.

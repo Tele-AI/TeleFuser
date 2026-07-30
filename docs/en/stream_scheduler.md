@@ -13,14 +13,13 @@ stage groups; the streaming scheduler owns bounded, per-session dataflow and per
 
 The scheduler executes a directed acyclic graph of typed artifacts:
 
-```text
-external input
-     |
-     v
-  encode -- condition --> denoise -- latent --> decode -- frames --> output
-                            ^
-                            |
-                         control
+```mermaid
+flowchart LR
+    I[External input] --> E[Encode actor]
+    E -->|condition| D[Denoise actor]
+    C[Control] --> D
+    D -->|latent| V[Decode actor]
+    V -->|frames| O[Output]
 ```
 
 Each logical stage is represented by one long-lived actor. Independent actors may run concurrently even when their
@@ -47,7 +46,23 @@ admission-controlled, not as an unbounded queue.
 
 ## Relationship to stream-service scheduling
 
-Three schedulers operate at different boundaries and must not be treated as one queue:
+The [Stream Server Guide](stream_server.md) owns room, admission, and user-facing lifecycle semantics. This guide
+starts after a pipeline session has been admitted. Three schedulers operate at different boundaries and must not be
+treated as one queue:
+
+```mermaid
+flowchart TB
+    H[HTTP session request] --> A[Retained-session admission]
+    A -->|admitted pipeline session| L[LingBot execution lease]
+    L -->|one whole chunk| O[StreamingPipelineOrchestrator]
+    O --> E[Encode actor]
+    O --> D[Denoise actor]
+    O --> V[Decode actor]
+
+    Q1[HTTP admission FIFO] -. waits before .-> A
+    Q2[Execution-lease FIFO] -. waits before .-> L
+    Q3[Bounded artifact edges] -. backpressure inside .-> O
+```
 
 | Boundary | Owner | Purpose |
 | --- | --- | --- |
@@ -55,11 +70,10 @@ Three schedulers operate at different boundaries and must not be treated as one 
 | Cross-session model execution | LingBot service instance | Grant one execution lease so only one retained LingBot session submits a whole chunk at a time. |
 | Intra-pipeline dataflow | `StreamingPipelineOrchestrator` | Schedule encode, denoise, and decode stage work with bounded artifacts and per-session ordering. |
 
-The current LiveKit runtime loads one service instance in one in-process model worker. Multiple LiveKit room runners
-and their pipeline sessions share it. `max_sessions_per_worker` changes retained-session admission only; it neither
-loads more service instances nor changes graph edge capacity. For LingBot, the service-level lease surrounds one
-session chunk, while the streaming orchestrator may still overlap that chunk's independent stages. Other
-`BidirectionalService` implementations must define their own cross-session concurrency policy.
+`max_sessions_per_worker` changes only the first boundary. It does not change service-instance count, execution
+leases, or graph-edge capacities. The second boundary is a LingBot service policy, not a generic orchestrator
+feature: its lease surrounds one session chunk, while the orchestrator may still overlap independent stages within
+that chunk. Other `BidirectionalService` implementations define their own cross-session policy.
 
 ## LingBot Condition Prefetch
 
@@ -82,9 +96,9 @@ session cleanup still runs through the owning actors.
 ## Actor Ownership and Session Lifecycle
 
 A state-owning stage worker has exactly one actor owner for its entire lifetime. This pipeline-level stage worker is
-not the LiveKit model worker that owns retained-session capacity. In particular, one `ParallelWorker` must not be
-invoked directly by a session facade or shared by multiple stage actors. This preserves result ordering and ensures
-that cache mutation and release occur in one well-defined execution context.
+not the stream-server model worker that owns retained-session capacity. In particular, one `ParallelWorker` must
+not be invoked directly by a session facade or shared by multiple stage actors. This preserves result ordering and
+ensures that cache mutation and release occur in one well-defined execution context.
 
 Session shutdown is ordered as follows:
 

@@ -24,10 +24,13 @@ turnserver -n -m 1 \
 livekit-server --dev
 
 # Terminal 3: TeleFuser model and session API
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
 telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey \
   --livekit-api-secret secret \
+  --worker-gpu-map 0,1,2,3 \
   --max-sessions-per-worker 2 \
   --control-idle-timeout 10 \
   --port 8088 \
@@ -44,11 +47,11 @@ Open `http://127.0.0.1:8092`, choose an image, and click **Start**. For VS Code 
 `7880`, and `3478` to the same local ports; the API proxy means `8088` does not need forwarding. Stop the browser
 session first, then stop terminals 4 through 1 in reverse order.
 
-This command loads one LingBot service instance, not one instance per user. The one model worker retains up to two
-independent LiveKit/pipeline sessions and the LingBot execution lease time-slices their model chunks. The setting is
-not a generic replication option: server-push capacity remains one, and other bidirectional services must implement
-their own safe cross-session execution policy.
+This command starts one process, one in-process model worker, and one shared LingBot service instance. It exposes four
+physical GPUs as process-local devices 0-3, declares one four-device logical worker group, and retains up to two
+independent sessions. The LingBot execution lease serializes their model chunks; it is not a generic replication
+option.
 
 The LiveKit Python SDK is part of TeleFuser's base dependencies; the LiveKit Server is installed and operated
-separately. See the [Stream Server guide](../../docs/en/stream_server.md) for the session API, data topics, worker
-lifecycle, remote development, and production deployment.
+separately. See the [Stream Server guide](../../docs/en/stream_server.md) for room roles and viewer fan-out, the exact
+GPU-map boundary, session API, queues, lifecycle, observability, remote development, and production deployment.
