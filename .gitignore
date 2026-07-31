@@ -162,3 +162,4 @@ telefuser/_version.py
 !examples/data/lingbot_world_fast/image.jpg
 !examples/data/lingbot_world_fast/poses.npy
 !examples/data/lingbot_world_fast/intrinsics.npy
+.models

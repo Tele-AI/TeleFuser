@@ -20,8 +20,8 @@ else
 fi
 if [[ -z "${AIPERF_PYTHON}" ]] || ! command -v "${AIPERF_PYTHON}" >/dev/null 2>&1 \
     || ! PYTHONPATH="${ADAPTER_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-        "${AIPERF_PYTHON}" -c 'import livekit, telefuser_aiperf' >/dev/null 2>&1; then
-    echo "The pinned streaming-capable AIPerf or LiveKit is not installed. Run: bash scripts/setup_aiperf.sh" >&2
+        "${AIPERF_PYTHON}" -c 'import livekit, msgspec, websockets, telefuser_aiperf' >/dev/null 2>&1; then
+    echo "The pinned streaming-capable AIPerf dependencies are not installed. Run: bash scripts/setup_aiperf.sh" >&2
     exit 1
 fi
 

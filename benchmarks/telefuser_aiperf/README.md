@@ -162,9 +162,54 @@ session, joins its room, receives native video tracks, sends reliable controls o
 `tf.status` and bounded `tf.metrics` messages. It produces AIPerf's standard session results without requiring any
 LiveKit-specific changes in AIPerf.
 
+## SGLang LingBot-World v2, Four GPUs
+
+This target uses SGLang's native MessagePack WebSocket endpoint and does not start LiveKit. It requires an SGLang
+installation containing the `/v1/realtime_video/generate` endpoint and
+`LingBotWorldCausalDMDPipeline`. In terminal 1, launch the four-GPU server:
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+```
+
+The launcher defaults to GPUs `0,1,2,3`, port `30000`, and model
+`robbyant/lingbot-world-v2-14b-causal-fast-diffusers`. It uses an installed `sglang` command when available.
+For the checked-in `work_dirs/sglang` source, set `SGLANG_PYTHON` to an environment installed with that source's
+dependencies. Override the defaults when needed:
+
+```bash
+SGLANG_BIN=/path/to/sglang \
+SGLANG_PYTHON=/path/to/sglang-env/bin/python \
+SGLANG_SOURCE_DIR=/path/to/sglang-source \
+SGLANG_MODEL_PATH=/path/to/lingbot-world-v2-14b-causal-fast-diffusers \
+SGLANG_CUDA_VISIBLE_DEVICES=4,5,6,7 \
+  bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+```
+
+Wait until `http://127.0.0.1:30000/health` succeeds, then run AIPerf in terminal 2:
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+```
+
+Artifacts are written below
+`artifacts/telefuser_aiperf/stream_sglang_lingbot_v2_4gpu_1min/`. The adapter counts combined and split SGLang frame
+batches, converts the shared keyboard trace to `camera_actions` state events, and maps scheduler, WebP encoding,
+pacing, and WebSocket write timings into AIPerf's standard stream result.
+
+The launcher intentionally passes `--flow-shift 10`, matching the official LingBot-World v2 implementation and the
+TeleFuser workload. The SGLang source default is `5`; use `SGLANG_FLOW_SHIFT=5` only to benchmark SGLang's default
+behavior, and do not compare that run as a numerically equivalent model configuration. The workload also fixes four
+DMD steps, 16 FPS, 60 chunks, a KV window of 18 latent frames plus a six-frame sink, WebP quality 95, and no output
+pacing. SGLang permits one active realtime generation session, so the contract fixes concurrency to one.
+
 ## Troubleshooting
 
 - `The pinned streaming-capable AIPerf or LiveKit is not installed`: rerun `bash scripts/setup_aiperf.sh`.
+- `SGLang is not installed or SGLANG_BIN is invalid`: activate the SGLang environment or set `SGLANG_BIN` to its
+  executable.
+- SGLang connection refused on port 30000: wait for model loading to finish and check `/health`.
 - Connection refused on port 8088: the TeleFuser process is still warming up or has exited; inspect terminal 2.
 - `0/1 succeeded` with zero received frames: confirm LiveKit is still running, restart the TeleFuser service, wait for
   one idle worker, and rerun the benchmark.
@@ -204,7 +249,7 @@ tree. History failures do not silently fall back to an in-memory or file-only da
 configs/             Reproducible batch and streaming workloads
 data/                Prompt and control inputs
 scripts/             Batch and streaming launchers
-telefuser_aiperf/    Source-loaded LiveKit adapter
+telefuser_aiperf/    Source-loaded LiveKit and SGLang realtime adapters
 tests/               Adapter tests
 *_contract.yaml      Target and transport capability contracts
 ```
@@ -219,9 +264,11 @@ AIPerf environment first, then run the checks from the repository root:
 
 PYTHONPATH=benchmarks/telefuser_aiperf \
   .venv-aiperf/bin/python -m pytest \
-  benchmarks/telefuser_aiperf/tests/test_livekit_adapter.py
+  benchmarks/telefuser_aiperf/tests/test_livekit_adapter.py \
+  benchmarks/telefuser_aiperf/tests/test_sglang_adapter.py
 
 bash -n \
   scripts/setup_aiperf.sh \
-  benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
+  benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
 ```

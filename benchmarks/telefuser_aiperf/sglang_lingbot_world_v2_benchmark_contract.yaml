@@ -1,0 +1,66 @@
+# Benchmark contract for SGLang's LingBot-World v2 realtime WebSocket target.
+contract_version: v1
+name: sglang_lingbot_world_v2_realtime
+mode: stream_world
+implementation: sglang
+model_family: lingbot_world_v2
+model: LingBot-World-v2-14B-Causal-Fast
+supported_tasks:
+  - bidirectional
+transport: websocket
+adapter: sglang_realtime
+transport_provider: sglang
+endpoint:
+  health_path: /health
+  offer_path: /v1/realtime_video/generate
+request_encoding:
+  content_type: application/msgpack
+  init_type: init
+  control_type: event
+  control_kind: camera_actions
+result_delivery:
+  media: websocket_frame_batch
+  metrics: websocket_chunk_stats
+  event_log: events/{phase}_{logical_session_index}_{session_id}.jsonl
+workload:
+  mode: bidirectional
+  task: bidirectional
+  fps: 16
+  session_count: 1
+  warmup_sessions: 0
+  session_duration_s: 240.0
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  request_extra:
+    size: 832x480
+    num_frames: 957
+    max_chunks: 60
+    num_inference_steps: 4
+    guidance_scale: 1.0
+    seed: 42
+    realtime_output_format: webp
+    output_compression: 95
+    realtime_output_pacing: false
+    realtime_causal_sink_size: 6
+    realtime_causal_kv_cache_num_frames: 18
+metrics:
+  - offer_rtt_ms
+  - connected_latency_ms
+  - first_frame_latency_ms
+  - first_metadata_latency_ms
+  - stream_fps
+  - session_runtime_s
+  - frames_received
+  - control_ack_latency_ms
+  - control_to_next_frame_latency_ms
+  - chunk_compute_seconds
+  - chunk_compute_fps
+  - chunk_encode_seconds
+  - chunk_output_write_seconds
+  - success_rate
+limits:
+  active_sessions: 1
+artifacts:
+  config: benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+  control_trace: benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
+  server_runner: benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+  benchmark_runner: benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh

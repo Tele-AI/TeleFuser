@@ -2,7 +2,8 @@
 
 TeleFuser exposes raw target-side facts; AIPerf owns workload execution, aggregation, resource collection, artifacts,
 GreptimeDB history, and visualization. The checked-in integration covers batch video generation through the
-OpenAI-compatible `/v1/videos` API and LingBot streaming through LiveKit.
+OpenAI-compatible `/v1/videos` API, TeleFuser LingBot streaming through LiveKit, and SGLang LingBot streaming through
+its native realtime WebSocket endpoint.
 
 AIPerf's stream runner and result schema are transport-neutral. The LiveKit adapter is maintained by
 TeleFuser, loads from source at process startup, and produces AIPerf's standard session results. The contract records WebRTC as
@@ -60,6 +61,19 @@ minutes for the command to finish. Success is `Stream profile sessions: 1/1 succ
 `artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`. See the canonical README for model file layout, manual Python
 environment selection, history setup, and troubleshooting.
 
+To profile SGLang on the same four-GPU workload instead, start its server and select the SGLang config:
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+```
+
+This launch explicitly uses `--flow-shift 10` for parity with the official model and TeleFuser. SGLang's source
+default is `5`, so runs made with `SGLANG_FLOW_SHIFT=5` describe SGLang's default but are not model-configuration
+parity comparisons. See the benchmark README for model, GPU, port, and executable overrides.
+
 ## Ownership and metric semantics
 
 | Component | Owner | Responsibility |
@@ -67,6 +81,7 @@ environment selection, history setup, and troubleshooting.
 | TeleFuser runtime | TeleFuser | Emit synchronized phase, chunk, runtime, cache, and environment facts |
 | Batch target adapter | AIPerf | Convert `/v1/videos` HTTP events into the standard request timeline |
 | LiveKit source adapter | TeleFuser | Convert room, track, status, metrics, and control events into session results |
+| SGLang source adapter | TeleFuser | Convert MessagePack frames, chunk timings, and camera events into session results |
 | Aggregation and history | AIPerf | Apply warmup, percentiles, throughput, artifacts, GreptimeDB, and visualization |
 | Contracts and workloads | TeleFuser | Fix target capabilities, inputs, settings, and reproducible launch commands |
 

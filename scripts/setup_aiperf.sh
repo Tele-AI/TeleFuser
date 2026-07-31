@@ -6,12 +6,15 @@ PYTHON_BIN="${AIPERF_PYTHON_BIN:-python3}"
 AIPERF_ENV_DIR="${AIPERF_ENV_DIR:-${ROOT_DIR}/.venv-aiperf}"
 AIPERF_SPEC="${AIPERF_SPEC:-aiperf @ git+https://github.com/ActivePeter/aiperf.git@e977ffbb1648510acec431b2a3fbd1a0f7bb8a35}"
 LIVEKIT_SPEC="${LIVEKIT_SPEC:-livekit>=1.1.13,<2.0.0}"
+MSGSPEC_SPEC="${MSGSPEC_SPEC:-msgspec>=0.18,<1.0}"
+WEBSOCKETS_SPEC="${WEBSOCKETS_SPEC:-websockets>=15,<17}"
 ADAPTER_ROOT="${ROOT_DIR}/benchmarks/telefuser_aiperf"
 
 usage() {
     echo "Usage: scripts/setup_aiperf.sh"
     echo ""
-    echo "Environment overrides: AIPERF_SPEC, LIVEKIT_SPEC, AIPERF_ENV_DIR, AIPERF_PYTHON_BIN"
+    echo "Environment overrides: AIPERF_SPEC, LIVEKIT_SPEC, MSGSPEC_SPEC, WEBSOCKETS_SPEC,"
+    echo "                       AIPERF_ENV_DIR, AIPERF_PYTHON_BIN"
 }
 
 if [[ $# -gt 0 ]]; then
@@ -37,7 +40,11 @@ if "${AIPERF_ENV_DIR}/bin/python" -c 'import importlib.util; raise SystemExit(im
     "${AIPERF_ENV_DIR}/bin/python" -m pip uninstall -y aiperf
 fi
 
-"${AIPERF_ENV_DIR}/bin/python" -m pip install "${AIPERF_SPEC}" "${LIVEKIT_SPEC}"
+"${AIPERF_ENV_DIR}/bin/python" -m pip install \
+    "${AIPERF_SPEC}" \
+    "${LIVEKIT_SPEC}" \
+    "${MSGSPEC_SPEC}" \
+    "${WEBSOCKETS_SPEC}"
 
 mkdir -p "${ROOT_DIR}/artifacts"
 

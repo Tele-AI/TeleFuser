@@ -5,6 +5,7 @@ from __future__ import annotations
 from aiperf.streaming.adapters import register_stream_adapter
 
 from telefuser_aiperf.adapter import TeleFuserLiveKitAdapter
+from telefuser_aiperf.sglang_adapter import SGLangRealtimeAdapter
 
 
 def register_adapters(*, replace: bool = False) -> None:
@@ -15,6 +16,11 @@ def register_adapters(*, replace: bool = False) -> None:
         TeleFuserLiveKitAdapter,
         replace=replace,
     )
+    register_stream_adapter(
+        "sglang_realtime",
+        SGLangRealtimeAdapter,
+        replace=replace,
+    )
 
 
-__all__ = ["TeleFuserLiveKitAdapter", "register_adapters"]
+__all__ = ["SGLangRealtimeAdapter", "TeleFuserLiveKitAdapter", "register_adapters"]

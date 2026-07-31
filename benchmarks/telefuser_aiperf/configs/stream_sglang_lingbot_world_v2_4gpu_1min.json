@@ -1,0 +1,39 @@
+{
+  "contract": "benchmarks/telefuser_aiperf/sglang_lingbot_world_v2_benchmark_contract.yaml",
+  "server_url": "http://127.0.0.1:30000",
+  "mode": "bidirectional",
+  "task": "bidirectional",
+  "prompt": "walk forward through the scene",
+  "image_path": "examples/data/lingbot_world_fast/image.jpg",
+  "fps": 16,
+  "session_count": 1,
+  "warmup_sessions": 0,
+  "warmup_chunks": 1,
+  "session_duration_s": 240.0,
+  "stagger_s": 0.0,
+  "control_trace_path": "benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json",
+  "request_extra": {
+    "size": "832x480",
+    "num_frames": 957,
+    "max_chunks": 60,
+    "num_inference_steps": 4,
+    "guidance_scale": 1.0,
+    "seed": 42,
+    "realtime_output_format": "webp",
+    "output_compression": 95,
+    "realtime_output_pacing": false,
+    "realtime_causal_sink_size": 6,
+    "realtime_causal_kv_cache_num_frames": 18
+  },
+  "transport": {
+    "connect_timeout_s": 60.0,
+    "message_timeout_s": 300.0,
+    "frame_timeout_s": 300.0,
+    "shutdown_timeout_s": 10.0,
+    "receive_audio": false
+  },
+  "server_metrics": {
+    "enabled": false
+  },
+  "artifacts_dir": "artifacts/telefuser_aiperf/stream_sglang_lingbot_v2_4gpu_1min"
+}
