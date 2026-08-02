@@ -127,6 +127,19 @@ def test_independent_vae_stage_configs_are_resolved_independently() -> None:
     LingBotWorldFastPipeline._validate_vae_stage_runtime_config(config.vae_decode_config)
 
 
+def test_only_vae_decode_stage_accepts_spatial_parallel_workers() -> None:
+    config = ModelRuntimeConfig(
+        device_type="cuda",
+        device_id=0,
+        torch_dtype=torch.float32,
+        parallel_config=ParallelConfig(device_ids=[0, 1, 2, 3], sp_ulysses_degree=4),
+    )
+
+    LingBotWorldFastPipeline._validate_vae_stage_runtime_config(config, allow_parallel=True)
+    with pytest.raises(ValueError, match="VAE encode stage currently requires exactly one GPU"):
+        LingBotWorldFastPipeline._validate_vae_stage_runtime_config(config)
+
+
 def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
     pipeline = _Pipeline()
     runtime = LingBotWorldFastGenerationSession(

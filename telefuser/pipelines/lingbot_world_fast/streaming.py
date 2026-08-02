@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -52,6 +54,7 @@ class _LingBotStreamingSessionEntry:
     progress_callback: Callable[..., None] | None
     next_condition_index: int = 0
     next_control_index: int = 0
+    chunk_profiles: dict[int, dict[str, object]] = field(default_factory=dict)
 
 
 class LingBotWorldFastStreamingRuntime:
@@ -62,6 +65,8 @@ class LingBotWorldFastStreamingRuntime:
         self._lock = threading.RLock()
         self._sessions: dict[str, _LingBotStreamingSessionEntry] = {}
         self._closed = False
+        self._serialize_dit_decode = self._dit_decode_devices_overlap()
+        self._dit_decode_lock = threading.Lock()
         actors = {
             "encode": ParallelWorkerStageActor(
                 pipeline.vae_encode_worker,
@@ -72,12 +77,9 @@ class LingBotWorldFastStreamingRuntime:
                 session_closer=self._release_encode_session,
             ),
             "denoise": self._denoise_actor(),
-            "decode": ParallelWorkerStageActor(
-                pipeline.vae_decode_worker,
-                "decode_chunk",
-                self._decode_inputs,
-                self._decode_outputs,
-                close_worker=False,
+            "decode": LocalStageActor(
+                self._decode,
+                name="lingbot-decode-actor",
                 session_closer=self._release_decode_session,
             ),
         }
@@ -251,6 +253,27 @@ class LingBotWorldFastStreamingRuntime:
         self._require_session(session)
         return self.orchestrator.session_metrics(session.session_id)
 
+    def _pop_chunk_profile(self, session: LingBotWorldFastStreamingSession, index: int) -> dict[str, object]:
+        entry = self._require_session(session)
+        with self._lock:
+            profile = entry.chunk_profiles.pop(index, {})
+        for stage_id in ("encode", "denoise", "decode"):
+            timing = next(
+                (
+                    item
+                    for item in self.orchestrator.stage_timings(session.session_id, stage_id)
+                    if item.sequence_id == index
+                ),
+                None,
+            )
+            if timing is None:
+                continue
+            if timing.admitted_at is not None and timing.completed_at is not None:
+                profile[f"{stage_id}_actor_seconds"] = timing.completed_at - timing.admitted_at
+            if timing.inputs_ready_at is not None and timing.admitted_at is not None:
+                profile[f"{stage_id}_queue_seconds"] = timing.admitted_at - timing.inputs_ready_at
+        return profile
+
     def wait_until_idle(self, session: LingBotWorldFastStreamingSession, timeout: float = 5.0) -> bool:
         """Wait until the session has no admitted or immediately admissible work."""
         self._require_session(session)
@@ -326,6 +349,21 @@ class LingBotWorldFastStreamingRuntime:
             name="lingbot-denoise-actor",
             session_closer=self._release_denoise_session,
         )
+
+    @staticmethod
+    def _runtime_device_ids(runtime_config: object) -> set[int]:
+        parallel_config = runtime_config.parallel_config
+        if parallel_config.device_ids is not None:
+            return set(parallel_config.device_ids)
+        return {runtime_config.device_id}
+
+    def _dit_decode_devices_overlap(self) -> bool:
+        config = getattr(self.pipeline, "config", None)
+        if config is None:
+            return False
+        dit_devices = self._runtime_device_ids(config.dit_config)
+        decode_devices = self._runtime_device_ids(config.vae_decode_config)
+        return not dit_devices.isdisjoint(decode_devices)
 
     def _entry_for_context(self, context: StreamingSessionContext) -> _LingBotStreamingSessionEntry:
         with self._lock:
@@ -428,10 +466,15 @@ class LingBotWorldFastStreamingRuntime:
         return {
             "cache_handle": runtime.cache_handle,
             "condition_chunk": invocation.inputs["condition"],
-            "prompt_emb": runtime.prompt_emb,
+            "prompt_emb": None,
             "control_chunk": invocation.inputs["control"],
             "current_start": index * runtime.chunk_size * runtime.frame_tokens,
             "max_attention_size": runtime.max_attention_size,
+            "_local_vae_handoff": bool(
+                runtime.world_kv_binding is None
+                and getattr(self.pipeline.vae_decode_worker, "uses_local_latent_handoff", False)
+            ),
+            "_benchmark_profile": runtime.config.benchmark_metrics,
         }
 
     @torch.inference_mode()
@@ -449,9 +492,25 @@ class LingBotWorldFastStreamingRuntime:
         else:
             self.pipeline._notify_progress(entry.progress_callback, "denoising_chunk", index=index)
             kwargs = self._denoise_kwargs(invocation)
-            latent = self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)
-            if callable(latent):
-                latent = latent()
+            lock = self._dit_decode_lock if self._serialize_dit_decode else nullcontext()
+            lock_started_at = time.perf_counter()
+            with lock:
+                worker_started_at = time.perf_counter()
+                result = self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)
+                submit_finished_at = time.perf_counter()
+                if callable(result):
+                    result = result()
+                worker_finished_at = time.perf_counter()
+                if isinstance(result, tuple):
+                    latent, profile = result
+                    profile["denoise_lock_wait_seconds"] = worker_started_at - lock_started_at
+                    profile["denoise_submit_seconds"] = submit_finished_at - worker_started_at
+                    profile["denoise_result_wait_seconds"] = worker_finished_at - submit_finished_at
+                    profile["denoise_worker_seconds"] = worker_finished_at - worker_started_at
+                    with self._lock:
+                        entry.chunk_profiles.setdefault(index, {}).update(profile)
+                else:
+                    latent = result
             self.pipeline._notify_progress(entry.progress_callback, "chunk_denoised", index=index)
         if runtime.world_kv_binding is not None:
             try:
@@ -476,11 +535,16 @@ class LingBotWorldFastStreamingRuntime:
             "latents": invocation.inputs["latent"],
             "is_first_clip": index == 0,
             "is_last_clip": index == runtime.chunk_count - 1,
+            "_benchmark_profile": runtime.config.benchmark_metrics,
         }
 
     def _decode_outputs(self, value: torch.Tensor, invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
-        frames = self.pipeline.tensor2video(value)
+        if value.dtype == torch.uint8:
+            arrays = value.permute(1, 2, 3, 0).contiguous().numpy()
+            frames = [Image.fromarray(array) for array in arrays]
+        else:
+            frames = self.pipeline.tensor2video(value)
         self.pipeline._notify_progress(
             entry.progress_callback,
             "chunk_decoded",
@@ -488,3 +552,31 @@ class LingBotWorldFastStreamingRuntime:
             frames=len(frames),
         )
         return {"frames": frames}
+
+    @torch.inference_mode()
+    def _decode(self, invocation: StreamingStageInvocation) -> dict[str, object]:
+        args, kwargs = self._decode_inputs(invocation)
+        lock = self._dit_decode_lock if self._serialize_dit_decode else nullcontext()
+        lock_started_at = time.perf_counter()
+        with lock:
+            worker_started_at = time.perf_counter()
+            result = self.pipeline.vae_decode_worker.decode_chunk(*args, **kwargs)
+            submit_finished_at = time.perf_counter()
+            if callable(result):
+                result = result()
+            worker_finished_at = time.perf_counter()
+        if isinstance(result, tuple):
+            value, profile = result
+            profile["decode_lock_wait_seconds"] = worker_started_at - lock_started_at
+            profile["decode_submit_seconds"] = submit_finished_at - worker_started_at
+            profile["decode_result_wait_seconds"] = worker_finished_at - submit_finished_at
+            profile["decode_worker_seconds"] = worker_finished_at - worker_started_at
+        else:
+            value, profile = result, {}
+        convert_start = time.perf_counter()
+        output = self._decode_outputs(value, invocation)
+        profile["tensor_to_frames_seconds"] = time.perf_counter() - convert_start
+        entry = self._entry_for_invocation(invocation)
+        with self._lock:
+            entry.chunk_profiles.setdefault(invocation.key.sequence_id, {}).update(profile)
+        return output

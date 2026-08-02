@@ -63,8 +63,9 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
     assert config.dit_config.parallel_config.enable_fsdp is offline_example.PPL_CONFIG["enable_fsdp"]
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 1
-    assert config.vae_decode_config.parallel_config.device_ids == [1]
+    assert config.vae_decode_config.device_id == 0
+    assert config.vae_decode_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.vae_decode_config.parallel_config.sp_ulysses_degree == 4
     load_calls = module_manager.load_model.call_args_list
     assert [call.args[0] for call in load_calls[:2]] == [
         "/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
@@ -76,10 +77,32 @@ def test_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -> N
 
 
 def test_unified_example_resolves_fixed_gpu_layouts() -> None:
-    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, 1)
-    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, 1)
-    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, 4)
-    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, 5)
+    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, [1])
+    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, [0, 1, 2, 3])
+    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, [4])
+    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, [5])
+
+
+def test_unified_example_six_gpu_uses_five_dit_gpus_and_one_vae_gpu() -> None:
+    pipeline = MagicMock()
+    module_manager = MagicMock()
+
+    with (
+        patch.object(offline_example, "ModuleManager", return_value=module_manager),
+        patch.object(offline_example, "LingBotWorldFastPipeline", return_value=pipeline),
+    ):
+        offline_example.get_pipeline(
+            parallelism=6,
+            model_root="/models/Wan2.2-I2V-A14B",
+            fast_model_root="/models/lingbot-world-fast",
+        )
+
+    config = pipeline.init.call_args.args[1]
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3, 4]
+    assert config.dit_config.parallel_config.sp_ulysses_degree == 5
+    assert config.vae_encode_config.parallel_config.device_ids == [5]
+    assert config.vae_decode_config.parallel_config.device_ids == [5]
+    assert config.vae_decode_config.parallel_config.sp_ulysses_degree == 1
 
 
 def test_unified_example_get_service_uses_passed_gpu_num_and_ppl_fps() -> None:

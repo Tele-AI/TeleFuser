@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -14,6 +15,8 @@ from telefuser.models.wan_video_vae import (
     WanVideoVAE,
     WanVideoVAEStreamingDecodeState,
     WanVideoVAEStreamingEncodeState,
+    _convert_conv3d_to_channels_last_3d,
+    _enable_spatial_parallel_decode,
 )
 
 
@@ -102,6 +105,7 @@ class _VAEEncodeCacheState:
 
     condition_image: torch.Tensor | None
     encoder_state: WanVideoVAEStreamingEncodeState = field(default_factory=WanVideoVAEStreamingEncodeState)
+    latent_condition: torch.Tensor | None = None
     pool_slot: int | None = None
 
 
@@ -114,6 +118,9 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
         if self.vae is None:
             raise ValueError("LingBot VAE encode stage requires a loaded wan_video_vae module")
         self.model_names = ["vae"]
+        # Condition chunks reuse the same bounded shapes for the session lifetime.
+        # Retain allocator blocks instead of forcing a driver allocation per call.
+        self.empty_cache_after_call = False
         self._cache_registry: dict[int, _VAEEncodeCacheState] = {}
         self._observed_session_cache_bytes = 0
         self._cache_layout: dict[int, tuple[torch.dtype, int]] = {}
@@ -146,8 +153,6 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
             raise ValueError(f"cache pool capacity must be positive, got {capacity}")
         if self._cache_registry:
             raise RuntimeError("cannot configure the LingBot VAE encode cache pool while sessions are active")
-        if not self._cache_layout:
-            raise RuntimeError("cannot configure the LingBot VAE encode cache pool before warmup")
         existing = self._cache_pool
         if existing is not None:
             if existing.capacity != capacity:
@@ -194,35 +199,43 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
     def encode_condition_chunk(
         self, cache_handle: int, chunk_index: int, chunk_count: int, chunk_size: int, height: int, width: int
     ) -> torch.Tensor:
-        """Encode one condition chunk and return CPU transport features."""
+        """Encode the bounded zero-frame prefix once and return one condition chunk."""
         state = self._cache_registry[cache_handle]
-        is_first = chunk_index == 0
-        video = torch.zeros(
-            (3, 1 + 4 * (chunk_size - 1) if is_first else 4 * chunk_size, height, width),
-            device=self.device,
-            dtype=self.torch_dtype,
-        )
-        if is_first:
+        if state.latent_condition is None:
             if state.condition_image is None:
-                raise RuntimeError("The first condition chunk requires the session image tensor")
+                raise RuntimeError("The first condition request requires the session image tensor")
+            target_latent_frames = chunk_count * chunk_size
+            encoded_latent_frames = min(target_latent_frames, 16)
+            video = torch.zeros(
+                (3, 1 + 4 * (encoded_latent_frames - 1), height, width),
+                device=self.device,
+                dtype=self.torch_dtype,
+            )
             video[:, 0] = state.condition_image
-        latent = self.vae.cached_encode_withflag(
-            video,
-            device=self.device,
-            is_first_clip=is_first,
-            is_last_clip=chunk_index == chunk_count - 1,
-            encode_state=state.encoder_state,
-        )
-        self._observe_cache(state.encoder_state.feat_cache)
-        if self._cache_pool is not None and state.pool_slot is not None:
-            self._cache_pool.stabilize(state.encoder_state.feat_cache, state.pool_slot)
-        if latent.shape[1] != chunk_size:
-            raise RuntimeError(f"VAE condition chunk has {latent.shape[1]} latent frames, expected {chunk_size}")
-        mask = torch.zeros((4, chunk_size, latent.shape[2], latent.shape[3]), device=latent.device, dtype=latent.dtype)
-        if is_first:
-            mask[:, 0] = 1
+            latent = self.vae.cached_encode_withflag(
+                video,
+                device=self.device,
+                is_first_clip=True,
+                is_last_clip=True,
+                encode_state=state.encoder_state,
+            )
+            if latent.shape[1] != encoded_latent_frames:
+                raise RuntimeError(
+                    f"VAE condition prefix has {latent.shape[1]} latent frames, expected {encoded_latent_frames}"
+                )
+            state.latent_condition = latent.cpu()
             state.condition_image = None
-        return torch.cat([mask, latent], dim=0).unsqueeze(0).cpu()
+
+        latent_condition = state.latent_condition
+        start = chunk_index * chunk_size
+        available = latent_condition[:, start : start + chunk_size]
+        if available.shape[1] < chunk_size:
+            tail = latent_condition[:, -1:].expand(-1, chunk_size - available.shape[1], -1, -1)
+            available = torch.cat([available, tail], dim=1)
+        mask = torch.zeros((4, chunk_size, available.shape[2], available.shape[3]), dtype=available.dtype)
+        if chunk_index == 0:
+            mask[:, 0] = 1
+        return torch.cat([mask, available], dim=0).unsqueeze(0)
 
     def release_cache(self, cache_handle: int) -> bool:
         """Release encoder state for one session."""
@@ -244,6 +257,18 @@ class _VAEDecodeCacheState:
 
     decoder_state: WanVideoVAEStreamingDecodeState = field(default_factory=WanVideoVAEStreamingDecodeState)
     pool_slot: int | None = None
+    output_buffer: torch.Tensor | None = None
+    exported_output_buffer: torch.Tensor | None = None
+
+
+def _copy_frames_to_shared_cpu(state: _VAEDecodeCacheState, frames: torch.Tensor) -> torch.Tensor:
+    converted = ((frames + 1) * 127.5).clamp_(0, 255).to(dtype=torch.uint8)
+    output = state.output_buffer
+    if output is None or output.shape != converted.shape:
+        output = torch.empty(converted.shape, dtype=torch.uint8, device="cpu").share_memory_()
+        state.output_buffer = output
+    output.copy_(converted)
+    return output
 
 
 class LingBotWorldFastVAEDecodeStage(BaseStage):
@@ -259,6 +284,11 @@ class LingBotWorldFastVAEDecodeStage(BaseStage):
         self._observed_session_cache_bytes = 0
         self._cache_layout: dict[int, tuple[torch.dtype, int]] = {}
         self._cache_pool: _VAECachePool | None = None
+
+    def parallel_models(self) -> None:
+        """Shard decoder feature maps across the configured VAE worker ranks."""
+        _enable_spatial_parallel_decode(self.vae)
+        _convert_conv3d_to_channels_last_3d(self.vae.model.decoder)
 
     def _observe_cache(self, cache: list[object]) -> None:
         self._observed_session_cache_bytes = max(self._observed_session_cache_bytes, _cache_tensor_bytes(cache))
@@ -330,10 +360,20 @@ class LingBotWorldFastVAEDecodeStage(BaseStage):
 
     @with_model_offload(["vae"])
     def decode_chunk(
-        self, cache_handle: int, latents: torch.Tensor, is_first_clip: bool, is_last_clip: bool
-    ) -> torch.Tensor:
+        self,
+        cache_handle: int,
+        latents: torch.Tensor,
+        is_first_clip: bool,
+        is_last_clip: bool,
+        _benchmark_profile: bool = False,
+    ) -> torch.Tensor | None | tuple[torch.Tensor | None, dict[str, float]]:
         """Decode one latent chunk and return CPU frame tensors."""
         state = self._cache_registry[cache_handle]
+        decode_start = decode_end = None
+        if _benchmark_profile and self.device.type == "cuda":
+            decode_start = torch.cuda.Event(enable_timing=True)
+            decode_end = torch.cuda.Event(enable_timing=True)
+            decode_start.record()
         frames = self.vae.cached_decode_withflag(
             latents,
             device=self.device,
@@ -341,10 +381,33 @@ class LingBotWorldFastVAEDecodeStage(BaseStage):
             is_last_clip=is_last_clip,
             decode_state=state.decoder_state,
         )
+        profile = None
+        if decode_end is not None:
+            decode_end.record()
+            decode_end.synchronize()
+            profile = {"vae_decode_gpu_seconds": decode_start.elapsed_time(decode_end) / 1000.0}
         self._observe_cache(state.decoder_state.feat_cache)
         if self._cache_pool is not None and state.pool_slot is not None:
             self._cache_pool.stabilize(state.decoder_state.feat_cache, state.pool_slot)
-        return frames.cpu()
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() != 0:
+                result = None
+            else:
+                transfer_start = time.perf_counter()
+                shared_result = _copy_frames_to_shared_cpu(state, frames)
+                if state.exported_output_buffer is shared_result:
+                    result = None
+                else:
+                    state.exported_output_buffer = shared_result
+                    result = shared_result
+                if profile is not None:
+                    profile["gpu_to_cpu_seconds"] = time.perf_counter() - transfer_start
+        else:
+            transfer_start = time.perf_counter()
+            result = frames.cpu()
+            if profile is not None:
+                profile["gpu_to_cpu_seconds"] = time.perf_counter() - transfer_start
+        return (result, profile) if profile is not None else result
 
     def release_cache(self, cache_handle: int) -> bool:
         """Release decoder state for one session."""

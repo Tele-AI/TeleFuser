@@ -55,6 +55,66 @@ def _default_vae_stage_runtime_config() -> ModelRuntimeConfig:
     return ModelRuntimeConfig(torch_dtype=torch.float32, parallel_config=ParallelConfig(device_ids=[0]))
 
 
+class _CoLocatedVAEDecodeWorker:
+    """Map VAE decode calls onto a denoising ParallelWorker."""
+
+    uses_local_latent_handoff = True
+
+    def __init__(self, worker: ParallelWorker) -> None:
+        self._worker = worker
+        self.name = f"Co-located VAE decode on {worker.name}"
+        self._output_buffers: dict[int, torch.Tensor] = {}
+
+    def reset_device_memory_peak(self) -> bool:
+        return self._worker.reset_vae_decode_device_memory_peak(sync=True)
+
+    def device_memory_snapshots(self) -> list[dict[str, int | str]]:
+        return self._worker.vae_decode_device_memory_snapshots(sync=True)
+
+    def estimate_session_cache_bytes(self) -> int:
+        return self._worker.estimate_vae_decode_session_cache_bytes(sync=True)
+
+    def observed_session_cache_bytes(self) -> int:
+        return self._worker.observed_vae_decode_session_cache_bytes(sync=True)
+
+    def configure_cache_pool(self, capacity: int) -> object:
+        return self._worker.configure_vae_decode_cache_pool(capacity, sync=True)
+
+    def initialize_cache(self, cache_handle: int, *, sync: bool = False) -> object:
+        self._output_buffers.pop(cache_handle, None)
+        return self._worker.initialize_vae_decode_cache(cache_handle, sync=sync)
+
+    def decode_chunk(self, cache_handle: int, *args: object, **kwargs: object) -> object:
+        result = self._worker.decode_chunk(cache_handle, *args, **kwargs)
+
+        def resolve(value: object) -> object:
+            output, profile = value if isinstance(value, tuple) else (value, None)
+            if output is None or isinstance(output, torch.Tensor) and not output.numel():
+                output = self._output_buffers.get(cache_handle)
+                if output is None:
+                    raise RuntimeError(f"Co-located VAE output buffer {cache_handle} was not registered")
+            elif isinstance(output, torch.Tensor):
+                self._output_buffers[cache_handle] = output
+            else:
+                raise TypeError(f"Co-located VAE decode returned {type(output).__name__}, expected Tensor")
+            return (output, profile) if isinstance(value, tuple) else output
+
+        return (lambda: resolve(result())) if callable(result) else resolve(result)
+
+    def release_cache(self, cache_handle: int, *, sync: bool = False) -> object:
+        result = self._worker.release_vae_decode_cache(cache_handle, sync=sync)
+        if callable(result):
+
+            def wait() -> object:
+                released = result()
+                self._output_buffers.pop(cache_handle, None)
+                return released
+
+            return wait
+        self._output_buffers.pop(cache_handle, None)
+        return result
+
+
 @dataclass
 class LingBotWorldFastPipelineConfig:
     vae_encode_config: ModelRuntimeConfig = field(default_factory=_default_vae_stage_runtime_config)
@@ -256,8 +316,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.tokenizer = HuggingfaceTokenizer(tokenizer_path, 512, "whitespace")
         vae_encode_config = config.vae_encode_config
         vae_decode_config = config.vae_decode_config
-        self._validate_vae_stage_runtime_config(vae_encode_config)
-        self._validate_vae_stage_runtime_config(vae_decode_config)
+        self._validate_vae_stage_runtime_config(vae_encode_config, allow_parallel=False)
+        self._validate_vae_stage_runtime_config(vae_decode_config, allow_parallel=True)
         self.vae_encode_device = self._runtime_device(vae_encode_config)
         self.vae_decode_device = self._runtime_device(vae_decode_config)
         self.vae_encode_torch_dtype = vae_encode_config.torch_dtype
@@ -269,7 +329,6 @@ class LingBotWorldFastPipeline(BasePipeline):
             "lingbot_world_fast_vae_decode", module_manager, vae_decode_config
         )
         self.vae_encode_worker = ParallelWorker(vae_encode_stage)
-        self.vae_decode_worker = ParallelWorker(vae_decode_stage)
 
         dit_runtime_config = config.dit_config
         dit_device = "cpu" if dit_runtime_config.parallel_config.world_size > 1 else self.device
@@ -284,16 +343,30 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
         denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", module_manager, dit_runtime_config)
+        colocate_vae_decode = (
+            dit_runtime_config.parallel_config.world_size > 1
+            and dit_runtime_config.parallel_config.device_ids == vae_decode_config.parallel_config.device_ids
+            and dit_runtime_config.parallel_config.world_size == vae_decode_config.parallel_config.world_size
+        )
+        if colocate_vae_decode:
+            denoise_stage.attach_vae_decode_stage(vae_decode_stage)
         self.denoise_stage = (
             ParallelWorker(denoise_stage) if dit_runtime_config.parallel_config.world_size > 1 else denoise_stage
         )
+        self.vae_decode_worker = (
+            _CoLocatedVAEDecodeWorker(self.denoise_stage) if colocate_vae_decode else ParallelWorker(vae_decode_stage)
+        )
 
     @staticmethod
-    def _validate_vae_stage_runtime_config(runtime_config: ModelRuntimeConfig) -> None:
-        """Restrict the VAE stage to one configured GPU until VAE model parallelism exists."""
+    def _validate_vae_stage_runtime_config(
+        runtime_config: ModelRuntimeConfig,
+        *,
+        allow_parallel: bool = False,
+    ) -> None:
+        """Validate a VAE stage, allowing height-sharded decode workers only."""
         runtime_config.parallel_config.validate()
-        if runtime_config.parallel_config.world_size != 1:
-            raise ValueError("LingBot VAE stage currently requires exactly one GPU")
+        if not allow_parallel and runtime_config.parallel_config.world_size != 1:
+            raise ValueError("LingBot VAE encode stage currently requires exactly one GPU")
 
     @staticmethod
     def _resolve_self_kv_size(
@@ -660,6 +733,7 @@ class LingBotWorldFastPipeline(BasePipeline):
                 generator_state=denoise_generator.get_state().tolist(),
                 noise_generator_state=noise_generator.get_state().tolist(),
                 noise_shape=(1, 16, session_config.chunk_size, lat_h, lat_w),
+                prompt_emb=prompt_emb,
                 timestep_indices=getattr(self.config, "timestep_indices", (0, 179, 358, 679)),
             )
             if isinstance(self.denoise_stage, ParallelWorker):

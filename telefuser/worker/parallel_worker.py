@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
+from multiprocessing.queues import SimpleQueue
 from queue import Empty
 from typing import TYPE_CHECKING, Any
 
@@ -52,8 +53,8 @@ def to_device(data: Any, device: str | torch.device) -> Any:
 def _worker_loop(
     rank: int,
     world_size: int,
-    queue_in: list[mp.Queue],
-    queue_out: mp.Queue,
+    queue_in: list[SimpleQueue],
+    queue_out: SimpleQueue,
     stage: BaseStage,
     master_port: int,
 ) -> None:
@@ -67,13 +68,12 @@ def _worker_loop(
     args = None
     kwargs = None
     try:
+        parallel_config = stage.model_runtime_config.parallel_config
+        # Avoid host-wide launch pools in every spawned CUDA worker, including
+        # single-rank workers such as the LingBot condition encoder.
+        torch.set_num_threads(parallel_config.worker_intra_op_threads)
         device = stage.device
         if world_size > 1:
-            parallel_config = stage.model_runtime_config.parallel_config
-            # Match torchrun's per-rank default. Letting every spawned worker
-            # inherit the host-wide intra-op pool oversubscribes CPU launch
-            # threads and can leave accelerators idle between eager kernels.
-            torch.set_num_threads(parallel_config.worker_intra_op_threads)
             os.environ["RANK"] = str(rank)
             os.environ["WORLD_SIZE"] = str(world_size)
             os.environ["MASTER_ADDR"] = "localhost"
@@ -183,8 +183,11 @@ class ParallelWorker:
                 raise RuntimeError("Failed to set start method to spawn:", e)
 
         spawn_ctx = mp.get_context("spawn")
-        self.queue_in: list[mp.Queue] = [spawn_ctx.Queue() for _ in range(self.world_size)]
-        self.queue_out: mp.Queue = spawn_ctx.Queue()
+        # Queue uses a background feeder thread for every process. These messages
+        # only carry small commands and shared-tensor handles, so synchronous
+        # SimpleQueue writes avoid feeder scheduling tails between GPU stages.
+        self.queue_in: list[SimpleQueue] = [spawn_ctx.SimpleQueue() for _ in range(self.world_size)]
+        self.queue_out: SimpleQueue = spawn_ctx.SimpleQueue()
 
         master_port = PortAllocator().get_free_port_in_interval()
         logger.info(f"parallel worker {self.name} with port {master_port}, world_size={self.world_size}")
@@ -246,7 +249,12 @@ class ParallelWorker:
 
     def _wait_result(self, method_name: str) -> Any:
         try:
-            result = self.queue_out.get(timeout=self.timeout)
+            # SimpleQueue does not expose a timeout argument. Its reader is the
+            # underlying multiprocessing Connection and provides the same bounded
+            # wait without reintroducing a feeder or polling thread.
+            if not self.queue_out._reader.poll(self.timeout):
+                raise Empty
+            result = self.queue_out.get()
         except Empty as exc:
             reason = f"{method_name} timeout after {self.timeout} seconds"
             self._mark_failed(reason)

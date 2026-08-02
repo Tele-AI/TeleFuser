@@ -116,9 +116,11 @@ never transfer actor-owned stage state between workers.
 `StreamingResourceGroupSpec` represents an explicit shared concurrency constraint. A stage participates only when
 its `StreamingStageSpec.resource_group` names a group declared by `StreamingPipelineSpec.resource_groups`.
 
-Do not infer a resource group from `device_id` or `ParallelConfig.device_ids`. For LingBot, VAE encode, DiT, and VAE
-decode are independent actors and may overlap on the same GPU. If a placement exceeds memory capacity, move stages to
-different devices or define a deliberate deployment constraint; do not add an implicit global mutex.
+Do not infer a resource group from `device_id` or `ParallelConfig.device_ids`. LingBot VAE encode remains an
+independent actor. When distributed DiT and VAE decode use exactly the same device list and world size, the pipeline
+explicitly co-locates the decoder in the DiT worker group to reuse CUDA contexts; non-matching placements remain
+independent actors. If a placement exceeds memory capacity, move stages to different devices or define a deliberate
+deployment constraint; do not add an implicit global mutex.
 
 LingBot uses independent `vae_encode_config` and `vae_decode_config`. Each VAE
 stage receives its own complete `ModelRuntimeConfig`; there is no shared VAE

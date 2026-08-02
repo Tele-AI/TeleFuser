@@ -460,6 +460,9 @@ class LingBotWorldFastService:
                     return True
             return False
 
+        def is_measurement_status(item: dict) -> bool:
+            return item.get("type") == "status" and isinstance(item.get("measurement"), dict)
+
         if output_queue.full():
             discarded = False
             if payload_type in _VIDEO_OUTPUT_TYPES:
@@ -470,7 +473,18 @@ class LingBotWorldFastService:
                     return
             elif payload_type == "status":
                 stage = payload.get("stage")
-                discarded = discard_first(lambda item: item.get("type") == "status" and item.get("stage") == stage)
+                if is_measurement_status(payload):
+                    discarded = discard_first(
+                        lambda item: item.get("type") == "status" and not is_measurement_status(item)
+                    )
+                else:
+                    discarded = discard_first(
+                        lambda item: (
+                            item.get("type") == "status"
+                            and item.get("stage") == stage
+                            and not is_measurement_status(item)
+                        )
+                    )
                 if not discarded:
                     with state.metrics_lock:
                         state.dropped_status_payloads += 1
@@ -1187,6 +1201,7 @@ class LingBotWorldFastService:
                 applied_controls = controls_by_chunk.pop(result_index, None)
                 control_received_at = control_received_at_by_chunk.pop(result_index, None)
                 chunk_facts = self._finish_benchmark_measurement(measurements_by_chunk.pop(result_index, None))
+                chunk_profile = streaming_runtime._pop_chunk_profile(streaming_session, result_index)
                 if state.config.show_control_hud:
                     frames = self._overlay_control_hud(frames, applied_controls)
                 self._put_output(
@@ -1245,6 +1260,7 @@ class LingBotWorldFastService:
                                 "frames": len(frames),
                                 "compute_seconds": chunk_facts["seconds"],
                                 "memory": chunk_facts["memory"],
+                                "phases": chunk_profile,
                             }
                         }
                         if chunk_facts is not None

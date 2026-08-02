@@ -5,6 +5,8 @@ Single GPU:
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4
+Six GPUs with five-way DiT parallelism and one dedicated VAE GPU:
+    python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 6
 Multi-GPU runs configure the VAE worker and DiT SP group independently in PPL_CONFIG.
 LiveKit streaming service:
     telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
@@ -29,6 +31,7 @@ from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
 from telefuser.models.wan_video_text_encoder import WanTextEncoder
 from telefuser.models.wan_video_vae import WanVideoVAE
+from telefuser.ops.attention.backends import FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_4_AVAILABLE
 from telefuser.pipelines.lingbot_world_fast.service import LingBotWorldFastService
 from telefuser.pipelines.lingbot_world_fast.session import LingBotWorldFastSessionConfig, resolve_lingbot_frame_count
 from telefuser.pipelines.lingbot_world_v2 import (
@@ -49,7 +52,8 @@ DEFAULT_PROMPT = (
     "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped "
     "mountains under a bright blue sky with drifting white clouds. Gentle ripples reflect the tree and sky."
 )
-RESOLUTION_AREAS = {"480p": 480 * 832, "720p": 720 * 1280}
+RESOLUTION_SIZES = {"480p": (832, 480), "720p": (1280, 720)}
+RESOLUTION_AREAS = {name: width * height for name, (width, height) in RESOLUTION_SIZES.items()}
 
 PPL_CONFIG = dict(
     vae_path=str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B" / "Wan2.1_VAE.pth"),
@@ -76,8 +80,14 @@ PPL_CONFIG = dict(
     seed=42,
     target_fps=16,
     max_duration_seconds=120.0,
-    attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
-    compile_config=CompileConfig(enabled=True),
+    attn_impl=(
+        AttnImplType.FLASH_ATTN_4
+        if FLASH_ATTN_4_AVAILABLE
+        else AttnImplType.FLASH_ATTN_3
+        if FLASH_ATTN_3_AVAILABLE
+        else AttnImplType.SAGE_ATTN_2_8_8_SM90
+    ),
+    compile_config=CompileConfig(enabled=False),
     enable_fsdp=False,
     local_attn_size=18,
     sink_size=6,
@@ -93,20 +103,34 @@ PPL_CONFIG = dict(
 )
 
 
-def _resolve_stage_devices(total_gpu_count: int) -> tuple[list[int], int, int]:
+class _LingBotWorldV2Service(LingBotWorldFastService):
+    """Normalize service images to the checkpoint configured output size."""
+
+    @staticmethod
+    def _load_image(config: dict) -> Image.Image:
+        image = LingBotWorldFastService._load_image(config)
+        target_size = RESOLUTION_SIZES[PPL_CONFIG["resolution"]]
+        if image.size != target_size:
+            image = image.resize(target_size, Image.Resampling.BICUBIC)
+        return image
+
+
+def _resolve_stage_devices(total_gpu_count: int) -> tuple[list[int], int, list[int]]:
     """Return DiT, VAE encode, and VAE decode devices for available GPUs."""
     if total_gpu_count < 1:
         raise ValueError(f"parallelism must be positive, got {total_gpu_count}")
-    if total_gpu_count in {2, 4}:
-        return list(range(total_gpu_count)), 0, 1
+    if total_gpu_count == 2:
+        return [0, 1], 0, [1]
+    if total_gpu_count == 4:
+        return [0, 1, 2, 3], 0, [0, 1, 2, 3]
     if total_gpu_count == 5:
-        return [0, 1, 2, 3], 4, 4
+        return [0, 1, 2, 3], 4, [4]
     if total_gpu_count == 6:
-        return [0, 1, 2, 3, 4], 5, 5
+        return [0, 1, 2, 3, 4], 5, [5]
     return (
         list(range(total_gpu_count)),
         int(PPL_CONFIG["vae_encode_device_id"]),
-        int(PPL_CONFIG["vae_decode_device_id"]),
+        [int(PPL_CONFIG["vae_decode_device_id"])],
     )
 
 
@@ -116,7 +140,7 @@ def get_pipeline(
     v2_model_root: str | None = None,
 ) -> LingBotWorldV2Pipeline:
     """Load LingBot-World v2 for offline chunked generation."""
-    dit_device_ids, vae_encode_device, vae_decode_device = _resolve_stage_devices(parallelism)
+    dit_device_ids, vae_encode_device, vae_decode_device_ids = _resolve_stage_devices(parallelism)
 
     model_root_path = Path(model_root).expanduser() if model_root else None
     v2_model_root_path = Path(v2_model_root).expanduser() if v2_model_root else None
@@ -157,6 +181,7 @@ def get_pipeline(
     pipeline.init(
         module_manager,
         LingBotWorldV2PipelineConfig(
+            max_area=RESOLUTION_AREAS[PPL_CONFIG["resolution"]] + 1,
             vae_encode_config=ModelRuntimeConfig(
                 device_type="cuda",
                 device_id=vae_encode_device,
@@ -165,9 +190,12 @@ def get_pipeline(
             ),
             vae_decode_config=ModelRuntimeConfig(
                 device_type="cuda",
-                device_id=vae_decode_device,
+                device_id=vae_decode_device_ids[0],
                 torch_dtype=PPL_CONFIG["vae_torch_dtype"],
-                parallel_config=ParallelConfig(device_ids=[vae_decode_device]),
+                parallel_config=ParallelConfig(
+                    device_ids=vae_decode_device_ids,
+                    sp_ulysses_degree=len(vae_decode_device_ids),
+                ),
             ),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=dit_device_ids[0], torch_dtype=dtype),
             dit_config=ModelRuntimeConfig(
@@ -190,7 +218,7 @@ def get_pipeline(
 def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
     """Build the service loaded by the TeleFuser stream server."""
     pipeline = get_pipeline(parallelism=gpu_num)
-    return LingBotWorldFastService(
+    return _LingBotWorldV2Service(
         pipeline,
         default_fps=PPL_CONFIG["target_fps"],
         max_generation_seconds=PPL_CONFIG["max_duration_seconds"],
@@ -229,7 +257,10 @@ def run(
     """Generate a complete offline video through the pipeline core API."""
     if resolution not in RESOLUTION_AREAS:
         raise ValueError(f"Unsupported resolution: {resolution}")
-    pipeline.config.max_area = RESOLUTION_AREAS[resolution]
+    pipeline.config.max_area = RESOLUTION_AREAS[resolution] + 1
+    target_size = RESOLUTION_SIZES[resolution]
+    if image.size != target_size:
+        image = image.resize(target_size, Image.Resampling.BICUBIC)
     fps = PPL_CONFIG["target_fps"] if fps is None else fps
 
     session_config = LingBotWorldFastSessionConfig(
@@ -318,7 +349,6 @@ def main(
         image = Image.open(image_path).convert("RGB")
 
         start = time.perf_counter()
-
         frames = run(
             pipeline,
             image,

@@ -127,7 +127,7 @@ class TestParallelWorkerUnit:
         mock_spawn_ctx = MagicMock()
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue = MagicMock()
-        mock_spawn_ctx.Queue.return_value = mock_queue
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -154,7 +154,8 @@ class TestParallelWorkerUnit:
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue_out = MagicMock()
         mock_queue_out.get.return_value = torch.randn(2, 3)
-        mock_spawn_ctx.Queue.return_value = mock_queue_out
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue_out
+        mock_queue_out._reader.poll.return_value = True
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -181,7 +182,8 @@ class TestParallelWorkerUnit:
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue_out = MagicMock()
         mock_queue_out.get.return_value = torch.randn(2, 3)
-        mock_spawn_ctx.Queue.return_value = mock_queue_out
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue_out
+        mock_queue_out._reader.poll.return_value = True
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -209,7 +211,8 @@ class TestParallelWorkerUnit:
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue_out = MagicMock()
         mock_queue_out.get.return_value = "result"
-        mock_spawn_ctx.Queue.return_value = mock_queue_out
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue_out
+        mock_queue_out._reader.poll.return_value = True
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -235,7 +238,8 @@ class TestParallelWorkerUnit:
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue_out = MagicMock()
         mock_queue_out.get.return_value = RuntimeError("Worker error")
-        mock_spawn_ctx.Queue.return_value = mock_queue_out
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue_out
+        mock_queue_out._reader.poll.return_value = True
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -260,8 +264,8 @@ class TestParallelWorkerUnit:
         mock_spawn_ctx = MagicMock()
         mock_mp.get_context.return_value = mock_spawn_ctx
         mock_queue_out = MagicMock()
-        mock_queue_out.get.side_effect = Empty()
-        mock_spawn_ctx.Queue.return_value = mock_queue_out
+        mock_queue_out._reader.poll.return_value = False
+        mock_spawn_ctx.SimpleQueue.return_value = mock_queue_out
 
         mock_stage = MagicMock()
         mock_stage.name = "TestStage"
@@ -302,6 +306,7 @@ class TestWorkerLoopUnit:
 
         mock_stage = MagicMock()
         mock_stage.device = "cpu"
+        mock_stage.model_runtime_config.parallel_config.worker_intra_op_threads = 1
         mock_stage.test_method.return_value = torch.randn(2, 3)
 
         _worker_loop(
@@ -332,6 +337,7 @@ class TestWorkerLoopUnit:
 
         mock_stage = MagicMock()
         mock_stage.device = "cpu"
+        mock_stage.model_runtime_config.parallel_config.worker_intra_op_threads = 1
         mock_stage.name = "TestStage"
         del mock_stage.nonexistent_method  # Ensure method doesn't exist
 
@@ -363,6 +369,7 @@ class TestWorkerLoopUnit:
 
         mock_stage = MagicMock()
         mock_stage.device = "cpu"
+        mock_stage.model_runtime_config.parallel_config.worker_intra_op_threads = 1
         mock_stage.test_method.side_effect = RuntimeError("Method error")
 
         _worker_loop(

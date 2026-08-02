@@ -5,6 +5,8 @@ Single GPU:
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --gpu_num 4
+Six GPUs with five-way DiT parallelism and one dedicated VAE GPU:
+    python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --gpu_num 6
 LiveKit streaming service:
     telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
         --livekit-url ws://127.0.0.1:7880 \
@@ -78,20 +80,22 @@ PPL_CONFIG = dict(
 )
 
 
-def _resolve_stage_devices(total_gpu_count: int) -> tuple[list[int], int, int]:
+def _resolve_stage_devices(total_gpu_count: int) -> tuple[list[int], int, list[int]]:
     """Return DiT, VAE encode, and VAE decode devices for available GPUs."""
     if total_gpu_count < 1:
         raise ValueError(f"parallelism must be positive, got {total_gpu_count}")
-    if total_gpu_count in {2, 4}:
-        return list(range(total_gpu_count)), 0, 1
+    if total_gpu_count == 2:
+        return [0, 1], 0, [1]
+    if total_gpu_count == 4:
+        return [0, 1, 2, 3], 0, [0, 1, 2, 3]
     if total_gpu_count == 5:
-        return [0, 1, 2, 3], 4, 4
+        return [0, 1, 2, 3], 4, [4]
     if total_gpu_count == 6:
-        return [0, 1, 2, 3, 4], 5, 5
+        return [0, 1, 2, 3, 4], 5, [5]
     return (
         list(range(total_gpu_count)),
         int(PPL_CONFIG["vae_encode_device_id"]),
-        int(PPL_CONFIG["vae_decode_device_id"]),
+        [int(PPL_CONFIG["vae_decode_device_id"])],
     )
 
 
@@ -101,7 +105,7 @@ def get_pipeline(
     fast_model_root: str | None = None,
 ) -> LingBotWorldFastPipeline:
     """Load LingBot-World-Fast for offline chunked generation."""
-    dit_device_ids, vae_encode_device, vae_decode_device = _resolve_stage_devices(parallelism)
+    dit_device_ids, vae_encode_device, vae_decode_device_ids = _resolve_stage_devices(parallelism)
     model_root_path = Path(model_root).expanduser() if model_root else None
     fast_model_root_path = Path(fast_model_root).expanduser() if fast_model_root else None
     vae_path = str(model_root_path / "Wan2.1_VAE.pth") if model_root_path else PPL_CONFIG["vae_path"]
@@ -148,9 +152,12 @@ def get_pipeline(
             ),
             vae_decode_config=ModelRuntimeConfig(
                 device_type="cuda",
-                device_id=vae_decode_device,
+                device_id=vae_decode_device_ids[0],
                 torch_dtype=PPL_CONFIG["vae_torch_dtype"],
-                parallel_config=ParallelConfig(device_ids=[vae_decode_device]),
+                parallel_config=ParallelConfig(
+                    device_ids=vae_decode_device_ids,
+                    sp_ulysses_degree=len(vae_decode_device_ids),
+                ),
             ),
             text_encoding_config=ModelRuntimeConfig(device_type="cuda", device_id=dit_device_ids[0], torch_dtype=dtype),
             dit_config=ModelRuntimeConfig(

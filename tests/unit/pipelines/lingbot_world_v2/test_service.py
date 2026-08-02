@@ -28,16 +28,18 @@ def test_v2_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -
     pipeline_cls.assert_called_once_with(device="cuda", torch_dtype=torch.bfloat16)
     assert pipeline.init.call_args.args[0] is module_manager
     config = pipeline.init.call_args.args[1]
+    assert config.max_area == 832 * 480 + 1
     assert config.local_attn_size == 18
     assert config.sink_size == 6
     assert config.timestep_indices == (0, 250, 500, 750)
-    assert config.dit_config.attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90
-    assert config.dit_config.compile_config.enabled is True
+    assert config.dit_config.attention_config.attn_impl == offline_example.PPL_CONFIG["attn_impl"]
+    assert config.dit_config.compile_config.enabled is False
     assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3]
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 1
-    assert config.vae_decode_config.parallel_config.device_ids == [1]
+    assert config.vae_decode_config.device_id == 0
+    assert config.vae_decode_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.vae_decode_config.parallel_config.sp_ulysses_degree == 4
     load_calls = module_manager.load_model.call_args_list
     assert [call.args[0] for call in load_calls[:2]] == [
         "/models/Wan2.2-I2V-A14B/Wan2.1_VAE.pth",
@@ -49,7 +51,7 @@ def test_v2_unified_example_get_pipeline_maps_ppl_config_to_internal_workers() -
     ]
 
 
-def test_v2_offline_multi_gpu_defaults_to_the_shared_vae_worker() -> None:
+def test_v2_offline_four_gpu_uses_spatial_parallel_vae_decode() -> None:
     pipeline = MagicMock()
     module_manager = MagicMock()
 
@@ -68,15 +70,38 @@ def test_v2_offline_multi_gpu_defaults_to_the_shared_vae_worker() -> None:
     assert config.dit_config.parallel_config.sp_ulysses_degree == 4
     assert config.vae_encode_config.device_id == 0
     assert config.vae_encode_config.parallel_config.device_ids == [0]
-    assert config.vae_decode_config.device_id == 1
-    assert config.vae_decode_config.parallel_config.device_ids == [1]
+    assert config.vae_decode_config.device_id == 0
+    assert config.vae_decode_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.vae_decode_config.parallel_config.sp_ulysses_degree == 4
 
 
 def test_v2_unified_example_resolves_fixed_gpu_layouts() -> None:
-    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, 1)
-    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, 1)
-    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, 4)
-    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, 5)
+    assert offline_example._resolve_stage_devices(2) == ([0, 1], 0, [1])
+    assert offline_example._resolve_stage_devices(4) == ([0, 1, 2, 3], 0, [0, 1, 2, 3])
+    assert offline_example._resolve_stage_devices(5) == ([0, 1, 2, 3], 4, [4])
+    assert offline_example._resolve_stage_devices(6) == ([0, 1, 2, 3, 4], 5, [5])
+
+
+def test_v2_offline_six_gpu_uses_five_dit_gpus_and_one_vae_gpu() -> None:
+    pipeline = MagicMock()
+    module_manager = MagicMock()
+
+    with (
+        patch.object(offline_example, "ModuleManager", return_value=module_manager),
+        patch.object(offline_example, "LingBotWorldV2Pipeline", return_value=pipeline),
+    ):
+        offline_example.get_pipeline(
+            parallelism=6,
+            model_root="/models/Wan2.2-I2V-A14B",
+            v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
+        )
+
+    config = pipeline.init.call_args.args[1]
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3, 4]
+    assert config.dit_config.parallel_config.sp_ulysses_degree == 5
+    assert config.vae_encode_config.parallel_config.device_ids == [5]
+    assert config.vae_decode_config.parallel_config.device_ids == [5]
+    assert config.vae_decode_config.parallel_config.sp_ulysses_degree == 1
 
 
 def test_v2_unified_example_uses_ppl_configured_vae_stage_devices_independently() -> None:
@@ -114,6 +139,7 @@ def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> N
 
     assert isinstance(session_config, LingBotWorldFastSessionConfig)
     assert session_config.frame_num == 1917
+    assert session_config.image.size == (832, 480)
     assert session_config.chunk_size == 4
     assert session_config.frame_policy == "truncate"
     assert session_config.sample_shift == 10.0

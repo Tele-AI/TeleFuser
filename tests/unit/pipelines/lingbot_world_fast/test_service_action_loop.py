@@ -779,6 +779,21 @@ def test_output_queue_discards_stale_video_and_records_runtime_metrics() -> None
     assert LingBotWorldFastService._runtime_metrics(state)["output_queue_high_watermark"] == 2
 
 
+def test_output_queue_preserves_benchmark_measurements_under_backpressure() -> None:
+    state = _state()
+    state.output_queue = asyncio.Queue(maxsize=2)
+    first = {"type": "status", "stage": "chunk_sent", "measurement": {"index": 0}}
+    second = {"type": "status", "stage": "chunk_sent", "measurement": {"index": 1}}
+
+    LingBotWorldFastService._enqueue_output(state, first)
+    LingBotWorldFastService._enqueue_output(state, {"type": "status", "stage": "generating_chunk"})
+    LingBotWorldFastService._enqueue_output(state, second)
+    LingBotWorldFastService._enqueue_output(state, {"type": "status", "stage": "chunk_sent"})
+
+    assert list(state.output_queue._queue) == [first, second]
+    assert LingBotWorldFastService._runtime_metrics(state)["dropped_status_payloads"] == 2
+
+
 def test_stream_progress_reports_duration_frames_and_chunks() -> None:
     service = LingBotWorldFastService(MagicMock(), max_generation_seconds=20.0)
     state = _state()

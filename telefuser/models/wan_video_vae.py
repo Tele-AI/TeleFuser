@@ -10,6 +10,13 @@ from einops import rearrange, repeat
 from tqdm import tqdm
 
 from telefuser.core.base_model import BaseModel
+from telefuser.distributed.vae_spatial import (
+    _SpatialParallelConv2d,
+    _gather_height,
+    _spatial_causal_conv3d_forward,
+    _spatial_world_size,
+    _split_height,
+)
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
 
@@ -113,6 +120,49 @@ class CausalConv3d(nn.Conv3d):
         x = F.pad(x, padding)
         x = x.contiguous(memory_format=torch.channels_last_3d)
         return super().forward(x)
+
+
+class _SpatialParallelCausalConv3d(CausalConv3d):
+    """Causal Conv3d over a height shard with neighboring halo exchange."""
+
+    def __init__(self, source: CausalConv3d) -> None:
+        temporal_padding = source._padding[4] // 2
+        height_padding = source._padding[2]
+        width_padding = source._padding[0]
+        if source.stride[1] != 1:
+            raise ValueError("VAE spatial decode only supports stride-one height convolutions")
+        super().__init__(
+            source.in_channels,
+            source.out_channels,
+            source.kernel_size,
+            stride=source.stride,
+            padding=(temporal_padding, height_padding, width_padding),
+            dilation=source.dilation,
+            groups=source.groups,
+            bias=source.bias is not None,
+            padding_mode=source.padding_mode,
+            device=source.weight.device,
+            dtype=source.weight.dtype,
+        )
+        self.weight = source.weight
+        self.bias = source.bias
+        self._height_halo_size = source.dilation[1] * (source.kernel_size[1] - 1) // 2
+        if height_padding != self._height_halo_size:
+            raise ValueError("VAE spatial Conv3d requires symmetric height padding")
+        self._spatial_padding = (
+            width_padding,
+            width_padding,
+            0,
+            0,
+            2 * temporal_padding,
+            0,
+        )
+        self._halo_recv_top: torch.Tensor | None = None
+        self._halo_recv_bottom: torch.Tensor | None = None
+        self.train(source.training)
+
+    def forward(self, x: torch.Tensor, cache_x: torch.Tensor | None = None) -> torch.Tensor:
+        return _spatial_causal_conv3d_forward(self, x, cache_x)
 
 
 class RMS_norm(nn.Module):
@@ -268,10 +318,13 @@ class AttentionBlock(nn.Module):
         self.norm = RMS_norm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
+        self._spatial_parallel = False
 
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._spatial_parallel:
+            x = _gather_height(x).contiguous()
         identity = x
         b, c, t, h, w = x.size()
         x = rearrange(x, "b c t h w -> (b t) c h w")
@@ -283,7 +336,8 @@ class AttentionBlock(nn.Module):
 
         x = self.proj(x)
         x = rearrange(x, "(b t) c h w-> b c t h w", t=t)
-        return x + identity
+        x = x + identity
+        return _split_height(x) if self._spatial_parallel else x
 
 
 class Encoder3d(nn.Module):
@@ -414,6 +468,8 @@ class Decoder3d(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_upsample = temperal_upsample
+        self._spatial_parallel = False
+        self._spatial_upsample_count = 0
 
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
         dims = [int(d * (1 - pruning_rate)) for d in dims]
@@ -452,6 +508,10 @@ class Decoder3d(nn.Module):
 
     def forward(self, x: torch.Tensor, feat_cache: list | None = None, feat_idx: list | None = None) -> torch.Tensor:
         """Forward pass with list-based feature caching."""
+        expected_height = None
+        if self._spatial_parallel:
+            expected_height = x.shape[-2] * (2**self._spatial_upsample_count)
+            x = _split_height(x)
         if feat_cache is not None and feat_idx is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -498,7 +558,45 @@ class Decoder3d(nn.Module):
                 feat_idx[0] += 1
             else:
                 x = layer(x)
+        if self._spatial_parallel:
+            x = _gather_height(x)
+            x = x[..., :expected_height, :].contiguous()
         return x
+
+
+def _enable_spatial_parallel_decode(vae: WanVideoVAE) -> int:
+    """Replace decoder convolutions with height-sharded equivalents in a worker process."""
+    if _spatial_world_size() <= 1:
+        return 0
+    if getattr(vae, "parallelism", 1) > 1:
+        raise RuntimeError("Wan VAE native decode_parallel and streaming spatial decode are mutually exclusive")
+    decoder = vae.model.decoder
+    decoder._spatial_parallel = True
+    decoder._spatial_upsample_count = sum(
+        isinstance(module, Resample) and module.mode in {"upsample2d", "upsample3d"} for module in decoder.modules()
+    )
+    converted = 0
+
+    def convert(module: nn.Module, inside_resample: bool = False) -> None:
+        nonlocal converted
+        if isinstance(module, AttentionBlock):
+            module._spatial_parallel = True
+        for name, child in list(module.named_children()):
+            if isinstance(child, (_SpatialParallelCausalConv3d, _SpatialParallelConv2d)):
+                continue
+            if isinstance(child, CausalConv3d):
+                setattr(module, name, _SpatialParallelCausalConv3d(child))
+                converted += 1
+                continue
+            child_inside_resample = inside_resample or isinstance(module, Resample)
+            if child_inside_resample and isinstance(child, nn.Conv2d):
+                setattr(module, name, _SpatialParallelConv2d(child))
+                converted += 1
+                continue
+            convert(child, child_inside_resample)
+
+    convert(decoder)
+    return converted
 
 
 class VideoVAE(nn.Module):
@@ -742,7 +840,9 @@ class WanVideoVAE(BaseModel):
         """
         return _convert_conv3d_to_channels_last_3d(self.model)
 
-    def set_parallelism(self, parallelism: int):
+    def set_parallelism(self, parallelism: int) -> None:
+        if parallelism > 1 and getattr(self.model.decoder, "_spatial_parallel", False):
+            raise RuntimeError("Wan VAE native decode_parallel and streaming spatial decode are mutually exclusive")
         self.parallelism = parallelism
 
     # ==================== 2D Spatial Parallel Methods ====================
