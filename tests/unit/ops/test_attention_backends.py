@@ -1,7 +1,63 @@
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from telefuser.ops.attention import backends
+import torch
+
+from telefuser.ops.attention import attention_impl, backends
+
+
+def test_flash_attn4_dispatch_uses_cute_return_lse_argument() -> None:
+    q = torch.randn(1, 3, 2, 4)
+    flash_attn4 = MagicMock(return_value=(q, torch.zeros(1, 2, 3)))
+
+    with (
+        patch.object(attention_impl, "FLASH_ATTN_4_AVAILABLE", True),
+        patch.object(attention_impl, "flash_attn4", flash_attn4),
+    ):
+        output, lse = attention_impl.attention(
+            q,
+            q,
+            q,
+            attn_impl=attention_impl.AttnImplType.FLASH_ATTN_4,
+            return_lse=True,
+        )
+
+    assert output is q
+    assert lse.shape == (1, 2, 3)
+    flash_attn4.assert_called_once_with(
+        q,
+        q,
+        q,
+        softmax_scale=None,
+        causal=False,
+        return_lse=True,
+    )
+
+
+def test_flash_attn4_dispatch_unwraps_output_when_lse_is_disabled() -> None:
+    q = torch.randn(1, 3, 2, 4)
+    flash_attn4 = MagicMock(return_value=(q, None))
+
+    with (
+        patch.object(attention_impl, "FLASH_ATTN_4_AVAILABLE", True),
+        patch.object(attention_impl, "flash_attn4", flash_attn4),
+    ):
+        output = attention_impl.attention(
+            q,
+            q,
+            q,
+            attn_impl=attention_impl.AttnImplType.FLASH_ATTN_4,
+        )
+
+    assert output is q
+    flash_attn4.assert_called_once_with(
+        q,
+        q,
+        q,
+        softmax_scale=None,
+        causal=False,
+        return_lse=False,
+    )
 
 
 def test_sage_attention_prefers_tf_kernel() -> None:

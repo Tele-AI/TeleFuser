@@ -1062,3 +1062,151 @@ def fused_scale_shift_gate_select(
         num_stages=2,
     )
     return output, gate_out
+
+
+@triton.jit
+def _fused_layernorm_scale_shift_kernel(
+    output_ptr,
+    residual_out_ptr,
+    x_ptr,
+    residual_ptr,
+    weight_ptr,
+    bias_ptr,
+    scale_ptr,
+    shift_ptr,
+    inner_dim,
+    seq_len,
+    scale_seq_len,
+    shift_seq_len,
+    eps,
+    HAS_RESIDUAL: tl.constexpr,
+    STORE_RESIDUAL: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_N)
+    mask = cols < inner_dim
+    batch_idx = row // seq_len
+    seq_idx = row % seq_len
+    offsets = row * inner_dim + cols
+
+    value = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    if HAS_RESIDUAL:
+        value += tl.load(residual_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    if STORE_RESIDUAL:
+        tl.store(residual_out_ptr + offsets, value, mask=mask)
+
+    normalized = _compute_layernorm(
+        value,
+        cols,
+        mask,
+        inner_dim,
+        eps,
+        weight_ptr,
+        bias_ptr,
+        1,
+        1,
+        HAS_WEIGHT,
+        HAS_BIAS,
+    )
+    scale_row = batch_idx * scale_seq_len + tl.minimum(seq_idx, scale_seq_len - 1)
+    shift_row = batch_idx * shift_seq_len + tl.minimum(seq_idx, shift_seq_len - 1)
+    scale = tl.load(scale_ptr + scale_row * inner_dim + cols, mask=mask, other=0.0).to(tl.float32)
+    shift = tl.load(shift_ptr + shift_row * inner_dim + cols, mask=mask, other=0.0).to(tl.float32)
+    tl.store(output_ptr + offsets, normalized * (1.0 + scale) + shift, mask=mask)
+
+
+def _normalize_modulation(tensor: torch.Tensor, batch_size: int, seq_len: int, hidden_size: int) -> torch.Tensor:
+    if tensor.dim() == 2:
+        tensor = tensor.unsqueeze(1)
+    if tensor.dim() != 3 or tensor.shape[0] not in (1, batch_size) or tensor.shape[1] not in (1, seq_len):
+        raise ValueError("scale and shift must broadcast to [B, L, C]")
+    if tensor.shape[2] != hidden_size:
+        raise ValueError(f"scale and shift hidden size must be {hidden_size}, got {tensor.shape[2]}")
+    return tensor.expand(batch_size, tensor.shape[1], hidden_size).contiguous()
+
+
+def fused_layernorm_scale_shift(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Fuse LayerNorm and adaptive scale/shift for contiguous BLC tensors."""
+    assert x.is_cuda and x.is_contiguous()
+    batch_size, seq_len, hidden_size = x.shape
+    scale = _normalize_modulation(scale, batch_size, seq_len, hidden_size)
+    shift = _normalize_modulation(shift, batch_size, seq_len, hidden_size)
+    output = torch.empty_like(x)
+    placeholder = x
+    block_n = triton.next_power_of_2(hidden_size)
+    _fused_layernorm_scale_shift_kernel[(batch_size * seq_len,)](
+        output,
+        placeholder,
+        x,
+        placeholder,
+        placeholder if weight is None else weight.contiguous(),
+        placeholder if bias is None else bias.contiguous(),
+        scale,
+        shift,
+        hidden_size,
+        seq_len,
+        scale.shape[1],
+        shift.shape[1],
+        eps,
+        HAS_RESIDUAL=False,
+        STORE_RESIDUAL=False,
+        HAS_WEIGHT=weight is not None,
+        HAS_BIAS=bias is not None,
+        BLOCK_N=block_n,
+        num_warps=8,
+    )
+    return output
+
+
+def fused_add_layernorm_scale_shift(
+    residual: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse residual add, LayerNorm, and adaptive scale/shift for BLC tensors."""
+    assert residual.is_cuda and residual.is_contiguous() and x.is_contiguous()
+    if residual.shape != x.shape:
+        raise ValueError(f"residual and x shapes must match, got {residual.shape} and {x.shape}")
+    batch_size, seq_len, hidden_size = x.shape
+    scale = _normalize_modulation(scale, batch_size, seq_len, hidden_size)
+    shift = _normalize_modulation(shift, batch_size, seq_len, hidden_size)
+    output = torch.empty_like(x)
+    residual_out = torch.empty_like(residual)
+    placeholder = x
+    block_n = triton.next_power_of_2(hidden_size)
+    _fused_layernorm_scale_shift_kernel[(batch_size * seq_len,)](
+        output,
+        residual_out,
+        x,
+        residual,
+        placeholder if weight is None else weight.contiguous(),
+        placeholder if bias is None else bias.contiguous(),
+        scale,
+        shift,
+        hidden_size,
+        seq_len,
+        scale.shape[1],
+        shift.shape[1],
+        eps,
+        HAS_RESIDUAL=True,
+        STORE_RESIDUAL=True,
+        HAS_WEIGHT=weight is not None,
+        HAS_BIAS=bias is not None,
+        BLOCK_N=block_n,
+        num_warps=8,
+    )
+    return output, residual_out

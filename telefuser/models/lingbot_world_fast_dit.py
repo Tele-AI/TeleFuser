@@ -16,21 +16,40 @@ from telefuser.distributed.device_mesh import get_ulysses_group, get_ulysses_wor
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention as attn_func
-from telefuser.ops.normalization import LayerNorm, RMSNorm
+from telefuser.ops.normalization import (
+    LayerNorm,
+    RMSNorm,
+    _fused_add_layer_norm_scale_shift,
+    _fused_layer_norm_scale_shift,
+    fused_scale_shift,
+)
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import init_weights_on_device, load_state_dict
 
 from .wan_video_dit import apply_rotary_emb, precompute_freqs_cis_3d, sinusoidal_embedding_1d
 
+_PreparedControl = tuple[torch.Tensor, tuple[tuple[torch.Tensor, torch.Tensor], ...]]
 
-def _cache_index_to_int(value: int | torch.Tensor) -> int:
+
+def _cache_index_to_int(cache: dict[str, object], name: str) -> int:
+    host_indices = cache.get("host_indices")
+    if isinstance(host_indices, dict):
+        value = host_indices.get(name)
+        if isinstance(value, int):
+            return value
+    value = cache[name]
     if isinstance(value, int):
         return value
-    return int(value.item())
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"Unsupported LingBot cache index type: {type(value).__name__}")
+    resolved = int(value.item())
+    cache.setdefault("host_indices", {})[name] = resolved
+    return resolved
 
 
-def _set_cache_index(cache: dict[str, torch.Tensor | int], name: str, value: int) -> None:
+def _set_cache_index(cache: dict[str, object], name: str, value: int) -> None:
     """Update an eager cursor in place when its storage is a scalar tensor."""
+    cache.setdefault("host_indices", {})[name] = value
     cursor = cache[name]
     if isinstance(cursor, torch.Tensor):
         cursor.fill_(value)
@@ -68,14 +87,13 @@ class CausalSelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def _apply_causal_rope(
+    def _prepare_causal_rope(
         self,
-        x: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         grid_size: tuple[int, int, int],
         start_frame: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         f, h, w = grid_size
         head_dim = self.head_dim
 
@@ -104,10 +122,25 @@ class CausalSelfAttention(nn.Module):
             dim=-1,
         ).reshape(seq_len, 1, -1)
 
-        roped = apply_rotary_emb(x[:, :seq_len], (cos, sin))
-        if x.shape[1] == seq_len:
+        return cos, sin
+
+    def _apply_causal_rope(
+        self,
+        x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        grid_size: tuple[int, int, int],
+        start_frame: int,
+        causal_rope: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        if causal_rope is None:
+            causal_rope = self._prepare_causal_rope(freqs_cos, freqs_sin, grid_size, start_frame)
+
+        sequence_length = math.prod(grid_size)
+        roped = apply_rotary_emb(x[:, :sequence_length], causal_rope)
+        if x.shape[1] == sequence_length:
             return roped
-        return torch.cat([roped, x[:, seq_len:]], dim=1)
+        return torch.cat([roped, x[:, sequence_length:]], dim=1)
 
     def forward(
         self,
@@ -119,29 +152,27 @@ class CausalSelfAttention(nn.Module):
         current_start: int,
         max_attention_size: int,
         device_mesh: DeviceMesh | None = None,
-    ) -> torch.Tensor:
+        causal_rope: tuple[torch.Tensor, torch.Tensor] | None = None,
+        update_cache_only: bool = False,
+    ) -> torch.Tensor | None:
         group = get_ulysses_group(device_mesh)
         ulysses_enabled = group is not None and get_ulysses_world_size(device_mesh) > 1
         q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
-        q_wait = ulysses_scatter_heads(q, group) if ulysses_enabled else None
         k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
-        k_wait = ulysses_scatter_heads(k, group) if ulysses_enabled else None
         v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
-        v_wait = ulysses_scatter_heads(v, group) if ulysses_enabled else None
+        qkv_wait = ulysses_scatter_heads(torch.cat((q, k, v), dim=-1), group) if ulysses_enabled else None
         frame_tokens = grid_size[1] * grid_size[2]
         start_frame = current_start // frame_tokens
         valid_seq_len = math.prod(grid_size)
         if ulysses_enabled:
-            q = q_wait()
-            k = k_wait()
-            v = v_wait()
+            q, k, v = qkv_wait().chunk(3, dim=-1)
             padded_seq_len = q.shape[1]
-            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
-            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
+            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)[:, :valid_seq_len]
+            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)[:, :valid_seq_len]
             v = v[:, :valid_seq_len]
         else:
-            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)
-            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)
+            q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)
+            k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)
 
         num_new_tokens = q.shape[1]
         current_end = current_start + num_new_tokens
@@ -150,8 +181,8 @@ class CausalSelfAttention(nn.Module):
         cache_k = kv_cache["k"]
         cache_v = kv_cache["v"]
         kv_cache_size = cache_k.shape[1]
-        global_end = _cache_index_to_int(kv_cache["global_end_index"])
-        local_end = _cache_index_to_int(kv_cache["local_end_index"])
+        global_end = _cache_index_to_int(kv_cache, "global_end_index")
+        local_end = _cache_index_to_int(kv_cache, "local_end_index")
 
         if self.local_attn_size != -1 and current_end > global_end and num_new_tokens + local_end > kv_cache_size:
             evicted = num_new_tokens + local_end - kv_cache_size
@@ -170,6 +201,11 @@ class CausalSelfAttention(nn.Module):
         cache_k[:, local_start:local_end] = k
         cache_v[:, local_start:local_end] = v
 
+        _set_cache_index(kv_cache, "global_end_index", current_end)
+        _set_cache_index(kv_cache, "local_end_index", local_end)
+        if update_cache_only:
+            return None
+
         attn_start = max(0, local_end - max_attention_size)
         k_cache = cache_k[:, attn_start:local_end]
         v_cache = cache_v[:, attn_start:local_end]
@@ -182,9 +218,6 @@ class CausalSelfAttention(nn.Module):
             input_layout="BSND",
             output_layout="BSND",
         )
-
-        _set_cache_index(kv_cache, "global_end_index", current_end)
-        _set_cache_index(kv_cache, "local_end_index", local_end)
 
         if ulysses_enabled:
             pad_len = padded_seq_len - num_new_tokens
@@ -263,7 +296,7 @@ class CachedCrossAttention(nn.Module):
 
 class Gate(nn.Module):
     def forward(self, x: torch.Tensor, gate: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        return x + gate * residual
+        return fused_scale_shift(residual, gate, x, scale_constant=0.0).to(dtype=x.dtype)
 
 
 class LingBotWorldFastBlock(nn.Module):
@@ -319,21 +352,21 @@ class LingBotWorldFastBlock(nn.Module):
         current_start: int,
         max_attention_size: int,
         control_tokens: torch.Tensor | None = None,
+        camera_modulation: tuple[torch.Tensor, torch.Tensor] | None = None,
         device_mesh: DeviceMesh | None = None,
+        causal_rope: tuple[torch.Tensor, torch.Tensor] | None = None,
+        update_cache_only: bool = False,
     ) -> torch.Tensor:
         modulation = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (modulation.unsqueeze(0) + t_mod).chunk(
-            6, dim=2
-        )
+        if t_mod.dim() == 4:
+            modulation_chunks = (modulation.unsqueeze(0) + t_mod).chunk(6, dim=2)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                chunk.squeeze(2) for chunk in modulation_chunks
+            )
+        else:
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (modulation + t_mod).chunk(6, dim=1)
 
-        shift_msa = shift_msa.squeeze(2)
-        scale_msa = scale_msa.squeeze(2)
-        gate_msa = gate_msa.squeeze(2)
-        shift_mlp = shift_mlp.squeeze(2)
-        scale_mlp = scale_mlp.squeeze(2)
-        gate_mlp = gate_mlp.squeeze(2)
-
-        attn_in = self.norm1(x) * (1 + scale_msa) + shift_msa
+        attn_in = _fused_layer_norm_scale_shift(x, scale_msa, shift_msa, eps=self.norm1.eps)
         attn_out = self.self_attn(
             attn_in,
             freqs_cos=freqs_cos,
@@ -343,16 +376,31 @@ class LingBotWorldFastBlock(nn.Module):
             current_start=current_start,
             max_attention_size=max_attention_size,
             device_mesh=device_mesh,
+            causal_rope=causal_rope,
+            update_cache_only=update_cache_only,
         )
+        if update_cache_only:
+            return x
+        if attn_out is None:
+            raise RuntimeError("LingBot self-attention returned no output during denoising")
         x = self.gate(x, gate_msa, attn_out)
 
-        if control_tokens is not None:
+        if camera_modulation is not None:
+            scale, shift = camera_modulation
+            x = fused_scale_shift(x, scale, shift).to(dtype=x.dtype)
+        elif control_tokens is not None:
             hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(control_tokens)))
             hidden = hidden + control_tokens
             x = (1.0 + self.cam_scale_layer(hidden)) * x + self.cam_shift_layer(hidden)
 
-        x = x + self.cross_attn(self.norm3(x), context, crossattn_cache)
-        mlp_in = self.norm2(x) * (1 + scale_mlp) + shift_mlp
+        cross_attn_out = self.cross_attn(self.norm3(x), context, crossattn_cache)
+        mlp_in, x = _fused_add_layer_norm_scale_shift(
+            x,
+            cross_attn_out,
+            scale_mlp,
+            shift_mlp,
+            eps=self.norm2.eps,
+        )
         x = self.gate(x, gate_mlp, self.ffn(mlp_in))
         return x
 
@@ -372,7 +420,8 @@ class LingBotWorldFastHead(nn.Module):
         shift, scale = (modulation.unsqueeze(0) + t.unsqueeze(2)).chunk(2, dim=2)
         shift = shift.squeeze(2)
         scale = scale.squeeze(2)
-        return self.head(self.norm(x) * (1 + scale) + shift)
+        modulated = _fused_layer_norm_scale_shift(x, scale, shift, eps=self.norm.eps)
+        return self.head(modulated)
 
 
 class LingBotWorldFastDiT(BaseModel):
@@ -480,7 +529,7 @@ class LingBotWorldFastDiT(BaseModel):
             if t.dim() == 1:
                 emb_input = sinusoidal_embedding_1d(self.freq_dim, t).float()
                 emb = self.time_embedding(emb_input)
-                t_mod = self.time_projection(emb).unflatten(1, (6, self.dim)).unsqueeze(1).expand(-1, seq_len, -1, -1)
+                t_mod = self.time_projection(emb).unflatten(1, (6, self.dim))
                 return emb.unsqueeze(1).float(), t_mod.float()
 
             flat = t.flatten()
@@ -490,7 +539,13 @@ class LingBotWorldFastDiT(BaseModel):
             t_mod = self.time_projection(emb).unflatten(2, (6, self.dim))
             return emb.float(), t_mod.float()
 
-    def _prepare_control_tokens(self, control_tensor: torch.Tensor | None) -> torch.Tensor | None:
+    def _prepare_control(
+        self,
+        control_tensor: torch.Tensor | None,
+        *,
+        shard_for_usp: bool = False,
+    ) -> _PreparedControl | None:
+        """Prepare the chunk-invariant camera tensors consumed by every block."""
         if control_tensor is None:
             return None
 
@@ -507,7 +562,46 @@ class LingBotWorldFastDiT(BaseModel):
         )
         control_tokens = self.patch_embedding_wancamctrl(control_tokens)
         hidden = self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(control_tokens)))
-        return control_tokens + hidden
+        control_tokens = control_tokens + hidden
+        if shard_for_usp:
+            sequence_parallel_shard(self.device_mesh, [control_tokens], [1])
+        camera_modulations: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for block in self.blocks:
+            block_hidden = block.cam_injector_layer2(F.silu(block.cam_injector_layer1(control_tokens)))
+            block_hidden = block_hidden + control_tokens
+            camera_modulations.append((block.cam_scale_layer(block_hidden), block.cam_shift_layer(block_hidden)))
+        return control_tokens, tuple(camera_modulations)
+
+    def _project_text_context(self, context: torch.Tensor) -> torch.Tensor:
+        """Project static prompt embeddings once before repeated chunk forwards."""
+        return self.text_embedding(context)
+
+    def _prepare_session_causal_rope(
+        self,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        grid_size: tuple[int, int, int],
+        current_start: int,
+        session_input_cache: dict[str, object] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reuse one chunk's 3D RoPE across every block and DiT forward."""
+        key = (grid_size, current_start, freqs_cos.device, freqs_cos.dtype)
+        cached = None if session_input_cache is None else session_input_cache.get("causal_rope")
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == key:
+            value = cached[1]
+            if isinstance(value, tuple) and len(value) == 2:
+                return value
+
+        frame_tokens = grid_size[1] * grid_size[2]
+        rope = self.blocks[0].self_attn._prepare_causal_rope(
+            freqs_cos,
+            freqs_sin,
+            grid_size,
+            current_start // frame_tokens,
+        )
+        if session_input_cache is not None:
+            session_input_cache["causal_rope"] = (key, rope)
+        return rope
 
     def patchify(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
         x = x.contiguous(memory_format=torch.channels_last_3d)
@@ -538,7 +632,13 @@ class LingBotWorldFastDiT(BaseModel):
         crossattn_cache: list[dict[str, torch.Tensor | bool | int]] | None = None,
         current_start: int = 0,
         max_attention_size: int = 1_000_000,
-    ) -> torch.Tensor:
+        *,
+        _session_input_cache: dict[str, object] | None = None,
+        _prepared_control: _PreparedControl | None = None,
+        _prepared_control_is_sharded: bool = False,
+        _projected_context: torch.Tensor | None = None,
+        update_cache_only: bool = False,
+    ) -> torch.Tensor | None:
         if y is not None:
             y = y.to(device=x.device, dtype=x.dtype)
             x = torch.cat([x, y], dim=1)
@@ -546,16 +646,56 @@ class LingBotWorldFastDiT(BaseModel):
         x, grid_size = self.patchify(x)
         seq_len = x.shape[1]
         t_head, t_mod = self._build_timestep_embeddings(timestep, seq_len)
-        context = self.text_embedding(context)
-        control_tokens = self._prepare_control_tokens(control_tensor)
+        if _projected_context is None:
+            cached_context = None if _session_input_cache is None else _session_input_cache.get("projected_context")
+            if isinstance(cached_context, torch.Tensor):
+                context = cached_context
+            else:
+                context = self._project_text_context(context)
+                if _session_input_cache is not None:
+                    _session_input_cache["projected_context"] = context
+        else:
+            context = _projected_context
+        if _prepared_control is None:
+            cached_control = None if _session_input_cache is None else _session_input_cache.get("prepared_control")
+            if cached_control is None:
+                prepared_control = self._prepare_control(control_tensor, shard_for_usp=self.usp_flag)
+                if _session_input_cache is not None:
+                    _session_input_cache["prepared_control"] = prepared_control
+                prepared_control_is_sharded = self.usp_flag and prepared_control is not None
+            else:
+                prepared_control = cached_control
+                prepared_control_is_sharded = _prepared_control_is_sharded
+        else:
+            prepared_control = _prepared_control
+            prepared_control_is_sharded = _prepared_control_is_sharded
+        control_tokens = prepared_control[0] if prepared_control is not None else None
+        camera_modulations = prepared_control[1] if prepared_control is not None else None
 
         freqs_cos = self.freqs_cos.to(device=x.device)
         freqs_sin = self.freqs_sin.to(device=x.device)
+        causal_rope = self._prepare_session_causal_rope(
+            freqs_cos,
+            freqs_sin,
+            grid_size,
+            current_start,
+            _session_input_cache,
+        )
         full_seq_len = seq_len
 
         if self.usp_flag:
-            shard_tensors = [x, t_mod, control_tokens]
-            shard_dims = [1, 1, 1]
+            shard_tensors = [x]
+            shard_dims = [1]
+            if t_mod.dim() == 4 and t_mod.shape[1] == seq_len:
+                shard_tensors.append(t_mod)
+                shard_dims.append(1)
+            if control_tokens is not None and not prepared_control_is_sharded:
+                shard_tensors.append(control_tokens)
+                shard_dims.append(1)
+            if camera_modulations is not None and not prepared_control_is_sharded:
+                for scale, shift in camera_modulations:
+                    shard_tensors.extend((scale, shift))
+                    shard_dims.extend((1, 1))
             if t_head.shape[1] == seq_len:
                 shard_tensors.append(t_head)
                 shard_dims.append(1)
@@ -577,9 +717,14 @@ class LingBotWorldFastDiT(BaseModel):
                 current_start=current_start,
                 max_attention_size=max_attention_size,
                 control_tokens=control_tokens,
+                camera_modulation=None if camera_modulations is None else camera_modulations[idx],
                 device_mesh=self.device_mesh,
+                causal_rope=causal_rope,
+                update_cache_only=update_cache_only and idx == len(self.blocks) - 1,
             )
 
+        if update_cache_only:
+            return None
         x = self.head(x, t_head)
         if self.usp_flag:
             (x,) = sequence_parallel_unshard(self.device_mesh, [x], [1], [full_seq_len])

@@ -212,19 +212,19 @@ def attention(
 
     # Flash Attention implementations
     if attn_impl == AttnImplType.FLASH_ATTN_4 and FLASH_ATTN_4_AVAILABLE and flash_attn4 is not None:
-        result = flash_attn4(q, k, v, softmax_scale=scale, return_softmax_lse=return_lse, **kwargs)
-        if return_lse:
+        result = flash_attn4(q, k, v, softmax_scale=scale, causal=is_causal, return_lse=return_lse, **kwargs)
+        if isinstance(result, tuple):
             output, lse = result
         else:
             output = result
     elif attn_impl == AttnImplType.FLASH_ATTN_3 and FLASH_ATTN_3_AVAILABLE and flash_attn3 is not None:
-        result = flash_attn3(q, k, v, softmax_scale=scale, return_softmax_lse=return_lse, **kwargs)
+        result = flash_attn3(q, k, v, softmax_scale=scale, causal=is_causal, return_softmax_lse=return_lse, **kwargs)
         if return_lse:
             output, lse = result
         else:
             output = result
     elif attn_impl == AttnImplType.FLASH_ATTN_2 and FLASH_ATTN_2_AVAILABLE and flash_attn2 is not None:
-        result = flash_attn2(q, k, v, softmax_scale=scale, return_attn_probs=return_lse, **kwargs)
+        result = flash_attn2(q, k, v, softmax_scale=scale, causal=is_causal, return_attn_probs=return_lse, **kwargs)
         if return_lse:
             output, lse, _ = result
         else:

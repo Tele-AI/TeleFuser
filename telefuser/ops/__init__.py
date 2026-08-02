@@ -13,7 +13,13 @@ from __future__ import annotations
 from .base import CustomOp, CustomOpFunction
 from .custom_op import TritonKernelWrapper, register_custom_op
 from .moe import grouped_expert_forward, route_topk
-from .normalization import AdaLayerNormContinuous, LayerNorm, RMSNorm, fused_scale_shift, modulate
+from .normalization import (
+    AdaLayerNormContinuous,
+    LayerNorm,
+    RMSNorm,
+    fused_scale_shift,
+    modulate,
+)
 from .rotary import apply_rotary_emb
 
 __all__ = [

@@ -4,7 +4,38 @@ import pytest
 import torch
 import torch.nn as nn
 
-from telefuser.ops.normalization import AdaLayerNormContinuous, LayerNorm, RMSNorm
+from telefuser.ops.normalization import (
+    AdaLayerNormContinuous,
+    LayerNorm,
+    RMSNorm,
+    _fused_add_layer_norm_scale_shift,
+    _fused_layer_norm_scale_shift,
+)
+
+
+def test_fused_layer_norm_scale_shift_matches_native() -> None:
+    x = torch.randn(2, 5, 16)
+    scale = torch.randn(2, 1, 16)
+    shift = torch.randn(2, 1, 16)
+
+    output = _fused_layer_norm_scale_shift(x, scale, shift)
+    expected = torch.nn.functional.layer_norm(x, (16,)) * (1 + scale) + shift
+
+    torch.testing.assert_close(output, expected, atol=5e-5, rtol=1e-5)
+
+
+def test_fused_add_layer_norm_scale_shift_matches_native() -> None:
+    residual = torch.randn(2, 5, 16)
+    x = torch.randn_like(residual)
+    scale = torch.randn(2, 1, 16)
+    shift = torch.randn(2, 1, 16)
+
+    output, residual_out = _fused_add_layer_norm_scale_shift(residual, x, scale, shift)
+    expected_residual = residual + x
+    expected = torch.nn.functional.layer_norm(expected_residual, (16,)) * (1 + scale) + shift
+
+    torch.testing.assert_close(residual_out, expected_residual)
+    torch.testing.assert_close(output, expected, atol=5e-5, rtol=1e-5)
 
 
 class TestRMSNorm:

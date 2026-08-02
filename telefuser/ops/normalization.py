@@ -15,7 +15,19 @@ import torch.nn.functional as F
 
 from .base import CustomOp
 
-KernelName = Literal["norm_infer", "layer_norm_fn", "fused_scale_shift"]
+_compiled_rmsnorm: Callable | None = None
+try:
+    from tf_kernel import rmsnorm as _compiled_rmsnorm
+except ImportError:
+    pass
+
+KernelName = Literal[
+    "norm_infer",
+    "layer_norm_fn",
+    "fused_scale_shift",
+    "fused_layernorm_scale_shift",
+    "fused_add_layernorm_scale_shift",
+]
 
 
 @functools.lru_cache(maxsize=None)
@@ -33,6 +45,14 @@ def _get_triton_kernel(name: KernelName) -> Callable:
         from telefuser.kernel.triton import fused_scale_shift
 
         return fused_scale_shift
+    elif name == "fused_layernorm_scale_shift":
+        from telefuser.kernel.triton import fused_layernorm_scale_shift
+
+        return fused_layernorm_scale_shift
+    elif name == "fused_add_layernorm_scale_shift":
+        from telefuser.kernel.triton import fused_add_layernorm_scale_shift
+
+        return fused_add_layernorm_scale_shift
     raise ValueError(f"Unknown kernel: {name}")
 
 
@@ -88,6 +108,18 @@ class RMSNorm(CustomOp):
             assert self.weight is not None
             # Ensure input is contiguous for Triton kernel
             hidden_states = hidden_states.contiguous()
+            if (
+                _compiled_rmsnorm is not None
+                and hidden_states.dtype in (torch.float16, torch.bfloat16)
+                and self.weight.dtype == hidden_states.dtype
+            ):
+                shape = hidden_states.shape
+                normalized = _compiled_rmsnorm(
+                    hidden_states.view(-1, shape[-1]),
+                    self.weight,
+                    self.eps,
+                )
+                return normalized.view(shape)
             norm_infer = _get_triton_kernel("norm_infer")
             # weight is nn.Parameter - always contiguous by PyTorch convention
             return norm_infer(hidden_states, self.weight, None, self.eps, is_rms_norm=True)
@@ -263,6 +295,42 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
         Modulated tensor: x * (1 + scale) + shift
     """
     return fused_scale_shift(x, scale, shift, scale_constant=1.0)
+
+
+def _fused_layer_norm_scale_shift(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    *,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse LayerNorm and adaptive modulation while preserving the input dtype."""
+    if torch.compiler.is_compiling() or x.device.type != "cuda":
+        normalized = F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+        return (normalized * (1 + scale) + shift).to(dtype=x.dtype)
+    kernel = _get_triton_kernel("fused_layernorm_scale_shift")
+    return kernel(x.contiguous(), weight, bias, scale, shift, eps)
+
+
+def _fused_add_layer_norm_scale_shift(
+    residual: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    *,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse residual add, LayerNorm, and adaptive modulation."""
+    if torch.compiler.is_compiling() or x.device.type != "cuda":
+        residual_out = (residual + x).to(dtype=residual.dtype)
+        normalized = F.layer_norm(residual_out, (residual_out.shape[-1],), weight, bias, eps)
+        return (normalized * (1 + scale) + shift).to(dtype=residual.dtype), residual_out
+    kernel = _get_triton_kernel("fused_add_layernorm_scale_shift")
+    return kernel(residual.contiguous(), x.contiguous(), weight, bias, scale, shift, eps)
 
 
 __all__ = [

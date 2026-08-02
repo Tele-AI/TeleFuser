@@ -1,3 +1,4 @@
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,7 +19,11 @@ def _cache_stage() -> LingBotWorldFastDenoisingStage:
     return stage
 
 
-def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) -> bool:
+def _initialize_cache(
+    stage: LingBotWorldFastDenoisingStage,
+    cache_handle: int,
+    prompt_emb: torch.Tensor | None = None,
+) -> bool:
     generator_state = torch.Generator(device="cpu").manual_seed(cache_handle).get_state().tolist()
     noise_generator_state = torch.Generator(device="cpu").manual_seed(cache_handle + 100).get_state().tolist()
     return LingBotWorldFastDenoisingStage.initialize_cache.__wrapped__(
@@ -31,7 +36,17 @@ def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) 
         generator_state=generator_state,
         noise_generator_state=noise_generator_state,
         noise_shape=(1, 16, 1, 1, 1),
+        prompt_emb=prompt_emb,
     )
+
+
+def test_worker_cache_retains_session_prompt_embedding() -> None:
+    stage = _cache_stage()
+    prompt_emb = torch.randn(1, 8, 16)
+
+    assert _initialize_cache(stage, 11, prompt_emb=prompt_emb) is True
+
+    assert stage._cache_registry[11].prompt_emb is prompt_emb
 
 
 def test_worker_cache_registry_isolates_handles_and_releases_idempotently() -> None:
@@ -121,6 +136,65 @@ def test_worker_owned_noise_rng_advances_deterministically() -> None:
     assert not torch.equal(actual_third, expected_second)
     torch.testing.assert_close(actual_third, expected_third)
     torch.testing.assert_close(replicated_third, expected_third)
+
+
+class _SessionCacheTestDiT(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.text_embedding = nn.Sequential(nn.Linear(2, 2))
+
+
+def test_session_input_caches_invalidate_on_prompt_and_control_mutation() -> None:
+    stage = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    stage.dit = _SessionCacheTestDiT()
+    state = SimpleNamespace(
+        projected_context_key=None,
+        prepared_control_key=None,
+        prepared_control_is_sharded=False,
+        session_input_cache={},
+    )
+    prompt = torch.zeros(1, 2)
+    control = torch.zeros(1, 2)
+
+    stage._prepare_session_inputs(state, 9, prompt, control)
+    cached_context = torch.ones(1, 2)
+    cached_control = (torch.ones(1, 2), ())
+    state.session_input_cache.update(projected_context=cached_context, prepared_control=cached_control)
+    stage._prepare_session_inputs(state, 9, prompt, control)
+
+    assert state.session_input_cache["projected_context"] is cached_context
+    assert state.session_input_cache["prepared_control"] is cached_control
+
+    prompt.add_(1)
+    stage._prepare_session_inputs(state, 9, prompt, control)
+
+    assert "projected_context" not in state.session_input_cache
+    assert state.session_input_cache["prepared_control"] is cached_control
+
+    control.add_(1)
+    stage._prepare_session_inputs(state, 9, prompt, control)
+
+    assert "prepared_control" not in state.session_input_cache
+
+
+def test_colocated_decode_consumes_worker_local_latent() -> None:
+    stage = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    decoder = MagicMock()
+    decoder.decode_chunk.return_value = torch.ones(1)
+    stage._vae_decode_stage = decoder
+    local_latent = torch.ones(1, 2, 3)
+    next_local_latent = torch.full((1, 2, 3), 2.0)
+    stage._pending_vae_decode_latents = {9: deque([local_latent, next_local_latent])}
+
+    output = stage.decode_chunk(9, torch.empty(0, dtype=torch.uint8), True, False)
+    stage.decode_chunk(9, torch.empty(0, dtype=torch.uint8), False, True)
+
+    assert torch.equal(output, torch.ones(1))
+    assert decoder.decode_chunk.call_args_list == [
+        ((9, local_latent, True, False),),
+        ((9, next_local_latent, False, True),),
+    ]
+    assert stage._pending_vae_decode_latents == {}
 
 
 class _RecordingDecoder(nn.Module):

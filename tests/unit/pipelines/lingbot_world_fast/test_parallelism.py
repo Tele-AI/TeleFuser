@@ -26,6 +26,7 @@ def test_denoising_stage_parallel_models_enables_ulysses_and_fsdp() -> None:
     module_manager = MagicMock()
     module_manager.fetch_module.return_value = dit
     stage = LingBotWorldFastDenoisingStage("denoise", module_manager, runtime_config)
+    assert stage.empty_cache_after_call is False
     device_mesh = MagicMock()
     fsdp_model = MagicMock()
 

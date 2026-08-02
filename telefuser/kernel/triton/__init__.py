@@ -20,6 +20,8 @@ from .norm import (
 from .quant import per_token_dequant_fp8, per_token_quant_fp8
 from .rotary import apply_rotary_embedding
 from .scale_shift import (
+    fused_add_layernorm_scale_shift,
+    fused_layernorm_scale_shift,
     fused_layernorm_scale_shift_gate_select01,
     fused_residual_layernorm_scale_shift_gate_select01,
     fused_scale_shift,
@@ -34,6 +36,8 @@ __all__ = [
     "apply_rotary_embedding",
     "apply_rotary_embedding_inplace",
     "fused_scale_shift",
+    "fused_layernorm_scale_shift",
+    "fused_add_layernorm_scale_shift",
     "fused_scale_shift_gate_select",
     "fused_layernorm_scale_shift_gate_select01",
     "fused_residual_layernorm_scale_shift_gate_select01",
