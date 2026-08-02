@@ -142,6 +142,51 @@ class TestParallelWorkerUnit:
 
         mock_queue.put.assert_called_once()
 
+    @patch("telefuser.worker.parallel_worker.to_device")
+    def test_put_data_broadcasts_handles_without_parent_device_copies(self, mock_to_device):
+        """Target-device copies belong to ranks, not the parent dispatch loop."""
+        from telefuser.worker.parallel_worker import ParallelWorker
+
+        worker = ParallelWorker.__new__(ParallelWorker)
+        worker._closed = False
+        worker._failed = False
+        worker.queue_with_cpu = False
+        worker.queue_in = [MagicMock(), MagicMock()]
+        payload = ["method", (torch.ones(1),), {}, False]
+
+        worker.put_data(payload)
+
+        mock_to_device.assert_not_called()
+        for queue in worker.queue_in:
+            queue.put.assert_called_once_with(payload)
+
+    @patch("telefuser.worker.parallel_worker.mp")
+    @patch("telefuser.worker.parallel_worker.PortAllocator")
+    def test_initialization_binds_direct_tensor_channels(self, mock_port_allocator, mock_mp):
+        from telefuser.worker.parallel_worker import ParallelWorker
+
+        mock_port_allocator.return_value.get_free_port_in_interval.return_value = 12345
+        mock_mp.get_start_method.return_value = "spawn"
+        mock_mp.get_context.return_value = MagicMock()
+        output_channel = MagicMock()
+        input_channel = MagicMock()
+        mock_stage = MagicMock()
+        mock_stage.name = "TestStage"
+        mock_stage.model_runtime_config.parallel_config.world_size = 2
+        mock_stage.model_runtime_config.parallel_config.device_ids = [0, 1]
+        mock_stage.model_runtime_config.parallel_config.queue_with_cpu = False
+        mock_stage.model_runtime_config.parallel_config.timeout = 600
+
+        ParallelWorker(
+            mock_stage,
+            tensor_output_channel=output_channel,
+            tensor_output_methods=("forward",),
+            tensor_input_channels=(input_channel,),
+        )
+
+        output_channel.bind_producer.assert_called_once_with()
+        input_channel.bind_consumer.assert_called_once_with(2)
+
     @patch("telefuser.worker.parallel_worker.mp")
     @patch("telefuser.worker.parallel_worker.PortAllocator")
     def test_call_with_sync(self, mock_port_allocator, mock_mp):

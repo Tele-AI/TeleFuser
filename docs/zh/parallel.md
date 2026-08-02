@@ -159,6 +159,33 @@ out = out_wait()
 
 将模型层分割到多个 GPU，实现大模型推理。
 
+### 跨 Worker Tensor 通道
+
+相邻 stage 如果属于不同 `ParallelWorker` group，可以使用 `WorkerTensorChannel` 连接。Producer 通过
+multiprocessing shared memory 或 CUDA IPC，把 tensor storage 直接发送给每个 consumer rank。主进程只接收
+`WorkerTensorRef`，其中包含 channel、transfer、shape、dtype、字节数和源设备等元数据。Consumer 在调用原有
+stage 方法之前，负责在自己的设备上解析引用；stage 的函数签名无需改变。
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(consumer_world_size=vae_parallel_config.world_size)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
+```
+
+该路径是单 producer、单 consumer group 的点对点 FIFO。只有 tensor 的完整 consumer 集合就是所连接的 worker
+group 时才能启用。需要在主进程读取 tensor 的调用可以传入 `_tensor_transport=False`。Consumer 必须保持
+producer 顺序，并在两个 worker 都停止后再关闭 channel。Scheduler 取消尚未消费的 artifact 时，receiver 会
+丢弃更早的 FIFO entry，避免污染后续传输。
+
+常规 worker 派发同样只向各 rank 发送 shared-memory 或 CUDA IPC handle，最终 device placement 由接收 rank
+完成；主进程不再为每张目标 GPU 分配临时副本。
+
 ### 原理
 
 ```

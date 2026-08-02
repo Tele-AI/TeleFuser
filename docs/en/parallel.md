@@ -159,6 +159,34 @@ out = out_wait()
 
 Split model layers across multiple GPUs for large model inference.
 
+### Cross-worker tensor channels
+
+Independent `ParallelWorker` groups can connect adjacent stages with a `WorkerTensorChannel`. The producer sends
+tensor storage directly to every consumer rank through multiprocessing shared memory or CUDA IPC. The parent process
+receives only a `WorkerTensorRef` containing the channel, transfer, shape, dtype, and source-device metadata. The
+consumer resolves that reference on its own device before invoking the unchanged stage method.
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(consumer_world_size=vae_parallel_config.world_size)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
+```
+
+This is a point-to-point, single-producer/single-consumer-group path. Enable it only for outputs whose complete
+consumer set is the connected worker group. Calls that need to inspect a tensor in the parent may pass
+`_tensor_transport=False`. Start both workers before submitting work, stop both workers before closing the channel,
+preserve producer order at the consumer, and treat transported tensors as immutable until the consumer finishes.
+The receiver discards older FIFO entries when the scheduler cancels an artifact before consumption.
+
+Regular worker dispatch also sends shared-memory or CUDA IPC handles to each rank and lets the receiving rank perform
+the final device placement. The parent does not allocate a temporary copy on every target GPU.
+
 ### Principle
 
 ```
