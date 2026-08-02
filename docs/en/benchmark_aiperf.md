@@ -102,6 +102,36 @@ Target facts follow these rules:
 Client delivery, target pipeline residence, target phase time, and resource utilization remain separate dimensions.
 Fields without equivalent semantics remain private or unavailable instead of being forced into a common metric.
 
+## Validated one-minute LingBot-World v2 replay
+
+Commit `663c385b179012c5c3de613212d10e8e6eac5f5d` was validated on 2026-08-02 with the
+`stream_lingbot_world_v2_1min.json` workload, AIPerf 0.11.0 at commit
+`e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`, and four H100 80 GB GPUs. The current H100 example used BF16 DiT,
+FP32 VAE, FlashAttention-4, disabled `torch.compile`, disabled FSDP, `chunk_size=4`, and 16 FPS. The 60-second
+request was truncated to 60 complete latent chunks: 957 generated frames representing 59.75 seconds of media.
+LingBot-World v2 used `local_attn_size=18` and `sink_size=6`; the session reported a fixed 28,080-token KV capacity
+for its 240 latent frames.
+
+| Runtime / target | Compute FPS | Mean / p99 chunk | Stream FPS | Client frames | Artifact |
+|---|---:|---:|---:|---:|---|
+| TeleFuser `.venv`, torch cu128 | 16.191 | 0.988 / 1.099 s | 12.697 | 756 | `20260802_084922_d7ae0931` |
+| TeleFuser `.venv-sglang`, torch cu130 | 15.897 | 1.006 / 1.208 s | 14.089 | 871 | `20260802_090301_af6c433c` |
+| SGLang `.venv-sglang`, torch cu130 | 16.617 | 0.963 / 0.974 s | 16.772 | 957 | `20260801_104829_2320fd7f` |
+
+Every row completed 60 target chunks and generated 957 frames. AIPerf excluded only target chunk 0, leaving 944
+frames across 59 chunks. The aligned TeleFuser run used 59.381647 seconds of synchronized compute time and was 4.33%
+below the SGLang compute rate. The cu130 TeleFuser result was 1.81% below its cu128 run, so the environment change is
+reported separately and is not counted as an optimization gain. The aligned TeleFuser report is
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260802_090301_af6c433c/stream_report.html`.
+
+`stream_fps` is not used for the compute comparison. TeleFuser published LiveKit video with real-time 16 FPS pacing;
+its aligned run averaged 18.99 ms from decoded-ready to publish start, 941.66 ms in paced publication, and 2.10 ms
+from publish completion to client metadata. SGLang used unpaced burst WebSocket output. Those delivery semantics are
+not equivalent even though both include network and client decoding. TeleFuser's 9.740-second first-frame latency
+comprised 0.630 seconds to create the session, another 1.979 seconds to connect, 3.206 seconds from connection to
+admission, and 3.925 seconds from admission to the first client frame; runtime creation occupied 1.564 seconds of the
+last interval.
+
 ## Reproducibility
 
 Every result should retain the TeleFuser commit and AIPerf package version, model revision, accelerator model/count,

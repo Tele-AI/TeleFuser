@@ -97,6 +97,32 @@ Target 原始事实遵守以下规则：
 客户端交付、target pipeline residence、target phase time 和资源利用率保持为不同维度。无法等价的字段保留为
 private 或 unavailable，不强行映射为同一指标。
 
+## LingBot-World v2 一分钟回放实测
+
+2026-08-02 使用 4 张 H100 80 GB 验证了 TeleFuser commit
+`663c385b179012c5c3de613212d10e8e6eac5f5d` 和 `stream_lingbot_world_v2_1min.json` workload；AIPerf 为
+0.11.0、commit `e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`。当前 H100 example 使用 BF16 DiT、FP32 VAE、
+FlashAttention-4，关闭 `torch.compile` 和 FSDP，`chunk_size=4`，输出 16 FPS。60 秒请求按完整 latent
+chunk 截断为 60 个 chunk、957 帧，对应 59.75 秒媒体时长。LingBot-World v2 使用
+`local_attn_size=18`、`sink_size=6`，本次 240 latent frame session 报告的固定 KV 容量为 28,080 token。
+
+| 运行环境 / target | Compute FPS | Chunk mean / p99 | Stream FPS | 客户端帧数 | Artifact |
+|---|---:|---:|---:|---:|---|
+| TeleFuser `.venv`，torch cu128 | 16.191 | 0.988 / 1.099 s | 12.697 | 756 | `20260802_084922_d7ae0931` |
+| TeleFuser `.venv-sglang`，torch cu130 | 15.897 | 1.006 / 1.208 s | 14.089 | 871 | `20260802_090301_af6c433c` |
+| SGLang `.venv-sglang`，torch cu130 | 16.617 | 0.963 / 0.974 s | 16.772 | 957 | `20260801_104829_2320fd7f` |
+
+三次运行均完成 60 个 target chunk、生成 957 帧。AIPerf 只排除 target chunk 0，稳态统计包含 59 个 chunk、
+944 帧。对齐环境后的 TeleFuser 同步计算时间为 59.381647 秒，compute FPS 比 SGLang 低 4.33%。TeleFuser
+cu130 结果比 cu128 低 1.81%，因此环境变化单独报告，不计作代码优化收益。对齐环境 TeleFuser 报告位于
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260802_090301_af6c433c/stream_report.html`。
+
+Compute 对比不使用 `stream_fps`。TeleFuser 的 LiveKit 视频按实时 16 FPS pacing 发布；对齐环境运行中，
+decoded-ready 到 publish start 平均 18.99 ms，paced publish 平均 941.66 ms，publish 完成到客户端 metadata
+平均 2.10 ms。SGLang 使用无 pacing 的 WebSocket burst 输出，两者交付语义不等价，尽管两边都包含网络
+传输和客户端解码。TeleFuser 首帧为 9.740 秒：session 创建 0.630 秒，其后连接 1.979 秒，连接到准入
+3.206 秒，准入到客户端首帧 3.925 秒；最后一段中的 runtime creation 为 1.564 秒。
+
 ## 复现要求
 
 每个结果都应保留 TeleFuser commit、AIPerf 包版本、模型 revision、加速器型号/数量、driver、CUDA、
