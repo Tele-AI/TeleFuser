@@ -19,14 +19,14 @@ if [[ -n "${SGLANG_BIN}" ]]; then
         exit 1
     fi
     sglang_command=("${SGLANG_BIN}")
-elif command -v sglang >/dev/null 2>&1; then
-    sglang_command=("$(command -v sglang)")
 elif [[ -n "${SGLANG_PYTHON}" && -x "${SGLANG_PYTHON}" \
     && -f "${SGLANG_SOURCE_DIR}/python/sglang/cli/main.py" ]]; then
     export PYTHONPATH="${SGLANG_SOURCE_DIR}/python${PYTHONPATH:+:${PYTHONPATH}}"
     sglang_command=("${SGLANG_PYTHON}" "-c" "from sglang.cli.main import main; main()")
+elif command -v sglang >/dev/null 2>&1; then
+    sglang_command=("$(command -v sglang)")
 else
-    echo "SGLang is unavailable. Set SGLANG_BIN, or set SGLANG_SOURCE_DIR and a compatible SGLANG_PYTHON." >&2
+    echo "SGLang is unavailable. Set SGLANG_SOURCE_DIR and SGLANG_PYTHON, or set SGLANG_BIN." >&2
     exit 1
 fi
 
@@ -40,6 +40,7 @@ export CUDA_VISIBLE_DEVICES="${SGLANG_CUDA_VISIBLE_DEVICES}"
 export SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES="${SGLANG_LINGBOT_LAZY_VAE_ENCODE_BLACK_FRAMES:-60}"
 
 exec "${sglang_command[@]}" serve \
+    --model-type diffusion \
     --model-path "${SGLANG_MODEL_PATH}" \
     --pipeline-class-name LingBotWorldCausalDMDPipeline \
     --host "${SGLANG_HOST}" \

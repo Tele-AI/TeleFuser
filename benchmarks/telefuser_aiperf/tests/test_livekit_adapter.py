@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,18 @@ class _FakeLiveKitRoom:
                             "compute_seconds": 0.5,
                             "encode_seconds": 0.1,
                             "memory": [],
+                            "phases": {
+                                "dmd_step_seconds": [0.1, 0.1, 0.1, 0.1],
+                                "vae_decode_gpu_seconds": 0.08,
+                            },
+                        },
+                        "transport_measurement": {
+                            "decoded_ready_at": time.time() - 1.0,
+                            "publish_started_at": time.time() - 0.5,
+                            "publish_finished_at": time.time() - 0.01,
+                            "publish_seconds": 0.49,
+                            "frames": 3,
+                            "pacing": "realtime",
                         },
                     },
                 }
@@ -317,6 +330,14 @@ async def test_adapter_normalizes_room_events_and_deletes_target(
         "http://127.0.0.1:30000/sessions/livekit-session",
     ) in http.requests
     assert Path(result.artifacts_event_file or "").is_file()
+    events = [orjson.loads(line) for line in Path(result.artifacts_event_file or "").read_bytes().splitlines()]
+    phase_profile = next(item for item in events if item["event"] == "target_phase_profile")
+    assert phase_profile["chunk_index"] == 0
+    assert phase_profile["phases"]["vae_decode_gpu_seconds"] == 0.08
+    transport_profile = next(item for item in events if item["event"] == "target_transport_profile")
+    assert transport_profile["chunk_index"] == 0
+    assert transport_profile["transport"]["pacing"] == "realtime"
+    assert transport_profile["publish_to_client_metadata_seconds"] >= 0.0
 
 
 @pytest.mark.asyncio

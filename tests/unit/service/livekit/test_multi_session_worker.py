@@ -71,6 +71,9 @@ class _RoomClient:
         self.on_data = on_data
         self.connected.set()
 
+    async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None:
+        return None
+
     async def publish_video_track(self, name: str, width: int, height: int, *, fps: float = 16.0) -> None:
         return None
 

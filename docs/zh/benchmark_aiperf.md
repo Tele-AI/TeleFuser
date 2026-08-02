@@ -56,10 +56,18 @@ curl --noproxy '*' --fail --silent --show-error \
 bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 ```
 
-请求媒体时长为 59.75 秒，但 AIPerf active window 配置为 240 秒，因此命令通常约 4 分钟完成，不要在模型
-停止生成后提前中断。成功输出为 `Stream profile sessions: 1/1 succeeded`，报告写入
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`。模型文件布局、手动选择 Python 环境、历史服务和故障
-排查见上面的 canonical README。
+请求媒体时长为 59.75 秒。240 秒 active window 是超时上限；成功运行会在 target 发出完成状态后退出，
+从准入起通常约 66 秒。成功输出为 `Stream profile sessions: 1/1 succeeded`，报告写入
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`。
+
+使用相同四卡 workload 测试 SGLang 时，先启动服务，再选择 SGLang 配置：
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+```
 
 ## 职责与指标语义
 
@@ -68,6 +76,7 @@ bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 | TeleFuser runtime | TeleFuser | 输出同步的 phase、chunk、runtime、cache 和环境原始事实 |
 | Batch target adapter | AIPerf | 将 `/v1/videos` HTTP 事件转为标准 request 时间线 |
 | LiveKit 源码 adapter | TeleFuser | 将 room、track、status、metrics 和 control 事件转为 session result |
+| SGLang 源码 adapter | TeleFuser | 将 MessagePack frame、chunk timing 和 camera event 转为 session result |
 | 聚合与历史 | AIPerf | 负责 warmup、percentile、throughput、artifact、GreptimeDB 和展示 |
 | Contract 与 workload | TeleFuser | 固定 target 能力、输入、设置和可复现启动命令 |
 
@@ -87,35 +96,6 @@ Target 原始事实遵守以下规则：
 
 客户端交付、target pipeline residence、target phase time 和资源利用率保持为不同维度。无法等价的字段保留为
 private 或 unavailable，不强行映射为同一指标。
-
-## LingBot-World v2 一分钟回放实测
-
-2026-07-28 使用 4 张 H100 80 GB 验证了 `stream_lingbot_world_v2_1min.json`：DiT 为 BF16，VAE 为 FP32，
-启用 SageAttention SM90 和 `torch.compile`，禁用 FSDP，`chunk_size=4`，输出 16 FPS。60 秒请求按完整 latent
-chunk 截断为 60 个 chunk、957 帧，对应 59.75 秒媒体时长。LingBot-World v2 使用固定
-`local_attn_size=18`、`sink_size=6` 窗口，因此 240 latent frame 的请求仍只分配 27,144 token KV 容量，
-不会改为时长规模的全局 KV cache。
-
-| 指标 | 结果 |
-|---|---:|
-| 成功 session | 1 / 1 |
-| Target chunk / 生成帧 | 60 / 957 |
-| 客户端收到帧数 | 947 |
-| Target 稳态 chunk / 帧 | 59 / 944 |
-| 配置的 session runtime | 242.255 s |
-| 首帧延迟 | 6,252.773 ms |
-| 客户端交付速率（`stream_fps`） | 9.397 FPS |
-| 稳态 chunk 加权计算速率 | 4.708 FPS |
-| Chunk pipeline residence mean / p99 | 3.399 / 3.901 s |
-
-Target 实际生成了全部 957 帧，LiveKit 客户端收到 947 帧。AIPerf 在 target 稳态计算聚合中排除了首个
-chunk，剩余 59 个 chunk 共生成 944 帧。242 秒 session runtime 是 240 秒 active window 上限加连接开销，
-不是 59.75 秒媒体内容的模型生成耗时。
-
-Chunk pipeline residence 从 actor 准入计到输出，包含相互重叠的 encode、DiT、decode 工作，所以可以大于相邻
-交付间隔；报告中的 4.708 稳态 chunk 加权计算 FPS 不能当作客户端推流吞吐。本次 Git 安装的 AIPerf
-运行退出码为 0。回放报告位于
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260728_083948_fc4344ba/stream_report.html`。
 
 ## 复现要求
 

@@ -22,6 +22,7 @@ from .session_registry import SessionRecord
 from .token_service import LiveKitTokenService
 
 _ROOM_DISCONNECT_TIMEOUT_SECONDS = 5.0
+_CONTROLLER_JOIN_TIMEOUT_SECONDS = 60.0
 
 
 class WorkerEventSink(Protocol):
@@ -112,6 +113,10 @@ class LiveKitWorker:
                 self.config.livekit_url,
                 worker_token,
                 lambda message, topic, identity: self._on_data_message(record, message, topic, identity),
+            )
+            await self.room_client.wait_for_participant(
+                record.controller_identity,
+                timeout_s=_CONTROLLER_JOIN_TIMEOUT_SECONDS,
             )
 
             self.event_sink.on_worker_status(self.worker_id, "starting_pipeline")
@@ -206,6 +211,9 @@ class LiveKitWorker:
                 break
 
             frames, audio, metadata = split_chunk_media(chunk)
+            decoded_ready_at = chunk.get("timestamp")
+            publish_started_at = time.time()
+            publish_started_monotonic = time.monotonic()
             chunk_data = chunk.get("data") if isinstance(chunk.get("data"), dict) else chunk
             fps_value = chunk_data.get("fps", chunk.get("fps", self.config.default_fps))
             try:
@@ -239,6 +247,14 @@ class LiveKitWorker:
                 break
             if frames:
                 chunk_count += 1
+                metadata["transport_measurement"] = {
+                    "decoded_ready_at": decoded_ready_at if isinstance(decoded_ready_at, int | float) else None,
+                    "publish_started_at": publish_started_at,
+                    "publish_finished_at": time.time(),
+                    "publish_seconds": time.monotonic() - publish_started_monotonic,
+                    "frames": len(frames),
+                    "pacing": "realtime",
+                }
             if metadata:
                 index = chunk.get("index")
                 if index is None:

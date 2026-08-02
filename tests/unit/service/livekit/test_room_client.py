@@ -84,6 +84,7 @@ def test_livekit_room_client_uses_sdk_room_publish_and_video_source(monkeypatch)
         def __init__(self) -> None:
             self.local_participant = FakeLocalParticipant()
             self.handlers = {}
+            self.remote_participants = {}
 
         def on(self, event: str):
             def _decorator(fn):
@@ -91,6 +92,10 @@ def test_livekit_room_client_uses_sdk_room_publish_and_video_source(monkeypatch)
                 return fn
 
             return _decorator
+
+        def off(self, event: str, fn) -> None:
+            if self.handlers.get(event) is fn:
+                self.handlers.pop(event)
 
         async def connect(self, url: str, token: str) -> None:
             captured["connect"] = (url, token)
@@ -127,6 +132,13 @@ def test_livekit_room_client_uses_sdk_room_publish_and_video_source(monkeypatch)
         packet = types.SimpleNamespace(data=b"{}", topic="tf.control", participant=participant)
         fake_room.handlers["data_received"](packet)
 
+        controller = types.SimpleNamespace(identity="controller")
+        wait_task = asyncio.create_task(client.wait_for_participant("controller", timeout_s=1.0))
+        await asyncio.sleep(0)
+        fake_room.remote_participants["controller"] = controller
+        fake_room.handlers["participant_connected"](controller)
+        await wait_task
+
         frame = np.zeros((2, 3, 3), dtype=np.uint8)
         await client.publish_video_frame(frame, fps=16)
         _video_track, video_options = captured["published_track"]
@@ -145,7 +157,7 @@ def test_livekit_room_client_uses_sdk_room_publish_and_video_source(monkeypatch)
         assert video_options.simulcast is False
         assert video_options.video_codec == "VP8"
         assert video_options.video_encoding.max_framerate == 16
-        assert video_options.video_encoding.max_bitrate == 3_000_000
+        assert video_options.video_encoding.max_bitrate == 8_000_000
         assert captured["frame"]["buffer_type"] == "RGB24"
         assert captured["audio_source"] == (48_000, 1)
         assert captured["audio_frame"] == (pcm, 48_000, 1, 960)

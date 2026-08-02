@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -12,13 +13,14 @@ from .data_protocol import TF_METRICS_TOPIC, TF_STATUS_TOPIC
 from .token_service import LiveKitDependencyError
 
 DataMessageHandler = Callable[[bytes | str | dict[str, Any], str, str], None]
-_VIDEO_MAX_BITRATE = 3_000_000
+_VIDEO_MAX_BITRATE = 8_000_000
 
 
 class RoomClient(Protocol):
     """Minimal room operations required by a TeleFuser LiveKit worker."""
 
     async def connect(self, url: str, token: str, on_data: DataMessageHandler) -> None: ...
+    async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None: ...
     async def publish_video_track(self, name: str, width: int, height: int, *, fps: float = 16.0) -> None: ...
     async def publish_video_frame(self, frame_rgb: np.ndarray, *, fps: float = 16.0) -> None: ...
     async def publish_audio_frame(self, pcm: bytes, *, sample_rate: int, channels: int) -> None: ...
@@ -59,6 +61,29 @@ class LiveKitRoomClient:
             on_data(packet.data, packet.topic or "", identity)
 
         await room.connect(url, token)
+
+    async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None:
+        """Wait until a specific remote participant has joined the room."""
+        if timeout_s <= 0:
+            raise ValueError(f"Participant wait timeout must be positive, got {timeout_s}")
+        room = self._require_room()
+        if identity in room.remote_participants:
+            return
+
+        joined = asyncio.Event()
+
+        @room.on("participant_connected")
+        def _on_participant_connected(participant: Any) -> None:
+            if getattr(participant, "identity", None) == identity:
+                joined.set()
+
+        try:
+            # Cover a participant arriving between the initial check and handler registration.
+            if identity in room.remote_participants:
+                return
+            await asyncio.wait_for(joined.wait(), timeout=timeout_s)
+        finally:
+            room.off("participant_connected", _on_participant_connected)
 
     async def publish_video_track(self, name: str, width: int, height: int, *, fps: float = 16.0) -> None:
         room = self._require_room()

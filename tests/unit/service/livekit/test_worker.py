@@ -76,11 +76,18 @@ class FakeRoomClient:
         self.statuses: list[dict] = []
         self.disconnected = False
         self.disconnect_gate: asyncio.Event | None = None
+        self.participant_gate = asyncio.Event()
+        self.participant_gate.set()
+        self.waited_for_participants: list[tuple[str, float]] = []
 
     async def connect(self, url: str, token: str, on_data) -> None:
         self.connect_args = (url, token)
         self.on_data = on_data
         self.connected.set()
+
+    async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None:
+        self.waited_for_participants.append((identity, timeout_s))
+        await asyncio.wait_for(self.participant_gate.wait(), timeout=timeout_s)
 
     async def publish_video_track(self, name: str, width: int, height: int, *, fps: float = 16.0) -> None:
         return None
@@ -145,6 +152,7 @@ def _native_chunk() -> dict:
         "type": "chunk",
         "index": 1,
         "fps": 16,
+        "timestamp": 123.0,
         "frames": [Image.new("RGB", (8, 8), color=(1, 2, 3))],
         "stream_progress": {"completed_chunks": 2},
     }
@@ -215,16 +223,67 @@ def test_livekit_worker_runs_pipeline_and_forwards_control() -> None:
         assert adapter.pushed == [("pipeline-session-1", {"type": "control", "event": "press", "key": "ArrowUp"})]
         assert adapter.closed == ["pipeline-session-1"]
         assert room.connect_args == ("wss://livekit.example", "worker:telefuser-worker-0:room-1")
+        assert room.waited_for_participants == [("controller", worker_module._CONTROLLER_JOIN_TIMEOUT_SECONDS)]
         assert len(room.video_frames) == 2
         assert room.video_frame_fps == [16.0, 16.0]
         assert room.audio_frames == [(np.zeros(960, dtype=np.int16).tobytes(), 48_000, 1)]
         assert any(status.get("data", {}).get("frames") == 13 for status in room.statuses)
         assert any(status.get("data", {}).get("stream_progress") == {"completed_chunks": 2} for status in room.statuses)
+        transport = next(
+            status["data"]["transport_measurement"]
+            for status in room.statuses
+            if status.get("data", {}).get("index") == 1
+        )
+        assert transport["decoded_ready_at"] == 123.0
+        assert transport["pacing"] == "realtime"
+        assert transport["frames"] == 1
+        assert transport["publish_started_at"] <= transport["publish_finished_at"]
         assert room.statuses[-1]["type"] == "done"
         assert room.disconnected is True
         assert sink.pipeline_sessions == [("session-1", "pipeline-session-1")]
         assert room.statuses[-1]["total_chunks"] == 2
         assert sink.finished == [("worker-0", "session-1", None)]
+
+    asyncio.run(_run())
+
+
+def test_livekit_worker_waits_for_controller_before_creating_pipeline() -> None:
+    async def _run() -> None:
+        adapter = FakePipelineAdapter()
+        room = FakeRoomClient()
+        room.participant_gate.clear()
+        worker = LiveKitWorker(
+            worker_id="worker-0",
+            config=LiveKitServeConfig(
+                livekit_url="wss://livekit.example",
+                livekit_api_key="key",
+                livekit_api_secret="secret",
+            ),
+            pipeline_file="pipeline.py",
+            token_service=FakeTokenService(),
+            pipeline_adapter=adapter,
+            room_client=room,
+        )
+        record = SessionRecord(
+            session_id="session-1",
+            room_name="room-1",
+            controller_identity="controller",
+            status="assigned",
+            worker_id="worker-0",
+            config={"session_id": "session-1"},
+            created_at=0,
+            updated_at=0,
+        )
+
+        task = asyncio.create_task(worker.run_session(record))
+        await room.connected.wait()
+        await asyncio.sleep(0)
+        assert adapter.created_config is None
+
+        room.participant_gate.set()
+        await adapter.created.wait()
+        await adapter.output_queue.put(None)
+        await task
 
     asyncio.run(_run())
 

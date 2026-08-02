@@ -150,6 +150,7 @@ class _LiveKitSession:
             self.events.record("done_message", topic=topic)
             return
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        self._record_transport_profile(data)
         if data.get("type") == "error" or payload.get("error"):
             error = data.get("error") or payload.get("error")
             self.result.error = redact_string(str(error))
@@ -177,11 +178,25 @@ class _LiveKitSession:
             self.target_ready = True
             self._try_start_active_window()
         if stage in {"runtime_ready", "chunk_sent"}:
+            measurement = data.get("measurement")
+            normalized_data = data
+            if stage == "chunk_sent" and isinstance(measurement, Mapping):
+                phases = measurement.get("phases")
+                if isinstance(phases, Mapping):
+                    self.events.record(
+                        "target_phase_profile",
+                        chunk_index=measurement.get("index"),
+                        phases=dict(phases),
+                    )
+                    normalized_data = {
+                        **data,
+                        "measurement": {key: value for key, value in measurement.items() if key != "phases"},
+                    }
             record_target_measurement(
                 result=self.result,
                 events=self.events,
                 stage=stage,
-                data=data,
+                data=normalized_data,
             )
         if not self.pending_control_acks:
             return
@@ -194,6 +209,28 @@ class _LiveKitSession:
                 (now - self.control_sent_at[index]) * 1000.0,
                 0.0,
             )
+
+    def _record_transport_profile(self, data: Mapping[str, Any]) -> None:
+        transport = data.get("transport_measurement")
+        if not isinstance(transport, Mapping):
+            return
+        received_at = time.time()
+        chunk_index = data.get("index")
+        measurement = data.get("measurement")
+        if chunk_index is None and isinstance(measurement, Mapping):
+            chunk_index = measurement.get("index")
+        publish_finished_at = transport.get("publish_finished_at")
+        self.events.record(
+            "target_transport_profile",
+            chunk_index=chunk_index,
+            transport=dict(transport),
+            client_metadata_received_at=received_at,
+            publish_to_client_metadata_seconds=(
+                max(received_at - float(publish_finished_at), 0.0)
+                if isinstance(publish_finished_at, int | float)
+                else None
+            ),
+        )
 
     async def _send_control_trace(self) -> None:
         active_started_at = self._active_start()

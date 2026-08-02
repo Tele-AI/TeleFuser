@@ -143,9 +143,9 @@ In terminal 3, run the one-minute LingBot-World v2 workload:
 bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 ```
 
-The v2 workload is the launcher default and the only checked-in stream workload. It requests 59.75 seconds of media
-using the model's fixed attention window. Its AIPerf active window is 240 seconds, so a successful command normally
-takes about four minutes rather than one minute. Do not terminate it after media generation becomes quiet.
+The v2 workload is the default TeleFuser stream workload. It requests 59.75 seconds of media using the model's fixed
+attention window. The 240-second AIPerf active window is a timeout ceiling; a successful run exits after the target
+emits its completion status and normally takes about 66 seconds after admission, excluding model loading.
 
 A successful run prints `Stream profile sessions: 1/1 succeeded`, an artifact directory, and an HTML report path.
 Results are written below:
@@ -173,9 +173,8 @@ bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
 ```
 
 The launcher defaults to GPUs `0,1,2,3`, port `30000`, and model
-`robbyant/lingbot-world-v2-14b-causal-fast-diffusers`. It uses an installed `sglang` command when available.
-For the checked-in `work_dirs/sglang` source, set `SGLANG_PYTHON` to an environment installed with that source's
-dependencies. Override the defaults when needed:
+`robbyant/lingbot-world-v2-14b-causal-fast-diffusers`. Explicit `SGLANG_SOURCE_DIR` and `SGLANG_PYTHON` values take
+precedence over an installed `sglang` command. Override the defaults when needed:
 
 ```bash
 SGLANG_BIN=/path/to/sglang \
