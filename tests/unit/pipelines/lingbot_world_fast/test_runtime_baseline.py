@@ -37,6 +37,11 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
     )
     pipeline.denoise_stage = MagicMock()
     pipeline.vae_encode_worker = MagicMock()
+    pipeline.vae_encode_worker.encode_condition_chunk.return_value = {
+        "chunk_index": 0,
+        "chunk_size": 3,
+        "latent_condition": torch.zeros(16, 3, 2, 2),
+    }
     pipeline.vae_decode_worker = MagicMock()
     pipeline._next_cache_handle = 0
     pipeline.encode_prompt = MagicMock(return_value=torch.zeros(1, 4, 8))
@@ -168,7 +173,7 @@ def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
     assert runtime.latent_f == 21
     assert runtime.chunk_count == 7
     assert not hasattr(runtime, "noise_generator")
-    assert runtime.condition_image is not None
+    assert runtime.condition_image is None
     assert not hasattr(runtime, "noise_chunks")
     assert not hasattr(runtime, "condition_chunks")
     assert runtime.cache_handle == 0

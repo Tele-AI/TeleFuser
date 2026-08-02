@@ -505,6 +505,7 @@ class LingBotWorldFastDiT(BaseModel):
         freqs = precompute_freqs_cis_3d(head_dim)
         self.freqs_cos = torch.cat([f.real for f in freqs], dim=-1)
         self.freqs_sin = torch.cat([f.imag for f in freqs], dim=-1)
+        self._freqs_by_device: dict[tuple[str, int | None], tuple[torch.Tensor, torch.Tensor]] = {}
         self.device_mesh: DeviceMesh | None = None
         self.usp_flag = False
 
@@ -603,6 +604,15 @@ class LingBotWorldFastDiT(BaseModel):
             session_input_cache["causal_rope"] = (key, rope)
         return rope
 
+    def _rope_frequencies(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Keep the original-precision RoPE tables resident after first use."""
+        key = (device.type, device.index)
+        cached = self._freqs_by_device.get(key)
+        if cached is None:
+            cached = (self.freqs_cos.to(device=device), self.freqs_sin.to(device=device))
+            self._freqs_by_device[key] = cached
+        return cached
+
     def patchify(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
         x = x.contiguous(memory_format=torch.channels_last_3d)
         x = self.patch_embedding(x)
@@ -672,8 +682,7 @@ class LingBotWorldFastDiT(BaseModel):
         control_tokens = prepared_control[0] if prepared_control is not None else None
         camera_modulations = prepared_control[1] if prepared_control is not None else None
 
-        freqs_cos = self.freqs_cos.to(device=x.device)
-        freqs_sin = self.freqs_sin.to(device=x.device)
+        freqs_cos, freqs_sin = self._rope_frequencies(x.device)
         causal_rope = self._prepare_session_causal_rope(
             freqs_cos,
             freqs_sin,

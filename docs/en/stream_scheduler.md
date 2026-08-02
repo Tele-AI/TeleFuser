@@ -77,21 +77,25 @@ that chunk. Other `BidirectionalService` implementations define their own cross-
 
 ## LingBot Condition Prefetch
 
-LingBot condition encoding is independent of the corresponding control input. The session therefore keeps a fixed
-lookahead of two conditions so VAE encode can overlap with earlier denoise and decode work:
+LingBot encodes the bounded reference-image prefix once while initializing the session. A generic
+`WorkerTensorChannel` distributes that base latent directly from the VAE encode worker to every DiT rank, where it
+remains resident in the session cache. Later condition artifacts contain only `chunk_index` and `chunk_size`; each
+rank slices the resident latent, repeats its tail when necessary, and constructs the first-frame mask locally.
+
+The session keeps a fixed lookahead of two condition metadata artifacts independently of control admission:
 
 - Session startup admits `condition[0]` and `condition[1]` when bounded ingress has capacity.
 - After denoise completes for chunk `i`, the session refills the window, normally with `condition[i+2]`.
 - `next_condition_index` and `next_control_index` maintain
   `0 <= next_condition_index - next_control_index <= 2`.
-- If backpressure prevented prefetch, the next control and its missing encode request are admitted atomically.
+- If backpressure prevented prefetch, the next control and its missing condition request are admitted atomically.
 
 Conditions and controls still join by session and sequence ID before denoise. The optimization changes scheduling,
 not model computation or causal cache ownership. `latency_anchor_artifact="control"` ensures condition-only
 prefetch does not start the control-to-output timer.
 
-This model-specific policy sits above the generic scheduler; edge capacities continue to bound retained tensors and
-session cleanup still runs through the owning actors.
+This model-specific policy sits above the generic scheduler. Edge capacities bound in-flight metadata while retained
+session capacity includes the resident condition latent, and cleanup still runs through the owning actors.
 
 ## Actor Ownership and Session Lifecycle
 
@@ -125,6 +129,11 @@ deployment constraint; do not add an implicit global mutex.
 LingBot uses independent `vae_encode_config` and `vae_decode_config`. Each VAE
 stage receives its own complete `ModelRuntimeConfig`; there is no shared VAE
 placement fallback.
+
+When distributed DiT and VAE decode use different worker groups, LingBot connects their latent edge with a generic
+`WorkerTensorChannel`. The denoising worker sends CUDA IPC handles directly to the decode ranks and returns only
+validated tensor metadata to the scheduler. The parent process therefore retains bounded artifact ownership and
+ordering without materializing the latent or allocating copies on the decode GPUs.
 
 ## Observability and Real-Time Operation
 

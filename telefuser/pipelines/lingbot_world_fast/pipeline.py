@@ -28,6 +28,7 @@ from telefuser.models.t5_tokenizer import HuggingfaceTokenizer
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
+from telefuser.worker.tensor_channel import WorkerTensorChannel
 
 from .control import (
     LingBotWorldFastControlBuilder,
@@ -322,15 +323,30 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.vae_decode_device = self._runtime_device(vae_decode_config)
         self.vae_encode_torch_dtype = vae_encode_config.torch_dtype
         self.vae_device = self.vae_decode_device
+        dit_runtime_config = config.dit_config
+        self._worker_tensor_channels: list[WorkerTensorChannel] = []
+        condition_channel = None
+        if dit_runtime_config.parallel_config.world_size > 1:
+            condition_channel = WorkerTensorChannel(
+                dit_runtime_config.parallel_config.world_size,
+                timeout=max(
+                    vae_encode_config.parallel_config.timeout,
+                    dit_runtime_config.parallel_config.timeout,
+                ),
+            )
+            self._worker_tensor_channels.append(condition_channel)
         vae_encode_stage = LingBotWorldFastVAEEncodeStage(
             "lingbot_world_fast_vae_encode", module_manager, vae_encode_config
         )
         vae_decode_stage = LingBotWorldFastVAEDecodeStage(
             "lingbot_world_fast_vae_decode", module_manager, vae_decode_config
         )
-        self.vae_encode_worker = ParallelWorker(vae_encode_stage)
+        self.vae_encode_worker = ParallelWorker(
+            vae_encode_stage,
+            tensor_output_channel=condition_channel,
+            tensor_output_methods=("encode_condition_chunk",) if condition_channel is not None else (),
+        )
 
-        dit_runtime_config = config.dit_config
         dit_device = "cpu" if dit_runtime_config.parallel_config.world_size > 1 else self.device
         self.dit = module_manager.fetch_module("lingbot_world_fast_dit")
         if self.dit is None:
@@ -350,12 +366,37 @@ class LingBotWorldFastPipeline(BasePipeline):
         )
         if colocate_vae_decode:
             denoise_stage.attach_vae_decode_stage(vae_decode_stage)
+        direct_vae_handoff = dit_runtime_config.parallel_config.world_size > 1 and not colocate_vae_decode
+        latent_channel = None
+        if direct_vae_handoff:
+            latent_channel = WorkerTensorChannel(
+                vae_decode_config.parallel_config.world_size,
+                timeout=max(
+                    dit_runtime_config.parallel_config.timeout,
+                    vae_decode_config.parallel_config.timeout,
+                ),
+            )
+            self._worker_tensor_channels.append(latent_channel)
         self.denoise_stage = (
-            ParallelWorker(denoise_stage) if dit_runtime_config.parallel_config.world_size > 1 else denoise_stage
+            ParallelWorker(
+                denoise_stage,
+                tensor_output_channel=latent_channel,
+                tensor_output_methods=("denoise_and_update_cache",) if latent_channel is not None else (),
+                tensor_input_channels=(condition_channel,) if condition_channel is not None else (),
+            )
+            if dit_runtime_config.parallel_config.world_size > 1
+            else denoise_stage
         )
         self.vae_decode_worker = (
-            _CoLocatedVAEDecodeWorker(self.denoise_stage) if colocate_vae_decode else ParallelWorker(vae_decode_stage)
+            _CoLocatedVAEDecodeWorker(self.denoise_stage)
+            if colocate_vae_decode
+            else ParallelWorker(
+                vae_decode_stage,
+                tensor_input_channels=(latent_channel,) if latent_channel is not None else (),
+            )
         )
+        self.uses_direct_condition_handoff = condition_channel is not None
+        self.uses_direct_vae_handoff = direct_vae_handoff
 
     @staticmethod
     def _validate_vae_stage_runtime_config(
@@ -547,8 +588,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         encode_dtype = getattr(self, "vae_encode_torch_dtype", self.config.vae_encode_config.torch_dtype)
         return tensor.to("cpu", dtype=encode_dtype)
 
-    def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> None:
-        """Register session-owned VAE caches in the dedicated worker."""
+    def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> dict[str, object]:
+        """Register VAE caches and export the session image latent once."""
         if session.cache_handle is None or session.condition_image is None:
             raise RuntimeError("VAE session initialization requires an image and cache handle")
         encoder_initialized = self.vae_encode_worker.initialize_cache(
@@ -559,6 +600,20 @@ class LingBotWorldFastPipeline(BasePipeline):
         decoder_initialized = self.vae_decode_worker.initialize_cache(cache_handle=session.cache_handle, sync=True)
         if not decoder_initialized:
             raise RuntimeError("LingBot retained-session cache capacity is exhausted at VAE decode")
+        condition = self.vae_encode_worker.encode_condition_chunk(
+            cache_handle=session.cache_handle,
+            chunk_index=0,
+            chunk_count=session.chunk_count,
+            chunk_size=session.chunk_size,
+            height=session.height,
+            width=session.width,
+            output_dtype=self.torch_dtype,
+            sync=True,
+        )
+        if not isinstance(condition, dict):
+            raise TypeError("LingBot VAE condition initialization must return a mapping")
+        session.condition_image = None
+        return condition
 
     def _release_vae_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
         if not hasattr(self, "vae_encode_worker") or not hasattr(self, "vae_decode_worker"):
@@ -613,6 +668,8 @@ class LingBotWorldFastPipeline(BasePipeline):
         for vae_worker in (getattr(self, "vae_encode_worker", None), getattr(self, "vae_decode_worker", None)):
             if isinstance(vae_worker, ParallelWorker):
                 vae_worker.close()
+        for channel in getattr(self, "_worker_tensor_channels", ()):
+            channel.close()
 
     def _get_streaming_runtime(self) -> LingBotWorldFastStreamingRuntime:
         """Return the one actor graph owned by this pipeline instance."""
@@ -723,7 +780,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             cache_handle=cache_handle,
         )
         try:
-            self._initialize_vae_session(session)
+            image_condition = self._initialize_vae_session(session)
             initialize_cache_kwargs = dict(
                 cache_handle=cache_handle,
                 batch_size=1,
@@ -734,6 +791,7 @@ class LingBotWorldFastPipeline(BasePipeline):
                 noise_generator_state=noise_generator.get_state().tolist(),
                 noise_shape=(1, 16, session_config.chunk_size, lat_h, lat_w),
                 prompt_emb=prompt_emb,
+                image_condition=image_condition,
                 timestep_indices=getattr(self.config, "timestep_indices", (0, 179, 358, 679)),
             )
             if isinstance(self.denoise_stage, ParallelWorker):

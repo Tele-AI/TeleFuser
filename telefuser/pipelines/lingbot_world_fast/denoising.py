@@ -50,6 +50,7 @@ class _DenoisingCacheState:
     noise_generator: torch.Generator
     noise_shape: tuple[int, int, int, int, int]
     prompt_emb: torch.Tensor | None = None
+    image_condition_latent: torch.Tensor | None = None
     pool_slot: int | None = None
     projected_context_key: tuple[object, ...] | None = None
     prepared_control_key: tuple[object, ...] | None = None
@@ -178,6 +179,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self.empty_cache_after_call = False
         self._cache_registry: dict[int, _DenoisingCacheState] = {}
         self._cache_pool: _DenoisingCachePool | None = None
+        self._observed_condition_bytes = 0
         self._vae_decode_stage: LingBotWorldFastVAEDecodeStage | None = None
         self._pending_vae_decode_latents: dict[int, deque[torch.Tensor]] = {}
         if model_runtime_config.parallel_config.world_size == 1 and model_runtime_config.compile_config.enabled:
@@ -332,7 +334,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self_kv = 2 * self.dit.num_layers * batch_size * kv_size * local_num_heads * head_dim * element_size
         cross_kv = 2 * self.dit.num_layers * batch_size * max_sequence_length * num_heads * head_dim * element_size
         cursors = self.dit.num_layers * 2 * torch.empty((), dtype=torch.int64).element_size()
-        return self_kv + cross_kv + cursors
+        return self_kv + cross_kv + cursors + getattr(self, "_observed_condition_bytes", 0)
 
     def configure_cache_pool(
         self,
@@ -397,6 +399,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         noise_generator_state: list[int],
         noise_shape: tuple[int, int, int, int, int],
         prompt_emb: torch.Tensor | None = None,
+        image_condition: dict[str, object] | None = None,
         timestep_indices: tuple[int, ...] = (0, 179, 358, 679),
     ) -> bool:
         """Atomically register session-scoped KV, scheduler, and RNG state."""
@@ -404,7 +407,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             raise ValueError(f"Cache handle {cache_handle} is already registered")
 
         scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1, use_dynamic_shifting=False)
-        timesteps = _select_timesteps(scheduler, tuple(timestep_indices), sample_shift)
+        timesteps = _select_timesteps(scheduler, tuple(timestep_indices), sample_shift).to(self.device)
         generator = torch.Generator(device=self.device)
         generator.set_state(torch.tensor(generator_state, dtype=torch.uint8))
         noise_generator = torch.Generator(device=self.device)
@@ -441,6 +444,13 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 prompt_emb=prompt_emb,
                 pool_slot=pool_slot,
             )
+            if image_condition is not None:
+                self._resolve_image_condition(
+                    state,
+                    image_condition,
+                    device=self.device,
+                    dtype=self.torch_dtype,
+                )
         except Exception:
             if pool is not None and pool_slot is not None:
                 pool.release(pool_slot)
@@ -466,6 +476,54 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             sigma_t = sigma_t.unsqueeze(-1)
         x0 = xt - sigma_t * flow_pred
         return x0.to(original_dtype)
+
+    def _resolve_image_condition(
+        self,
+        state: _DenoisingCacheState,
+        condition_chunk: torch.Tensor | dict[str, object],
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Materialize one condition chunk from a session-resident image latent."""
+        if isinstance(condition_chunk, torch.Tensor):
+            return condition_chunk
+        if not isinstance(condition_chunk, dict):
+            raise TypeError(
+                f"LingBot image condition must be a tensor or mapping, got {type(condition_chunk).__name__}"
+            )
+
+        chunk_index = condition_chunk.get("chunk_index")
+        chunk_size = condition_chunk.get("chunk_size")
+        if not isinstance(chunk_index, int) or chunk_index < 0:
+            raise ValueError(f"LingBot image condition has invalid chunk_index {chunk_index!r}")
+        if not isinstance(chunk_size, int) or chunk_size < 1:
+            raise ValueError(f"LingBot image condition has invalid chunk_size {chunk_size!r}")
+
+        exported = condition_chunk.get("latent_condition")
+        if exported is not None:
+            if not isinstance(exported, torch.Tensor) or exported.ndim != 4 or exported.shape[1] < 1:
+                raise ValueError("LingBot image condition latent must have shape (channels, frames, height, width)")
+            state.image_condition_latent = exported.to(device=device, dtype=dtype)
+            condition_bytes = state.image_condition_latent.numel() * state.image_condition_latent.element_size()
+            self._observed_condition_bytes = max(getattr(self, "_observed_condition_bytes", 0), condition_bytes)
+        latent_condition = state.image_condition_latent
+        if latent_condition is None:
+            raise RuntimeError("LingBot image condition metadata arrived before the session latent")
+
+        start = chunk_index * chunk_size
+        available = latent_condition[:, start : start + chunk_size]
+        if available.shape[1] < chunk_size:
+            tail = latent_condition[:, -1:].expand(-1, chunk_size - available.shape[1], -1, -1)
+            available = torch.cat([available, tail], dim=1)
+        mask = torch.zeros(
+            (4, chunk_size, available.shape[2], available.shape[3]),
+            dtype=available.dtype,
+            device=available.device,
+        )
+        if chunk_index == 0:
+            mask[:, 0] = 1
+        return torch.cat([mask, available], dim=0).unsqueeze(0)
 
     @staticmethod
     def _build_i2v_model_input_writer(
@@ -514,7 +572,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 step_start = torch.cuda.Event(enable_timing=True)
                 step_end = torch.cuda.Event(enable_timing=True)
                 step_start.record()
-            schedule_timestep = timesteps[timestep_idx].view(1).to(device=current_latent.device)
+            schedule_timestep = timesteps[timestep_idx].view(1)
             model_timestep = schedule_timestep.to(dtype=torch.float32)
             with torch.amp.autocast(
                 current_latent.device.type,
@@ -544,7 +602,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 raise RuntimeError("LingBot DMD forward unexpectedly returned no prediction")
             x0 = self._convert_flow_pred_to_x0(noise_pred, current_latent, schedule_timestep[0], scheduler)
             if timestep_idx < len(timesteps) - 1:
-                next_timestep = timesteps[timestep_idx + 1].view(1).to(device=x0.device)
+                next_timestep = timesteps[timestep_idx + 1].view(1)
                 noise = torch.randn(x0.shape, generator=generator, device=x0.device, dtype=x0.dtype)
                 current_latent = scheduler.add_noise(x0, noise, next_timestep)
             else:
@@ -604,7 +662,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
     def denoise_and_update_cache(
         self,
         cache_handle: int,
-        condition_chunk: torch.Tensor,
+        condition_chunk: torch.Tensor | dict[str, object],
         prompt_emb: torch.Tensor | None,
         control_chunk: torch.Tensor | None,
         current_start: int,
@@ -623,6 +681,12 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self._prepare_session_inputs(state, cache_handle, session_prompt_emb, control_chunk)
         try:
             latent_chunk = self._next_noise_chunk(state)
+            condition_chunk = self._resolve_image_condition(
+                state,
+                condition_chunk,
+                device=latent_chunk.device,
+                dtype=self.torch_dtype,
+            )
             prepare_model_input = self._build_i2v_model_input_writer(
                 latent_chunk,
                 condition_chunk,

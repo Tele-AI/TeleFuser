@@ -161,6 +161,28 @@ def test_set_attention_config_updates_all_blocks() -> None:
         assert block.cross_attn.attention_config is attention_config
 
 
+def test_rope_frequencies_keep_original_precision_and_are_cached_per_device() -> None:
+    model = LingBotWorldFastDiT(
+        in_dim=4,
+        dim=32,
+        ffn_dim=64,
+        freq_dim=8,
+        text_dim=16,
+        out_dim=4,
+        num_heads=4,
+        num_layers=1,
+    ).to(dtype=torch.bfloat16)
+
+    original_dtype = model.freqs_cos.dtype
+    first = model._rope_frequencies(torch.device("cpu"))
+    second = model._rope_frequencies(torch.device("cpu"))
+
+    assert first[0].dtype == original_dtype
+    assert first[1].dtype == original_dtype
+    assert second[0] is first[0]
+    assert second[1] is first[1]
+
+
 def test_scalar_timestep_modulation_stays_broadcastable() -> None:
     model = LingBotWorldFastDiT(
         in_dim=4,

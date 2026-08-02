@@ -47,6 +47,33 @@ def test_worker_cache_retains_session_prompt_embedding() -> None:
     assert _initialize_cache(stage, 11, prompt_emb=prompt_emb) is True
 
     assert stage._cache_registry[11].prompt_emb is prompt_emb
+    assert stage._cache_registry[11].timesteps.device == stage.device
+
+
+def test_worker_cache_retains_image_condition_and_materializes_chunks_locally() -> None:
+    stage = _cache_stage()
+    _initialize_cache(stage, 11)
+    state = stage._cache_registry[11]
+    latent = torch.arange(16 * 5, dtype=torch.float32).view(16, 5, 1, 1)
+
+    first = stage._resolve_image_condition(
+        state,
+        {"chunk_index": 0, "chunk_size": 2, "latent_condition": latent},
+        device=stage.device,
+        dtype=torch.float32,
+    )
+    tail = stage._resolve_image_condition(
+        state,
+        {"chunk_index": 3, "chunk_size": 2, "latent_condition": None},
+        device=stage.device,
+        dtype=torch.float32,
+    )
+
+    assert state.image_condition_latent is latent
+    assert first.shape == (1, 20, 2, 1, 1)
+    assert torch.equal(first[0, :4, 0], torch.ones(4, 1, 1))
+    assert torch.count_nonzero(first[0, :4, 1]) == 0
+    assert torch.equal(tail[0, 4:], latent[:, -1:].expand(-1, 2, -1, -1))
 
 
 def test_worker_cache_registry_isolates_handles_and_releases_idempotently() -> None:

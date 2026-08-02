@@ -265,6 +265,11 @@ switching. For other counts, the examples retain the PPL-configured VAE devices 
 Direct `LingBotWorldFastPipelineConfig` users may set `vae_encode_config`, `vae_decode_config`, and `dit_config`
 independently; non-matching placements continue to use independent workers.
 
+The reference image is VAE-encoded once per session into at most 16 latent frames. For distributed DiT, the encode
+worker sends that base latent once to every DiT rank through CUDA IPC/P2P; each rank retains it and builds later
+four-frame condition slices and masks locally. Subsequent chunks therefore carry condition metadata rather than
+repeating VAE-to-CPU-to-DiT transfers. The retained bytes are included in session-capacity accounting.
+
 The scheduler does not infer a resource group from overlapping device IDs. VAE encode remains independent, while an
 exactly matching distributed DiT/VAE-decode placement uses the pipeline's explicit co-location path. See the
 [streaming scheduler guide](../../docs/en/stream_scheduler.md) for lifecycle guarantees.

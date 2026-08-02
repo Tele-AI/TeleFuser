@@ -450,20 +450,21 @@ class LingBotWorldFastStreamingRuntime:
             "chunk_size": runtime.chunk_size,
             "height": runtime.height,
             "width": runtime.width,
+            "output_dtype": self.pipeline.torch_dtype,
         }
 
-    def _encode_outputs(self, value: torch.Tensor, invocation: StreamingStageInvocation) -> dict[str, object]:
+    def _encode_outputs(self, value: dict[str, object], invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
         index = invocation.key.sequence_id
         self.pipeline._notify_progress(entry.progress_callback, "condition_chunk_encoded", index=index)
         if index == 0:
             entry.runtime.condition_image = None
-        return {"condition": value.to(device=self.pipeline.device, dtype=self.pipeline.torch_dtype)}
+        return {"condition": value}
 
     def _denoise_kwargs(self, invocation: StreamingStageInvocation) -> dict[str, object]:
         runtime = self._entry_for_invocation(invocation).runtime
         index = invocation.key.sequence_id
-        return {
+        kwargs = {
             "cache_handle": runtime.cache_handle,
             "condition_chunk": invocation.inputs["condition"],
             "prompt_emb": None,
@@ -476,6 +477,9 @@ class LingBotWorldFastStreamingRuntime:
             ),
             "_benchmark_profile": runtime.config.benchmark_metrics,
         }
+        if getattr(self.pipeline, "uses_direct_vae_handoff", False):
+            kwargs["_tensor_transport"] = runtime.world_kv_binding is None
+        return kwargs
 
     @torch.inference_mode()
     def _denoise(self, invocation: StreamingStageInvocation) -> dict[str, object]:

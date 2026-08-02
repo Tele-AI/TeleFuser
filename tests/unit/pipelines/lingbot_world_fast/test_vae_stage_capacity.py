@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from telefuser.pipelines.lingbot_world_fast import vae_stage
+from telefuser.pipelines.lingbot_world_fast.denoising import LingBotWorldFastDenoisingStage
 from telefuser.pipelines.lingbot_world_fast.vae_stage import (
     _VAECachePool,
     _VAEDecodeCacheState,
@@ -134,10 +135,28 @@ def test_vae_encode_stage_encodes_bounded_prefix_once_and_repeats_tail() -> None
     assert stage.initialize_cache(1, torch.ones(3, 2, 2)) is True
 
     encode = vae_stage.LingBotWorldFastVAEEncodeStage.encode_condition_chunk.__wrapped__
-    first = encode(stage, 1, 0, 5, 4, 2, 2)
-    tail = encode(stage, 1, 4, 5, 4, 2, 2)
+    first_packet = encode(stage, 1, 0, 5, 4, 2, 2, torch.float32)
+    tail_packet = encode(stage, 1, 4, 5, 4, 2, 2, torch.float32)
+    resolver = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    resolver._observed_condition_bytes = 0
+    denoise_state = SimpleNamespace(image_condition_latent=None)
+    first = resolver._resolve_image_condition(
+        denoise_state,
+        first_packet,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    tail = resolver._resolve_image_condition(
+        denoise_state,
+        tail_packet,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
 
     assert stage.vae.frame_counts == [61]
+    assert first_packet["latent_condition"].shape == (16, 16, 2, 2)
+    assert tail_packet["latent_condition"] is None
+    assert denoise_state.image_condition_latent is first_packet["latent_condition"]
     assert first.shape == (1, 20, 4, 2, 2)
     assert torch.equal(first[0, :4, 0], torch.ones(4, 2, 2))
     assert torch.count_nonzero(first[0, :4, 1:]) == 0

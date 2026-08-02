@@ -106,6 +106,7 @@ class _VAEEncodeCacheState:
     condition_image: torch.Tensor | None
     encoder_state: WanVideoVAEStreamingEncodeState = field(default_factory=WanVideoVAEStreamingEncodeState)
     latent_condition: torch.Tensor | None = None
+    latent_condition_exported: bool = False
     pool_slot: int | None = None
 
 
@@ -123,6 +124,7 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
         self.empty_cache_after_call = False
         self._cache_registry: dict[int, _VAEEncodeCacheState] = {}
         self._observed_session_cache_bytes = 0
+        self._observed_condition_bytes = 0
         self._cache_layout: dict[int, tuple[torch.dtype, int]] = {}
         self._cache_pool: _VAECachePool | None = None
 
@@ -138,7 +140,7 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
 
     def estimate_session_cache_bytes(self) -> int:
         """Return VAE encoder bytes for one fixed slot including shape headroom."""
-        return sum(
+        causal_cache_bytes = sum(
             (
                 (numel * _CACHE_POOL_HEADROOM_NUMERATOR + _CACHE_POOL_HEADROOM_DENOMINATOR - 1)
                 // _CACHE_POOL_HEADROOM_DENOMINATOR
@@ -146,6 +148,7 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
             * torch.empty((), dtype=dtype).element_size()
             for dtype, numel in self._cache_layout.values()
         )
+        return causal_cache_bytes + getattr(self, "_observed_condition_bytes", 0)
 
     def configure_cache_pool(self, capacity: int) -> VAECachePoolProfile:
         """Allocate all persistent encoder-cache slots before accepting sessions."""
@@ -197,9 +200,16 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
 
     @with_model_offload(["vae"])
     def encode_condition_chunk(
-        self, cache_handle: int, chunk_index: int, chunk_count: int, chunk_size: int, height: int, width: int
-    ) -> torch.Tensor:
-        """Encode the bounded zero-frame prefix once and return one condition chunk."""
+        self,
+        cache_handle: int,
+        chunk_index: int,
+        chunk_count: int,
+        chunk_size: int,
+        height: int,
+        width: int,
+        output_dtype: torch.dtype,
+    ) -> dict[str, object]:
+        """Encode the bounded image prefix once and export it once per session."""
         state = self._cache_registry[cache_handle]
         if state.latent_condition is None:
             if state.condition_image is None:
@@ -223,19 +233,22 @@ class LingBotWorldFastVAEEncodeStage(BaseStage):
                 raise RuntimeError(
                     f"VAE condition prefix has {latent.shape[1]} latent frames, expected {encoded_latent_frames}"
                 )
-            state.latent_condition = latent.cpu()
+            state.latent_condition = latent.to(dtype=output_dtype)
+            self._observed_condition_bytes = max(
+                getattr(self, "_observed_condition_bytes", 0),
+                state.latent_condition.numel() * state.latent_condition.element_size(),
+            )
             state.condition_image = None
 
-        latent_condition = state.latent_condition
-        start = chunk_index * chunk_size
-        available = latent_condition[:, start : start + chunk_size]
-        if available.shape[1] < chunk_size:
-            tail = latent_condition[:, -1:].expand(-1, chunk_size - available.shape[1], -1, -1)
-            available = torch.cat([available, tail], dim=1)
-        mask = torch.zeros((4, chunk_size, available.shape[2], available.shape[3]), dtype=available.dtype)
-        if chunk_index == 0:
-            mask[:, 0] = 1
-        return torch.cat([mask, available], dim=0).unsqueeze(0)
+        exported = None
+        if not state.latent_condition_exported:
+            exported = state.latent_condition
+            state.latent_condition_exported = True
+        return {
+            "chunk_index": chunk_index,
+            "chunk_size": chunk_size,
+            "latent_condition": exported,
+        }
 
     def release_cache(self, cache_handle: int) -> bool:
         """Release encoder state for one session."""
