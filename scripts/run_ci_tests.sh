@@ -4,6 +4,16 @@
 
 set -e
 
+skip_install=false
+if [ "${1:-}" = "--skip-install" ]; then
+    skip_install=true
+    shift
+fi
+if [ "$#" -ne 0 ]; then
+    echo "Usage: $0 [--skip-install]"
+    exit 2
+fi
+
 echo "=========================================="
 echo "Running CI Tests Locally"
 echo "=========================================="
@@ -39,10 +49,15 @@ if [ ! -f "pyproject.toml" ]; then
 fi
 
 # Install dependencies if needed
-print_section "Installing dependencies"
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q
-pip install -e ".[dev]" -q
-check_result "Dependencies installation"
+if [ "$skip_install" = true ]; then
+    print_section "Skipping dependency installation"
+    echo "Using dependencies from the active Python environment"
+else
+    print_section "Installing dependencies"
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q
+    pip install -e ".[dev]" -q
+    check_result "Dependencies installation"
+fi
 
 # Run lint checks
 print_section "Running lint checks"
@@ -55,16 +70,23 @@ check_result "Ruff format check"
 ruff check --select I telefuser tests
 check_result "Import check"
 
+# A CUDA-enabled local PyTorch build is valid for local CI, but the tests below
+# must observe the same CPU-only runtime contract as the GitHub runners.
+print_section "Enforcing CPU-only test execution"
+export CUDA_VISIBLE_DEVICES=""
+python -c 'import torch; assert not torch.cuda.is_available(), "CUDA must be hidden during CPU CI tests"'
+check_result "CPU-only runtime"
+
 # Run unit tests
 print_section "Running unit tests"
-pytest tests/unit -v \
+python -m pytest tests/unit -v \
     -m "not gpu and not distributed and not slow and not quant" \
     --tb=short
 check_result "Unit tests"
 
 # Run server pytest tests (includes OpenAI API tests)
 print_section "Running server pytest tests (includes OpenAI API)"
-pytest tests/server/ -v \
+python -m pytest tests/server/ -v \
     -m "not gpu and not distributed and not slow" \
     --tb=short
 check_result "Server pytest tests (including OpenAI API)"

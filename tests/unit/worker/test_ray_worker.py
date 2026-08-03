@@ -24,14 +24,15 @@ def test_setup_resources_preserves_ray_visible_devices(monkeypatch: pytest.Monke
     worker = _ray_worker(num_gpus=2, memory_limit=0.5)
 
     with (
-        patch("telefuser.worker.ray_worker.current_platform.device_count", return_value=2),
-        patch("telefuser.worker.ray_worker.current_platform.set_device") as set_device,
+        patch("telefuser.worker.ray_worker.current_platform") as current_platform,
         patch("telefuser.worker.ray_worker.torch.cuda.set_per_process_memory_fraction") as set_fraction,
     ):
+        current_platform.device_type = "cuda"
+        current_platform.device_count.return_value = 2
         worker._setup_resources()
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "4,7"
-    set_device.assert_called_once_with(0)
+    current_platform.set_device.assert_called_once_with(0)
     set_fraction.assert_called_once_with(0.5, device=0)
 
 
