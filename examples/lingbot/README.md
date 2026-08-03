@@ -125,6 +125,43 @@ python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
     --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
 ```
 
+### Validated Four-H100 Real-Time Gate
+
+Commit `540b579` was validated on 2026-08-03 with four H100 80 GB GPUs, PyTorch 2.11.0+cu128,
+FlashAttention-4, BF16 DiT, FP32 VAE, disabled FSDP, and disabled `torch.compile`. The default 832x480
+request generated all 77 frames in five chunks at a 16 FPS playback target.
+
+| Metric | Result |
+| --- | ---: |
+| Steady compute FPS | **17.14** |
+| Steady chunk mean / p50 / p90 | 0.9335 / 0.9409 / 0.9410 s |
+| Slowest steady chunk | 1.0058 s |
+| Generated frames / chunks | 77 / 5 |
+
+The steady summary excludes chunk 0 and covers four 16-frame chunks. `compute_seconds` synchronizes all target CUDA
+devices and includes condition handling, DiT, clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame
+conversion. It excludes model loading, runtime creation, LiveKit pacing/encoding, network delivery, and client
+rendering. The average therefore clears the 16 FPS target-side real-time gate, while the slowest chunk exceeds its
+one-second budget by 5.8 ms; treat this as a validated configuration, not a guarantee for other hardware, resolutions,
+durations, concurrent sessions, or transport conditions.
+
+Reproduce the measured direct pipeline-service path without LiveKit or codec time:
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python tools/validation/benchmark_lingbot_world_v2_direct.py \
+    --pipeline examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --image examples/data/lingbot_world_fast/image.jpg \
+    --control-trace benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json \
+    --output work_dirs/lingbot_world_v2_4gpu_77frames.json \
+    --gpu-num 4 --frame-num 77 --fps 16 --chunk-size 4
+```
+
+The offline CLI was also validated to produce an H.264 832x480 video containing all 77 frames. Use the
+[AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the one-minute workload, client delivery metrics,
+and comparisons that require identical environments.
+
 ## Usage
 
 ### Four H100 GPUs

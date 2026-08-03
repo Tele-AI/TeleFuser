@@ -17,9 +17,12 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
+- ✨ **2026-08-03**: Validated LingBot-World v2 target-side real-time generation on **4 x H100 80 GB** at
+  832x480 and 16 FPS. The current 77-frame gate reached **17.14 steady compute FPS**; see the
+  [reproducible benchmark](docs/en/benchmark_aiperf.md#current-four-h100-real-time-gate).
 - ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, retained multi-session admission, LingBot
   chunk-boundary time slicing, reconnect-friendly browser transport, and server-push/bidirectional contracts.
-- ✨ **2026-07-22**: **NEW** Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
+- ✨ **2026-07-22**: Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
@@ -94,6 +97,12 @@ video = pipe(
 
 TeleFuser streams `LingBot-World v2` through LiveKit. LingBot-World v2 uses camera control and its v2 PPL defaults;
 its streaming example caps a session at two minutes.
+
+The validated four-H100 configuration sustains 17.14 target-side compute FPS for the default 77-frame, 832x480
+request, above its 16 FPS playback target. This is a synchronized pipeline-compute metric; model loading, LiveKit
+encoding, network delivery, and client rendering are measured separately. See the
+[LingBot example guide](examples/lingbot/README.md#validated-four-h100-real-time-gate) for the exact command and
+chunk timings.
 
 LingBot streaming uses the actor-based scheduler for both offline and service execution. Encode, DiT, and decode may
 overlap even on the same GPU; move stages only when memory placement requires it. See the

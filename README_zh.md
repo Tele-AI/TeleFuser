@@ -17,9 +17,12 @@ TeleFuser 是一个面向世界模型推理与多模态生成的高性能运行�
 
 ## News 📰
 
+- ✨ **2026-08-03**：LingBot-World v2 已在 **4 张 H100 80 GB** 上通过 832x480、16 FPS 的目标侧实时生成
+  验证。当前 77 帧门禁达到 **17.14 steady compute FPS**，复现方法见
+  [基准文档](docs/zh/benchmark_aiperf.md#当前-77-帧实时计算门禁)。
 - ✨ **2026-07-27**：统一使用 LiveKit 流式后端，支持 room 会话、worker 准入、浏览器自动重连，以及
   server-push 和 bidirectional 两种 pipeline contract。
-- ✨ **2026-07-22**：**NEW** 新增 [**LingBot-Video**](examples/lingbot_video/README.md) 支持，覆盖 Dense/MoE T2I、T2V、TI2V、原生四卡 CFG/SP 推理与内存直传 MoE refiner。
+- ✨ **2026-07-22**：新增 [**LingBot-Video**](examples/lingbot_video/README.md) 支持，覆盖 Dense/MoE T2I、T2V、TI2V、原生四卡 CFG/SP 推理与内存直传 MoE refiner。
 - ✨ **2026-07-15**：新增 [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) 支持，支持离线生成、交互式 WebRTC 流和多卡推理。
 
 - ✨ **2026-07-06**：新增外部 **CacheSeek** latent cache 集成，支持服务模式下跨请求复用；命中后可跳过前 N 步去噪。Wan2.2 服务示例默认快照 `[5, 10, 15, 20, 25]`。配置和安装方式见 [docs/zh/latent_cache.md](docs/zh/latent_cache.md)。
@@ -93,6 +96,10 @@ video = pipe(
 
 TeleFuser 通过 LiveKit 传输 `LingBot-World v2`。LingBot-World v2 使用相机控制和 v2 PPL 默认值；其流式
 示例将单个会话上限设为两分钟。
+
+已验证的四卡 H100 配置在默认 77 帧、832x480 请求上达到 17.14 target-side compute FPS，高于 16 FPS
+播放目标。该数值是设备同步后的 pipeline 计算指标；模型加载、LiveKit 编码、网络交付和客户端渲染需单独
+衡量。精确命令和逐 chunk 结果见 [LingBot 示例文档](examples/lingbot/README.md#validated-four-h100-real-time-gate)。
 
 LingBot 的离线与服务执行共用 actor scheduler。即使位于同一张 GPU，encode、DiT 和 decode 也可以重叠；
 仅在显存放置需要时移动 Stage。详见[流式调度器指南](docs/zh/stream_scheduler.md)。
