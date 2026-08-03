@@ -20,6 +20,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 
+from .collectives import all_gather_cat
 from .device_mesh import (
     get_attention_strategy,
     get_cfg_group,
@@ -189,10 +190,9 @@ def sequence_parallel_unshard(
 
     unshard_tensors = []
     for tensor, seq_dim, seq_len in zip(tensors, seq_dims, seq_lens):
-        # All-gather across the shard group
-        unshard = [torch.zeros_like(tensor) for _ in range(shard_degree)]
-        dist.all_gather(unshard, tensor, group=shard_group)
-        unshard = torch.cat(unshard, dim=seq_dim).narrow(dim=seq_dim, start=0, length=seq_len)
+        unshard = all_gather_cat(tensor, dim=seq_dim, group=shard_group, world_size=shard_degree).narrow(
+            dim=seq_dim, start=0, length=seq_len
+        )
         unshard_tensors.append(unshard)
 
     return unshard_tensors
@@ -239,12 +239,8 @@ def cfg_parallel_unshard(device_mesh: DeviceMesh, tensors: list[torch.Tensor]) -
 
     unshard_tensors = []
     for tensor in tensors:
-        unshard = torch.zeros(
-            (cfg_world_size, *tensor.shape[1:]),
-            dtype=tensor.dtype,
-            device=tensor.device,
+        unshard_tensors.append(
+            all_gather_cat(tensor, dim=0, group=get_cfg_group(device_mesh), world_size=cfg_world_size)
         )
-        dist.all_gather_into_tensor(unshard, tensor, group=get_cfg_group(device_mesh))
-        unshard_tensors.append(unshard)
 
     return unshard_tensors

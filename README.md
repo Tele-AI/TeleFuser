@@ -240,6 +240,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
 - [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
 - [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
+- [docs/en/communication.md](docs/en/communication.md): collectives, CUDA IPC, synchronization, and transport lifecycle
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
 - [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
 - [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns

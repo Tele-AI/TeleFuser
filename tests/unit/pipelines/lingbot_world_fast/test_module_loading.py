@@ -97,7 +97,7 @@ def test_non_colocated_dit_and_vae_workers_use_direct_tensor_channel(tmp_path) -
     assert channel_cls.call_args_list[0].args == (2,)
     assert channel_cls.call_args_list[0].kwargs == {"timeout": 600}
     assert channel_cls.call_args_list[1].args == (1,)
-    assert channel_cls.call_args_list[1].kwargs == {"timeout": 600}
+    assert channel_cls.call_args_list[1].kwargs == {"timeout": 600, "shard_dim": None}
     assert pipeline.uses_direct_condition_handoff is True
     assert pipeline.uses_direct_vae_handoff is True
     assert worker_cls.call_args_list[0].kwargs == {

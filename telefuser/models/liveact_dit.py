@@ -376,9 +376,12 @@ class WanSelfAttention(nn.Module):
         v = self.v(x).view(b, s, n, d)
 
         # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
-        q = ulysses_scatter_heads(q, self.ulysses_group)()
-        k = ulysses_scatter_heads(k, self.ulysses_group)()
-        v = ulysses_scatter_heads(v, self.ulysses_group)()
+        q_wait = ulysses_scatter_heads(q, self.ulysses_group)
+        k_wait = ulysses_scatter_heads(k, self.ulysses_group)
+        v_wait = ulysses_scatter_heads(v, self.ulysses_group)
+        q = q_wait()
+        k = k_wait()
+        v = v_wait()
 
         k_cache, v_cache = kv_cache.load(x.device, torch.bfloat16)
 

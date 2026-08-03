@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from telefuser.core.base_model import BaseModel
+from telefuser.distributed.collectives import all_gather_stacked, all_reduce_sum_
 
 # Import shared components from existing VAE
 from .wan_video_vae import (
@@ -951,8 +952,6 @@ class Wan22VideoVAE(BaseModel):
         device: torch.device,
     ) -> torch.Tensor:
         """Encode video with true 2D spatial splitting."""
-        import torch.distributed as dist
-
         spatial_ratio = self.upsampling_factor  # 16 for Wan2.2
         padding_latent = 1
 
@@ -980,9 +979,7 @@ class Wan22VideoVAE(BaseModel):
             encoded_chunk, cur_rank_h, cur_rank_w, world_size_h, world_size_w, chunk_h, chunk_w
         )
 
-        world_size_total = world_size_h * world_size_w
-        full_encoded = [torch.empty_like(encoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_encoded, encoded_chunk)
+        full_encoded = list(all_gather_stacked(encoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         encoded = self._reconstruct_2d(full_encoded, world_size_h, world_size_w, dim=3)
         return encoded.squeeze(0).cpu()
@@ -997,8 +994,6 @@ class Wan22VideoVAE(BaseModel):
         device: torch.device,
     ) -> torch.Tensor:
         """Decode latent with true 2D spatial splitting."""
-        import torch.distributed as dist
-
         spatial_ratio = self.upsampling_factor  # 16
         padding_latent = 2
 
@@ -1022,9 +1017,7 @@ class Wan22VideoVAE(BaseModel):
             decoded_chunk, cur_rank_h, cur_rank_w, world_size_h, world_size_w, chunk_h_output, chunk_w_output
         )
 
-        world_size_total = world_size_h * world_size_w
-        full_decoded = [torch.empty_like(decoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_decoded, decoded_chunk)
+        full_decoded = list(all_gather_stacked(decoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         decoded = self._reconstruct_2d(full_decoded, world_size_h, world_size_w, dim=3)
         return decoded.squeeze(0).cpu().clamp_(-1, 1)
@@ -1225,8 +1218,7 @@ class Wan22VideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1 and dist.is_initialized():
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         values = values.float()
         return values
@@ -1297,8 +1289,7 @@ class Wan22VideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1 and dist.is_initialized():
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         values = values.cpu()
         # unpatchify is already called in VideoVAE.decode(), output is already RGB

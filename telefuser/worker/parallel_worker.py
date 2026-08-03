@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from telefuser.metrics import StageMetricContext
 
 
+_DISCARD_TENSOR_REFS = "__telefuser_discard_tensor_refs__"
+
+
 def to_device(data: Any, device: str | torch.device) -> Any:
     """Recursively move data to target device."""
     if isinstance(data, dict):
@@ -121,6 +124,16 @@ def _worker_loop(
             if name == "exit":
                 logger.info(f"parallel worker {stage.name} on rank {rank} exits")
                 break
+            if name == _DISCARD_TENSOR_REFS:
+                discarded = 0
+                for channel in tensor_input_channels:
+                    if channel.contains_ref(args):
+                        discarded += channel.discard(args, rank=rank)
+                if world_size > 1:
+                    dist.barrier()
+                if world_size == 1 or rank == 0:
+                    queue_out.put(discarded)
+                continue
             if not hasattr(stage, name):
                 raise AttributeError(f'{stage.__class__.__name__} has no attribute "{name}"')
             stage_inputs = (args, kwargs)
@@ -157,6 +170,8 @@ def _worker_loop(
         args = None
         kwargs = None
         current_platform.synchronize()
+        for channel in tensor_input_channels:
+            channel.release_local_cuda_ipc()
         gc.collect()
         current_platform.empty_cache()
         current_platform.ipc_collect()
@@ -331,6 +346,16 @@ class ParallelWorker:
             data = to_device(data, "cpu")
         for q in self.queue_in:
             q.put(data)
+
+    def discard_tensor_refs(self, value: Any, *, sync: bool = False) -> int | Callable[[], int]:
+        """Release direct-channel tensors that will not be passed to the stage."""
+        self._ensure_usable()
+        self.put_data([_DISCARD_TENSOR_REFS, (value,), {}, False])
+
+        def wait() -> int:
+            return int(self._wait_result(_DISCARD_TENSOR_REFS))
+
+        return wait() if sync else wait
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | Callable[[], Any]:
         """Submit __call__ task to all workers."""

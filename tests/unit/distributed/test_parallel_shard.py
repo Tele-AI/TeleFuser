@@ -149,7 +149,7 @@ class TestSequenceParallelUnshard:
     @patch("telefuser.distributed.parallel_shard.get_attention_strategy")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_group")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_degree")
-    @patch("telefuser.distributed.parallel_shard.dist.all_gather")
+    @patch("telefuser.distributed.parallel_shard.all_gather_cat")
     def test_unshard_multi_gpu(
         self, mock_all_gather, mock_get_sp_shard_degree, mock_get_sp_shard_group, mock_get_attention_strategy
     ):
@@ -161,11 +161,7 @@ class TestSequenceParallelUnshard:
         mock_get_sp_shard_group.return_value = MagicMock()
         mock_mesh = MagicMock()
 
-        def mock_gather(output_list, input_tensor, group):
-            for i, t in enumerate(output_list):
-                t.copy_(input_tensor + i)
-
-        mock_all_gather.side_effect = mock_gather
+        mock_all_gather.side_effect = lambda tensor, *, dim, **_: torch.cat((tensor, tensor + 1), dim=dim)
 
         tensors = [torch.randn(2, 5, 64)]
         result = sequence_parallel_unshard(mock_mesh, tensors, [1], [10])
@@ -176,7 +172,7 @@ class TestSequenceParallelUnshard:
     @patch("telefuser.distributed.parallel_shard.get_attention_strategy")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_group")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_degree")
-    @patch("telefuser.distributed.parallel_shard.dist.all_gather")
+    @patch("telefuser.distributed.parallel_shard.all_gather_cat")
     def test_unshard_multiple_tensors(
         self, mock_all_gather, mock_get_sp_shard_degree, mock_get_sp_shard_group, mock_get_attention_strategy
     ):
@@ -188,11 +184,7 @@ class TestSequenceParallelUnshard:
         mock_get_sp_shard_group.return_value = MagicMock()
         mock_mesh = MagicMock()
 
-        def mock_gather(output_list, input_tensor, group):
-            for t in output_list:
-                t.copy_(input_tensor)
-
-        mock_all_gather.side_effect = mock_gather
+        mock_all_gather.side_effect = lambda tensor, *, dim, **_: torch.cat((tensor, tensor), dim=dim)
 
         tensors = [torch.randn(2, 5, 64), torch.randn(3, 8, 32)]
         result = sequence_parallel_unshard(mock_mesh, tensors, [1, 1], [10, 16])
@@ -289,27 +281,23 @@ class TestCFGParallelUnshard:
 
     @patch("telefuser.distributed.parallel_shard.get_cfg_world_size")
     @patch("telefuser.distributed.parallel_shard.get_cfg_group")
-    @patch("telefuser.distributed.parallel_shard.dist.all_gather_into_tensor")
+    @patch("telefuser.distributed.parallel_shard.all_gather_cat")
     def test_unshard_gather_into_tensor(self, mock_all_gather, mock_get_cfg_group, mock_get_cfg_world_size):
-        """Test unsharding uses all_gather_into_tensor."""
+        """Test unsharding delegates to the shared gather primitive."""
         from telefuser.distributed.parallel_shard import cfg_parallel_unshard
 
         mock_get_cfg_world_size.return_value = 2
         mock_get_cfg_group.return_value = MagicMock()
         mock_mesh = MagicMock()
 
-        def mock_gather(output, input_tensor, group):
-            output.fill_(1.0)
-
-        mock_all_gather.side_effect = mock_gather
+        mock_all_gather.side_effect = lambda tensor, *, dim, **_: torch.cat((tensor, tensor), dim=dim)
 
         tensors = [torch.randn(2, 10, 64), torch.randn(3, 8, 32)]
         result = cfg_parallel_unshard(mock_mesh, tensors)
 
         assert len(result) == 2
-        # Output shape is (cfg_world_size, *tensor.shape[1:])
-        assert result[0].shape == (2, 10, 64)
-        assert result[1].shape == (2, 8, 32)
+        assert result[0].shape == (4, 10, 64)
+        assert result[1].shape == (6, 8, 32)
         assert mock_all_gather.call_count == 2
 
 
@@ -320,7 +308,7 @@ class TestShardUnshardRoundTrip:
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_degree")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_rank")
     @patch("telefuser.distributed.parallel_shard.get_sp_shard_group")
-    @patch("telefuser.distributed.parallel_shard.dist.all_gather")
+    @patch("telefuser.distributed.parallel_shard.all_gather_cat")
     def test_sequence_parallel_roundtrip(
         self,
         mock_all_gather,
@@ -338,11 +326,7 @@ class TestShardUnshardRoundTrip:
         mock_get_sp_shard_group.return_value = MagicMock()
         mock_mesh = MagicMock()
 
-        def mock_gather(output_list, input_tensor, group):
-            for i, t in enumerate(output_list):
-                t.copy_(input_tensor + i * 0.1)  # Slight difference per rank
-
-        mock_all_gather.side_effect = mock_gather
+        mock_all_gather.side_effect = lambda tensor, *, dim, **_: torch.cat((tensor, tensor + 0.1), dim=dim)
 
         original_shape = (2, 10, 64)
         tensor = torch.randn(*original_shape)

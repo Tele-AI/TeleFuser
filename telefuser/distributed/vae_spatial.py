@@ -7,6 +7,8 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .collectives import all_gather_stacked
+
 
 def _spatial_rank() -> int:
     return dist.get_rank() if dist.is_initialized() else 0
@@ -37,9 +39,8 @@ def _gather_height_sizes(tensor: torch.Tensor) -> list[int]:
     if world_size == 1:
         return [tensor.shape[-2]]
     local_height = torch.tensor([tensor.shape[-2]], dtype=torch.int64, device=tensor.device)
-    gathered = [torch.empty_like(local_height) for _ in range(world_size)]
-    dist.all_gather(gathered, local_height)
-    return [int(height.item()) for height in gathered]
+    gathered = all_gather_stacked(local_height, world_size=world_size)
+    return gathered.flatten().tolist()
 
 
 def _gather_height(tensor: torch.Tensor) -> torch.Tensor:
@@ -47,15 +48,19 @@ def _gather_height(tensor: torch.Tensor) -> torch.Tensor:
     if world_size == 1:
         return tensor
     heights = _gather_height_sizes(tensor)
+    memory_format = _height_memory_format(tensor)
     max_height = max(heights)
     if tensor.shape[-2] < max_height:
         shape = list(tensor.shape)
         shape[-2] = max_height - tensor.shape[-2]
         tensor = torch.cat([tensor, tensor.new_zeros(shape)], dim=-2)
-    tensor = tensor.contiguous()
-    gathered = [torch.empty_like(tensor) for _ in range(world_size)]
-    dist.all_gather(gathered, tensor)
-    return torch.cat([shard[..., :height, :] for shard, height in zip(gathered, heights)], dim=-2)
+    gather_input = tensor.movedim(-2, 0).contiguous()
+    gathered = all_gather_stacked(gather_input, world_size=world_size)
+    if all(height == max_height for height in heights):
+        merged = gathered.flatten(0, 1)
+    else:
+        merged = torch.cat([shard[:height] for shard, height in zip(gathered, heights)], dim=0)
+    return merged.movedim(0, -2).contiguous(memory_format=memory_format)
 
 
 def _ensure_halo_buffer(buffer: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
@@ -78,21 +83,25 @@ def _exchange_height_halo(module: nn.Module, tensor: torch.Tensor, halo_size: in
     rank = _spatial_rank()
     top = tensor[..., :halo_size, :]
     bottom = tensor[..., -halo_size:, :]
+    module._halo_send_top = _ensure_halo_buffer(module._halo_send_top, top)
+    module._halo_send_bottom = _ensure_halo_buffer(module._halo_send_bottom, bottom)
     module._halo_recv_top = _ensure_halo_buffer(module._halo_recv_top, top)
     module._halo_recv_bottom = _ensure_halo_buffer(module._halo_recv_bottom, bottom)
+    module._halo_send_top.copy_(top)
+    module._halo_send_bottom.copy_(bottom)
 
     operations = []
     if rank > 0:
         operations.extend(
             [
                 dist.P2POp(dist.irecv, module._halo_recv_top, rank - 1),
-                dist.P2POp(dist.isend, top.contiguous(memory_format=_height_memory_format(top)), rank - 1),
+                dist.P2POp(dist.isend, module._halo_send_top, rank - 1),
             ]
         )
     if rank < world_size - 1:
         operations.extend(
             [
-                dist.P2POp(dist.isend, bottom.contiguous(memory_format=_height_memory_format(bottom)), rank + 1),
+                dist.P2POp(dist.isend, module._halo_send_bottom, rank + 1),
                 dist.P2POp(dist.irecv, module._halo_recv_bottom, rank + 1),
             ]
         )
@@ -158,6 +167,8 @@ class _SpatialParallelConv2d(nn.Conv2d):
         if source.padding[0] != self._height_halo_size:
             raise ValueError("VAE spatial Conv2d requires symmetric height padding")
         self._width_padding = source.padding[1]
+        self._halo_send_top: torch.Tensor | None = None
+        self._halo_send_bottom: torch.Tensor | None = None
         self._halo_recv_top: torch.Tensor | None = None
         self._halo_recv_bottom: torch.Tensor | None = None
         self.train(source.training)

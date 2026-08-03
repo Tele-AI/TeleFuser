@@ -15,7 +15,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from telefuser.core.model_registry import register_model_config
-from telefuser.distributed.ulysses_comm import ulysses_all_to_all_split_cat
+from telefuser.distributed.collectives import all_gather_cat
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention
 from telefuser.utils.model_weight import hash_state_dict_keys
 
@@ -154,26 +155,12 @@ class LingBotVideoAttention(nn.Module):
             group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1
         )
         if use_ulysses:
-            world_size = dist.get_world_size(group)
-            local_heads = self.num_heads // world_size
-            query = ulysses_all_to_all_split_cat(
-                query.reshape(batch, sequence, self.num_heads * self.head_dim),
-                group,
-                scatter_dim=2,
-                gather_dim=1,
-            ).view(batch, sequence * world_size, local_heads, self.head_dim)
-            key = ulysses_all_to_all_split_cat(
-                key.reshape(batch, sequence, self.num_heads * self.head_dim),
-                group,
-                scatter_dim=2,
-                gather_dim=1,
-            ).view(batch, sequence * world_size, local_heads, self.head_dim)
-            value = ulysses_all_to_all_split_cat(
-                value.reshape(batch, sequence, self.num_heads * self.head_dim),
-                group,
-                scatter_dim=2,
-                gather_dim=1,
-            ).view(batch, sequence * world_size, local_heads, self.head_dim)
+            query_wait = ulysses_scatter_heads(query, group)
+            key_wait = ulysses_scatter_heads(key, group)
+            value_wait = ulysses_scatter_heads(value, group)
+            query = query_wait()
+            key = key_wait()
+            value = value_wait()
         output = attention(
             query.transpose(1, 2),
             key.transpose(1, 2),
@@ -188,12 +175,7 @@ class LingBotVideoAttention(nn.Module):
             raise RuntimeError("LingBot attention does not support log-sum-exp outputs")
         output = output.transpose(1, 2)
         if use_ulysses:
-            output = ulysses_all_to_all_split_cat(
-                output.reshape(batch, sequence * world_size, local_heads * self.head_dim),
-                group,
-                scatter_dim=1,
-                gather_dim=2,
-            ).view(batch, sequence, self.num_heads, self.head_dim)
+            output = ulysses_gather_heads(output, group, num_heads=self.num_heads)()
         return self.to_out(output.reshape(batch, sequence, -1).to(hidden_states.dtype))
 
 
@@ -419,11 +401,7 @@ class LingBotVideoTransformer3DModel(nn.Module):
 
     def _ulysses_gather_sequence(self, local: torch.Tensor) -> torch.Tensor:
         """Gather equal local token slices in rank order without changing their layout."""
-        if self._ulysses_world_size() == 1:
-            return local
-        gathered = [torch.empty_like(local) for _ in range(self._ulysses_world_size())]
-        dist.all_gather(gathered, local.contiguous(), group=self.ulysses_group)
-        return torch.cat(gathered, dim=1)
+        return all_gather_cat(local, dim=1, group=self.ulysses_group, world_size=self._ulysses_world_size())
 
     def forward(
         self,

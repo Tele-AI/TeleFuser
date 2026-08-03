@@ -126,6 +126,7 @@ plugins:
             User Guides: 用户指南
             Benchmarks: 基准测试
             Parallel Inference: 并行推理
+            Communication Architecture: 通信架构
             Developer Guides: 开发者指南
             Configuration: 配置
             Tools: 工具
@@ -178,6 +179,7 @@ nav:
       - Quantization: quantization.md
   - Parallel Inference:
       - parallel.md
+      - Communication Architecture: communication.md
       - attention.md
       - feature_cache.md
       - latent_cache.md

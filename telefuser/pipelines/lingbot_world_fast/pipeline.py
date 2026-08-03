@@ -375,6 +375,7 @@ class LingBotWorldFastPipeline(BasePipeline):
                     dit_runtime_config.parallel_config.timeout,
                     vae_decode_config.parallel_config.timeout,
                 ),
+                shard_dim=-2 if vae_decode_config.parallel_config.world_size > 1 else None,
             )
             self._worker_tensor_channels.append(latent_channel)
         self.denoise_stage = (
@@ -662,12 +663,15 @@ class LingBotWorldFastPipeline(BasePipeline):
             self._streaming_runtime = None
         if streaming_runtime is not None:
             streaming_runtime.close()
+        vae_decode_worker = getattr(self, "vae_decode_worker", None)
+        if isinstance(vae_decode_worker, ParallelWorker):
+            vae_decode_worker.close()
         denoise_stage = getattr(self, "denoise_stage", None)
         if isinstance(denoise_stage, ParallelWorker):
             denoise_stage.close()
-        for vae_worker in (getattr(self, "vae_encode_worker", None), getattr(self, "vae_decode_worker", None)):
-            if isinstance(vae_worker, ParallelWorker):
-                vae_worker.close()
+        vae_encode_worker = getattr(self, "vae_encode_worker", None)
+        if isinstance(vae_encode_worker, ParallelWorker):
+            vae_encode_worker.close()
         for channel in getattr(self, "_worker_tensor_channels", ()):
             channel.close()
 

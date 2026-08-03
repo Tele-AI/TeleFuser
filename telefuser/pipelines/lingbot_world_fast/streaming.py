@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from telefuser.orchestrator import (
 )
 from telefuser.utils.logging import logger
 from telefuser.worker.parallel_worker import ParallelWorker
+from telefuser.worker.tensor_channel import WorkerTensorRef
 
 from .session import LingBotWorldFastGenerationSession, LingBotWorldFastSessionStatus
 
@@ -57,6 +59,17 @@ class _LingBotStreamingSessionEntry:
     chunk_profiles: dict[int, dict[str, object]] = field(default_factory=dict)
 
 
+@dataclass
+class _DirectTensorTransfer:
+    """One channel transfer awaiting consumption or cancellation cleanup."""
+
+    session_id: str
+    key: tuple[str, int]
+    value: object
+    tensor_count: int
+    cancelled: bool = False
+
+
 class LingBotWorldFastStreamingRuntime:
     """Own the single actor graph shared by all sessions of one pipeline."""
 
@@ -64,6 +77,8 @@ class LingBotWorldFastStreamingRuntime:
         self.pipeline = pipeline
         self._lock = threading.RLock()
         self._sessions: dict[str, _LingBotStreamingSessionEntry] = {}
+        self._direct_condition_transfers: deque[_DirectTensorTransfer] = deque()
+        self._direct_latent_transfers: deque[_DirectTensorTransfer] = deque()
         self._closed = False
         self._serialize_dit_decode = self._dit_decode_devices_overlap()
         self._dit_decode_lock = threading.Lock()
@@ -365,6 +380,146 @@ class LingBotWorldFastStreamingRuntime:
         decode_devices = self._runtime_device_ids(config.vae_decode_config)
         return not dit_devices.isdisjoint(decode_devices)
 
+    @staticmethod
+    def _direct_transfer_refs(value: object) -> tuple[WorkerTensorRef, ...]:
+        refs: list[WorkerTensorRef] = []
+        seen: set[WorkerTensorRef] = set()
+
+        def visit(item: object) -> None:
+            if isinstance(item, WorkerTensorRef):
+                if item not in seen:
+                    seen.add(item)
+                    refs.append(item)
+            elif isinstance(item, dict):
+                for child in item.values():
+                    visit(child)
+            elif isinstance(item, tuple | list):
+                for child in item:
+                    visit(child)
+
+        visit(value)
+        return tuple(refs)
+
+    @staticmethod
+    def _direct_transfer_key(refs: tuple[WorkerTensorRef, ...]) -> tuple[str, int]:
+        keys = {(ref.channel_id, ref.transfer_id) for ref in refs}
+        if len(keys) != 1:
+            raise RuntimeError(f"Direct tensor artifact must contain one channel transfer, got {sorted(keys)}")
+        return next(iter(keys))
+
+    def _track_direct_transfer(
+        self,
+        transfers: deque[_DirectTensorTransfer],
+        session_id: str,
+        value: object,
+    ) -> None:
+        refs = self._direct_transfer_refs(value)
+        if not refs:
+            return
+        transfer = _DirectTensorTransfer(
+            session_id=session_id,
+            key=self._direct_transfer_key(refs),
+            value=value,
+            tensor_count=len(refs),
+        )
+        with self._lock:
+            transfers.append(transfer)
+
+    def _consume_direct_transfer(
+        self,
+        transfers: deque[_DirectTensorTransfer],
+        session_id: str,
+        value: object,
+        worker: object,
+        label: str,
+    ) -> None:
+        """Retire one consumed transfer and older entries skipped by channel receive."""
+        refs = self._direct_transfer_refs(value)
+        if not refs:
+            return
+        key = self._direct_transfer_key(refs)
+        with self._lock:
+            match_index = None
+            for index, transfer in enumerate(transfers):
+                if transfer.key == key:
+                    if transfer.session_id != session_id:
+                        raise RuntimeError(
+                            f"Direct {label} transfer {key[1]} belongs to {transfer.session_id!r}, not {session_id!r}"
+                        )
+                    match_index = index
+                    break
+                if not transfer.cancelled:
+                    raise RuntimeError(f"Direct {label} transfer {key[1]} overtook live transfer {transfer.key[1]}")
+            if match_index is None:
+                raise RuntimeError(f"Unknown direct {label} transfer {key[1]}")
+            for _ in range(match_index + 1):
+                transfers.popleft()
+        self._discard_cancelled_direct_transfers(transfers, worker, label)
+
+    def _cancel_direct_transfers(
+        self,
+        transfers: deque[_DirectTensorTransfer],
+        session_id: str,
+        worker: object,
+        label: str,
+    ) -> None:
+        with self._lock:
+            for transfer in transfers:
+                if transfer.session_id == session_id:
+                    transfer.cancelled = True
+        self._discard_cancelled_direct_transfers(transfers, worker, label)
+
+    def _discard_direct_transfer(
+        self,
+        transfers: deque[_DirectTensorTransfer],
+        session_id: str,
+        value: object,
+        worker: object,
+        label: str,
+    ) -> None:
+        refs = self._direct_transfer_refs(value)
+        if not refs:
+            return
+        key = self._direct_transfer_key(refs)
+        with self._lock:
+            for transfer in transfers:
+                if transfer.key != key:
+                    continue
+                if transfer.session_id != session_id:
+                    raise RuntimeError(
+                        f"Direct {label} transfer {key[1]} belongs to {transfer.session_id!r}, not {session_id!r}"
+                    )
+                transfer.cancelled = True
+                break
+            else:
+                raise RuntimeError(f"Unknown direct {label} transfer {key[1]}")
+        self._discard_cancelled_direct_transfers(transfers, worker, label)
+
+    def _discard_cancelled_direct_transfers(
+        self,
+        transfers: deque[_DirectTensorTransfer],
+        worker: object,
+        label: str,
+    ) -> None:
+        """Drain only the cancelled FIFO prefix from every consumer rank."""
+        while True:
+            with self._lock:
+                if not transfers or not transfers[0].cancelled:
+                    return
+                transfer = transfers[0]
+            if not isinstance(worker, ParallelWorker):
+                raise RuntimeError(f"Direct LingBot {label} cleanup requires a ParallelWorker consumer")
+            discarded = worker.discard_tensor_refs(transfer.value, sync=True)
+            if discarded != transfer.tensor_count:
+                raise RuntimeError(
+                    f"Direct {label} cleanup discarded {discarded} of {transfer.tensor_count} tensors "
+                    f"for transfer {transfer.key[1]}"
+                )
+            with self._lock:
+                if not transfers or transfers[0] is not transfer:
+                    raise RuntimeError(f"Direct {label} transfer order changed during cancellation cleanup")
+                transfers.popleft()
+
     def _entry_for_context(self, context: StreamingSessionContext) -> _LingBotStreamingSessionEntry:
         with self._lock:
             try:
@@ -396,6 +551,12 @@ class LingBotWorldFastStreamingRuntime:
     ) -> None:
         del reason
         entry = self._entry_for_context(context)
+        self._cancel_direct_transfers(
+            self._direct_latent_transfers,
+            context.session_id,
+            self.pipeline.vae_decode_worker,
+            "latent",
+        )
         cache_handle = entry.runtime.cache_handle
         if cache_handle is None:
             return
@@ -410,6 +571,12 @@ class LingBotWorldFastStreamingRuntime:
     ) -> None:
         del reason
         entry = self._entry_for_context(context)
+        self._cancel_direct_transfers(
+            self._direct_condition_transfers,
+            context.session_id,
+            self.pipeline.denoise_stage,
+            "condition",
+        )
         cache_handle = entry.runtime.cache_handle
         if cache_handle is None:
             return
@@ -456,6 +623,7 @@ class LingBotWorldFastStreamingRuntime:
     def _encode_outputs(self, value: dict[str, object], invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
         index = invocation.key.sequence_id
+        self._track_direct_transfer(self._direct_condition_transfers, invocation.key.session_id, value)
         self.pipeline._notify_progress(entry.progress_callback, "condition_chunk_encoded", index=index)
         if index == 0:
             entry.runtime.condition_image = None
@@ -486,8 +654,16 @@ class LingBotWorldFastStreamingRuntime:
         entry = self._entry_for_invocation(invocation)
         runtime = entry.runtime
         index = invocation.key.sequence_id
+        condition = invocation.inputs["condition"]
         cached_latent = runtime.world_kv_cached_latents.pop(index, None) if runtime.world_kv_cached_latents else None
         if cached_latent is not None:
+            self._discard_direct_transfer(
+                self._direct_condition_transfers,
+                invocation.key.session_id,
+                condition,
+                self.pipeline.denoise_stage,
+                "condition",
+            )
             self.pipeline._notify_progress(entry.progress_callback, "world_kv_cache_hit", index=index)
             advance = self.pipeline.denoise_stage.advance_noise(cache_handle=runtime.cache_handle)
             if callable(advance):
@@ -498,24 +674,34 @@ class LingBotWorldFastStreamingRuntime:
             kwargs = self._denoise_kwargs(invocation)
             lock = self._dit_decode_lock if self._serialize_dit_decode else nullcontext()
             lock_started_at = time.perf_counter()
-            with lock:
-                worker_started_at = time.perf_counter()
-                result = self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)
-                submit_finished_at = time.perf_counter()
-                if callable(result):
-                    result = result()
-                worker_finished_at = time.perf_counter()
-                if isinstance(result, tuple):
-                    latent, profile = result
-                    profile["denoise_lock_wait_seconds"] = worker_started_at - lock_started_at
-                    profile["denoise_submit_seconds"] = submit_finished_at - worker_started_at
-                    profile["denoise_result_wait_seconds"] = worker_finished_at - submit_finished_at
-                    profile["denoise_worker_seconds"] = worker_finished_at - worker_started_at
-                    with self._lock:
-                        entry.chunk_profiles.setdefault(index, {}).update(profile)
-                else:
-                    latent = result
+            try:
+                with lock:
+                    worker_started_at = time.perf_counter()
+                    result = self.pipeline.denoise_stage.denoise_and_update_cache(**kwargs)
+                    submit_finished_at = time.perf_counter()
+                    if callable(result):
+                        result = result()
+                    worker_finished_at = time.perf_counter()
+            finally:
+                self._consume_direct_transfer(
+                    self._direct_condition_transfers,
+                    invocation.key.session_id,
+                    condition,
+                    self.pipeline.denoise_stage,
+                    "condition",
+                )
+            if isinstance(result, tuple):
+                latent, profile = result
+                profile["denoise_lock_wait_seconds"] = worker_started_at - lock_started_at
+                profile["denoise_submit_seconds"] = submit_finished_at - worker_started_at
+                profile["denoise_result_wait_seconds"] = worker_finished_at - submit_finished_at
+                profile["denoise_worker_seconds"] = worker_finished_at - worker_started_at
+                with self._lock:
+                    entry.chunk_profiles.setdefault(index, {}).update(profile)
+            else:
+                latent = result
             self.pipeline._notify_progress(entry.progress_callback, "chunk_denoised", index=index)
+        self._track_direct_transfer(self._direct_latent_transfers, invocation.key.session_id, latent)
         if runtime.world_kv_binding is not None:
             try:
                 runtime.world_kv_binding.on_chunk_finalized(runtime, index, latent)
@@ -534,13 +720,17 @@ class LingBotWorldFastStreamingRuntime:
             index=index,
             device=str(self.pipeline.vae_device),
         )
-        return (), {
+        latent = invocation.inputs["latent"]
+        kwargs = {
             "cache_handle": runtime.cache_handle,
-            "latents": invocation.inputs["latent"],
+            "latents": latent,
             "is_first_clip": index == 0,
             "is_last_clip": index == runtime.chunk_count - 1,
             "_benchmark_profile": runtime.config.benchmark_metrics,
         }
+        if isinstance(latent, WorkerTensorRef) and latent.shard_dim == len(latent.shape) - 2:
+            kwargs["_global_latent_height"] = latent.shape[-2]
+        return (), kwargs
 
     def _decode_outputs(self, value: torch.Tensor, invocation: StreamingStageInvocation) -> dict[str, object]:
         entry = self._entry_for_invocation(invocation)
@@ -560,15 +750,25 @@ class LingBotWorldFastStreamingRuntime:
     @torch.inference_mode()
     def _decode(self, invocation: StreamingStageInvocation) -> dict[str, object]:
         args, kwargs = self._decode_inputs(invocation)
+        latent = kwargs["latents"]
         lock = self._dit_decode_lock if self._serialize_dit_decode else nullcontext()
         lock_started_at = time.perf_counter()
-        with lock:
-            worker_started_at = time.perf_counter()
-            result = self.pipeline.vae_decode_worker.decode_chunk(*args, **kwargs)
-            submit_finished_at = time.perf_counter()
-            if callable(result):
-                result = result()
-            worker_finished_at = time.perf_counter()
+        try:
+            with lock:
+                worker_started_at = time.perf_counter()
+                result = self.pipeline.vae_decode_worker.decode_chunk(*args, **kwargs)
+                submit_finished_at = time.perf_counter()
+                if callable(result):
+                    result = result()
+                worker_finished_at = time.perf_counter()
+        finally:
+            self._consume_direct_transfer(
+                self._direct_latent_transfers,
+                invocation.key.session_id,
+                latent,
+                self.pipeline.vae_decode_worker,
+                "latent",
+            )
         if isinstance(result, tuple):
             value, profile = result
             profile["decode_lock_wait_seconds"] = worker_started_at - lock_started_at

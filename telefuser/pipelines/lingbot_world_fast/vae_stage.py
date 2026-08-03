@@ -379,6 +379,7 @@ class LingBotWorldFastVAEDecodeStage(BaseStage):
         is_first_clip: bool,
         is_last_clip: bool,
         _benchmark_profile: bool = False,
+        _global_latent_height: int | None = None,
     ) -> torch.Tensor | None | tuple[torch.Tensor | None, dict[str, float]]:
         """Decode one latent chunk and return CPU frame tensors."""
         state = self._cache_registry[cache_handle]
@@ -393,6 +394,7 @@ class LingBotWorldFastVAEDecodeStage(BaseStage):
             is_first_clip=is_first_clip,
             is_last_clip=is_last_clip,
             decode_state=state.decoder_state,
+            input_global_height=_global_latent_height,
         )
         profile = None
         if decode_end is not None:

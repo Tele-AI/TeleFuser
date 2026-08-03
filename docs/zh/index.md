@@ -104,6 +104,7 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 <a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>安装、编译、验证和使用可选 CUDA 扩展。</span></a>
 <a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>
+<a href="communication/"><strong>通信架构</strong><span>NCCL collective、CUDA IPC、顺序与效率设计。</span></a>
 <a href="adding_new_model/"><strong>新增模型</strong><span>集成新的模型架构和阶段。</span></a>
 <a href="profiler/"><strong>性能分析</strong><span>性能分析工具。</span></a>
 </div>

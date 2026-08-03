@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -16,6 +16,7 @@ from telefuser.pipelines.lingbot_world_fast.session import (
     LingBotWorldFastSessionStatus,
 )
 from telefuser.pipelines.lingbot_world_fast.streaming import LingBotWorldFastStreamingRuntime
+from telefuser.worker.tensor_channel import WorkerTensorRef
 
 
 class _Worker:
@@ -25,6 +26,7 @@ class _Worker:
         self.calls: list[dict[str, object]] = []
         self.release_calls: list[int] = []
         self.release_failures = 0
+        self.discard_calls: list[WorkerTensorRef] = []
         self.closed = False
 
     def encode_condition_chunk(self, **kwargs):
@@ -44,6 +46,11 @@ class _Worker:
         self.release_order.append(self.name)
         return True
 
+    def discard_tensor_refs(self, ref: WorkerTensorRef, sync: bool = False) -> int:
+        assert sync
+        self.discard_calls.append(ref)
+        return 1
+
     def close(self):
         self.closed = True
 
@@ -55,6 +62,7 @@ class _Denoise:
         self.calls: list[dict[str, object]] = []
         self.inference_modes: list[bool] = []
         self.release_calls: list[int] = []
+        self.discard_calls: list[object] = []
         self.fail_denoise = False
         self.started: threading.Event | None = None
         self.release: threading.Event | None = None
@@ -73,10 +81,17 @@ class _Denoise:
     def advance_noise(self, cache_handle: int):
         self.advance_calls.append(cache_handle)
 
-    def release_cache(self, cache_handle: int):
+    def release_cache(self, cache_handle: int, sync: bool | None = None):
+        if sync is not None:
+            assert sync
         self.release_calls.append(cache_handle)
         self.release_order.append("denoise")
         return True
+
+    def discard_tensor_refs(self, value: object, sync: bool = False) -> int:
+        assert sync
+        self.discard_calls.append(value)
+        return len(LingBotWorldFastStreamingRuntime._direct_transfer_refs(value))
 
 
 class _Pipeline:
@@ -183,6 +198,74 @@ def test_streaming_session_routes_one_chunk_through_three_stages() -> None:
     assert pipeline.release_order == ["decode", "denoise", "encode"]
     assert pipeline.released == []
     assert runtime.cache_handle is None
+
+
+def test_direct_latent_cancellation_drains_only_the_cancelled_fifo_prefix() -> None:
+    pipeline = _Pipeline()
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    first = WorkerTensorRef("channel", 0, 0, (1,), "torch.float32", "cuda:0", 4)
+    second = WorkerTensorRef("channel", 1, 0, (1,), "torch.float32", "cuda:0", 4)
+    streaming_runtime._track_direct_transfer(streaming_runtime._direct_latent_transfers, "first", first)
+    streaming_runtime._track_direct_transfer(streaming_runtime._direct_latent_transfers, "second", second)
+    try:
+        with patch("telefuser.pipelines.lingbot_world_fast.streaming.ParallelWorker", _Worker):
+            streaming_runtime._cancel_direct_transfers(
+                streaming_runtime._direct_latent_transfers,
+                "second",
+                pipeline.vae_decode_worker,
+                "latent",
+            )
+            assert pipeline.vae_decode_worker.discard_calls == []
+
+            streaming_runtime._consume_direct_transfer(
+                streaming_runtime._direct_latent_transfers,
+                "first",
+                first,
+                pipeline.vae_decode_worker,
+                "latent",
+            )
+            assert pipeline.vae_decode_worker.discard_calls == [second]
+    finally:
+        streaming_runtime.close()
+
+
+def test_close_session_discards_its_unconsumed_direct_latent() -> None:
+    pipeline = _Pipeline()
+    runtime = LingBotWorldFastGenerationSession(
+        config=LingBotWorldFastSessionConfig(prompt="test", image=Image.new("RGB", (8, 8))),
+        prompt_emb=torch.tensor([0.0]),
+        latent_h=1,
+        latent_w=1,
+        latent_f=1,
+        height=8,
+        width=8,
+        frame_tokens=1,
+        chunk_size=1,
+        max_attention_size=1,
+        cache_handle=21,
+    )
+    streaming_runtime = LingBotWorldFastStreamingRuntime(pipeline)
+    session = streaming_runtime.create_session(runtime)
+    condition_ref = WorkerTensorRef("condition", 0, 0, (1,), "torch.float32", "cuda:0", 4)
+    condition = {"latent_condition": condition_ref}
+    latent_ref = WorkerTensorRef("latent", 0, 0, (1,), "torch.float32", "cuda:0", 4)
+    streaming_runtime._track_direct_transfer(
+        streaming_runtime._direct_condition_transfers,
+        session.session_id,
+        condition,
+    )
+    streaming_runtime._track_direct_transfer(
+        streaming_runtime._direct_latent_transfers,
+        session.session_id,
+        latent_ref,
+    )
+    try:
+        with patch("telefuser.pipelines.lingbot_world_fast.streaming.ParallelWorker", (_Worker, _Denoise)):
+            streaming_runtime.close_session(session)
+        assert pipeline.denoise_stage.discard_calls == [condition]
+        assert pipeline.vae_decode_worker.discard_calls == [latent_ref]
+    finally:
+        streaming_runtime.close()
 
 
 def test_streaming_session_prefetches_two_conditions_ahead_of_controls() -> None:

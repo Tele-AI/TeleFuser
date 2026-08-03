@@ -10,6 +10,7 @@ from einops import rearrange, repeat
 from tqdm import tqdm
 
 from telefuser.core.base_model import BaseModel
+from telefuser.distributed.collectives import all_gather_stacked, all_reduce_sum_
 from telefuser.distributed.vae_spatial import (
     _SpatialParallelConv2d,
     _gather_height,
@@ -157,6 +158,8 @@ class _SpatialParallelCausalConv3d(CausalConv3d):
             2 * temporal_padding,
             0,
         )
+        self._halo_send_top: torch.Tensor | None = None
+        self._halo_send_bottom: torch.Tensor | None = None
         self._halo_recv_top: torch.Tensor | None = None
         self._halo_recv_bottom: torch.Tensor | None = None
         self.train(source.training)
@@ -506,12 +509,20 @@ class Decoder3d(nn.Module):
             CausalConv3d(out_dim, 3, 3, padding=1),
         )
 
-    def forward(self, x: torch.Tensor, feat_cache: list | None = None, feat_idx: list | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        feat_cache: list | None = None,
+        feat_idx: list | None = None,
+        input_global_height: int | None = None,
+    ) -> torch.Tensor:
         """Forward pass with list-based feature caching."""
         expected_height = None
         if self._spatial_parallel:
-            expected_height = x.shape[-2] * (2**self._spatial_upsample_count)
-            x = _split_height(x)
+            global_height = x.shape[-2] if input_global_height is None else input_global_height
+            expected_height = global_height * (2**self._spatial_upsample_count)
+            if input_global_height is None:
+                x = _split_height(x)
         if feat_cache is not None and feat_idx is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -1064,9 +1075,7 @@ class WanVideoVAE(BaseModel):
         )
 
         # Gather all chunks
-        world_size_total = world_size_h * world_size_w
-        full_encoded = [torch.empty_like(encoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_encoded, encoded_chunk)
+        full_encoded = list(all_gather_stacked(encoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         # Reconstruct full latent
         encoded = self._reconstruct_2d(full_encoded, world_size_h, world_size_w, dim=3)
@@ -1128,9 +1137,7 @@ class WanVideoVAE(BaseModel):
         )
 
         # Gather all chunks
-        world_size_total = world_size_h * world_size_w
-        full_decoded = [torch.empty_like(decoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_decoded, decoded_chunk)
+        full_decoded = list(all_gather_stacked(decoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         # Reconstruct full video
         decoded = self._reconstruct_2d(full_decoded, world_size_h, world_size_w, dim=3)
@@ -1326,8 +1333,7 @@ class WanVideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1:
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         # Move to CPU to reduce VRAM usage (video output is large)
         values = values.cpu().clamp_(-1, 1)
@@ -1390,8 +1396,7 @@ class WanVideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1:
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         return values
 
@@ -1564,6 +1569,7 @@ class WanVideoVAE(BaseModel):
         is_first_clip: bool,
         is_last_clip: bool,
         decode_state: WanVideoVAEStreamingDecodeState | None = None,
+        input_global_height: int | None = None,
     ) -> torch.Tensor:
         """Decode with persistent feature cache for streaming generation.
 
@@ -1613,6 +1619,7 @@ class WanVideoVAE(BaseModel):
         # Decode frame-by-frame with cache
         iter_ = z.shape[2]
         x = self.model.conv2(z)
+        decoder_kwargs = {"input_global_height": input_global_height} if input_global_height is not None else {}
 
         for i in range(iter_):
             feat_idx[0] = 0  # Reset index for each frame
@@ -1621,12 +1628,14 @@ class WanVideoVAE(BaseModel):
                     x[:, :, i : i + 1, :, :],
                     feat_cache=feat_cache,
                     feat_idx=feat_idx,
+                    **decoder_kwargs,
                 )
             else:
                 out_ = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
                     feat_cache=feat_cache,
                     feat_idx=feat_idx,
+                    **decoder_kwargs,
                 )
                 out = torch.cat([out, out_], 2)
 

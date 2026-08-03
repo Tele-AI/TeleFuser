@@ -6,7 +6,6 @@ in a Ray cluster.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import torch
@@ -46,11 +45,17 @@ class RayWorker:
 
         logger.info(f"has device {current_platform.device_type}")
         if gpu_config.num_gpus > 0:
-            gpu_ids = list(range(gpu_config.num_gpus))
-            os.environ[current_platform.device_control_env_var] = ",".join(map(str, gpu_ids))
-            logger.info(f"RayWorker {self.worker_id} use device: {gpu_ids}")
+            visible_gpu_count = current_platform.device_count()
+            if visible_gpu_count < gpu_config.num_gpus:
+                raise RuntimeError(
+                    f"Ray assigned {visible_gpu_count} visible GPUs to {self.worker_id}, "
+                    f"but the stage requires {gpu_config.num_gpus}"
+                )
+            logical_gpu_ids = list(range(gpu_config.num_gpus))
+            current_platform.set_device(logical_gpu_ids[0])
+            logger.info(f"RayWorker {self.worker_id} use Ray-assigned logical devices: {logical_gpu_ids}")
             if gpu_config.memory_limit > 0 and current_platform.device_type == "cuda":
-                torch.cuda.set_per_process_memory_fraction(gpu_config.memory_limit)
+                torch.cuda.set_per_process_memory_fraction(gpu_config.memory_limit, device=logical_gpu_ids[0])
                 logger.info(f"RayWorker {self.worker_id} GPU memory limit: {gpu_config.memory_limit}")
 
         if self.ray_config.memory_gb > 0:

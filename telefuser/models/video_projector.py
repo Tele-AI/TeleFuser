@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from tqdm import tqdm
 
+from telefuser.distributed.collectives import all_reduce_sum_
+
 CACHE_T = 2
 
 
@@ -386,8 +388,7 @@ class Causal_LQ4x_Proj(nn.Module):
             weight = weights[layer_idx]
             all_value = all_values[layer_idx]
             if self.parallelism > 1:
-                dist.all_reduce(all_value)
-                dist.all_reduce(weight)
+                all_reduce_sum_((all_value, weight))
             weight[weight == 0] = 1
             averaged = all_value / weight.unsqueeze(-1)
             averaged = averaged.view(1, -1, self.linear_layers[0].out_features).cpu()

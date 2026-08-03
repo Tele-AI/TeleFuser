@@ -232,6 +232,7 @@ telefuser/
 - [docs/zh/stream_server.md](docs/zh/stream_server.md)：LiveKit 流服务、session API、data topic 和部署
 - [docs/zh/stream_scheduler.md](docs/zh/stream_scheduler.md)：基于 actor 的 Stage 调度、backpressure、生命周期、指标和 LingBot 卡位
 - [docs/zh/parallel.md](docs/zh/parallel.md)：分布式推理架构
+- [docs/zh/communication.md](docs/zh/communication.md)：collective、CUDA IPC、同步与传输生命周期
 - [docs/zh/latent_cache.md](docs/zh/latent_cache.md)：CacheSeek latent cache 集成
 - [docs/zh/feature_cache.md](docs/zh/feature_cache.md)：`AdaTaylorCache`
 - [docs/zh/model_loading.md](docs/zh/model_loading.md)：模型加载方式

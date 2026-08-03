@@ -46,17 +46,25 @@ def _spawn_receive(channel, metadata_queue, result_queue, release_event) -> None
 
 def _spawn_send_cuda(channel, metadata_queue, release_event) -> None:
     torch.cuda.set_device(0)
-    tensor = torch.arange(4, dtype=torch.float32, device="cuda:0")
-    metadata_queue.put(channel.send(tensor))
+    for offset in range(4):
+        tensor = torch.empty(4, dtype=torch.float32, device="cuda:0")
+        torch.cuda._sleep(50_000_000)
+        tensor.copy_(torch.arange(4, dtype=torch.float32, device="cuda:0") + offset)
+        metadata_queue.put(channel.send(tensor))
     release_event.wait(timeout=30)
 
 
 def _spawn_receive_cuda(channel, metadata_queue, result_queue, release_event) -> None:
     torch.cuda.set_device(1)
-    ref = metadata_queue.get()
-    tensor = channel.receive(ref, rank=0, device="cuda:1")
+    outputs = []
+    for _ in range(4):
+        ref = metadata_queue.get()
+        tensor = channel.receive(ref, rank=0, device="cuda:1")
+        outputs.append(tensor)
     torch.cuda.synchronize(1)
-    result_queue.put((str(tensor.device), tensor.cpu().tolist()))
+    values = [output.cpu().tolist() for output in outputs]
+    channel.release_local_cuda_ipc()
+    result_queue.put((str(tensor.device), values))
     release_event.set()
 
 
@@ -77,6 +85,34 @@ def test_tensor_channel_keeps_parent_artifact_metadata_only_and_fans_out() -> No
             resolved = channel.receive(artifact, rank=rank, device="cpu")
             torch.testing.assert_close(resolved["latent"], source)
             assert resolved["profile"] == {"seconds": 0.1}
+    finally:
+        channel.close()
+
+
+def test_tensor_channel_sends_only_each_consumers_tensor_shard() -> None:
+    channel = WorkerTensorChannel(consumer_world_size=2, timeout=1, shard_dim=-2)
+    source = torch.arange(30, dtype=torch.float32).reshape(1, 1, 1, 5, 6)
+    try:
+        artifact = channel.send(source)
+        rank_zero = channel.receive(artifact, rank=0, device="cpu")
+        rank_one = channel.receive(artifact, rank=1, device="cpu")
+    finally:
+        channel.close()
+
+    assert artifact.shape == source.shape
+    assert artifact.shard_dim == 3
+    assert artifact.nbytes == source.numel() * source.element_size()
+    assert rank_zero.shape[-2] == 3
+    assert rank_one.shape[-2] == 2
+    torch.testing.assert_close(torch.cat((rank_zero, rank_one), dim=-2), source)
+
+
+@pytest.mark.parametrize("shape", [(), (1, 2)])
+def test_tensor_channel_rejects_invalid_sharding(shape: tuple[int, ...]) -> None:
+    channel = WorkerTensorChannel(consumer_world_size=2, timeout=1, shard_dim=-2)
+    try:
+        with pytest.raises(ValueError, match="cannot shard|shard_dim"):
+            channel.send(torch.zeros(shape))
     finally:
         channel.close()
 
@@ -120,6 +156,19 @@ def test_tensor_channel_discards_cancelled_earlier_transfer() -> None:
     torch.testing.assert_close(resolved, torch.ones(1))
 
 
+def test_tensor_channel_explicitly_discards_terminal_transfer() -> None:
+    channel = WorkerTensorChannel(consumer_world_size=1, timeout=1)
+    try:
+        abandoned = channel.send((torch.zeros(1), {"duplicate": torch.zeros(1)}))
+        assert channel.discard(abandoned, rank=0) == 2
+        current = channel.send(torch.ones(1))
+        resolved = channel.receive(current, rank=0, device="cpu")
+    finally:
+        channel.close()
+
+    torch.testing.assert_close(resolved, torch.ones(1))
+
+
 def test_tensor_channel_validates_bindings_and_rank() -> None:
     channel = WorkerTensorChannel(consumer_world_size=2, timeout=1)
     try:
@@ -133,6 +182,9 @@ def test_tensor_channel_validates_bindings_and_rank() -> None:
             channel.receive(None, rank=2, device="cpu")
     finally:
         channel.close()
+
+    with pytest.raises(ValueError, match="cuda_ipc_slots"):
+        WorkerTensorChannel(consumer_world_size=1, cuda_ipc_slots=0)
 
 
 def test_tensor_channel_transfers_between_independent_spawned_processes() -> None:
@@ -177,8 +229,28 @@ def test_parallel_workers_exchange_tensor_without_parent_materialization() -> No
         result = consumer.consume(ref, sync=True)
         torch.testing.assert_close(result, torch.arange(4, dtype=torch.float32) + 1)
     finally:
-        producer.close()
         consumer.close()
+        producer.close()
+        channel.close()
+
+
+def test_parallel_worker_discards_unconsumed_tensor_refs_on_consumer_ranks() -> None:
+    channel = WorkerTensorChannel(consumer_world_size=1, timeout=10)
+    producer = ParallelWorker(
+        _TensorProducerStage(),
+        tensor_output_channel=channel,
+        tensor_output_methods=("produce",),
+    )
+    consumer = ParallelWorker(_TensorConsumerStage(), tensor_input_channels=(channel,))
+    try:
+        abandoned, _ = producer.produce(sync=True)
+        assert consumer.discard_tensor_refs(abandoned, sync=True) == 1
+        current, _ = producer.produce(sync=True)
+        result = consumer.consume(current, sync=True)
+        torch.testing.assert_close(result, torch.arange(4, dtype=torch.float32) + 1)
+    finally:
+        consumer.close()
+        producer.close()
         channel.close()
 
 
@@ -197,9 +269,9 @@ def test_tensor_channel_uses_cuda_ipc_and_cross_gpu_peer_copy() -> None:
         consumer.start()
         device, values = result_queue.get()
         assert device == "cuda:1"
-        assert values == [0.0, 1.0, 2.0, 3.0]
-        producer.join(timeout=30)
+        assert values == [[float(index + offset) for index in range(4)] for offset in range(4)]
         consumer.join(timeout=30)
+        producer.join(timeout=30)
         assert producer.exitcode == 0
         assert consumer.exitcode == 0
     finally:
