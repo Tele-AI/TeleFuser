@@ -221,6 +221,9 @@ class TestRMSNorm:
 
 TeleFuser provides a batch regression testing framework for running example pipelines, comparing outputs against baselines, and generating reports.
 
+All regression examples run with `TORCH_SDPA`. The runner disables Diffusers' optional xformers path before importing
+an example so an installed FlashAttention or xformers package cannot change the regression backend.
+
 ### Quick Start
 
 ```bash

@@ -41,6 +41,7 @@ if _PROJECT_ROOT not in sys.path:
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "example_config.yaml"
 _RESULT_MARKER = "###RESULT###"
+_REGRESSION_ATTN_IMPL = "TORCH_SDPA"
 
 
 def _pipeline_slug(pipeline_key: str) -> str:
@@ -780,6 +781,19 @@ def _patch_ppl_config(module: ModuleType, overrides: dict) -> None:
             config[key] = value
 
 
+def _prepare_sdpa_regression(overrides: dict) -> dict:
+    """Force regression examples onto SDPA without importing optional xformers kernels."""
+    try:
+        from diffusers.utils import import_utils
+
+        # Diffusers checks package metadata, which can mark an incompatible
+        # xformers installation as available and then import it eagerly.
+        import_utils._xformers_available = False
+    except ImportError:
+        pass
+    return {**overrides, "attn_impl": _REGRESSION_ATTN_IMPL}
+
+
 def _extract_click_default(module: ModuleType, param_name: str) -> str | None:
     """Extract a click option's default value from the module's main() command."""
     import click
@@ -1103,6 +1117,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    ppl_config_overrides = _prepare_sdpa_regression(ppl_cfg.ppl_config_overrides)
     runner_config = {
         "gpu_count": ppl_cfg.gpu_count,
         "seed": ppl_cfg.seed,
@@ -1118,11 +1133,11 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         "first_image_path": ppl_cfg.first_image_path,
         "last_image_path": ppl_cfg.last_image_path,
         "input_video_path": ppl_cfg.input_video_path,
-        "ppl_config_overrides": ppl_cfg.ppl_config_overrides,
+        "ppl_config_overrides": ppl_config_overrides,
         "script": ppl_cfg.script,  # Pass script for filename generation
     }
     # Merge ppl_config_overrides into runner_config for height/width access
-    runner_config.update(ppl_cfg.ppl_config_overrides)
+    runner_config.update(ppl_config_overrides)
 
     pipeline = None
     gpu_mem_peak = 0.0
@@ -1131,7 +1146,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
     # Phase 1: Model Loading
     try:
         module = _import_example_module(script_path)
-        _patch_ppl_config(module, ppl_cfg.ppl_config_overrides)
+        _patch_ppl_config(module, ppl_config_overrides)
         pipeline = _call_get_pipeline(module, runner_config)
     except Exception as e:
         tb = traceback.format_exc()

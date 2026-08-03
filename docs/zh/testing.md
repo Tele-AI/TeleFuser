@@ -221,6 +221,9 @@ class TestRMSNorm:
 
 TeleFuser 提供批量回归测试框架，用于运行示例 pipeline、对比 baseline 输出、生成测试报告。
 
+所有回归示例统一使用 `TORCH_SDPA`。runner 会在导入示例前禁用 Diffusers 的可选 xformers 路径，避免已安装的
+FlashAttention 或 xformers 包改变回归后端。
+
 ### 快速开始
 
 ```bash

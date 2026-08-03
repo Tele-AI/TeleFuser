@@ -15,6 +15,7 @@ from telefuser.utils.func import auto_async_call
 from telefuser.utils.logging import logger
 from telefuser.worker.parallel_worker import ParallelWorker
 from telefuser.worker.ray_worker import create_ray_worker
+from telefuser.worker.tensor_channel import WorkerTensorChannel
 
 from ..common.rift_vfi import RiftVFIStage
 from .moe_dit_denoising import MoeDitDenoisingStage
@@ -87,13 +88,44 @@ class Wan22VideoPipeline(BasePipeline):
         self.text_encoding_stage = TextEncodingStage("text_encoding", module_manager, config.text_encoding_config)
         if config.enable_vfi:
             self.vfi_stage = RiftVFIStage("vfi", module_manager, config.vfi_config)
+        self._worker_tensor_channels: list[WorkerTensorChannel] = []
+        vae_to_denoise_channel = None
+        denoise_to_vae_channel = None
+        direct_tensor_handoff = (
+            config.enable_vae_parallel and config.enable_denoising_parallel and not config.enable_vae_ray
+        )
+        if direct_tensor_handoff:
+            timeout = max(
+                config.vae_config.parallel_config.timeout,
+                config.dit_high_config.parallel_config.timeout,
+            )
+            vae_to_denoise_channel = WorkerTensorChannel(
+                config.dit_high_config.parallel_config.world_size,
+                timeout=timeout,
+            )
+            denoise_to_vae_channel = WorkerTensorChannel(
+                config.vae_config.parallel_config.world_size,
+                timeout=timeout,
+            )
+            self._worker_tensor_channels.extend((vae_to_denoise_channel, denoise_to_vae_channel))
         if config.enable_vae_ray:
             logger.info("enable ray actor for vae")
             self.vae_stage = create_ray_worker(self.vae_stage, self.config.enable_vae_parallel)
         elif config.enable_vae_parallel:
-            self.vae_stage = ParallelWorker(self.vae_stage)
+            self.vae_stage = ParallelWorker(
+                self.vae_stage,
+                tensor_output_channel=vae_to_denoise_channel,
+                tensor_output_methods=("process",) if vae_to_denoise_channel is not None else (),
+                tensor_input_channels=(denoise_to_vae_channel,) if denoise_to_vae_channel is not None else (),
+            )
         if config.enable_denoising_parallel:
-            self.denoise_stage = ParallelWorker(self.denoise_stage)
+            self.denoise_stage = ParallelWorker(
+                self.denoise_stage,
+                tensor_output_channel=denoise_to_vae_channel,
+                tensor_output_methods=("process",) if denoise_to_vae_channel is not None else (),
+                tensor_input_channels=(vae_to_denoise_channel,) if vae_to_denoise_channel is not None else (),
+            )
+        self._uses_direct_tensor_handoff = direct_tensor_handoff
 
         # Auto-enable metrics if configured
         if config.enable_metrics:
@@ -167,6 +199,11 @@ class Wan22VideoPipeline(BasePipeline):
                 num_frames,
                 **tiler_kwargs,
                 is_ray=self.config.enable_vae_ray,
+                **(
+                    {"_tensor_transport": self._uses_direct_tensor_handoff}
+                    if isinstance(self.vae_stage, ParallelWorker)
+                    else {}
+                ),
             )
             ref_latent = ref_latent_handler()
         prompt_emb_list = prompt_emb_list_handler()
@@ -186,6 +223,11 @@ class Wan22VideoPipeline(BasePipeline):
             sigma_shift,
             boundary,
             latent_data=latent_data,
+            **(
+                {"_tensor_transport": self._uses_direct_tensor_handoff}
+                if isinstance(self.denoise_stage, ParallelWorker)
+                else {}
+            ),
         )
         denoise_result = latents_handler()
 
@@ -195,7 +237,13 @@ class Wan22VideoPipeline(BasePipeline):
             latents, latent_payload = denoise_result
         else:
             latents = denoise_result
-        frames_handler = auto_async_call(self.vae_stage.process, "decode_video", latents, **tiler_kwargs)
+        frames_handler = auto_async_call(
+            self.vae_stage.process,
+            "decode_video",
+            latents,
+            **tiler_kwargs,
+            **({"_tensor_transport": False} if isinstance(self.vae_stage, ParallelWorker) else {}),
+        )
         frames = frames_handler()
         frames = self.tensor2video(frames[0])
 
@@ -211,10 +259,20 @@ class Wan22VideoPipeline(BasePipeline):
             return frames, latent_payload
         return frames
 
+    def close(self) -> None:
+        """Close multiprocessing workers before releasing tensor channels."""
+        for stage_name in ("denoise_stage", "vae_stage"):
+            stage = getattr(self, stage_name, None)
+            if isinstance(stage, ParallelWorker):
+                stage.close()
+        for channel in getattr(self, "_worker_tensor_channels", ()):
+            channel.close()
+
     def __del__(self):
-        del self.vae_stage
-        del self.denoise_stage
-        del self.text_encoding_stage
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @classmethod
     def from_pretrained(

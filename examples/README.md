@@ -2,6 +2,8 @@
 
 Runs configured pipelines in isolated subprocesses, compares outputs against
 baselines (PSNR/SSIM for video, pixel diff for image), and prints a results table.
+Regression runs force every example to use `TORCH_SDPA` and disable Diffusers'
+optional xformers path so results do not depend on installed attention kernels.
 
 ## Quick Start
 

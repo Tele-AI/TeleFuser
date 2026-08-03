@@ -129,6 +129,17 @@ def test_call_get_pipeline_forwards_matching_config_overrides() -> None:
     ) == (4, "sorted", True)
 
 
+def test_prepare_sdpa_regression_forces_sdpa_and_disables_xformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from diffusers.utils import import_utils
+
+    monkeypatch.setattr(import_utils, "_xformers_available", True)
+
+    overrides = run_examples._prepare_sdpa_regression({"attn_impl": "FLASH_ATTN_4", "compile": True})
+
+    assert overrides == {"attn_impl": "TORCH_SDPA", "compile": True}
+    assert not import_utils._xformers_available
+
+
 def test_call_run_preserves_missing_negative_prompt_default() -> None:
     module = ModuleType("negative_prompt_example")
 
