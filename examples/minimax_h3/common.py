@@ -19,6 +19,9 @@ from telefuser.core.config import (
     ModelRuntimeConfig,
     OffloadConfig,
     ParallelConfig,
+    QuantConfig,
+    QuantKernelBackend,
+    QuantType,
     WeightOffloadType,
 )
 from telefuser.core.module_manager import ModuleManager
@@ -127,6 +130,34 @@ def _checkpoint_shards(component: Path) -> list[str]:
     return shards
 
 
+def minimax_h3_quant_config(quantization: str | QuantType | None) -> QuantConfig:
+    """Resolve a public MiniMax H3 online-quantization name to runtime config."""
+    if quantization is None:
+        return QuantConfig()
+    if isinstance(quantization, str):
+        normalized = quantization.strip().lower().replace("_", "-")
+        names = {
+            "torchao-fp8": QuantType.TORCHAO_FP8,
+            "bnb-nf4": QuantType.BNB_NF4,
+        }
+        try:
+            quant_type = names[normalized]
+        except KeyError as exc:
+            raise ValueError("quantization must be 'torchao-fp8', 'bnb-nf4', or None") from exc
+    elif isinstance(quantization, QuantType):
+        quant_type = quantization
+    else:
+        raise TypeError("quantization must be a string, QuantType, or None")
+
+    backends = {
+        QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+        QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+    }
+    if quant_type not in backends:
+        raise ValueError(f"MiniMax H3 does not support online quantization type {quant_type.name}")
+    return QuantConfig(enabled=True, quant_type=quant_type, kernel_backend=backends[quant_type])
+
+
 def load_minimax_h3_pipeline(
     model_root: str | Path,
     *,
@@ -141,6 +172,7 @@ def load_minimax_h3_pipeline(
     feature_cache_config: FeatureCacheConfig | None = None,
     adaln_cache_path: str | Path | None = None,
     online_adaln_cache: bool = False,
+    quantization: str | QuantType | None = None,
 ) -> MiniMaxH3Pipeline:
     if adaln_cache_path is not None and online_adaln_cache:
         raise ValueError("Choose either adaln_cache_path or online_adaln_cache, not both.")
@@ -162,6 +194,11 @@ def load_minimax_h3_pipeline(
         raise ValueError("enable_fsdp requires multi-GPU sequence parallelism without tensor parallelism")
     if (adaln_cache_path is not None or online_adaln_cache) and resolved_enable_fsdp:
         raise ValueError("AdaLN cache modes do not yet support FSDP deployment.")
+    quant_config = minimax_h3_quant_config(quantization)
+    if quant_config.enabled and world_size != 1:
+        raise ValueError("MiniMax H3 online quantization currently requires a single-GPU profile")
+    if quant_config.enabled and resolved_enable_fsdp:
+        raise ValueError("MiniMax H3 online quantization cannot be combined with FSDP")
     if isinstance(attn_impl, str):
         try:
             attn_impl = AttnImplType[attn_impl]
@@ -171,12 +208,19 @@ def load_minimax_h3_pipeline(
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
     runtime_device = torch.device(device)
+    if quant_config.enabled and runtime_device.type != "cuda":
+        raise ValueError("MiniMax H3 online quantization requires a CUDA device")
     use_resident_modules = world_size > 1 or resolved_enable_fsdp
     resident_offload = OffloadConfig(
         offload_type=(
             WeightOffloadType.NO_CPU_OFFLOAD if use_resident_modules else WeightOffloadType.MODEL_CPU_OFFLOAD
         ),
         pin_cpu_memory=False,
+    )
+    dit_offload = (
+        OffloadConfig(offload_type=WeightOffloadType.NO_CPU_OFFLOAD, pin_cpu_memory=False)
+        if quant_config.enabled
+        else resident_offload
     )
     text_parallel = (
         ParallelConfig(
@@ -203,9 +247,10 @@ def load_minimax_h3_pipeline(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
-        offload_config=resident_offload,
+        offload_config=dit_offload,
         attention_config=AttentionConfig.dense_attention(attn_impl),
         feature_cache_config=feature_cache_config or FeatureCacheConfig(),
+        quant_config=quant_config,
         parallel_config=ParallelConfig(
             device_ids=list(range(world_size)),
             sp_ulysses_degree=ulysses_degree,
@@ -344,6 +389,7 @@ __all__ = [
     "load_minimax_h3_pipeline",
     "load_minimax_h3_request",
     "minimax_h3_adaln_cache_timesteps",
+    "minimax_h3_quant_config",
     "partition_for_minimax_h3_request",
     "run_minimax_h3_request",
     "save_generation",

@@ -125,6 +125,20 @@ class MiniMaxH3DenoisingStage(BaseStage):
         self.model_names = ["transformer"]
         self._request_serial = 0
 
+    def _ensure_online_quantized(self) -> None:
+        quant_config = self.model_runtime_config.quant_config
+        if not quant_config.enabled:
+            return
+        if self.transformer.quant_type == quant_config.quant_type:
+            return
+        if self.transformer.quant_type is not None:
+            raise RuntimeError(
+                f"MiniMax H3 DiT is already quantized as {self.transformer.quant_type}, "
+                f"cannot apply {quant_config.quant_type}"
+            )
+        self.transformer.enable_quant(quant_config)
+        current_platform.empty_cache()
+
     def parallel_models(self) -> None:
         parallel_config = self.model_runtime_config.parallel_config
         unsupported = {
@@ -222,6 +236,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         num_inference_steps: int,
         _transport_video: bool = False,
     ) -> MiniMaxH3DenoiseResult:
+        self._ensure_online_quantized()
         if isinstance(text, dict):
             text = MiniMaxH3TextCondition(**text)
         conditions = [

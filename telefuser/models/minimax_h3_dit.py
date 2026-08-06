@@ -16,7 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantType
 from telefuser.distributed.collectives import all_gather_cat, all_reduce_sum_
 from telefuser.distributed.device_mesh import (
     get_tp_group,
@@ -31,6 +31,7 @@ from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
 from telefuser.ops.rotary import apply_rotary_emb_neox
+from telefuser.utils.logging import logger
 
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
 MINIMAX_H3_FP32_PARAM_NAMES = frozenset(
@@ -1208,6 +1209,42 @@ class MiniMaxH3DiT(BaseModel):
         communicator = self._configure_ulysses_communicator(group)
         for block in self.blocks:
             block.attn.set_ulysses_group(group, communicator)
+
+    def enable_quant(self, quant_type: QuantConfig | str | torch.dtype) -> None:
+        """Apply supported online quantization to transformer Linear layers."""
+        if not isinstance(quant_type, QuantConfig):
+            super().enable_quant(quant_type)
+            return
+        if not quant_type.enabled:
+            return
+
+        include_names = quant_type.quantize_modules or ("blocks.",)
+        if quant_type.quant_type == QuantType.TORCHAO_FP8:
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self,
+                include_names=include_names,
+                exclude_names=quant_type.skip_modules,
+            )
+            self.torchao_fp8_replaced_linear = replaced
+        elif quant_type.quant_type == QuantType.BNB_NF4:
+            from telefuser.ops.bnb_nf4_linear import replace_linear_layers_with_bnb_nf4
+
+            replaced = replace_linear_layers_with_bnb_nf4(
+                self,
+                compute_dtype=torch.bfloat16,
+                include_names=include_names,
+                exclude_names=quant_type.skip_modules,
+            )
+            self.bnb_nf4_replaced_linear = replaced
+        else:
+            raise ValueError(f"MiniMax H3 does not support online quantization type {quant_type.quant_type.name}")
+
+        if replaced == 0:
+            raise RuntimeError("MiniMax H3 online quantization did not select any Linear layers")
+        self.quant_type = quant_type.quant_type
+        logger.info(f"MiniMax H3 {quant_type.quant_type.name} converted {replaced} transformer Linear layers")
 
     def enable_tp(self, device_mesh: Any | None = None) -> None:
         self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh

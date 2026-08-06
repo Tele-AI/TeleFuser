@@ -36,6 +36,7 @@ PPL_CONFIG: dict[str, Any] = {
     "device": "cuda:0",
     "enable_fsdp": None,
     "online_adaln_cache": True,
+    "quantization": None,
 }
 
 PIPELINE_MANIFEST = build_pipeline_manifest(
@@ -91,6 +92,7 @@ def get_pipeline(
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
+    quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load the Ref2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -104,6 +106,7 @@ def get_pipeline(
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
         online_adaln_cache=online_adaln_cache,
+        quantization=quantization,
     )
 
 
@@ -260,6 +263,7 @@ def main() -> None:
     parser.add_argument("--flow-shift", type=float, default=PPL_CONFIG["flow_shift"])
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
+    parser.add_argument("--quantization", choices=("torchao-fp8", "bnb-nf4"))
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
@@ -299,6 +303,7 @@ def main() -> None:
         num_inference_steps=request_steps,
         enable_fsdp=args.enable_fsdp,
         online_adaln_cache=online_adaln_cache,
+        quantization=args.quantization,
     )
     try:
         if args.request is not None:

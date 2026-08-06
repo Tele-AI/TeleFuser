@@ -38,6 +38,7 @@ PPL_CONFIG: dict[str, Any] = {
     "feature_cache_model_type": "MiniMax-H3-Base",
     "feature_cache_n_derivatives": 1,
     "feature_cache_taylor_threshold": 2,
+    "quantization": None,
 }
 
 
@@ -88,6 +89,7 @@ def get_pipeline(
     feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
     feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
     feature_cache_taylor_threshold: int = PPL_CONFIG["feature_cache_taylor_threshold"],
+    quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -108,6 +110,7 @@ def get_pipeline(
             n_derivatives=feature_cache_n_derivatives,
             taylor_threshold=feature_cache_taylor_threshold,
         ),
+        quantization=quantization,
     )
 
 
@@ -241,7 +244,7 @@ def run_with_file(
     return {"output_path": str(Path(output_path))}
 
 
-def main() -> None:
+def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None:
     parser = argparse.ArgumentParser(description="Generate MiniMax H3 T2VA/FL2VA audio-video on H100 GPUs")
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--mode", choices=("t2va", "first-frame", "last-frame", "first-last"))
@@ -265,6 +268,12 @@ def main() -> None:
     parser.add_argument("--flow-shift", type=float, default=PPL_CONFIG["flow_shift"])
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
+    parser.add_argument(
+        "--quantization",
+        choices=("torchao-fp8", "bnb-nf4"),
+        default=default_quantization,
+        help="Online DiT Linear quantization backend (single GPU only).",
+    )
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument(
         "--attn-impl",
@@ -319,6 +328,7 @@ def main() -> None:
         feature_cache_model_type=args.feature_cache_model_type,
         feature_cache_n_derivatives=args.feature_cache_n_derivatives,
         feature_cache_taylor_threshold=args.feature_cache_taylor_threshold,
+        quantization=args.quantization,
     )
     try:
         result = run_with_file(
@@ -337,6 +347,10 @@ def main() -> None:
         print("Output saved to {}".format(result["output_path"]))
     finally:
         pipeline.stop()
+
+
+def main() -> None:
+    _main()
 
 
 if __name__ == "__main__":
