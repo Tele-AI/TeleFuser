@@ -3,14 +3,18 @@ from pathlib import Path
 
 import pytest
 
+from examples.minimax_h3 import minimax_h3_fl2va_bnb_nf4_h100 as bnb_nf4_example
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
+from examples.minimax_h3 import minimax_h3_fl2va_torchao_fp8_h100 as torchao_fp8_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
+    load_minimax_h3_pipeline,
     load_minimax_h3_request,
     minimax_h3_adaln_cache_timesteps,
+    minimax_h3_quant_config,
     partition_for_minimax_h3_request,
 )
 from examples.minimax_h3.minimax_h3_cache_calibrate import _apply_cache_profile
@@ -20,7 +24,7 @@ from examples.minimax_h3.minimax_h3_ref2va_h100 import (
     default_ref2va_conditions,
     parse_ref2va_ordered_materials,
 )
-from telefuser.core.config import AttnImplType, FeatureCacheConfig
+from telefuser.core.config import AttnImplType, FeatureCacheConfig, QuantKernelBackend, QuantType
 from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
 from telefuser.service.core.pipeline_contract import PipelineContract
 
@@ -138,6 +142,7 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                     n_derivatives=1,
                     taylor_threshold=2,
                 ),
+                "quantization": None,
             },
         )
     ]
@@ -156,6 +161,69 @@ def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
 
     params = json.loads(output_path.read_text(encoding="utf-8"))
     assert params == {"K": 2, "retention_ratio": 0.2, "thresh": 0.03}
+
+
+@pytest.mark.parametrize(
+    ("name", "quant_type", "backend"),
+    [
+        ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
+    ],
+)
+def test_quantization_names_resolve_to_runtime_config(
+    name: str,
+    quant_type: QuantType,
+    backend: QuantKernelBackend,
+) -> None:
+    config = minimax_h3_quant_config(name)
+    assert config.enabled is True
+    assert config.quant_type == quant_type
+    assert config.kernel_backend == backend
+
+
+def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="single-GPU"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            ulysses_degree=2,
+            quantization="torchao-fp8",
+        )
+
+    (tmp_path / "FL2VA").mkdir()
+    with pytest.raises(ValueError, match="CUDA"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            device="cpu",
+            quantization="bnb-nf4",
+        )
+
+
+@pytest.mark.parametrize(
+    ("example", "quantization"),
+    [
+        (torchao_fp8_example, "torchao-fp8"),
+        (bnb_nf4_example, "bnb-nf4"),
+    ],
+)
+def test_dedicated_quantized_examples_forward_fixed_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    example: object,
+    quantization: str,
+) -> None:
+    calls = []
+    sentinel = object()
+
+    def fake_get_pipeline(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(example.base, "get_pipeline", fake_get_pipeline)
+    assert example.get_pipeline(1, "/models/h3", device="cuda:1") is sentinel
+    assert calls == [((1, "/models/h3"), {"device": "cuda:1", "quantization": quantization})]
+    assert example.PIPELINE_MANIFEST["pipeline_name"] == example.PPL_CONFIG["name"]
 
 
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:

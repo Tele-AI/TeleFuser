@@ -3,7 +3,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from telefuser.core.config import ModelRuntimeConfig, OffloadConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.config import (
+    ModelRuntimeConfig,
+    OffloadConfig,
+    ParallelConfig,
+    QuantConfig,
+    QuantType,
+    WeightOffloadType,
+)
 from telefuser.pipelines.minimax_h3.denoising import (
     MiniMaxH3DenoisingStage,
     _build_local_embedding_layout,
@@ -114,6 +121,23 @@ def test_parallel_models_rejects_tp_with_fsdp() -> None:
         pytest.raises(ValueError, match="cannot be combined with FSDP"),
     ):
         stage.parallel_models()
+
+
+def test_online_quantization_is_applied_once_after_stage_onload() -> None:
+    stage, transformer = _stage(ParallelConfig())
+    stage.model_runtime_config.quant_config = QuantConfig(enabled=True, quant_type=QuantType.TORCHAO_FP8)
+    transformer.quant_type = None
+
+    def enable_quant(config: QuantConfig) -> None:
+        transformer.quant_type = config.quant_type
+
+    transformer.enable_quant.side_effect = enable_quant
+    with patch("telefuser.pipelines.minimax_h3.denoising.current_platform.empty_cache") as empty_cache:
+        stage._ensure_online_quantized()
+        stage._ensure_online_quantized()
+
+    transformer.enable_quant.assert_called_once_with(stage.model_runtime_config.quant_config)
+    empty_cache.assert_called_once_with()
 
 
 def test_text_encoder_direct_handoff_keeps_token_tags_on_cpu() -> None:

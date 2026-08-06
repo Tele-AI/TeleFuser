@@ -479,6 +479,19 @@ def test_example_loader_allows_release_length_parallel_denoising(
     assert config.video_vae_config.parallel_config.tp_degree == 4
     assert config.audio_vae_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
 
+    common.load_minimax_h3_pipeline(
+        tmp_path,
+        partition="Ref2VA",
+        device="cuda:0",
+        quantization="torchao-fp8",
+    )
+    quantized_config = captured["config"]
+    assert quantized_config.dit_config.quant_config.enabled is True
+    assert quantized_config.dit_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+    assert quantized_config.text_encoder_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    assert quantized_config.video_vae_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    assert quantized_config.audio_vae_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+
 
 def test_example_writer_preserves_complete_generated_audio(
     monkeypatch: pytest.MonkeyPatch,

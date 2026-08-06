@@ -29,6 +29,8 @@ from telefuser.service_types import PipelineRunStatus, TaskStatus
 SERVICE_EXAMPLES = {
     "wan21_i2v_service": (Path("examples/wan_video/wan21_14b_image_to_video_480p_service.py"), "i2v", True),
     "minimax_h3_fl2va": (Path("examples/minimax_h3/minimax_h3_fl2va_h100.py"), "t2v", True),
+    "minimax_h3_fl2va_torchao_fp8": (Path("examples/minimax_h3/minimax_h3_fl2va_torchao_fp8_h100.py"), "t2v", True),
+    "minimax_h3_fl2va_bnb_nf4": (Path("examples/minimax_h3/minimax_h3_fl2va_bnb_nf4_h100.py"), "t2v", True),
     "minimax_h3_ref2va": (Path("examples/minimax_h3/minimax_h3_ref2va_h100.py"), "s2v", True),
     "wan22_i2v_distill": (Path("examples/wan_video/wan22_14b_image_to_video_distill_h100.py"), "i2v", True),
     "lingbot_video_dense": (Path("examples/lingbot_video/lingbot_video_dense_1_3b.py"), "t2i", True),

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantType
 from telefuser.models.minimax_h3_dit import (
     MINIMAX_H3_FP32_BUFFER_NAMES,
     MINIMAX_H3_FP32_PARAM_NAMES,
@@ -644,3 +644,46 @@ def test_online_adaln_cache_supports_tensor_parallelism() -> None:
 
     torch.testing.assert_close(actual_video, expected_video)
     torch.testing.assert_close(actual_audio, expected_audio)
+
+
+@pytest.mark.parametrize(
+    ("quant_type", "helper_path", "count_attribute"),
+    [
+        (
+            QuantType.TORCHAO_FP8,
+            "telefuser.ops.torchao_fp8_linear.replace_linear_layers_with_torchao_fp8",
+            "torchao_fp8_replaced_linear",
+        ),
+        (
+            QuantType.BNB_NF4,
+            "telefuser.ops.bnb_nf4_linear.replace_linear_layers_with_bnb_nf4",
+            "bnb_nf4_replaced_linear",
+        ),
+    ],
+)
+def test_online_quantization_selects_only_transformer_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    quant_type: QuantType,
+    helper_path: str,
+    count_attribute: str,
+) -> None:
+    model = MiniMaxH3DiT(_small_config())
+    calls = []
+
+    def fake_replace(module: torch.nn.Module, **kwargs: object) -> int:
+        calls.append((module, kwargs))
+        return 15
+
+    monkeypatch.setattr(helper_path, fake_replace)
+    model.enable_quant(QuantConfig(enabled=True, quant_type=quant_type))
+
+    assert calls[0][0] is model
+    assert calls[0][1]["include_names"] == ("blocks.",)
+    assert getattr(model, count_attribute) == 15
+    assert model.quant_type == quant_type
+
+
+def test_online_quantization_rejects_unsupported_type() -> None:
+    model = MiniMaxH3DiT(_small_config())
+    with pytest.raises(ValueError, match="does not support"):
+        model.enable_quant(QuantConfig(enabled=True, quant_type=QuantType.INT8))

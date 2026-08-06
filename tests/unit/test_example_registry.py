@@ -15,6 +15,8 @@ SERVICE_PARITY_EXAMPLES = {
     "lingbot_video/lingbot_video_dense_1_3b.py",
     "lingbot_video/lingbot_video_moe_30b.py",
     "minimax_h3/minimax_h3_fl2va_h100.py",
+    "minimax_h3/minimax_h3_fl2va_torchao_fp8_h100.py",
+    "minimax_h3/minimax_h3_fl2va_bnb_nf4_h100.py",
     "minimax_h3/minimax_h3_ref2va_h100.py",
 }
 
