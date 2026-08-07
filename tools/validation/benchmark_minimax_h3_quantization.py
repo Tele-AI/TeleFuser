@@ -23,7 +23,7 @@ def _package_version(name: str) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-root", default="/hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3")
-    parser.add_argument("--backend", choices=("bf16", "torchao-fp8", "bnb-nf4"), required=True)
+    parser.add_argument("--backend", choices=("bf16", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"), required=True)
     parser.add_argument("--prompt", default="Steam rises from the ramen while the family talks in the background.")
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--steps", type=int, default=50)

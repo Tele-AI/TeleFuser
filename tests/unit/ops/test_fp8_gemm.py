@@ -37,7 +37,8 @@ def test_fp8_linear_keeps_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fp8_linear_tf_kernel_forward() -> None:
     torch.manual_seed(0)
     linear = nn.Linear(64, 128, device="cuda", dtype=torch.bfloat16)
-    inputs = torch.randn(2, 3, 64, device="cuda", dtype=torch.bfloat16)
+    inputs = torch.randn(2, 64, 3, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
+    assert not inputs.is_contiguous()
     expected = linear(inputs)
     wrapped = fp8_gemm.FP8Linear(
         linear,

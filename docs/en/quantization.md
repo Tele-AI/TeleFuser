@@ -79,6 +79,26 @@ TorchAO and PyTorch must be version-compatible. Check the
 [TorchAO release compatibility table](https://github.com/pytorch/ao/releases) instead of installing the newest
 TorchAO release blindly; an import warning or failure means that configuration has not been validated.
 
+### tf-kernel FP8: online W8A8
+
+MiniMax H3 can use TeleFuser's tf-kernel FP8 GEMM wrapper for online W8A8 inference directly from the original BF16
+checkpoint. Activations are quantized per token at each forward, weights are quantized per output channel and cached
+on first use, and `tf_kernel.fp8_scaled_mm` produces BF16 output. This path requires a tf-kernel wheel built for the
+runtime's PyTorch/CUDA ABI and GPU architecture; on H100, build the SM90 wheel from `tf-kernel/` with the Makefile.
+
+```python
+quant_config = QuantConfig(
+    enabled=True,
+    quant_type=QuantType.FP8,
+    kernel_backend=QuantKernelBackend.TF_KERNEL,
+)
+```
+
+For MiniMax H3, use `quantization="tf-kernel-fp8"` or
+`examples/minimax_h3/minimax_h3_fl2va_tf_kernel_fp8_h100.py`. This backend is single-GPU only and keeps the FP8
+weights resident after first-use conversion. It is distinct from the scaled-FP8 checkpoint path below: the latter
+expects weights and scales already serialized in the checkpoint.
+
 ### bitsandbytes NF4: W4A16
 
 NF4 uses a non-uniform 4-bit codebook designed for approximately normal weight distributions. TeleFuser replaces selected Linear layers with `bitsandbytes.nn.Linear4bit`, uses BF16 compute, and enables compressed quantization statistics.

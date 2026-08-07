@@ -139,11 +139,12 @@ def minimax_h3_quant_config(quantization: str | QuantType | None) -> QuantConfig
         names = {
             "torchao-fp8": QuantType.TORCHAO_FP8,
             "bnb-nf4": QuantType.BNB_NF4,
+            "tf-kernel-fp8": QuantType.FP8,
         }
         try:
             quant_type = names[normalized]
         except KeyError as exc:
-            raise ValueError("quantization must be 'torchao-fp8', 'bnb-nf4', or None") from exc
+            raise ValueError("quantization must be 'torchao-fp8', 'tf-kernel-fp8', 'bnb-nf4', or None") from exc
     elif isinstance(quantization, QuantType):
         quant_type = quantization
     else:
@@ -152,6 +153,7 @@ def minimax_h3_quant_config(quantization: str | QuantType | None) -> QuantConfig
     backends = {
         QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
         QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+        QuantType.FP8: QuantKernelBackend.TF_KERNEL,
     }
     if quant_type not in backends:
         raise ValueError(f"MiniMax H3 does not support online quantization type {quant_type.name}")

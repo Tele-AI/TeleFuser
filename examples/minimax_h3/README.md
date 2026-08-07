@@ -293,19 +293,20 @@ FlashAttention 4 is unavailable.
 
 ## Online DiT Quantization
 
-MiniMax H3 supports two single-GPU online quantization backends for the DiT transformer Linear layers:
+MiniMax H3 supports three single-GPU online quantization backends for the DiT transformer Linear layers:
 
 | CLI value | Backend | Weight/activation path |
 |---|---|---|
 | torchao-fp8 | TorchAO | FP8 dynamic activation and FP8 weight when supported, otherwise TorchAO's FP8 weight-only path |
+| tf-kernel-fp8 | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 (W8A8), BF16 output |
 | bnb-nf4 | bitsandbytes | NF4 weight-only with BF16 compute |
 
-Both paths convert the 258 Linear layers in the main and token-refiner transformer blocks. The FP32 video/audio
+All three paths convert the 258 Linear layers in the main and token-refiner transformer blocks. The FP32 video/audio
 patch projections, timestep embedding, output projections, text encoder, and VAEs retain their reference dtypes.
 The BF16 DiT is loaded from the original shards, moved to CUDA after text encoding, quantized on first denoising use,
 and then kept resident for the pipeline lifetime. This ordering avoids a simultaneous BF16 text encoder and DiT on
 one GPU and avoids unsupported CPU transfers of quantized tensor subclasses.
-TorchAO conversion has a transient memory peak near the BF16 footprint; use the full 80 GB device without colocated workloads.
+TorchAO and tf-kernel conversion have a transient memory peak near the BF16 footprint; use the full 80 GB device without colocated workloads.
 
 Use the dedicated TorchAO FP8 example:
 
@@ -325,8 +326,17 @@ python examples/minimax_h3/minimax_h3_fl2va_bnb_nf4_h100.py \
   --output outputs/minimax_h3_bnb_nf4.mp4
 ~~~
 
+Or the dedicated tf-kernel FP8 example:
+
+~~~bash
+python examples/minimax_h3/minimax_h3_fl2va_tf_kernel_fp8_h100.py \
+  --mode t2va \
+  --duration 5 \
+  --output outputs/minimax_h3_tf_kernel_fp8.mp4
+~~~
+
 The standard FL2VA, Ref2VA, and JSON request CLIs also accept
---quantization with either torchao-fp8 or bnb-nf4. The Python loader accepts the same names:
+--quantization with torchao-fp8, tf-kernel-fp8, or bnb-nf4. The Python loader accepts the same names:
 
 ~~~python
 from examples.minimax_h3.common import load_minimax_h3_pipeline
@@ -334,7 +344,7 @@ from examples.minimax_h3.common import load_minimax_h3_pipeline
 pipeline = load_minimax_h3_pipeline(
     "/path/to/MiniMaxAI_MiniMax-H3",
     partition="FL2VA",
-    quantization="torchao-fp8",
+    quantization="tf-kernel-fp8",
 )
 ~~~
 
@@ -342,15 +352,15 @@ Online quantization currently requires ulysses_degree=1, tp_degree=1, and FSDP d
 would invalidate those wrappers' BF16 parameter-sharding contract, so unsupported combinations fail before checkpoint
 loading.
 
-For matched BF16/FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
+For matched BF16/TorchAO-FP8/tf-kernel-FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
 containing load time, end-to-end generation time, stage timings, and denoising allocator peaks:
 
 ~~~bash
 python tools/validation/benchmark_minimax_h3_quantization.py \
-  --backend torchao-fp8 \
+  --backend tf-kernel-fp8 \
   --duration 5 \
   --steps 50 \
-  --output outputs/minimax_h3_torchao_fp8_50step.mp4
+  --output outputs/minimax_h3_tf_kernel_fp8_50step.mp4
 ~~~
 
 For multi-GPU resident profiles, `WorkerTensorChannel` transports text conditioning, visual condition rows, and the

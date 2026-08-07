@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantType
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.minimax_h3_dit import (
     MINIMAX_H3_FP32_BUFFER_NAMES,
     MINIMAX_H3_FP32_PARAM_NAMES,
@@ -681,6 +681,37 @@ def test_online_quantization_selects_only_transformer_blocks(
     assert calls[0][1]["include_names"] == ("blocks.",)
     assert getattr(model, count_attribute) == 15
     assert model.quant_type == quant_type
+
+
+def test_tf_kernel_fp8_quantization_uses_filtered_linear_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = MiniMaxH3DiT(_small_config())
+    calls: list[tuple[str, object]] = []
+
+    def fake_count(module: torch.nn.Module, **kwargs: object) -> int:
+        calls.append(("count", kwargs["module_filter"]))
+        return 15
+
+    def fake_enable(module: torch.nn.Module, **kwargs: object) -> torch.nn.Module:
+        calls.append(("enable", kwargs))
+        return module
+
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.count_linear_layers", fake_count)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.enable_fp8_gemm", fake_enable)
+
+    model.enable_quant(
+        QuantConfig(
+            enabled=True,
+            quant_type=QuantType.FP8,
+            kernel_backend=QuantKernelBackend.TF_KERNEL,
+        )
+    )
+
+    assert calls[0][0] == "count"
+    assert calls[1][0] == "enable"
+    options = calls[1][1]["options"]
+    assert options.fp16_weight_storage == "discard"
+    assert getattr(model, "tf_kernel_fp8_replaced_linear") == 15
+    assert model.quant_type == QuantType.FP8
 
 
 def test_online_quantization_rejects_unsupported_type() -> None:

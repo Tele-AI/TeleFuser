@@ -16,7 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantType
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.distributed.collectives import all_gather_cat, all_reduce_sum_
 from telefuser.distributed.device_mesh import (
     get_tp_group,
@@ -1238,6 +1238,29 @@ class MiniMaxH3DiT(BaseModel):
                 exclude_names=quant_type.skip_modules,
             )
             self.bnb_nf4_replaced_linear = replaced
+        elif quant_type.quant_type == QuantType.FP8:
+            if quant_type.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                raise ValueError(
+                    "MiniMax H3 FP8 online quantization requires the tf-kernel backend; "
+                    f"got {quant_type.kernel_backend.name}"
+                )
+            from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+            def module_filter(name: str, _module: nn.Module) -> bool:
+                return any(token in name for token in include_names) and not any(
+                    token and token in name for token in quant_type.skip_modules
+                )
+
+            replaced = count_linear_layers(self, module_filter=module_filter)
+            enable_fp8_gemm(
+                self,
+                options=FP8GemmOptions(
+                    fp16_weight_storage="keep" if quant_type.keep_fp16_weight else "discard",
+                    materialize_fp8_on_wrap=True,
+                ),
+                module_filter=module_filter,
+            )
+            self.tf_kernel_fp8_replaced_linear = replaced
         else:
             raise ValueError(f"MiniMax H3 does not support online quantization type {quant_type.quant_type.name}")
 

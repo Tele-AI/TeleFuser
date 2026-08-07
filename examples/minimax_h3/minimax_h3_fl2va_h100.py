@@ -270,7 +270,7 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument(
         "--quantization",
-        choices=("torchao-fp8", "bnb-nf4"),
+        choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
         default=default_quantization,
         help="Online DiT Linear quantization backend (single GPU only).",
     )

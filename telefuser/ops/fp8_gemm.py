@@ -274,7 +274,7 @@ class FP8Linear(nn.Module):
                 bias = bias.to(dtype=out_dtype)
 
         x_shape = x_fp.shape
-        x_2d = x_fp.reshape(-1, x_shape[-1])
+        x_2d = x_fp.reshape(-1, x_shape[-1]).contiguous()
         qinput = torch.empty_like(x_2d, dtype=torch.float8_e4m3fn)
         input_scale = torch.empty((x_2d.shape[0], 1), dtype=torch.float32, device=x_fp.device)
         self._tf_kernel.tf_per_token_quant_fp8(x_2d, qinput, input_scale)
@@ -340,3 +340,24 @@ def enable_fp8_gemm(
 
     _recurse("", model)
     return model
+
+
+def count_linear_layers(
+    model: nn.Module,
+    *,
+    module_filter: Optional[Callable[[str, nn.Module], bool]] = None,
+) -> int:
+    """Count the ``nn.Linear`` modules that ``enable_fp8_gemm`` would wrap."""
+
+    def _count(prefix: str, parent: nn.Module) -> int:
+        count = 0
+        for child_name, child in parent.named_children():
+            full_name = f"{prefix}.{child_name}" if prefix else child_name
+            if isinstance(child, nn.Linear):
+                if module_filter is None or module_filter(full_name, child):
+                    count += 1
+            else:
+                count += _count(full_name, child)
+        return count
+
+    return _count("", model)

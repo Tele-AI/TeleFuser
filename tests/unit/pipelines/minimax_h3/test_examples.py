@@ -5,6 +5,7 @@ import pytest
 
 from examples.minimax_h3 import minimax_h3_fl2va_bnb_nf4_h100 as bnb_nf4_example
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
+from examples.minimax_h3 import minimax_h3_fl2va_tf_kernel_fp8_h100 as tf_kernel_fp8_example
 from examples.minimax_h3 import minimax_h3_fl2va_torchao_fp8_h100 as torchao_fp8_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
 from examples.minimax_h3.common import (
@@ -168,6 +169,7 @@ def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
     [
         ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
         ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
         ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
     ],
 )
@@ -205,6 +207,7 @@ def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Pa
     ("example", "quantization"),
     [
         (torchao_fp8_example, "torchao-fp8"),
+        (tf_kernel_fp8_example, "tf-kernel-fp8"),
         (bnb_nf4_example, "bnb-nf4"),
     ],
 )
