@@ -308,35 +308,28 @@ and then kept resident for the pipeline lifetime. This ordering avoids a simulta
 one GPU and avoids unsupported CPU transfers of quantized tensor subclasses.
 TorchAO and tf-kernel conversion have a transient memory peak near the BF16 footprint; use the full 80 GB device without colocated workloads.
 
-Use the dedicated TorchAO FP8 example:
+Use the single FL2VA example and choose the quantization backend with `--quantization`:
 
 ~~~bash
-python examples/minimax_h3/minimax_h3_fl2va_torchao_fp8_h100.py \
+python examples/minimax_h3/minimax_h3_fl2va_h100.py \
   --mode t2va \
+  --quantization torchao-fp8 \
   --duration 5 \
   --output outputs/minimax_h3_torchao_fp8.mp4
-~~~
-
-Or the dedicated bitsandbytes NF4 example:
-
-~~~bash
-python examples/minimax_h3/minimax_h3_fl2va_bnb_nf4_h100.py \
+python examples/minimax_h3/minimax_h3_fl2va_h100.py \
   --mode t2va \
+  --quantization bnb-nf4 \
   --duration 5 \
   --output outputs/minimax_h3_bnb_nf4.mp4
-~~~
-
-Or the dedicated tf-kernel FP8 example:
-
-~~~bash
-python examples/minimax_h3/minimax_h3_fl2va_tf_kernel_fp8_h100.py \
+python examples/minimax_h3/minimax_h3_fl2va_h100.py \
   --mode t2va \
+  --quantization tf-kernel-fp8 \
   --duration 5 \
   --output outputs/minimax_h3_tf_kernel_fp8.mp4
 ~~~
 
-The standard FL2VA, Ref2VA, and JSON request CLIs also accept
---quantization with torchao-fp8, tf-kernel-fp8, or bnb-nf4. The Python loader accepts the same names:
+The FL2VA CLI accepts `--quantization` with `torchao-fp8`, `tf-kernel-fp8`, or `bnb-nf4`; omit it for BF16. The Python
+loader accepts the same names:
 
 ~~~python
 from examples.minimax_h3.common import load_minimax_h3_pipeline

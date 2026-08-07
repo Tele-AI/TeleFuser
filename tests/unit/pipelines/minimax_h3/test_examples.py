@@ -3,10 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.minimax_h3 import minimax_h3_fl2va_bnb_nf4_h100 as bnb_nf4_example
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
-from examples.minimax_h3 import minimax_h3_fl2va_tf_kernel_fp8_h100 as tf_kernel_fp8_example
-from examples.minimax_h3 import minimax_h3_fl2va_torchao_fp8_h100 as torchao_fp8_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
@@ -203,17 +200,9 @@ def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Pa
         )
 
 
-@pytest.mark.parametrize(
-    ("example", "quantization"),
-    [
-        (torchao_fp8_example, "torchao-fp8"),
-        (tf_kernel_fp8_example, "tf-kernel-fp8"),
-        (bnb_nf4_example, "bnb-nf4"),
-    ],
-)
-def test_dedicated_quantized_examples_forward_fixed_backend(
+@pytest.mark.parametrize("quantization", ["torchao-fp8", "tf-kernel-fp8", "bnb-nf4"])
+def test_standard_example_forwards_selected_quantization(
     monkeypatch: pytest.MonkeyPatch,
-    example: object,
     quantization: str,
 ) -> None:
     calls = []
@@ -223,10 +212,13 @@ def test_dedicated_quantized_examples_forward_fixed_backend(
         calls.append((args, kwargs))
         return sentinel
 
-    monkeypatch.setattr(example.base, "get_pipeline", fake_get_pipeline)
-    assert example.get_pipeline(1, "/models/h3", device="cuda:1") is sentinel
-    assert calls == [((1, "/models/h3"), {"device": "cuda:1", "quantization": quantization})]
-    assert example.PIPELINE_MANIFEST["pipeline_name"] == example.PPL_CONFIG["name"]
+    monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_get_pipeline)
+    assert fl2va_example.get_pipeline(1, "/models/h3", device="cuda:1", quantization=quantization) is sentinel
+    assert len(calls) == 1
+    assert calls[0][0] == ("/models/h3",)
+    assert calls[0][1]["device"] == "cuda:1"
+    assert calls[0][1]["quantization"] == quantization
+    assert fl2va_example.PIPELINE_MANIFEST["pipeline_name"] == fl2va_example.PPL_CONFIG["name"]
 
 
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:
