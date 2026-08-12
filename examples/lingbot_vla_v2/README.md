@@ -45,67 +45,10 @@ python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
 The example saves canonical actions and checkpoint metadata in an `.npz` file. The base output must not be sent to
 a robot without an embodiment-specific post-training checkpoint, action mapping, and policy validation.
 
-## Minimal Single-GPU HTTP Service
-
-The VLA-specific server loads one policy replica and serializes all inference calls on the selected GPU. It does not
-use the shared media service, Ray, multi-GPU execution, dynamic batching, or robot control. Start it from the repository
-with the isolated VLA environment:
-
-```bash
-.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_server.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
-  --device cuda:0 \
-  --host 127.0.0.1 \
-  --port 8000
-```
-
-The process reports ready only after both the processor and policy have loaded:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-`POST /v1/vla/actions` accepts raw Base64 or a Base64 data URL for each camera. The state must contain exactly 14
-finite values. For example:
-
-```bash
-.venv-vla/bin/python - <<'PY'
-import base64
-from pathlib import Path
-
-import httpx
-
-
-def encode(path: str) -> str:
-    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
-
-
-response = httpx.post(
-    "http://127.0.0.1:8000/v1/vla/actions",
-    json={
-        "task": "pick up the red block",
-        "state": [0.0] * 14,
-        "camera_high": encode("/data/cam_high.png"),
-        "camera_left_wrist": encode("/data/cam_left_wrist.png"),
-        "camera_right_wrist": encode("/data/cam_right_wrist.png"),
-        "seed": 7,
-    },
-    timeout=300.0,
-)
-response.raise_for_status()
-print(response.json())
-PY
-```
-
-The response contains `canonical_normalized_actions`, `horizon`, `action_dim`, `checkpoint_variant`,
-`policy_verified`, and `verification_status`. A successful HTTP response confirms service and model execution only;
-the normalized base-model output is not a physical robot command.
-
 ## Native TeleFuser Service
 
 The native service uses the shared `PIPELINE_CONTRACT`, asynchronous task scheduler, pipeline pool, status API, runtime
-metrics, and `TFClient`. It keeps the standalone endpoint above as a small debugging path.
+metrics, and `TFClient`.
 
 The example resolves checkpoints under the existing `TF_MODEL_ZOO_PATH` layout:
 
@@ -346,3 +289,68 @@ inside its validation process so both sides use eager attention on the Python 3.
 inference keeps the upstream Triton MoE path through `telefuser.ops`; strict capture uses `--deterministic-moe` because
 the upstream kernel uses atomic accumulation and is not bitwise repeatable across separate processes. Artifact metadata
 records both `attention_backend` and `moe_backend`, and the comparator rejects mixed-backend artifacts.
+
+## Upstream vs TeleFuser Runtime
+
+Use the no-capture runtime benchmark after strict parity has passed. Unlike the parity capture, this benchmark does
+not install layer hooks or copy every intermediate tensor to CPU. Both implementations consume the same frozen
+preprocessed tensors and use the same initial noise, checkpoint paths, device type, software versions, attention
+backend, and MoE backend. The comparator rejects reports when any of these conditions differ.
+
+Run the official checkout and TeleFuser sequentially on the same otherwise-idle GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 work_dirs/.venv-lingbot-upstream/bin/python \
+  tools/validation/benchmark_lingbot_vla_v2_runtime.py \
+  --implementation upstream \
+  --upstream-root work_dirs/lingbot-vla-v2-upstream \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+  --input-artifact work_dirs/vla_upstream_parity/upstream_seed7.npz \
+  --seed 7 --device cuda:0 --warmup 3 --runs 20 \
+  --output work_dirs/vla_runtime_comparison/upstream_h100_runs20.json
+
+CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
+  tools/validation/benchmark_lingbot_vla_v2_runtime.py \
+  --implementation telefuser \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+  --input-artifact work_dirs/vla_upstream_parity/upstream_seed7.npz \
+  --seed 7 --device cuda:0 --warmup 3 --runs 20 \
+  --output work_dirs/vla_runtime_comparison/telefuser_h100_runs20.json
+
+.venv-vla/bin/python tools/validation/compare_lingbot_vla_v2_runtime_benchmarks.py \
+  --upstream work_dirs/vla_runtime_comparison/upstream_h100_runs20.json \
+  --telefuser work_dirs/vla_runtime_comparison/telefuser_h100_runs20.json \
+  --output-json work_dirs/vla_runtime_comparison/upstream_vs_telefuser_h100_runs20.json \
+  --output-markdown work_dirs/vla_runtime_comparison/upstream_vs_telefuser_h100_runs20.md
+```
+
+The following controlled run used upstream commit
+`be27333c9b5f2663b0ec33f069dd7dfd67fa32b5`, TeleFuser model source commit
+`86278d4a22d35f7cd8606dddd80ae3a4637e396c`, one NVIDIA H100 80GB HBM3, Python 3.10.12,
+PyTorch 2.11.0+cu130, CUDA 13.0, Transformers 4.57.3, eager attention, and the upstream Robby Triton MoE kernel.
+It used three warmup requests and 20 measured requests per scope.
+
+| Scope | Metric | Upstream | TeleFuser | TeleFuser change |
+|---|---:|---:|---:|---:|
+| Core model | mean | 669.382 ms | 660.100 ms | -1.39% |
+| Core model | p50 | 668.373 ms | 657.364 ms | -1.65% |
+| Core model | p95 | 677.683 ms | 669.343 ms | -1.23% |
+| Core model | p99 | 678.620 ms | 685.735 ms | +1.05% |
+| Runtime request | mean | 662.462 ms | 658.935 ms | -0.53% |
+| Runtime request | p50 | 661.707 ms | 656.974 ms | -0.72% |
+| Runtime request | p95 | 666.779 ms | 678.023 ms | +1.69% |
+| Runtime request | p99 | 669.705 ms | 682.456 ms | +1.90% |
+
+Negative change means TeleFuser is faster. `Core model` measures device-resident `sample_actions` with fixed inputs
+and noise. `Runtime request` additionally includes CPU-to-GPU tensor transfer, seeded noise construction, output
+validation, and CPU action delivery; image decoding and preprocessing are excluded equally on both sides. Peak CUDA
+allocated memory was 12,454.8 MiB for both implementations.
+
+The mean results differ by less than 1.5%, so this run shows no material TeleFuser inference overhead under the
+matched model boundary. The slightly higher TeleFuser p99 is within a small 20-sample run and should be tracked with
+more repetitions before drawing a tail-latency conclusion. Model loading time is recorded but not compared because
+the official and TeleFuser loaders construct processors and framework objects at different boundaries. This runtime
+benchmark does not replace the strict 38-tensor upstream parity result, include HTTP scheduling, or prove physical
+robot control semantics. Keep the generated reports under `work_dirs`; do not commit them.
