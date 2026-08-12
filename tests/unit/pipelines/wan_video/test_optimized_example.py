@@ -3,8 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from examples.wan_video.wan21_1_3b_text_to_video_fp8_h100 import get_pipeline as get_fp8_pipeline
-from examples.wan_video.wan21_1_3b_text_to_video_sol_fp8_h100 import (
+from examples.wan_video.wan21_1_3b_text_to_video_optimized_h100 import (
     make_attention_config,
     make_quant_config,
     run,
@@ -13,8 +12,8 @@ from telefuser.core.config import AttnImplType, QuantConfig, QuantKernelBackend,
 from telefuser.models.wan_video_dit import WanModel
 
 
-def test_wan_sol_quant_example_builds_compatible_configs() -> None:
-    attention = make_attention_config()
+def test_wan_optimized_example_builds_compatible_configs() -> None:
+    attention = make_attention_config("sol")
     quant = make_quant_config("torchao-fp8")
 
     assert attention.attn_impl is AttnImplType.SOL_ATTN
@@ -23,6 +22,18 @@ def test_wan_sol_quant_example_builds_compatible_configs() -> None:
     assert quant.enabled
     assert quant.quant_type is QuantType.TORCHAO_FP8
     assert quant.kernel_backend is QuantKernelBackend.TORCHAO
+
+
+def test_wan_optimized_example_builds_dense_attention_config() -> None:
+    attention = make_attention_config("dense")
+
+    assert attention.attn_impl is AttnImplType.TORCH_SDPA
+    assert attention.sparse_config is None
+
+
+def test_wan_optimized_example_rejects_unknown_attention() -> None:
+    with pytest.raises(ValueError, match="attention must be"):
+        make_attention_config("radial")
 
 
 @pytest.mark.parametrize(
@@ -34,7 +45,7 @@ def test_wan_sol_quant_example_builds_compatible_configs() -> None:
         ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
     ],
 )
-def test_wan_sol_quant_example_quantization_choices(name, quant_type, backend) -> None:
+def test_wan_optimized_example_quantization_choices(name, quant_type, backend) -> None:
     config = make_quant_config(name)
     if name == "none":
         assert not config.enabled
@@ -44,7 +55,7 @@ def test_wan_sol_quant_example_quantization_choices(name, quant_type, backend) -
     assert config.kernel_backend is backend
 
 
-def test_wan_sol_quant_example_rejects_unknown_quantization() -> None:
+def test_wan_optimized_example_rejects_unknown_quantization() -> None:
     with pytest.raises(ValueError, match="quantization must be"):
         make_quant_config("int8")
 
@@ -90,42 +101,7 @@ def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks(monkeypatch: pyte
     assert not module_filter("head", model.blocks[0][0])
 
 
-def test_dense_fp8_example_selects_dense_attention(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = {}
-
-    def fake_pipeline(**kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(
-        "examples.wan_video.wan21_1_3b_text_to_video_fp8_h100.get_quantized_pipeline",
-        fake_pipeline,
-    )
-
-    get_fp8_pipeline(model_root="model", quantization="tf-kernel-fp8")
-
-    assert captured["quantization"] == "tf-kernel-fp8"
-    assert captured["attention_config"].attn_impl is AttnImplType.TORCH_SDPA
-
-
-def test_dense_fp8_example_forwards_torchao_choice(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = {}
-
-    def fake_pipeline(**kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(
-        "examples.wan_video.wan21_1_3b_text_to_video_fp8_h100.get_quantized_pipeline",
-        fake_pipeline,
-    )
-
-    get_fp8_pipeline(model_root="model", quantization="torchao-fp8")
-
-    assert captured["quantization"] == "torchao-fp8"
-
-
-def test_wan_sol_quant_run_forwards_explicit_benchmark_parameters() -> None:
+def test_wan_optimized_run_forwards_explicit_benchmark_parameters() -> None:
     captured = {}
 
     def fake_pipeline(**kwargs):
@@ -154,6 +130,6 @@ def test_wan_sol_quant_run_forwards_explicit_benchmark_parameters() -> None:
     assert captured["sigma_shift"] == 5.0
 
 
-def test_wan_sol_quant_run_requires_width_and_height_together() -> None:
+def test_wan_optimized_run_requires_width_and_height_together() -> None:
     with pytest.raises(ValueError, match="width and height must be provided together"):
         run(lambda **_kwargs: object(), "prompt", width=832)
