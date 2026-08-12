@@ -99,6 +99,35 @@ def test_wan_self_attention_dispatches_sol_through_public_ops() -> None:
     assert captured["sparse_state"] is state
 
 
+def test_wan_self_attention_casts_fp32_qkv_only_for_active_sol() -> None:
+    module = SelfAttention(dim=128, num_heads=1)
+    config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=1, dense_layers=0)
+    state = SparseAttentionState(config, mask_map=None)
+    q = torch.randn(1, 4, 1, 128)
+
+    dense_qkv = module._prepare_sol_qkv(q, q, q, state)
+    assert all(tensor.dtype is torch.float32 for tensor in dense_qkv)
+
+    state.update(numeral_timestep=1)
+    sol_qkv = module._prepare_sol_qkv(q, q, q, state)
+    assert all(tensor.dtype is torch.bfloat16 for tensor in sol_qkv)
+
+
+def test_wan_self_attention_casts_projection_input_once_under_autocast() -> None:
+    module = SelfAttention(dim=128, num_heads=1)
+    config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=1, dense_layers=0)
+    state = SparseAttentionState(config, mask_map=None)
+    x = torch.randn(1, 4, 128)
+
+    with patch("telefuser.models.wan_video_dit.torch.is_autocast_enabled", return_value=True):
+        dense_x = module._prepare_sol_projection_input(x, state)
+        state.update(numeral_timestep=1)
+        sol_x = module._prepare_sol_projection_input(x, state)
+
+    assert dense_x is x
+    assert sol_x.dtype is torch.bfloat16
+
+
 @pytest.mark.gpu
 def test_wan_self_attention_executes_sol_on_h100(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):

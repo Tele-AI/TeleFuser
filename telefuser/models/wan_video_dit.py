@@ -121,6 +121,36 @@ class SelfAttention(nn.Module):
             return AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
         return self.attention_config
 
+    @staticmethod
+    def _is_sol_active(sparse_state: SparseAttentionState | None) -> bool:
+        return (
+            sparse_state is not None
+            and sparse_state.config.sparse_impl == "sol"
+            and not sparse_state.should_use_dense()
+        )
+
+    def _prepare_sol_projection_input(
+        self,
+        x: torch.Tensor,
+        sparse_state: SparseAttentionState | None,
+    ) -> torch.Tensor:
+        # TorchAO preserves Wan's FP32 residual dtype, unlike autocast nn.Linear.
+        # Cast once before q/k/v instead of casting all three projected tensors.
+        if self._is_sol_active(sparse_state) and x.dtype != torch.bfloat16 and torch.is_autocast_enabled(x.device.type):
+            return x.to(torch.bfloat16)
+        return x
+
+    def _prepare_sol_qkv(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sparse_state: SparseAttentionState | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._is_sol_active(sparse_state) and q.dtype != torch.bfloat16:
+            return q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)
+        return q, k, v
+
     def async_usp_forward(
         self,
         x: torch.Tensor,
@@ -185,6 +215,9 @@ class SelfAttention(nn.Module):
         sparse_state: SparseAttentionState | None = None,
         device_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
+        input_dtype = x.dtype
+        x = self._prepare_sol_projection_input(x, sparse_state)
+        projection_dtype = x.dtype
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(x))
         v = self.v(x)
@@ -193,6 +226,7 @@ class SelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
+        q, k, v = self._prepare_sol_qkv(q, k, v, sparse_state)
         if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
             q = rearrange(q, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
@@ -208,6 +242,11 @@ class SelfAttention(nn.Module):
             output_layout="BSND",
         )
         x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
+        if projection_dtype != input_dtype:
+            x = self.o(x)
+            return x.to(input_dtype)
+        if x.dtype != projection_dtype:
+            x = x.to(input_dtype)
         return self.o(x)
 
 
@@ -439,7 +478,7 @@ class WanModel(BaseModel):
 
     def enable_quant(self, quant_type: str | torch.dtype):
         """Enable quantization for transformer blocks."""
-        from telefuser.core.config import QuantConfig, QuantType
+        from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
 
         if isinstance(quant_type, QuantConfig):
             if quant_type.quant_type == QuantType.BNB_NF4:
@@ -469,6 +508,38 @@ class WanModel(BaseModel):
                 self.torchao_fp8_replaced_linear = replaced
                 logger.info(f"TorchAO FP8 converted {replaced} Linear layers")
                 self.quant_type = quant_type.quant_type
+                return
+            if quant_type.quant_type == QuantType.FP8:
+                if quant_type.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                    raise ValueError(
+                        "Wan FP8 online quantization requires the tf-kernel backend; "
+                        f"got {quant_type.kernel_backend.name}"
+                    )
+                logger.info("loading weights with tf-kernel FP8, start quantize linear layers")
+                from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+                include_names = quant_type.quantize_modules or ("blocks.",)
+
+                def module_filter(name: str, _module: nn.Module) -> bool:
+                    return any(token in name for token in include_names) and not any(
+                        token and token in name for token in quant_type.skip_modules
+                    )
+
+                replaced = count_linear_layers(self, module_filter=module_filter)
+                enable_fp8_gemm(
+                    self,
+                    options=FP8GemmOptions(
+                        cast_output_back=False,
+                        fp16_weight_storage="keep" if quant_type.keep_fp16_weight else "discard",
+                        materialize_fp8_on_wrap=True,
+                    ),
+                    module_filter=module_filter,
+                )
+                if replaced == 0:
+                    raise RuntimeError("Wan FP8 online quantization did not select any Linear layers")
+                self.tf_kernel_fp8_replaced_linear = replaced
+                self.quant_type = quant_type.quant_type
+                logger.info(f"Wan tf-kernel FP8 converted {replaced} transformer Linear layers")
                 return
             quant_type = torch.float8_e4m3fn if quant_type.quant_type == QuantType.FP8 else quant_type.quant_type
 

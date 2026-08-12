@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import pytest
+import torch
+
+from examples.wan_video.wan21_1_3b_text_to_video_fp8_h100 import get_pipeline as get_fp8_pipeline
+from examples.wan_video.wan21_1_3b_text_to_video_sol_fp8_h100 import (
+    make_attention_config,
+    make_quant_config,
+    run,
+)
+from telefuser.core.config import AttnImplType, QuantConfig, QuantKernelBackend, QuantType
+from telefuser.models.wan_video_dit import WanModel
+from telefuser.ops.fp8_gemm import FP8Linear
+
+
+def test_wan_sol_quant_example_builds_compatible_configs() -> None:
+    attention = make_attention_config()
+    quant = make_quant_config("torchao-fp8")
+
+    assert attention.attn_impl is AttnImplType.SOL_ATTN
+    assert attention.sparse_config is not None
+    assert attention.sparse_config.sol_tau == 1.0
+    assert quant.enabled
+    assert quant.quant_type is QuantType.TORCHAO_FP8
+    assert quant.kernel_backend is QuantKernelBackend.TORCHAO
+
+
+@pytest.mark.parametrize(
+    ("name", "quant_type", "backend"),
+    [
+        ("none", QuantType.FP8, QuantKernelBackend.AUTO),
+        ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
+        ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
+    ],
+)
+def test_wan_sol_quant_example_quantization_choices(name, quant_type, backend) -> None:
+    config = make_quant_config(name)
+    if name == "none":
+        assert not config.enabled
+    else:
+        assert config.enabled
+    assert config.quant_type is quant_type
+    assert config.kernel_backend is backend
+
+
+def test_wan_sol_quant_example_rejects_unknown_quantization() -> None:
+    with pytest.raises(ValueError, match="quantization must be"):
+        make_quant_config("int8")
+
+
+def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks() -> None:
+    model = WanModel.__new__(WanModel)
+    torch.nn.Module.__init__(model)
+    model.blocks = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.Linear(16, 8))])
+
+    model.enable_quant(
+        QuantConfig(
+            enabled=True,
+            quant_type=QuantType.FP8,
+            kernel_backend=QuantKernelBackend.TF_KERNEL,
+        )
+    )
+
+    assert model.tf_kernel_fp8_replaced_linear == 2
+    assert all(isinstance(module, FP8Linear) for module in model.blocks[0])
+    assert not model.blocks[0][0].options.cast_output_back
+    output = model.blocks[0](torch.randn(2, 8))
+    assert output.shape == (2, 8)
+
+
+def test_dense_fp8_example_selects_dense_attention(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_pipeline(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "examples.wan_video.wan21_1_3b_text_to_video_fp8_h100.get_quantized_pipeline",
+        fake_pipeline,
+    )
+
+    get_fp8_pipeline(model_root="model", quantization="tf-kernel-fp8")
+
+    assert captured["quantization"] == "tf-kernel-fp8"
+    assert captured["attention_config"].attn_impl is AttnImplType.TORCH_SDPA
+
+
+def test_dense_fp8_example_forwards_torchao_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_pipeline(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "examples.wan_video.wan21_1_3b_text_to_video_fp8_h100.get_quantized_pipeline",
+        fake_pipeline,
+    )
+
+    get_fp8_pipeline(model_root="model", quantization="torchao-fp8")
+
+    assert captured["quantization"] == "torchao-fp8"
+
+
+def test_wan_sol_quant_run_forwards_explicit_benchmark_parameters() -> None:
+    captured = {}
+
+    def fake_pipeline(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    output = run(
+        fake_pipeline,
+        "prompt",
+        seed=7,
+        width=832,
+        height=480,
+        num_inference_steps=50,
+        num_frames=81,
+        cfg_scale=5.0,
+        sigma_shift=5.0,
+    )
+
+    assert output is not None
+    assert captured["seed"] == 7
+    assert captured["width"] == 832
+    assert captured["height"] == 480
+    assert captured["num_inference_steps"] == 50
+    assert captured["num_frames"] == 81
+    assert captured["cfg_scale"] == 5.0
+    assert captured["sigma_shift"] == 5.0
+
+
+def test_wan_sol_quant_run_requires_width_and_height_together() -> None:
+    with pytest.raises(ValueError, match="width and height must be provided together"):
+        run(lambda **_kwargs: object(), "prompt", width=832)

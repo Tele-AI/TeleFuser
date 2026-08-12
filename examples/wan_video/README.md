@@ -90,6 +90,35 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py --resolution 480p --a
 - Video Frame Interpolation (VFI) with RIFE model for 30fps output
 - CFG parallel when cfg_scale > 1
 
+#### wan21_1_3b_text_to_video_fp8_h100.py
+
+Wan2.1 1.3B T2V with dense attention and online FP8 Linear layers.
+The VAE and text encoder remain BF16; only DiT transformer-block Linear layers are
+quantized. `tf-kernel-fp8` selects TeleFuser's dynamic W8A8 FP8 GEMM path;
+`torchao-fp8` selects TorchAO's dynamic-activation/FP8-weight implementation.
+Both paths keep BF16 outputs compatible with the rest of the Wan pipeline.
+
+```bash
+python examples/wan_video/wan21_1_3b_text_to_video_fp8_h100.py \
+    --model-root /path/to/Wan2.1-T2V-1.3B \
+    --quantization tf-kernel-fp8 \
+    --resolution 480p \
+    --output wan21_fp8.mp4
+```
+
+To use TorchAO instead:
+
+```bash
+python examples/wan_video/wan21_1_3b_text_to_video_fp8_h100.py \
+    --model-root /path/to/Wan2.1-T2V-1.3B \
+    --quantization torchao-fp8 \
+    --output wan21_torchao_fp8.mp4
+```
+
+Use `--quantization none` with the same example to run the BF16 dense baseline.
+The final log reports generation time, generated frames per second, and peak CUDA
+allocated/reserved memory.
+
 #### wan21_1_3b_text_to_video_hf.py
 
 T2V with HuggingFace format loading.
@@ -173,6 +202,69 @@ pipe_config.dit_config.attention_config = AttentionConfig.sol_attention()
 
 Sol-Attn is built into TeleFuser. Eligible BF16 self-attention calls use the sparse kernel; unsupported calls
 automatically use the existing dense fallback. The defaults follow the official Wan2.1 profile: Morton3D token ordering, dense layer 0, and 10 dense warm-up steps for the standard 50-step schedule.
+
+#### wan21_1_3b_text_to_video_sol_fp8_h100.py
+
+Combines Sol-Attn with online DiT quantization. The default `tf-kernel-fp8` mode
+quantizes transformer Linear layers while preserving BF16 Q/K/V tensors required
+by Sol-Attn. Dense warm-up calls and unsupported cross-attention calls use the
+normal dense attention fallback.
+
+```bash
+python examples/wan_video/wan21_1_3b_text_to_video_sol_fp8_h100.py \
+    --model-root /path/to/Wan2.1-T2V-1.3B \
+    --quantization tf-kernel-fp8 \
+    --dense-timesteps 10 \
+    --dense-layers 1 \
+    --tau 1.0 \
+    --threshold-type diag \
+    --kv-splits auto \
+    --output wan21_sol_fp8.mp4
+```
+
+Replace `--quantization tf-kernel-fp8` with `--quantization torchao-fp8` to use
+TorchAO FP8 with the same Sol-Attn configuration.
+
+For ablations, use `--quantization none` for BF16 + Sol-Attn and use the standalone
+FP8 example for FP8 + dense attention. Compare only runs with the same prompt,
+seed, resolution, frame count, inference steps, and kernel warm-up policy.
+
+##### H100 benchmark
+
+![Wan2.1 FP8 and Sol-Attn benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
+
+This generation cold-start benchmark runs each configuration in a separate process
+on one H100 80GB. It uses the official Wan2.1 T2V-1.3B example prompt, `832x480`,
+81 frames, 50 UniPC steps, CFG 5.0, sigma shift 5.0, and seed 42. Generation timing
+starts after pipeline loading, so it includes first-execution kernel/JIT costs but
+excludes model loading. Peak memory is `torch.cuda.max_memory_allocated()` over the
+same generation interval.
+
+| Quantization | Attention | Throughput (frames/s) | Peak allocated (GiB) |
+| --- | --- | ---: | ---: |
+| BF16 | Dense | 0.854 | 16.147 |
+| BF16 | Sol-Attn | 1.083 | 17.023 |
+| TorchAO FP8 | Dense | 0.674 | 17.601 |
+| TorchAO FP8 | Sol-Attn | 0.836 | 18.193 |
+| tf-kernel FP8 | Dense | 0.865 | 14.855 |
+| tf-kernel FP8 | Sol-Attn | 1.167 | 15.730 |
+
+The benchmark prompt is:
+
+> Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely
+> on a spotlighted stage.
+
+Example command (replace the quantization and example script for each ablation):
+
+```bash
+python examples/wan_video/wan21_1_3b_text_to_video_sol_fp8_h100.py \
+    --model-root /path/to/Wan2.1-T2V-1.3B \
+    --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
+    --quantization tf-kernel-fp8 \
+    --width 832 --height 480 \
+    --num-frames 81 --num-inference-steps 50 \
+    --sample-solver unipc --cfg-scale 5.0 --sigma-shift 5.0 --seed 42
+```
 
 #### wan21_1_3b_text_to_video_cache_calibrate.py
 
