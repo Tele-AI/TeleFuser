@@ -11,7 +11,6 @@ from examples.wan_video.wan21_1_3b_text_to_video_sol_fp8_h100 import (
 )
 from telefuser.core.config import AttnImplType, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.wan_video_dit import WanModel
-from telefuser.ops.fp8_gemm import FP8Linear
 
 
 def test_wan_sol_quant_example_builds_compatible_configs() -> None:
@@ -50,10 +49,23 @@ def test_wan_sol_quant_example_rejects_unknown_quantization() -> None:
         make_quant_config("int8")
 
 
-def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks() -> None:
+def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     model = WanModel.__new__(WanModel)
     torch.nn.Module.__init__(model)
     model.blocks = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.Linear(16, 8))])
+    calls = []
+
+    def fake_count(module, *, module_filter=None):
+        calls.append(("count", module, module_filter))
+        return 2
+
+    def fake_enable(module, *, options, module_filter=None):
+        calls.append(("enable", module, options, module_filter))
+        return module
+
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.tf_kernel", None)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.count_linear_layers", fake_count)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.enable_fp8_gemm", fake_enable)
 
     model.enable_quant(
         QuantConfig(
@@ -64,10 +76,18 @@ def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks() -> None:
     )
 
     assert model.tf_kernel_fp8_replaced_linear == 2
-    assert all(isinstance(module, FP8Linear) for module in model.blocks[0])
-    assert not model.blocks[0][0].options.cast_output_back
-    output = model.blocks[0](torch.randn(2, 8))
-    assert output.shape == (2, 8)
+    assert model.quant_type is QuantType.FP8
+    assert calls[0][0] == "count"
+    assert calls[0][1] is model
+    assert calls[1][0] == "enable"
+    assert calls[1][1] is model
+    options = calls[1][2]
+    assert not options.cast_output_back
+    assert options.fp16_weight_storage == "discard"
+    assert options.materialize_fp8_on_wrap
+    module_filter = calls[1][3]
+    assert module_filter("blocks.0.0", model.blocks[0][0])
+    assert not module_filter("head", model.blocks[0][0])
 
 
 def test_dense_fp8_example_selects_dense_attention(monkeypatch: pytest.MonkeyPatch) -> None:

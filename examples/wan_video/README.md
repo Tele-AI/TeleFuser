@@ -231,8 +231,6 @@ seed, resolution, frame count, inference steps, and kernel warm-up policy.
 
 ##### H100 benchmark
 
-![Wan2.1 FP8 and Sol-Attn benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
-
 This generation cold-start benchmark runs each configuration in a separate process
 on one H100 80GB. It uses the official Wan2.1 T2V-1.3B example prompt, `832x480`,
 81 frames, 50 UniPC steps, CFG 5.0, sigma shift 5.0, and seed 42. Generation timing
