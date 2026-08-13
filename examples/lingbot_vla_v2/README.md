@@ -4,6 +4,74 @@ This example loads the official LingBot-VLA v2 6B base checkpoint through TeleFu
 55-dimensional canonical action chunk. The RobotWin profile is used only to prepare the example observation; the
 result is not converted to physical RobotWin actions.
 
+The native HTTP and full-project CI evidence for TeleFuser commit `baf3d18` is recorded in
+[VALIDATION_BAF3D18.md](VALIDATION_BAF3D18.md).
+
+## Validated H100 Development Environment
+
+The strict upstream parity, runtime comparison, and native structured-service validation used the environment below.
+TeleFuser supports broader versions through its normal dependency ranges, but reproduce VLA parity and performance
+results with these versions before attributing a difference to code changes.
+
+| Component | Validated value |
+| --- | --- |
+| GPU | NVIDIA H100 80GB HBM3 (SM90) |
+| NVIDIA driver | `590.48.01` |
+| Python | `3.10.12` |
+| PyTorch | `2.11.0+cu130` |
+| TorchVision | `0.26.0+cu130` |
+| TorchAudio | `2.11.0+cu130` |
+| PyTorch CUDA runtime | `13.0` |
+| Transformers | `4.57.3` |
+| Triton | `3.6.0` |
+
+Create the VLA environment inside the repository. Install the CUDA 13.0 PyTorch wheels before TeleFuser so dependency
+resolution retains the validated PyTorch/CUDA ABI. Obtain the three exact wheels from the CUDA 13.0 PyTorch wheel
+index or artifact repository used by the deployment:
+
+```bash
+python3.10 -m venv .venv-vla
+source .venv-vla/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+
+# Replace /path/to/cu130-wheels with the deployment's CUDA 13.0 wheel directory.
+python -m pip install --no-index --find-links /path/to/cu130-wheels \
+  "torch==2.11.0+cu130" \
+  "torchvision==0.26.0+cu130" \
+  "torchaudio==2.11.0+cu130"
+
+python -m pip install -e ".[dev]"
+```
+
+The `.venv-vla` directory is ignored by Git and does not modify the system or Conda base environment. The commands
+below use its interpreter explicitly, so activating it is optional after installation. Verify the runtime before
+loading the checkpoint or comparing benchmark results:
+
+```bash
+.venv-vla/bin/python - <<'PY'
+import importlib.metadata as metadata
+
+import torch
+import transformers
+
+print("PyTorch:", torch.__version__)
+print("TorchVision:", metadata.version("torchvision"))
+print("TorchAudio:", metadata.version("torchaudio"))
+print("PyTorch CUDA:", torch.version.cuda)
+print("Transformers:", transformers.__version__)
+print("Triton:", metadata.version("triton"))
+print("GPU:", torch.cuda.get_device_name(0))
+
+assert torch.__version__ == "2.11.0+cu130"
+assert metadata.version("torchvision") == "0.26.0+cu130"
+assert metadata.version("torchaudio") == "2.11.0+cu130"
+assert torch.version.cuda == "13.0"
+assert transformers.__version__ == "4.57.3"
+assert metadata.version("triton") == "3.6.0"
+assert torch.cuda.is_available()
+PY
+```
+
 ## Inputs
 
 - Three RGB cameras in the upstream RobotWin order: high, left wrist, right wrist.
