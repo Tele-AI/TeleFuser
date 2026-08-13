@@ -231,8 +231,8 @@ reserved CUDA memory.
 
 ##### H100 benchmark
 
-This generation cold-start benchmark runs each configuration in a separate process
-on one H100 80GB. It uses the official Wan2.1 T2V-1.3B example prompt, `832x480`,
+This clean-process cold-start benchmark runs each configuration in a separate process
+with no other GPU processes on one H100 80GB. It uses the official Wan2.1 T2V-1.3B example prompt, `832x480`,
 81 frames, 50 UniPC steps, CFG 5.0, sigma shift 5.0, and seed 42. Generation timing
 starts after pipeline loading, so it includes first-execution kernel/JIT costs but
 excludes model loading. Peak memory is `torch.cuda.max_memory_allocated()` over the
@@ -241,9 +241,9 @@ same generation interval.
 | Quantization | Attention | Throughput (frames/s) | Peak allocated (GiB) |
 | --- | --- | ---: | ---: |
 | BF16 | Dense | 0.854 | 16.147 |
-| BF16 | Sol-Attn | 1.083 | 17.023 |
-| tf-kernel FP8 | Dense | 0.877 | 14.855 |
-| tf-kernel FP8 | Sol-FP8 (H100 CuTe BF16 QKV) | 1.158 | 15.730 |
+| BF16 | Sol-Attn | 1.105 | 17.023 |
+| tf-kernel FP8 | Dense | 0.879 | 14.855 |
+| tf-kernel FP8 | Sol-FP8 (H100 CuTe BF16 QKV) | 1.146 | 15.730 |
 
 ![Wan FP8-GEMM Sol-Attn H100 benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
 
