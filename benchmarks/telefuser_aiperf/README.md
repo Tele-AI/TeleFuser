@@ -113,9 +113,52 @@ TELEFUSER_AIPERF_CONCURRENCY=2 \
 ```
 
 Each terminal result is required to contain a finite `50x55` action chunk and the frozen structured result fields.
-The adapter retains an action hash, bounds, dimensions, verification status, target inference time, and peak memory;
-it does not copy full action arrays or Base64 cameras into AIPerf response records. This validates service execution
-and normalized action structure, not physical robot control semantics.
+The VLA adapter registers `vla_inference_time` and `vla_peak_memory` as AIPerf record metrics, so the normal AIPerf
+artifact contains their per-request values and aggregated p50/p95/p99 summaries alongside request latency, throughput,
+and success rate. It retains an action hash, bounds, dimensions, and verification status; it does not copy full action
+arrays or Base64 cameras into AIPerf response records. This validates service execution and normalized action structure,
+not physical robot control semantics.
+
+For a target-process RSS and per-GPU process-memory artifact, pass the native service PID. This is an external bounded
+sampler and does not change the TeleFuser service or any shared metric endpoint:
+
+```bash
+TELEFUSER_AIPERF_SERVICE_PID=<service-pid> \
+  bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
+```
+
+The resource summary is written to
+`artifacts/telefuser_aiperf/vla_structured/resource_summary.json` and includes sample count, RSS mean/p50/p95/p99,
+and per-GPU process-memory mean/p50/p95/p99. It is intentionally separate from AIPerf server metrics because RSS is
+an observer-side process-tree fact, while GPU telemetry remains target-side Prometheus data.
+
+The checked-in AIPerf configuration defaults to two excluded warmup requests and 20 measured requests. For a longer
+distribution, override the request count and concurrency without editing the configuration:
+
+```bash
+TELEFUSER_AIPERF_REQUESTS=100 \
+TELEFUSER_AIPERF_CONCURRENCY=2 \
+  bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
+```
+
+## VLA GPU Parallelism Assessment
+
+The current VLA policy validates `world_size == 1`, so this assessment is deliberately read-only and does not enable
+FSDP, tensor parallelism, or pipeline parallelism. It reports visible GPU capacity, current free memory, checkpoint
+size, and how many complete replicas fit using a measured resident-memory estimate:
+
+```bash
+.venv-vla/bin/python tools/validation/inspect_lingbot_vla_v2_gpu_plan.py \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --replica-memory-mib 13302 \
+  --output work_dirs/vla_gpu_plan.json
+```
+
+On the validated four-H100 host, the report showed four visible 80 GB GPUs and four estimated complete replicas at
+the 13,302 MiB measured process-memory baseline. This supports request-level multi-replica service capacity; it is
+not evidence that one model replica can be split across GPUs. Any future FSDP or tensor-parallel implementation must
+be introduced behind the VLA pipeline boundary and re-run the frozen preprocessing, velocity, action, and HTTP
+contract tests before it is considered equivalent.
 
 ## LingBot-World v2 Streaming
 

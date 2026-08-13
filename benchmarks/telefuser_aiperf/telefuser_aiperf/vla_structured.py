@@ -14,17 +14,21 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import orjson
-from aiperf.common.exceptions import NotInitializedError
+from aiperf.common.enums import MetricFlags, MetricSizeUnit, MetricTimeUnit
+from aiperf.common.exceptions import NoMetricValue, NotInitializedError
 from aiperf.common.models import (
     BaseResponseData,
     ErrorDetails,
     InferenceServerResponse,
     ParsedResponse,
+    ParsedResponseRecord,
     RequestInfo,
     RequestRecord,
     TextResponse,
 )
 from aiperf.endpoints.base_endpoint import BaseEndpoint
+from aiperf.metrics import BaseRecordMetric
+from aiperf.metrics.metric_dicts import MetricRecordDict
 from aiperf.plugin.schema.schemas import TransportMetadata
 from aiperf.transports.aiohttp_transport import AioHttpTransport
 
@@ -58,6 +62,43 @@ class VlaActionResponseData(BaseResponseData):
     verification_status: str
     inference_time_s: float | None = None
     peak_memory_mb: float | None = None
+
+
+class VlaInferenceTimeMetric(BaseRecordMetric[float]):
+    """Expose server-measured VLA inference time to AIPerf."""
+
+    tag = "vla_inference_time"
+    header = "VLA Inference Time"
+    short_header = "VLA Inference"
+    unit = MetricTimeUnit.SECONDS
+    display_unit = MetricTimeUnit.MILLISECONDS
+    display_order = 310
+    flags = MetricFlags.NONE
+
+    def _parse_record(self, record: ParsedResponseRecord, record_metrics: MetricRecordDict) -> float:
+        del record_metrics
+        for response in reversed(record.responses):
+            if isinstance(response.data, VlaActionResponseData) and response.data.inference_time_s is not None:
+                return response.data.inference_time_s
+        raise NoMetricValue("VLA inference time is not available in the structured response.")
+
+
+class VlaPeakMemoryMetric(BaseRecordMetric[float]):
+    """Expose server-measured peak accelerator memory to AIPerf."""
+
+    tag = "vla_peak_memory"
+    header = "VLA Peak Memory"
+    short_header = "VLA Peak Memory"
+    unit = MetricSizeUnit.MEGABYTES
+    display_order = 311
+    flags = MetricFlags.NONE
+
+    def _parse_record(self, record: ParsedResponseRecord, record_metrics: MetricRecordDict) -> float:
+        del record_metrics
+        for response in reversed(record.responses):
+            if isinstance(response.data, VlaActionResponseData) and response.data.peak_memory_mb is not None:
+                return response.data.peak_memory_mb
+        raise NoMetricValue("VLA peak memory is not available in the structured response.")
 
 
 def _finite_number(value: Any, *, name: str, allow_none: bool = False) -> float | None:
