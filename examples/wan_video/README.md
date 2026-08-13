@@ -245,8 +245,6 @@ same generation interval.
 | tf-kernel FP8 | Dense | 0.879 | 14.855 |
 | tf-kernel FP8 | Sol-FP8 (H100 CuTe BF16 QKV) | 1.146 | 15.730 |
 
-![Wan FP8-GEMM Sol-Attn H100 benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
-
 The benchmark prompt is:
 
 > Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely
