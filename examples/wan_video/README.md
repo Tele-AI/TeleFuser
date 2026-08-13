@@ -188,8 +188,6 @@ Quantization choices:
 
 - `none`: BF16 DiT
 - `tf-kernel-fp8`: TeleFuser dynamic W8A8 FP8 GEMM
-- `torchao-fp8`: TorchAO dynamic-activation/FP8-weight
-- `bnb-nf4`: bitsandbytes NF4
 
 Only DiT transformer-block Linear layers are quantized; the VAE and text encoder
 remain BF16. Select the two optimization axes independently:
@@ -222,8 +220,8 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --kv-splits auto
 ```
 
-Replace `tf-kernel-fp8` with `torchao-fp8` or `bnb-nf4` without changing
-the attention mode. `sol-fp8` quantizes post-RoPE Q/K/V per 64-token block and
+`tf-kernel-fp8` is the FP8-GEMM implementation benchmarked below. `sol-fp8`
+quantizes post-RoPE Q/K/V per 64-token block and
 runs exact Sol-Attn QK/PV GEMMs with FP8 inputs and FP32 accumulation; routing
 summaries remain BF16/FP32. The SOL tuning options apply to both `sol` modes.
 The final log reports generation time, frames per second, and peak allocated and
@@ -242,10 +240,10 @@ same generation interval.
 | --- | --- | ---: | ---: |
 | BF16 | Dense | 0.854 | 16.147 |
 | BF16 | Sol-Attn | 1.083 | 17.023 |
-| TorchAO FP8 | Dense | 0.674 | 17.601 |
-| TorchAO FP8 | Sol-Attn | 0.836 | 18.193 |
-| tf-kernel FP8 | Dense | 0.865 | 14.855 |
-| tf-kernel FP8 | Sol-Attn | 1.167 | 15.730 |
+| tf-kernel FP8 | Dense | 0.877 | 14.855 |
+| tf-kernel FP8 | Sol-FP8 | 0.927 | 15.730 |
+
+![Wan FP8-GEMM Sol-Attn H100 benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
 
 The benchmark prompt is:
 

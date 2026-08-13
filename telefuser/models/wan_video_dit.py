@@ -148,11 +148,7 @@ class SelfAttention(nn.Module):
         v: torch.Tensor,
         sparse_state: SparseAttentionState | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None]:
-        if (
-            self._is_sol_active(sparse_state)
-            and sparse_state is not None
-            and sparse_state.config.sol_fp8
-        ):
+        if self._is_sol_active(sparse_state) and sparse_state is not None and sparse_state.config.sol_fp8:
             q, q_scale = quantize_fp8_per_block(q)
             k, k_scale = quantize_fp8_per_block(k)
             v, v_scale = quantize_fp8_per_block(v)
