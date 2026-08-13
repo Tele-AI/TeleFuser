@@ -187,6 +187,9 @@ def attention(
     return_lse: bool = False,
     sequence_lengths: list[int] | None = None,
     cu_seqlens: Tensor | None = None,
+    q_scale: Tensor | None = None,
+    k_scale: Tensor | None = None,
+    v_scale: Tensor | None = None,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -403,6 +406,9 @@ def attention(
 
     # Sol-Attn
     elif attn_impl == AttnImplType.SOL_ATTN and SOL_ATTN_AVAILABLE and sol_attn is not None:
+        sparse_config = attention_config.sparse_config
+        if sparse_config is None:
+            raise RuntimeError("Sol-Attn requires sparse attention configuration")
         eligible = (
             attn_mask is None
             and not is_causal
@@ -411,13 +417,12 @@ def attention(
             and q.shape == k.shape == v.shape
             and q.ndim == 4
             and q.shape[-1] == 128
-            and q.dtype == torch.bfloat16
+            and (q.dtype == torch.bfloat16 or (sparse_config.sol_fp8 and q.dtype == torch.float8_e4m3fn))
             and q.is_cuda
         )
         if eligible:
-            sparse_config = attention_config.sparse_config
-            if sparse_config is None:
-                raise RuntimeError("Sol-Attn requires sparse attention configuration")
+            if q.dtype == torch.float8_e4m3fn and any(scale is None for scale in (q_scale, k_scale, v_scale)):
+                raise ValueError("FP8 Sol-Attn requires q_scale, k_scale, and v_scale")
             try:
                 output = sol_attn(
                     q.contiguous(),
@@ -427,12 +432,21 @@ def attention(
                     tau=sparse_config.sol_tau,
                     thresh_type=sparse_config.sol_threshold_type,
                     kv_splits=_resolve_sol_kv_splits(q, sparse_config.sol_kv_splits),
+                    q_scale=q_scale,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
                 )
             except (RuntimeError, TypeError, ValueError) as error:
                 msg = "Sol-Attn execution failed, falling back to TORCH_SDPA"
                 if msg not in _warned_attn_fallback:
                     _warned_attn_fallback.add(msg)
                     logger.warning("%s: %s", msg, error)
+                if q.dtype == torch.float8_e4m3fn:
+                    from telefuser.ops.fp8_attention import dequantize_fp8_per_block
+
+                    q = dequantize_fp8_per_block(q, q_scale, torch.bfloat16)
+                    k = dequantize_fp8_per_block(k, k_scale, torch.bfloat16)
+                    v = dequantize_fp8_per_block(v, v_scale, torch.bfloat16)
 
     # Fallback to SDPA
     if output is None:

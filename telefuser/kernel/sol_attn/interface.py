@@ -27,8 +27,8 @@ def _validate_inputs(
         raise ValueError("q, k, and v must share shape [B, T, H, 128]")
     if q.shape[1] == 0 or q.shape[3] != 128:
         raise ValueError("Sol-Attn requires T > 0 and head dimension 128")
-    if any(x.dtype != torch.bfloat16 for x in (q, k, v)):
-        raise TypeError("q, k, and v must use torch.bfloat16")
+    if any(x.dtype not in (torch.bfloat16, torch.float8_e4m3fn) for x in (q, k, v)):
+        raise TypeError("q, k, and v must use torch.bfloat16 or torch.float8_e4m3fn")
     if q.device.type != "cuda" or k.device != q.device or v.device != q.device:
         raise ValueError("q, k, and v must be on the same CUDA device")
     if not (q.is_contiguous() and k.is_contiguous() and v.is_contiguous()):
@@ -343,13 +343,48 @@ def sol_attn(
     kv_splits: int = 1,
     sink_tokens: int = 0,
     sink_start: int | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute noncausal Sol-Attn for contiguous BF16 BTHD tensors.
+    """Compute noncausal Sol-Attn for contiguous BF16 or FP8 BTHD tensors.
 
     ``sink_start`` and ``sink_tokens`` keep every KV block overlapping the
     corresponding contiguous token range exact for all queries. Omitting
     ``sink_start`` places the range at the token suffix.
     """
+
+    fp8_inputs = any(x.dtype == torch.float8_e4m3fn for x in (q, k, v))
+    if fp8_inputs:
+        if not all(x.dtype == torch.float8_e4m3fn for x in (q, k, v)):
+            raise TypeError("q, k, and v must all use the same dtype")
+        if any(scale is None for scale in (q_scale, k_scale, v_scale)):
+            raise ValueError("FP8 Sol-Attn requires q_scale, k_scale, and v_scale")
+        _validate_inputs(q, k, v, thresh_type, sink_tokens, sink_start)
+        if kv_splits != 1:
+            raise ValueError("FP8 Sol-Attn currently supports kv_splits=1")
+        blocks = (q.shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
+        expected_scale_shape = (q.shape[0], blocks, q.shape[2])
+        for name, tensor in (("q_scale", q_scale), ("k_scale", k_scale), ("v_scale", v_scale)):
+            if tensor.shape != expected_scale_shape or tensor.device != q.device:
+                raise ValueError(f"{name} must have shape {expected_scale_shape} on the Q/K/V device")
+            if not tensor.is_contiguous():
+                raise ValueError(f"{name} must be contiguous")
+        from .triton_ref import sol_attn as triton_sol_attn
+
+        return triton_sol_attn(
+            q,
+            k,
+            v,
+            scale=scale,
+            tau=tau,
+            thresh_type=thresh_type,
+            sink_tokens=sink_tokens,
+            sink_start=sink_start,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
 
     arch = _validate_inputs(
         q,

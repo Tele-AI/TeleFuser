@@ -182,6 +182,7 @@ Attention choices:
 
 - `dense`: PyTorch SDPA
 - `sol`: Sol-Attn with dense warm-up and fallback calls
+- `sol-fp8`: FP8 QKV inputs with FP8 Sol-Attn QK/PV GEMMs
 
 Quantization choices:
 
@@ -212,7 +213,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
 # Sol-Attn + tf-kernel FP8
 python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --model-root /path/to/Wan2.1-T2V-1.3B \
-    --attention sol \
+    --attention sol-fp8 \
     --quantization tf-kernel-fp8 \
     --dense-timesteps 10 \
     --dense-layers 1 \
@@ -222,7 +223,9 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
 ```
 
 Replace `tf-kernel-fp8` with `torchao-fp8` or `bnb-nf4` without changing
-the attention mode. The SOL tuning options apply only when `--attention sol`.
+the attention mode. `sol-fp8` quantizes post-RoPE Q/K/V per 64-token block and
+runs exact Sol-Attn QK/PV GEMMs with FP8 inputs and FP32 accumulation; routing
+summaries remain BF16/FP32. The SOL tuning options apply to both `sol` modes.
 The final log reports generation time, frames per second, and peak allocated and
 reserved CUDA memory.
 

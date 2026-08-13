@@ -90,14 +90,15 @@ def make_attention_config(
     """Build the selected dense or Sol-Attn configuration."""
     if attention == "dense":
         return AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
-    if attention != "sol":
-        raise ValueError("attention must be 'dense' or 'sol'")
+    if attention not in ("sol", "sol-fp8"):
+        raise ValueError("attention must be 'dense', 'sol', or 'sol-fp8'")
     return AttentionConfig.sol_attention(
         dense_timesteps=dense_timesteps,
         dense_layers=dense_layers,
         tau=tau,
         threshold_type=threshold_type,
         kv_splits=kv_splits,
+        sol_fp8=attention == "sol-fp8",
     )
 
 
@@ -189,7 +190,7 @@ def run(
 @click.option("--sigma-shift", default=PPL_CONFIG["sigma_shift"], type=float)
 @click.option("--sample-solver", default="euler", type=click.Choice(["euler", "unipc"]))
 @click.option("--model-root", default=PPL_CONFIG["model_root"])
-@click.option("--attention", default="dense", type=click.Choice(["dense", "sol"]))
+@click.option("--attention", default="dense", type=click.Choice(["dense", "sol", "sol-fp8"]))
 @click.option(
     "--quantization",
     default="none",

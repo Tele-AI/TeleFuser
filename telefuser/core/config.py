@@ -151,6 +151,7 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0  # Sol-Attn routing threshold multiplier
     sol_threshold_type: str = "diag"  # Sol-Attn threshold estimator: "diag" or "exact"
     sol_kv_splits: int | str = "auto"  # Auto selects split 4 for long SM90 sequences
+    sol_fp8: bool = False  # Quantize post-RoPE Q/K/V activations for FP8 Sol-Attn
 
     def __post_init__(self) -> None:
         if self.sparse_impl != "sol":
@@ -229,6 +230,7 @@ class AttentionConfig:
         tau: float = 1.0,
         threshold_type: str = "diag",
         kv_splits: int | str = "auto",
+        sol_fp8: bool = False,
         **kwargs: any,
     ) -> AttentionConfig:
         """Create a Sol-Attn config for dynamic sparse video self-attention."""
@@ -241,6 +243,7 @@ class AttentionConfig:
                 sol_tau=tau,
                 sol_threshold_type=threshold_type,
                 sol_kv_splits=kv_splits,
+                sol_fp8=sol_fp8,
             ),
             **kwargs,
         )

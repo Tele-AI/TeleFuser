@@ -6,6 +6,7 @@ import torch
 from telefuser.core.config import AttentionConfig, AttnImplType, SparseAttentionConfig
 from telefuser.models.wan_video_dit import SelfAttention, WanModel, precompute_freqs_cis_3d
 from telefuser.ops.attention import SparseAttentionState, attention_impl
+from telefuser.ops.fp8_attention import dequantize_fp8_per_block, quantize_fp8_per_block
 
 
 def test_wan_model_enables_sol_attention_state() -> None:
@@ -106,11 +107,13 @@ def test_wan_self_attention_casts_fp32_qkv_only_for_active_sol() -> None:
     q = torch.randn(1, 4, 1, 128)
 
     dense_qkv = module._prepare_sol_qkv(q, q, q, state)
-    assert all(tensor.dtype is torch.float32 for tensor in dense_qkv)
+    assert all(tensor.dtype is torch.float32 for tensor in dense_qkv[:3])
+    assert dense_qkv[3] is None
 
     state.update(numeral_timestep=1)
     sol_qkv = module._prepare_sol_qkv(q, q, q, state)
-    assert all(tensor.dtype is torch.bfloat16 for tensor in sol_qkv)
+    assert all(tensor.dtype is torch.bfloat16 for tensor in sol_qkv[:3])
+    assert sol_qkv[3] is None
 
 
 def test_wan_self_attention_casts_projection_input_once_under_autocast() -> None:
@@ -126,6 +129,27 @@ def test_wan_self_attention_casts_projection_input_once_under_autocast() -> None
 
     assert dense_x is x
     assert sol_x.dtype is torch.bfloat16
+
+
+def test_wan_self_attention_quantizes_qkv_for_fp8_sol() -> None:
+    module = SelfAttention(dim=128, num_heads=1).to(torch.bfloat16)
+    config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=0, sol_fp8=True)
+    state = SparseAttentionState(config, mask_map=None)
+    captured = {}
+
+    def fake_attention(q, k, v, **kwargs):
+        captured.update({"q": q, "k": k, "v": v, **kwargs})
+        return q.to(torch.bfloat16)
+
+    x = torch.randn(1, 65, 128, dtype=torch.bfloat16)
+    freqs = torch.zeros(65, 64, dtype=torch.bfloat16)
+    with patch("telefuser.models.wan_video_dit.attn_func", side_effect=fake_attention):
+        module.default_forward(x, freqs, freqs, sparse_state=state)
+
+    assert captured["q"].dtype is torch.float8_e4m3fn
+    assert captured["q_scale"].shape == (1, 2, 1)
+    restored = dequantize_fp8_per_block(captured["q"], captured["q_scale"], torch.bfloat16)
+    assert torch.isfinite(restored).all()
 
 
 @pytest.mark.gpu

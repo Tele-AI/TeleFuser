@@ -19,6 +19,7 @@ def test_wan_optimized_example_builds_compatible_configs() -> None:
     assert attention.attn_impl is AttnImplType.SOL_ATTN
     assert attention.sparse_config is not None
     assert attention.sparse_config.sol_tau == 1.0
+    assert not attention.sparse_config.sol_fp8
     assert quant.enabled
     assert quant.quant_type is QuantType.TORCHAO_FP8
     assert quant.kernel_backend is QuantKernelBackend.TORCHAO
@@ -29,6 +30,13 @@ def test_wan_optimized_example_builds_dense_attention_config() -> None:
 
     assert attention.attn_impl is AttnImplType.TORCH_SDPA
     assert attention.sparse_config is None
+
+
+def test_wan_optimized_example_builds_fp8_sol_config() -> None:
+    attention = make_attention_config("sol-fp8")
+    assert attention.attn_impl is AttnImplType.SOL_ATTN
+    assert attention.sparse_config is not None
+    assert attention.sparse_config.sol_fp8
 
 
 def test_wan_optimized_example_rejects_unknown_attention() -> None:

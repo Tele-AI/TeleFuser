@@ -37,6 +37,7 @@ from telefuser.offload import (
 from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
+from telefuser.ops.fp8_attention import quantize_fp8_per_block
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
@@ -146,10 +147,19 @@ class SelfAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         sparse_state: SparseAttentionState | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None]:
+        if (
+            self._is_sol_active(sparse_state)
+            and sparse_state is not None
+            and sparse_state.config.sol_fp8
+        ):
+            q, q_scale = quantize_fp8_per_block(q)
+            k, k_scale = quantize_fp8_per_block(k)
+            v, v_scale = quantize_fp8_per_block(v)
+            return q, k, v, (q_scale, k_scale, v_scale)
         if self._is_sol_active(sparse_state) and q.dtype != torch.bfloat16:
-            return q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)
-        return q, k, v
+            return q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16), None
+        return q, k, v, None
 
     def async_usp_forward(
         self,
@@ -226,7 +236,7 @@ class SelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
-        q, k, v = self._prepare_sol_qkv(q, k, v, sparse_state)
+        q, k, v, scales = self._prepare_sol_qkv(q, k, v, sparse_state)
         if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
             q = rearrange(q, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
@@ -240,6 +250,9 @@ class SelfAttention(nn.Module):
             sparse_state=sparse_state,
             input_layout="BSND",
             output_layout="BSND",
+            q_scale=None if scales is None else scales[0],
+            k_scale=None if scales is None else scales[1],
+            v_scale=None if scales is None else scales[2],
         )
         x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
         if projection_dtype != input_dtype:

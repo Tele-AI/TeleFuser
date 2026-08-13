@@ -6,7 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 BLOCK_SIZE = 64
 HEAD_DIM = 128
 THRESHOLD_GROUP_SIZE = 64
@@ -25,14 +24,18 @@ SUMMARY_PAD = 64
 def _reduce_kv_kernel(
     k,
     v,
+    k_scale,
+    v_scale,
     kc,
     vc,
     T,
     TP,
     NPAD,
     H: tl.constexpr,
+    N: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
@@ -45,6 +48,10 @@ def _reduce_kv_kernel(
     )
     k_values = tl.load(k + offsets, mask=valid[:, None], other=0.0)
     v_values = tl.load(v + offsets, mask=valid[:, None], other=0.0)
+    if FP8:
+        scale_offset = (batch * N + block) * H + head
+        k_values = k_values.to(tl.float32) * tl.load(k_scale + scale_offset)
+        v_values = v_values.to(tl.float32) * tl.load(v_scale + scale_offset)
     block_len = tl.minimum(BLOCK, T - block * BLOCK).to(tl.float32)
     summary_offsets = (
         ((batch * NPAD + block) * H + head) * D + dims
@@ -95,6 +102,7 @@ def _reduce_kc_stats_kernel(
 @triton.jit
 def _diag_threshold_kernel(
     q,
+    q_scale,
     kc_mean,
     kc_var_diag,
     threshold,
@@ -106,6 +114,7 @@ def _diag_threshold_kernel(
     D: tl.constexpr,
     BLOCK: tl.constexpr,
     TAU: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
@@ -117,6 +126,8 @@ def _diag_threshold_kernel(
         + dims[None, :]
     )
     q_values = tl.load(q + offsets, mask=valid[:, None], other=0.0)
+    if FP8:
+        q_values = q_values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
     q_len = tl.minimum(BLOCK, T - q_block * BLOCK).to(tl.float32)
     q_centroid = tl.sum(q_values.to(tl.float32), axis=0) / q_len
     mean_kc = tl.load(kc_mean + batch_head * D + dims)
@@ -137,6 +148,7 @@ def _diag_threshold_kernel(
 @triton.jit
 def _pool_query_kernel(
     q,
+    q_scale,
     q_bar,
     T,
     TP,
@@ -144,6 +156,7 @@ def _pool_query_kernel(
     N: tl.constexpr,
     D: tl.constexpr,
     BLOCK: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
@@ -155,6 +168,8 @@ def _pool_query_kernel(
         + dims[None, :]
     )
     values = tl.load(q + offsets, mask=valid[:, None], other=0.0)
+    if FP8:
+        values = values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
     q_len = tl.minimum(BLOCK, T - q_block * BLOCK).to(tl.float32)
     centroid = tl.sum(values.to(tl.float32), axis=0) / q_len
     tl.store(q_bar + (batch_head * N + q_block) * D + dims, centroid)
@@ -215,6 +230,8 @@ def _reduce_kv(
     v: torch.Tensor,
     *,
     tokens: int | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     batch, padded_tokens, heads, head_dim = k.shape
     tokens = padded_tokens if tokens is None else int(tokens)
@@ -226,17 +243,23 @@ def _reduce_kv(
         dtype=torch.bfloat16,
     )
     vc = torch.zeros_like(kc)
+    fp8_inputs = k.dtype == torch.float8_e4m3fn
+    dummy_scale = torch.ones((1,), device=k.device, dtype=torch.float32)
     _reduce_kv_kernel[(blocks, batch * heads)](
         k,
         v,
+        k_scale if fp8_inputs else dummy_scale,
+        v_scale if fp8_inputs else dummy_scale,
         kc,
         vc,
         tokens,
         padded_tokens,
         padded_blocks,
         heads,
+        blocks,
         head_dim,
         BLOCK_SIZE,
+        FP8=fp8_inputs,
     )
     return kc, vc
 
@@ -248,6 +271,7 @@ def _compute_diag_threshold(
     tau: float,
     scale: float,
     tokens: int | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch, padded_tokens, heads, head_dim = q.shape
     tokens = padded_tokens if tokens is None else int(tokens)
@@ -278,6 +302,7 @@ def _compute_diag_threshold(
     )
     _diag_threshold_kernel[(blocks, batch_heads)](
         q,
+        q_scale if q_scale is not None else torch.ones((1,), device=q.device, dtype=torch.float32),
         kc_mean,
         kc_var_diag,
         threshold,
@@ -289,6 +314,7 @@ def _compute_diag_threshold(
         head_dim,
         BLOCK_SIZE,
         tau,
+        FP8=q.dtype == torch.float8_e4m3fn,
         num_warps=4,
         num_stages=2,
     )
@@ -302,6 +328,7 @@ def _compute_exact_threshold(
     tau: float,
     scale: float,
     tokens: int | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch, padded_tokens, heads, head_dim = q.shape
     tokens = padded_tokens if tokens is None else int(tokens)
@@ -326,6 +353,7 @@ def _compute_exact_threshold(
     )
     _pool_query_kernel[(blocks, batch_heads)](
         q,
+        q_scale if q_scale is not None else torch.ones((1,), device=q.device, dtype=torch.float32),
         q_bar,
         tokens,
         padded_tokens,
@@ -333,6 +361,7 @@ def _compute_exact_threshold(
         blocks,
         head_dim,
         BLOCK_SIZE,
+        FP8=q.dtype == torch.float8_e4m3fn,
         num_warps=4,
         num_stages=1,
     )
@@ -365,8 +394,11 @@ def prepare(
     scale: float,
     thresh_type: str = "diag",
     tokens: int | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    kc, vc = _reduce_kv(k, v, tokens=tokens)
+    kc, vc = _reduce_kv(k, v, tokens=tokens, k_scale=k_scale, v_scale=v_scale)
     if thresh_type == "exact":
         threshold = _compute_exact_threshold(
             q,
@@ -374,6 +406,7 @@ def prepare(
             tau=tau,
             scale=scale,
             tokens=tokens,
+            q_scale=q_scale,
         )
     else:
         threshold = _compute_diag_threshold(
@@ -382,6 +415,7 @@ def prepare(
             tau=tau,
             scale=scale,
             tokens=tokens,
+            q_scale=q_scale,
         )
     return kc, vc, threshold
 
