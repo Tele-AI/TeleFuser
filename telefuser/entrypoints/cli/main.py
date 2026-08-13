@@ -158,6 +158,14 @@ def serve(
 @click.option(
     "--queue-size", default=0, type=int, help="Maximum queued sessions; 0 rejects when retained slots are full"
 )
+@click.option("--enable-autoscaling", is_flag=True, help="Dynamically load workers from the configured GPU map")
+@click.option("--autoscaling-min-workers", default=1, type=int, help="Initially loaded worker replicas")
+@click.option(
+    "--autoscaling-target-utilization", default=0.75, type=float, help="Target retained-session utilization"
+)
+@click.option("--autoscaling-hysteresis", default=0.10, type=float, help="Scale decision hysteresis band")
+@click.option("--autoscaling-cooldown-seconds", default=30.0, type=float, help="Minimum time between scales")
+@click.option("--autoscaling-interval-seconds", default=5.0, type=float, help="Autoscaling control interval")
 @click.option(
     "--control-idle-timeout",
     default=None,
@@ -170,9 +178,9 @@ def serve(
 @click.option("--room-empty-timeout", default=30, type=int, help="Seconds to keep a session after room becomes empty")
 @click.option(
     "--worker-mode",
-    type=click.Choice(["in-process", "process"], case_sensitive=False),
+    type=click.Choice(["in-process", "process", "process-nccl"], case_sensitive=False),
     default="in-process",
-    help="Worker isolation mode; the current runtime supports in-process only",
+    help="Worker isolation mode; process-nccl keeps LiveKit transport in the parent and migrates model state over NCCL",
 )
 @click.option(
     "--security-level",
@@ -197,6 +205,12 @@ def stream_serve(
     max_sessions_per_worker: int | None,
     worker_gpu_map: str | None,
     queue_size: int,
+    enable_autoscaling: bool,
+    autoscaling_min_workers: int,
+    autoscaling_target_utilization: float,
+    autoscaling_hysteresis: float,
+    autoscaling_cooldown_seconds: float,
+    autoscaling_interval_seconds: float,
     control_idle_timeout: float | None,
     session_timeout: int,
     token_ttl: int,
@@ -235,6 +249,12 @@ def stream_serve(
         max_sessions_per_worker=max_sessions_per_worker,
         worker_gpu_map=worker_gpu_map,
         queue_size=queue_size,
+        autoscaling_enabled=enable_autoscaling,
+        autoscaling_min_workers=autoscaling_min_workers,
+        autoscaling_target_utilization=autoscaling_target_utilization,
+        autoscaling_hysteresis=autoscaling_hysteresis,
+        autoscaling_cooldown_seconds=autoscaling_cooldown_seconds,
+        autoscaling_interval_seconds=autoscaling_interval_seconds,
         control_idle_timeout=control_idle_timeout,
         session_timeout=session_timeout,
         token_ttl=token_ttl,

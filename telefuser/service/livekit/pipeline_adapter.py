@@ -15,9 +15,18 @@ class LiveKitPipelineAdapter:
     def __init__(self, *, security_level: SecurityLevel | None = None, config: ServerConfig | None = None) -> None:
         self.stream_service = StreamPipelineService(security_level=security_level, config=config)
 
-    def start(self, pipeline_file: str, *, skip_validation: bool = False, gpu_num: int = 1) -> None:
-        """Load and start a stream pipeline."""
-        if not self.stream_service.start_service(pipeline_file, skip_validation=skip_validation, gpu_num=gpu_num):
+    def start(
+        self,
+        pipeline_file: str,
+        *,
+        skip_validation: bool = False,
+        gpu_num: int = 1,
+        gpu_ids: list[str] | None = None,
+    ) -> None:
+        """Load and start a stream pipeline on the assigned CUDA devices."""
+        if not self.stream_service.start_service(
+            pipeline_file, skip_validation=skip_validation, gpu_num=gpu_num, gpu_ids=gpu_ids
+        ):
             raise RuntimeError(f"Failed to start LiveKit stream pipeline: {pipeline_file}")
 
     @property
@@ -50,3 +59,9 @@ class LiveKitPipelineAdapter:
     def configure_session_capacity(self, max_sessions: int | None) -> dict[str, object] | None:
         """Configure and return the loaded pipeline's optional capacity profile."""
         return self.stream_service.configure_session_capacity(max_sessions)
+
+    def runtime_metrics(self) -> dict[str, float | int] | None:
+        """Return optional model-service scheduling measurements for placement."""
+        service = getattr(self.stream_service, "service", None)
+        metrics = getattr(service, "runtime_metrics", None)
+        return dict(metrics()) if callable(metrics) else None

@@ -15,6 +15,7 @@ from telefuser.pipelines.wan_video.text_encoding import TextEncodingStage
 from telefuser.pipelines.wan_video.vae import VAEStage
 
 from .denoising import ABotWorldDenoisingStage
+from .taew_vae import ABotWorldTAEWDecodeStage
 
 
 @dataclass
@@ -50,7 +51,7 @@ class ABotWorldPipeline(BasePipeline):
         self.width_division_factor = 32
 
     def _get_stages(self) -> list:
-        return [self.vae_stage, self.text_encoding_stage, self.denoise_stage]
+        return [self.vae_stage, self.text_encoding_stage, self.denoise_stage, self.taew_decode_stage]
 
     def init(self, module_manager: ModuleManager, config: ABotWorldPipelineConfig) -> None:
         if config.dit_config.parallel_config.world_size != 1:
@@ -67,6 +68,7 @@ class ABotWorldPipeline(BasePipeline):
         self._model_info = module_manager.get_model_info()
         self.config = config
         self.vae_stage = VAEStage("abot_world_vae", module_manager, config.vae_config)
+        self.taew_decode_stage = ABotWorldTAEWDecodeStage("abot_world_taew_decode", module_manager, config.vae_config)
         self.text_encoding_stage = TextEncodingStage(
             "abot_world_text_encoding", module_manager, config.text_encoding_config
         )

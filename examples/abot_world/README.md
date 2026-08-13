@@ -1,7 +1,7 @@
 # ABot-World-0-5B-LF
 
-This example exposes a local single-GPU HTTP entry point and a LiveKit entry
-point. The HTTP controller is useful for model debugging:
+This example exposes a local single-GPU HTTP entry point and a concurrent
+TurboServe-style LiveKit entry point. The HTTP controller is useful for model debugging:
 
 ```bash
 python examples/abot_world/abot_world_interactive_web.py \
@@ -12,8 +12,9 @@ python examples/abot_world/abot_world_interactive_web.py \
 
 The browser controls WASD/arrow movement and IJKL camera rotation. Connecting
 creates the image-conditioned causal session but does not advance the DiT
-until a non-empty control state is received. Generated blocks remain ordered
-in a bounded FIFO and the producer waits when the browser is behind.
+until a non-empty control state is received. Generated blocks remain ordered in a bounded per-session queue. The default
+`latest` mode drops the oldest complete block, with metrics, only when a slow
+browser fills the queue; `lossless` mode applies scheduling backpressure instead.
 The six sink latents and rolling tail use fixed logical RoPE positions, so the
 global session frame number does not index beyond the trained local window.
 
@@ -48,6 +49,15 @@ telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
   --port 8088 --skip-validation
 ```
 
+For multiple GPUs, use one worker per GPU, for example
+`--num-workers 4 --worker-gpu-map '0;1;2;3' --worker-mode process-nccl`. This mode loads each
+GPU replica in a spawned child so Python, asyncio, CUDA contexts, and model execution are isolated across GPUs.
+It keeps room transport in the parent and enables NCCL session migration; its NCCL group is fixed, so do not
+enable process autoscaling. Use plain `--worker-mode process` plus a non-zero queue and
+`--enable-autoscaling --autoscaling-min-workers 1` for on-demand independent replicas.
+Each worker continuously batches compatible retained sessions through both DiT
+and cached VAE decode; GPU IDs are passed explicitly to the ABot model factory.
+
 Serve the reused browser page in another terminal:
 
 ```bash
@@ -79,7 +89,13 @@ ABOT_WORLD_TEST_IMAGE=/path/to/initial.png \
 pytest -m "gpu and slow" tests/integration/test_abot_world_smoke.py -v
 ```
 
-The smoke uses the public 480x832 shape, a fixed seed, and a fixed control
-state. It checks that every block decodes frames and that the session's
-emitted-frame counter matches the observed count. It is a generation contract
-test, not a visual-quality or long-horizon parity claim.
+The multi-session benchmark exercises 30 continuously batched blocks:
+
+```bash
+python tools/validation/benchmark_abot_turboserve.py \
+  --model-root /path/to/ABot-World-0-5B-LF --image /path/to/initial.png \
+  --sessions 2 --chunks 30 --batch-size 2 --output /tmp/abot-turboserve.json
+```
+
+The smoke and benchmark check generation, session-state isolation, block ordering,
+and batching; they are not visual-quality or long-horizon parity claims.

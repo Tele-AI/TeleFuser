@@ -51,6 +51,7 @@ class MultiSessionLiveKitWorker:
         pipeline_adapter: LiveKitPipelineAdapter | None = None,
         room_client_factory: Callable[[], RoomClient] | None = None,
         gpu_num: int = 1,
+        gpu_ids: list[str] | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.config = config
@@ -59,7 +60,8 @@ class MultiSessionLiveKitWorker:
         self.event_sink = event_sink or NullWorkerEventSink()
         self.pipeline_adapter = pipeline_adapter or LiveKitPipelineAdapter()
         self.room_client_factory = room_client_factory or LiveKitRoomClient
-        self.gpu_num = gpu_num
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+        self.gpu_num = len(self.gpu_ids) if self.gpu_ids else gpu_num
         self._sessions: dict[str, LiveKitSessionRunner] = {}
         self._session_worker_statuses: dict[str, str] = {}
         self._started = False
@@ -73,6 +75,7 @@ class MultiSessionLiveKitWorker:
             self.pipeline_file,
             skip_validation=skip_validation,
             gpu_num=self.gpu_num,
+            gpu_ids=self.gpu_ids,
         )
         profile = None
         configure_capacity = getattr(self.pipeline_adapter, "configure_session_capacity", None)

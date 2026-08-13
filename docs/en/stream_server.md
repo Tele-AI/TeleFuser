@@ -22,16 +22,16 @@ flowchart LR
     C <-->|WebRTC| LK[LiveKit signaling + SFU]
     V <-->|WebRTC| LK
     API --> A[Registry + admission]
-    A --> W[One in-process model worker]
+    A --> W[Model worker pool]
     W <-->|one room runner per session| LK
-    W --> S[One shared service instance]
+    W --> S[One service instance per worker]
     S --> P1[Pipeline session A]
     S --> P2[Pipeline session B]
 ```
 
 | Term | Meaning and ownership |
 |---|---|
-| Service process | One `telefuser stream-serve` process containing the HTTP API, registry, admission scheduler, and current in-process worker. |
+| Service process | One `telefuser stream-serve` parent containing the HTTP API, registry, admission scheduler, and either in-process or spawned model workers. |
 | Model worker | Loads the pipeline file once, owns one service instance, and accounts for retained-session capacity. |
 | Service instance | The single object returned by `get_service()`; model weights and its pipeline actor graph are loaded once. |
 | HTTP session | TeleFuser's public admission and lifecycle record. It maps one-to-one to a room name and, after admission, a room runner. |
@@ -39,9 +39,16 @@ flowchart LR
 | Pipeline session | Per-user state returned by `BidirectionalService.create_session()`, such as control, noise, VAE, and model-cache state. |
 | Stage actor | An internal pipeline execution owner. It is not the model worker that owns retained-session capacity. |
 
-The current runtime supports exactly one `in-process` model worker and calls `get_service()` once. Multiple users do
-not load multiple model replicas. Additional replicas require separate `stream-serve` processes and external
-request routing; their registries, queues, health, and session state are independent.
+`worker_mode=in-process` loads every configured replica in the API process. `worker_mode=process` uses the
+multiprocessing `spawn` context and loads exactly one service instance in each model-worker process. The parent
+process remains model-free and owns admission, health, and lifecycle state; capacity and session events cross a
+IPC control plane rather than executing model work on the API event loop. Each process worker retains and
+batches its own sessions, so one slow or failed GPU worker does not serialize the other GPU workers.
+
+`worker_mode=process-nccl` keeps the LiveKit room transport in the parent and puts only the model session in
+fixed, one-GPU child processes. At a chunk boundary it moves retained model tensors with NCCL point-to-point
+operations, then switches the parent route after the ownership commit. Plain `process` mode continues to report
+`migration_supported=false`.
 
 ## Service contracts and capacity
 
@@ -355,8 +362,8 @@ Use `telefuser stream-serve --help` for the complete option list. The options wi
 | Option | Default | Semantics |
 |---|---:|---|
 | `--host`, `--port` | `0.0.0.0`, `8088` | HTTP bind address |
-| `--num-workers` | `1` | Must remain `1` in the current runtime |
-| `--worker-gpu-map` | unset | One logical GPU group for the current worker, for example `0,1,2,3` |
+| `--num-workers` | `1` | Number of model replicas; process mode starts one child per worker |
+| `--worker-gpu-map` | unset | Semicolon-separated GPU group per worker, for example `0;1;2;3` |
 | `--max-sessions-per-worker` | `auto` | Hardware-calculated retained sessions; an integer is a safety ceiling |
 | `--queue-size` | `0` | HTTP admission FIFO length; zero rejects at capacity |
 | `--control-idle-timeout` | `10` | LingBot lease idle threshold when another session waits |
@@ -364,7 +371,7 @@ Use `telefuser stream-serve --help` for the complete option list. The options wi
 | `--token-ttl` | `3600` | Join-token lifetime |
 | `--controller-timeout` | `60` | Reserved; not currently enforced |
 | `--room-empty-timeout` | `30` | Reserved; not currently enforced |
-| `--worker-mode` | `in-process` | `process` is accepted by the CLI but not implemented by the runtime |
+| `--worker-mode` | `in-process` | Use `process` for independent multi-GPU model executors |
 
 The CLI can fall back to `TELEFUSER_LIVEKIT_URL`, `TELEFUSER_LIVEKIT_API_KEY`,
 `TELEFUSER_LIVEKIT_API_SECRET`, `TELEFUSER_LIVEKIT_WORKER_GPU_MAP`,
@@ -376,24 +383,30 @@ value is unset. Environment-only settings include `TELEFUSER_LIVEKIT_DEFAULT_FPS
 Other Click options currently pass their displayed defaults explicitly, so use the CLI option rather than a
 same-named environment variable for those fields.
 
-In the current in-process runtime, `worker_gpu_map` records scheduler topology and its group size becomes the
-`gpu_num` passed to `get_service()`. It does not set `CUDA_VISIBLE_DEVICES`, isolate devices, or rewrite
-`ModelRuntimeConfig`. Select physical GPUs with `CUDA_VISIBLE_DEVICES` and ensure that the pipeline uses the
-corresponding process-local device indices. For example:
+In process mode every worker group is passed to the child pipeline as explicit device IDs. Multiple process workers
+require `worker_gpu_map`; duplicate GPU IDs are rejected before models load. Process isolation separates Python,
+asyncio, CUDA contexts, and model executors, but it does not rewrite `CUDA_VISIBLE_DEVICES`. IDs in the map are
+logical within the parent's visible-device set. For four one-GPU worker processes on physical GPUs 4-7, use:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 \
-telefuser stream-serve PIPE_PATH --worker-gpu-map 0,1,2,3
+telefuser stream-serve PIPE_PATH \
+  --num-workers 4 \
+  --worker-gpu-map '0;1;2;3' \
+  --worker-mode process
 ```
 
-This exposes physical GPUs 4-7 as local devices 0-3 and passes `gpu_num=4`; it still loads one service instance.
+This exposes physical GPUs 4-7 as local devices 0-3 and loads four independent service instances. A group may
+contain multiple device IDs for a model replica that itself uses tensor, sequence, or pipeline parallelism. In
+`in-process` mode the same map still binds adapters explicitly, but all replicas share the API process and its
+Python runtime.
 
 ## Observability
 
 | Signal | Exact interpretation |
 |---|---|
-| `workers_busy` | Model workers retaining at least one session; with the current runtime this is `0` or `1`. |
-| `workers_idle` | Non-failed model workers retaining no sessions. |
+| `workers_busy` | Model workers retaining at least one session. |
+| `workers_idle` | Active model workers in the `idle` state; stopped autoscaling replicas are excluded. |
 | `workers_failed` | Workers whose aggregate state is failed. |
 | `queued_sessions` | HTTP admission queue depth only; it excludes LingBot lease and pipeline artifact waits. |
 | `livekit_connected` | Derived from aggregate worker status being `starting_pipeline`, `running`, or `draining`; it is not a direct LiveKit server probe. |

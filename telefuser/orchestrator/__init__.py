@@ -7,6 +7,7 @@ parallel execution, dependency management, and result routing.
 from __future__ import annotations
 
 from .artifact_save_stage import ArtifactSaveConfig, ArtifactSaveStage
+from .batched_stage_actor import BatchedLocalStageActor
 from .parallel_worker_stage_actor import ParallelWorkerStageActor
 from .pipeline_orchestrator import FlexiblePipelineOrchestrator, RequestState
 from .stage_wrapper import EnhancedPipelineStageWrapper, StageConfig, StageResult, StageTask
@@ -38,6 +39,7 @@ from .streaming_pipeline_orchestrator import (
 __all__ = [
     "ArtifactSaveConfig",
     "ArtifactSaveStage",
+    "BatchedLocalStageActor",
     "FlexiblePipelineOrchestrator",
     "RequestState",
     "EnhancedPipelineStageWrapper",

@@ -1,7 +1,9 @@
 # ABot-World-0-5B-LF
 
-TeleFuser provides a single-GPU integration for the public ABot-World-0-5B-LF
-long-forcing checkpoint. There are two supported transport entry points:
+TeleFuser provides a TurboServe-style concurrent integration for the public
+ABot-World-0-5B-LF long-forcing checkpoint. Each model replica remains single-GPU,
+while a LiveKit deployment can run one replica per configured GPU and continuously
+batch compatible retained sessions. There are two supported transport entry points:
 
 * Native HTTP controller for local debugging:
 
@@ -71,10 +73,21 @@ VAE and text stages plus the model-specific `ABotWorldDenoisingStage`.
 `ABotWorldDiT` uses the public TeleFuser attention operations and the official
 four-step x0-prediction causal sampler.
 
-`ABotWorldInteractivePipeline` retains the prompt embedding, initial image
-latent, self/cross KV caches, scheduler, RNG, and VAE temporal cache between
-control blocks. The initial integration supports one GPU and one retained
-causal session.
+`ABotWorldInteractivePipeline` retains the prompt embedding, initial-image
+latent, self/cross KV caches, scheduler, RNG, and VAE temporal cache per session.
+The scheduler owns one GPU execution thread per replica and batches compatible
+sessions through DiT and cached VAE decode. Per-session RNG draws, KV/VAE cache
+scatter, relative RoPE positions, and chunk counters remain isolated.
+
+The service performs a real one-session warmup before admission, separates retained
+state from temporary workspace memory, and applies the resulting capacity ceiling. The
+planner treats the measured one-item workspace as batch-scaled: for each candidate
+capacity it budgets every retained session plus `min(candidate, max_batch_size)`
+workspace items under a 10% free-memory reserve. This avoids advertising a capacity
+that is safe only for batch size one.
+Idle state can be suspended to CPU. A two-phase chunk-boundary migration snapshot
+contains prompt state, RNG, KV, VAE caches, counters, and ownership epoch; the
+in-process LiveKit router changes model ownership only after target import succeeds.
 
 ## Controls And Idle Behavior
 
@@ -84,9 +97,11 @@ not advance the DiT with an empty action state. A non-empty control snapshot
 starts the next three-latent causal block. Releasing all keys stops new model
 execution without discarding frames already queued for playback.
 
-The browser consumes decoded frames in order at 12 FPS. The bounded FIFO
-applies producer backpressure when playback is behind, so normal playback does
-not drop generated blocks.
+The browser consumes decoded frames in order at 12 FPS. Every session has a
+bounded output queue. The default `latest` delivery mode evicts the oldest complete
+video block when a slow client fills that queue and increments drop metrics, keeping
+control latency bounded. `delivery_mode=lossless` instead applies per-session
+scheduling backpressure; it does not block other ready sessions.
 
 ## KV And RoPE
 
@@ -100,7 +115,46 @@ This fixed logical position policy is an intentional difference from the
 original non-sink ABot baseline and must be evaluated as part of any future
 long-horizon quality claim.
 
-## Tests
+## Multi-GPU and autoscaling
+
+Assign exactly one numeric GPU ID to each ABot worker. For example, four warm
+replicas with hardware-sized retained-session capacity use:
+
+```bash
+telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  --num-workers 4 --worker-gpu-map '0;1;2;3' \
+  --worker-mode process-nccl \
+  --max-sessions-per-worker auto --queue-size 32 \
+  --port 8088 --skip-validation
+```
+
+`process-nccl` is the cross-process TurboServe baseline. The parent keeps each
+LiveKit room, ingress, and egress alive; a source GPU quiesces at a chunk boundary,
+the target GPU receives retained CUDA tensors directly with NCCL P2P, and routing
+changes only after source release and ownership commit. Controls received during
+that window are buffered in the parent and replayed on the committed owner.
+
+It deliberately uses a fixed one-GPU-per-worker NCCL group, so it does not combine
+with process autoscaling. Plain `--worker-mode process` remains independent-replica
+batching and reports `migration_supported: false`; it is not a TurboServe migration
+baseline. In-process migration remains useful for debugging, but stages state via CPU.
+
+For plain `process` mode, optional cold-replica autoscaling starts only the requested
+minimum and scales within the GPUs declared above. For example:
+
+```bash
+  --enable-autoscaling --autoscaling-min-workers 1 \
+  --autoscaling-target-utilization 0.75 \
+  --autoscaling-hysteresis 0.10 \
+  --autoscaling-cooldown-seconds 30 --autoscaling-interval-seconds 5
+```
+
+Because scale-out loads a checkpoint, autoscaling with multiple workers requires
+a non-zero session queue.
+
+## Tests and benchmark
 
 CPU contract tests cover model conversion, sink KV rolling, RoPE boundaries,
 session cleanup, idle behavior, FIFO backpressure, and action layout:
@@ -121,12 +175,31 @@ python -m pytest -m "gpu and slow" \
   tests/integration/test_abot_world_smoke.py -v -s
 ```
 
-The smoke is a generation and cache contract test. It does not establish
-visual quality, prompt fidelity, or parity over an unbounded session.
+The deterministic continuous-batching benchmark runs multiple sessions for
+30 blocks and writes stage/batch latency plus throughput JSON:
 
-## Scope
+```bash
+python tools/validation/benchmark_abot_turboserve.py \
+  --model-root /path/to/ABot-World-0-5B-LF \
+  --image /path/to/initial.png \
+  --sessions 2 --chunks 30 --batch-size 2 \
+  --output /tmp/abot-turboserve.json
+```
 
-The integration is intentionally single-GPU and advertises one retained causal
-session per worker. Both transports use the same interactive pipeline and
-fixed six-sink/twelve-tail KV policy; LiveKit adds only the shared TeleFuser
-transport and room lifecycle.
+The smoke and benchmark are generation, cache-isolation, batching, and ordering
+contract tests. They do not establish visual quality, prompt fidelity, or parity
+over an unbounded session. Every ABot replica remains single-GPU; multi-GPU
+deployments scale with independent replicas rather than tensor parallelism.
+
+For a service-level workload with bursty arrivals, independent keyboard activity,
+and playback-paced consumers, run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/validation/benchmark_abot_turboserve_concurrent.py \
+  --model-root /path/to/ABot-World-0-5B-LF --image /path/to/initial.png \
+  --sessions 4 --duration-seconds 12 --arrival-window-seconds 1.5 \
+  --max-batch-size 4 --output /tmp/abot-concurrent.json
+```
+
+This reports delivered FPS, first-chunk latency, scheduler queue wait, model compute
+time, observed batch-size distribution, and per-session latest-queue drops.

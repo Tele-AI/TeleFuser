@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -106,7 +107,7 @@ class ABotWorldDenoisingStage(BaseStage):
         self_cache: list[dict[str, Any]],
         cross_cache: list[dict[str, Any]],
         current_start: int,
-        generator: torch.Generator,
+        generator: torch.Generator | Sequence[torch.Generator],
         scheduler: FlowMatchScheduler,
     ) -> torch.Tensor:
         current = latent
@@ -133,7 +134,23 @@ class ABotWorldDenoisingStage(BaseStage):
                 )
             x0 = self._x0_prediction(flow_prediction, current, timestep, scheduler)
             if index < len(timesteps) - 1:
-                noise = torch.randn(x0.shape, generator=generator, dtype=x0.dtype, device=self.device)
+                if isinstance(generator, Sequence):
+                    if len(generator) != x0.shape[0]:
+                        raise ValueError("ABot batched denoising requires one generator per session")
+                    noise = torch.cat(
+                        [
+                            torch.randn(
+                                (1, *x0.shape[1:]),
+                                generator=item_generator,
+                                dtype=x0.dtype,
+                                device=self.device,
+                            )
+                            for item_generator in generator
+                        ],
+                        dim=0,
+                    )
+                else:
+                    noise = torch.randn(x0.shape, generator=generator, dtype=x0.dtype, device=self.device)
                 current = scheduler.add_noise(x0, noise, timesteps[index + 1])
             else:
                 current = x0
