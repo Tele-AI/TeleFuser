@@ -370,6 +370,23 @@ def sol_attn(
                 raise ValueError(f"{name} must have shape {expected_scale_shape} on the Q/K/V device")
             if not tensor.is_contiguous():
                 raise ValueError(f"{name} must be contiguous")
+        # Use the production CuTe path on SM90 until its native FP8 mainloop
+        # is available; the pointer Triton fallback is substantially slower.
+        arch = tuple(torch.cuda.get_device_capability(q.device))
+        if arch == (9, 0) and _cute_runtime_available():
+            from telefuser.ops.fp8_attention import dequantize_fp8_per_block
+
+            return sol_attn(
+                dequantize_fp8_per_block(q, q_scale, torch.bfloat16),
+                dequantize_fp8_per_block(k, k_scale, torch.bfloat16),
+                dequantize_fp8_per_block(v, v_scale, torch.bfloat16),
+                scale=scale,
+                tau=tau,
+                thresh_type=thresh_type,
+                kv_splits=kv_splits,
+                sink_tokens=sink_tokens,
+                sink_start=sink_start,
+            )
         from .triton_ref import sol_attn as triton_sol_attn
 
         return triton_sol_attn(

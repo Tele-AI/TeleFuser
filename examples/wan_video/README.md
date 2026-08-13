@@ -182,7 +182,7 @@ Attention choices:
 
 - `dense`: PyTorch SDPA
 - `sol`: Sol-Attn with dense warm-up and fallback calls
-- `sol-fp8`: FP8 QKV inputs with FP8 Sol-Attn QK/PV GEMMs
+- `sol-fp8`: FP8 Sol-Attn mode; on H100 it keeps QKV in BF16 for the optimized CuTe kernel
 
 Quantization choices:
 
@@ -220,10 +220,12 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --kv-splits auto
 ```
 
-`tf-kernel-fp8` is the FP8-GEMM implementation benchmarked below. `sol-fp8`
-quantizes post-RoPE Q/K/V per 64-token block and
-runs exact Sol-Attn QK/PV GEMMs with FP8 inputs and FP32 accumulation; routing
-summaries remain BF16/FP32. The SOL tuning options apply to both `sol` modes.
+`tf-kernel-fp8` is the FP8-GEMM implementation benchmarked below. On H100,
+`sol-fp8` keeps QKV in BF16 so it can use the optimized CuTe SM90 Sol-Attn
+mainloop; this avoids a slower quantize/dequantize detour because a native FP8
+CuTe Sol-Attn mainloop is not available yet. On architectures with a native FP8
+Sol-Attn backend, it quantizes post-RoPE Q/K/V per 64-token block and runs exact
+FP8 QK/PV GEMMs with FP32 accumulation. The SOL tuning options apply to both modes.
 The final log reports generation time, frames per second, and peak allocated and
 reserved CUDA memory.
 
@@ -241,7 +243,7 @@ same generation interval.
 | BF16 | Dense | 0.854 | 16.147 |
 | BF16 | Sol-Attn | 1.083 | 17.023 |
 | tf-kernel FP8 | Dense | 0.877 | 14.855 |
-| tf-kernel FP8 | Sol-FP8 | 0.927 | 15.730 |
+| tf-kernel FP8 | Sol-FP8 (H100 CuTe BF16 QKV) | 1.158 | 15.730 |
 
 ![Wan FP8-GEMM Sol-Attn H100 benchmark](assets/wan21_fp8_sol_h100_benchmark.png)
 
