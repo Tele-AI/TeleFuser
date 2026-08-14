@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import socket
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -26,6 +27,80 @@ from .session_registry import SessionRecord
 from .token_service import LiveKitTokenService
 from .turboserve import TurboServeOwnership, TurboServeOwnershipTable
 from .worker import LiveKitWorker
+
+# The parent retains at most one decoded payload waiting for the LiveKit
+# transport. The transport acknowledges a payload as soon as it dequeues it,
+# which permits exactly one next payload to be prefetched while the current
+# one is paced onto WebRTC. Consequently, at most two fully-materialized
+# payloads per session live outside ABot's own bounded/latest output queue:
+# one being published and one in this parent queue.
+_MODEL_OUTPUT_PARENT_QUEUE_SIZE = 1
+_VIDEO_OUTPUT_TYPES = frozenset({"preview", "chunk"})
+_TERMINAL_OUTPUT_TYPES = frozenset({"error", "done"})
+
+
+@dataclass(frozen=True)
+class _ModelOutput:
+    """One child-model payload plus the worker that owns its output credit."""
+
+    worker_id: str
+    payload: dict[str, Any]
+
+
+async def _pump_model_outputs(
+    adapter: Any,
+    service: Any,
+    *,
+    worker_id: str,
+    session_id: str,
+    credits: asyncio.BoundedSemaphore,
+    events: Any,
+) -> None:
+    """Pull only after a parent credit, so IPC cannot outrun WebRTC playback."""
+    chunks = adapter.pull_chunks(session_id)
+    iterator = chunks.__aiter__()
+    credit_held = False
+    try:
+        while True:
+            await credits.acquire()
+            credit_held = True
+            try:
+                payload = await iterator.__anext__()
+            except StopAsyncIteration:
+                credits.release()
+                credit_held = False
+                return
+            except asyncio.CancelledError:
+                credits.release()
+                credit_held = False
+                raise
+            except Exception:
+                credits.release()
+                credit_held = False
+                raise
+            # No await separates dequeue from IPC submission. If migration
+            # pauses this task, a payload is either sent exactly once or has
+            # not been removed from the ABot generator.
+            events.put(
+                {
+                    "type": "model_output",
+                    "worker_id": worker_id,
+                    "session_id": session_id,
+                    "payload": payload,
+                    "runtime_metrics": adapter.runtime_metrics() or {},
+                    "session_runtime_metrics": service.runtime_metrics(session_id),
+                }
+            )
+            # The credit now belongs to the parent queue and transport path.
+            credit_held = False
+    finally:
+        if credit_held:
+            with contextlib.suppress(ValueError):
+                credits.release()
+        aclose = getattr(chunks, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(Exception):
+                await aclose()
 
 
 class _ProcessPipelineAdapter:
@@ -71,6 +146,18 @@ class _ParentTransportSink:
         self.pool._transport_finished(session_id)
         self.pool._event_sink.on_session_finished(worker_id, session_id, error)
 
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        callback = getattr(self.pool._event_sink, "on_control_received", None)
+        if callable(callback):
+            callback(worker_id, session_id)
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        callback = getattr(self.pool._event_sink, "on_chunk_published", None)
+        if callable(callback):
+            callback(worker_id, session_id, frames, first_frame_at)
+
 
 class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
     """TurboServe-compatible parent transport / GPU model-process pool."""
@@ -79,19 +166,32 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
         super().__init__(specs, **kwargs)
         self._worker_target = _nccl_model_worker_main
         self._ownership = TurboServeOwnershipTable()
-        self._model_outputs: dict[str, asyncio.Queue[dict | None]] = {}
+        self._model_outputs: dict[str, asyncio.Queue[_ModelOutput | None]] = {}
+        self._model_output_inflight: set[str] = set()
+        self._model_output_drained: dict[str, asyncio.Event] = {}
+        self._model_output_dropped: dict[str, int] = {}
         self._transport_workers: dict[str, LiveKitWorker] = {}
         self._transport_tasks: dict[str, asyncio.Task[None]] = {}
         self._migrating_controls: dict[str, list[dict]] = {}
-        self._worker_runtime_metrics: dict[str, dict[str, float | int]] = {}
+        # Worker snapshots include scalar timings/counters plus the bounded
+        # scheduler mode string (``batched`` or ``round_robin``).
+        self._worker_runtime_metrics: dict[str, dict[str, float | int | str]] = {}
         self._session_runtime_metrics: dict[str, dict[str, float | int]] = {}
         self._migration_total_ms: list[float] = []
         self._nccl_ranks: dict[str, int] = {}
         self._migration_lock = asyncio.Lock()
+        self._initializing_workers = False
 
     async def start(self, *, skip_validation: bool = False) -> None:
-        await super().start(skip_validation=skip_validation)
-        if len(self._active_workers) > 1:
+        # ``ProcessLiveKitWorkerPool.start`` calls this class's ``scale_to``
+        # once per replica. Defer communicator construction until all initial
+        # workers have completed their sequential checkpoint load.
+        self._initializing_workers = True
+        try:
+            await super().start(skip_validation=skip_validation)
+        finally:
+            self._initializing_workers = False
+        if len(self._active_workers) > 1 and not self._nccl_ranks:
             await self._init_nccl()
 
     async def scale_to(self, target_workers: int) -> int:
@@ -106,7 +206,7 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
                 )
                 self._nccl_ranks.clear()
             actual = await super().scale_to(target_workers)
-            if actual > 1:
+            if actual > 1 and not self._initializing_workers:
                 await self._init_nccl()
             return actual
 
@@ -140,17 +240,33 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
                 await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
 
     def create_model_session(self, worker_id: str, session_id: str, config: dict) -> None:
-        self._model_outputs[session_id] = asyncio.Queue()
+        output: asyncio.Queue[_ModelOutput | None] = asyncio.Queue(maxsize=_MODEL_OUTPUT_PARENT_QUEUE_SIZE)
+        drained = asyncio.Event()
+        drained.set()
+        self._model_outputs[session_id] = output
+        self._model_output_drained[session_id] = drained
+        self._model_output_dropped[session_id] = 0
         self._pipeline_routes[session_id] = worker_id
         self._session_workers[session_id] = worker_id
         self._ownership.register(session_id, worker_id)
-        self._send(worker_id, {"type": "model_create", "session_id": session_id, "config": dict(config)})
+        self._send(
+            worker_id,
+            {
+                "type": "model_create",
+                "session_id": session_id,
+                "config": dict(config),
+                "model_output_credit_window": _MODEL_OUTPUT_PARENT_QUEUE_SIZE,
+            },
+        )
 
     def push_model_chunk(self, session_id: str, chunk: dict) -> None:
         if session_id in self._migrating_controls:
             self._migrating_controls[session_id].append(dict(chunk))
             return
-        self._send(self._pipeline_routes[session_id], {"type": "model_push", "session_id": session_id, "chunk": dict(chunk)})
+        self._send(
+            self._pipeline_routes[session_id],
+            {"type": "model_push", "session_id": session_id, "chunk": dict(chunk)},
+        )
 
     def close_model_session(self, session_id: str) -> None:
         worker_id = self._pipeline_routes.pop(session_id, None)
@@ -160,13 +276,122 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
         self._session_runtime_metrics.pop(session_id, None)
         if worker_id in self._active_workers:
             self._send(worker_id, {"type": "model_close", "session_id": session_id})
-        if (output := self._model_outputs.pop(session_id, None)) is not None:
-            output.put_nowait(None)
+        self._close_model_output(session_id)
 
     async def pull_model_chunks(self, session_id: str):
-        output = self._model_outputs[session_id]
-        while (payload := await output.get()) is not None:
-            yield payload
+        output = self._model_outputs.get(session_id)
+        if output is None:
+            return
+        while True:
+            item = await output.get()
+            if item is None:
+                return
+            # This is deliberately before ``yield``: it allows one queued
+            # prefetch while the transport paces the just-dequeued payload.
+            self._model_output_inflight.add(session_id)
+            self._update_model_output_drained(session_id)
+            self._ack_model_output(session_id, item)
+            try:
+                yield item.payload
+            finally:
+                self._model_output_inflight.discard(session_id)
+                self._update_model_output_drained(session_id)
+
+    def _close_model_output(self, session_id: str) -> None:
+        output = self._model_outputs.pop(session_id, None)
+        self._model_output_inflight.discard(session_id)
+        drained = self._model_output_drained.pop(session_id, None)
+        self._model_output_dropped.pop(session_id, None)
+        if isinstance(output, asyncio.Queue):
+            while True:
+                try:
+                    output.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            with contextlib.suppress(asyncio.QueueFull):
+                output.put_nowait(None)
+        elif output is not None:
+            # Compatibility for simple queue doubles used by isolated tests.
+            output.put_nowait(None)
+        if drained is not None:
+            drained.set()
+
+    def _enqueue_model_output(self, session_id: str, item: _ModelOutput) -> None:
+        output = self._model_outputs.get(session_id)
+        if output is None:
+            return
+        if not isinstance(output, asyncio.Queue):
+            # Keep legacy light-weight test doubles usable while production
+            # always takes the bounded branch below.
+            output.put_nowait(item.payload)
+            return
+        try:
+            output.put_nowait(item)
+        except asyncio.QueueFull:
+            queued = output.get_nowait()
+            if queued is None:
+                output.put_nowait(None)
+                self._record_dropped_model_output(session_id, item)
+            elif self._should_replace_queued_output(queued, item):
+                output.put_nowait(item)
+                self._record_dropped_model_output(session_id, queued)
+            else:
+                output.put_nowait(queued)
+                self._record_dropped_model_output(session_id, item)
+        self._update_model_output_drained(session_id)
+
+    @staticmethod
+    def _should_replace_queued_output(queued: _ModelOutput, incoming: _ModelOutput) -> bool:
+        queued_type = str(queued.payload.get("type", ""))
+        incoming_type = str(incoming.payload.get("type", ""))
+        if queued_type in _TERMINAL_OUTPUT_TYPES:
+            return False
+        if incoming_type in _TERMINAL_OUTPUT_TYPES:
+            return True
+        # Preserve an initial preview until it reaches the transport. Later
+        # generated chunks are latest-wins, matching ABot's own queue.
+        if queued_type == "preview":
+            return False
+        if incoming_type == "preview":
+            return queued_type in _VIDEO_OUTPUT_TYPES
+        return queued_type == "chunk" and incoming_type == "chunk"
+
+    def _record_dropped_model_output(self, session_id: str, item: _ModelOutput, *, acknowledge: bool = True) -> None:
+        dropped = getattr(self, "_model_output_dropped", None)
+        if isinstance(dropped, dict):
+            dropped[session_id] = int(dropped.get(session_id, 0)) + 1
+        if acknowledge:
+            self._ack_model_output(session_id, item)
+
+    def _ack_model_output(self, session_id: str, item: _ModelOutput) -> None:
+        # Never wait for a child response from the parent event loop. The
+        # command only releases that child session's bounded semaphore.
+        try:
+            if item.worker_id in self._active_workers:
+                self._send(
+                    item.worker_id,
+                    {"type": "model_output_credit", "session_id": session_id},
+                )
+        except Exception:
+            # The owning child can disappear during close/migration; there is
+            # then no useful credit to return.
+            return
+
+    def _update_model_output_drained(self, session_id: str) -> None:
+        drained = self._model_output_drained.get(session_id)
+        output = self._model_outputs.get(session_id)
+        if drained is None or output is None or not isinstance(output, asyncio.Queue):
+            return
+        if session_id not in self._model_output_inflight and output.empty():
+            drained.set()
+        else:
+            drained.clear()
+
+    async def _wait_for_model_output_drain(self, session_id: str, *, timeout: float) -> None:
+        self._update_model_output_drained(session_id)
+        drained = self._model_output_drained.get(session_id)
+        if drained is not None:
+            await asyncio.wait_for(drained.wait(), timeout=timeout)
 
     async def migrate_session(self, pipeline_session_id: str, target_worker_id: str) -> TurboServeOwnership:
         async with self._migration_lock:
@@ -178,64 +403,153 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
             token = self._ownership.prepare_migration(pipeline_session_id, source_worker_id, target_worker_id)
             self._migrating_controls[pipeline_session_id] = []
             started = time.monotonic()
+            source_output_paused = False
             try:
                 await asyncio.gather(
                     self._request(source_worker_id, "scheduler_pause", timeout=300.0),
                     self._request(target_worker_id, "scheduler_pause", timeout=300.0),
                 )
-                exported = await self._request(source_worker_id, "nccl_export", session_id=pipeline_session_id, transfer_id=token.token_id, timeout=300.0)
-                metadata = dict(exported["result"])
-                await self._request(target_worker_id, "nccl_prepare_recv", transfer_id=token.token_id, metadata=metadata, source_rank=self._nccl_ranks[source_worker_id], owner_worker_id=target_worker_id, ownership_epoch=token.source_epoch + 1, timeout=300.0)
-                await asyncio.gather(
-                    self._request(source_worker_id, "nccl_send", transfer_id=token.token_id, target_rank=self._nccl_ranks[target_worker_id], timeout=300.0),
-                    self._request(target_worker_id, "nccl_recv", transfer_id=token.token_id, source_rank=self._nccl_ranks[source_worker_id], timeout=300.0),
+                exported = await self._request(
+                    source_worker_id,
+                    "nccl_export",
+                    session_id=pipeline_session_id,
+                    transfer_id=token.token_id,
+                    timeout=300.0,
                 )
-                await self._request(source_worker_id, "nccl_commit_source", session_id=pipeline_session_id, timeout=300.0)
+                await self._request(
+                    source_worker_id,
+                    "model_output_pause",
+                    session_id=pipeline_session_id,
+                    timeout=300.0,
+                )
+                source_output_paused = True
+                await self._wait_for_model_output_drain(pipeline_session_id, timeout=300.0)
+                metadata = dict(exported["result"])
+                await self._request(
+                    target_worker_id,
+                    "nccl_prepare_recv",
+                    transfer_id=token.token_id,
+                    metadata=metadata,
+                    source_rank=self._nccl_ranks[source_worker_id],
+                    owner_worker_id=target_worker_id,
+                    ownership_epoch=token.source_epoch + 1,
+                    model_output_credit_window=_MODEL_OUTPUT_PARENT_QUEUE_SIZE,
+                    timeout=300.0,
+                )
+                await asyncio.gather(
+                    self._request(
+                        source_worker_id,
+                        "nccl_send",
+                        transfer_id=token.token_id,
+                        target_rank=self._nccl_ranks[target_worker_id],
+                        timeout=300.0,
+                    ),
+                    self._request(
+                        target_worker_id,
+                        "nccl_recv",
+                        transfer_id=token.token_id,
+                        source_rank=self._nccl_ranks[source_worker_id],
+                        timeout=300.0,
+                    ),
+                )
+                await self._request(
+                    source_worker_id, "nccl_commit_source", session_id=pipeline_session_id, timeout=300.0
+                )
                 ownership = self._ownership.commit_migration(token)
+                self._pipeline_routes[pipeline_session_id] = target_worker_id
+                self._session_workers[pipeline_session_id] = target_worker_id
+                for chunk in self._migrating_controls.pop(pipeline_session_id, []):
+                    self._send(
+                        target_worker_id, {"type": "model_push", "session_id": pipeline_session_id, "chunk": chunk}
+                    )
+                self._migration_total_ms.append((time.monotonic() - started) * 1000.0)
+                return ownership
             except Exception:
                 with contextlib.suppress(Exception):
-                    await self._request(target_worker_id, "nccl_discard", transfer_id=token.token_id, session_id=pipeline_session_id)
+                    await self._request(
+                        target_worker_id,
+                        "nccl_discard",
+                        transfer_id=token.token_id,
+                        session_id=pipeline_session_id,
+                    )
                 with contextlib.suppress(Exception):
-                    await self._request(source_worker_id, "nccl_abort_source", session_id=pipeline_session_id, transfer_id=token.token_id)
+                    await self._request(
+                        source_worker_id,
+                        "nccl_abort_source",
+                        session_id=pipeline_session_id,
+                        transfer_id=token.token_id,
+                    )
+                if source_output_paused:
+                    with contextlib.suppress(Exception):
+                        await self._request(
+                            source_worker_id,
+                            "model_output_resume",
+                            session_id=pipeline_session_id,
+                        )
                 self._ownership.abort_migration(token)
                 for chunk in self._migrating_controls.pop(pipeline_session_id, []):
-                    self._send(source_worker_id, {"type": "model_push", "session_id": pipeline_session_id, "chunk": chunk})
+                    self._send(
+                        source_worker_id, {"type": "model_push", "session_id": pipeline_session_id, "chunk": chunk}
+                    )
                 raise
+            finally:
+                # A failed state copy must not leave either GPU permanently
+                # paused.  Resume is deliberately best-effort: the original
+                # migration exception is the meaningful caller-visible error.
                 await asyncio.gather(
                     self._request(source_worker_id, "scheduler_resume"),
                     self._request(target_worker_id, "scheduler_resume"),
                     return_exceptions=True,
                 )
-            self._pipeline_routes[pipeline_session_id] = target_worker_id
-            self._session_workers[pipeline_session_id] = target_worker_id
-            for chunk in self._migrating_controls.pop(pipeline_session_id, []):
-                self._send(target_worker_id, {"type": "model_push", "session_id": pipeline_session_id, "chunk": chunk})
-            self._migration_total_ms.append((time.monotonic() - started) * 1000.0)
-            await asyncio.gather(
-                self._request(source_worker_id, "scheduler_resume"),
-                self._request(target_worker_id, "scheduler_resume"),
-                return_exceptions=True,
-            )
-            return ownership
 
     def turboserve_snapshot(self) -> dict[str, object]:
         snapshot = super().turboserve_snapshot()
-        snapshot.update({
-            "migration_supported": bool(self._nccl_ranks),
-            "migration_backend": "process_nccl" if self._nccl_ranks else None,
-            "nccl_ranks": dict(self._nccl_ranks),
-            "worker_runtime_metrics": {worker_id: dict(self._worker_runtime_metrics.get(worker_id, {})) for worker_id in self._specs},
-            "session_runtime_metrics": dict(self._session_runtime_metrics),
-            "migration_calibration": {"average_total_ms": sum(self._migration_total_ms) / len(self._migration_total_ms) if self._migration_total_ms else 0.0},
-        })
+        snapshot.update(
+            {
+                "migration_supported": bool(self._nccl_ranks),
+                "migration_backend": "process_nccl" if self._nccl_ranks else None,
+                "nccl_ranks": dict(self._nccl_ranks),
+                "worker_runtime_metrics": {
+                    worker_id: dict(self._worker_runtime_metrics.get(worker_id, {})) for worker_id in self._specs
+                },
+                "session_runtime_metrics": dict(self._session_runtime_metrics),
+                "migration_calibration": {
+                    "average_total_ms": sum(self._migration_total_ms) / len(self._migration_total_ms)
+                    if self._migration_total_ms
+                    else 0.0
+                },
+                "model_output_flow_control": self._model_output_flow_snapshot(),
+            }
+        )
         return snapshot
+
+    def _model_output_flow_snapshot(self) -> dict[str, object]:
+        outputs = getattr(self, "_model_outputs", {})
+        inflight = getattr(self, "_model_output_inflight", set())
+        backlog: dict[str, int] = {}
+        for session_id, output in outputs.items():
+            qsize = getattr(output, "qsize", None)
+            if callable(qsize):
+                queued = int(qsize())
+            else:
+                queued = len(getattr(output, "items", ()))
+            backlog[session_id] = queued + int(session_id in inflight)
+        return {
+            "parent_queue_capacity": _MODEL_OUTPUT_PARENT_QUEUE_SIZE,
+            "ack_on_dequeue": True,
+            "max_materialized_payloads_per_session": _MODEL_OUTPUT_PARENT_QUEUE_SIZE + 1,
+            "backlog": backlog,
+            "dropped_payloads": dict(getattr(self, "_model_output_dropped", {})),
+        }
 
     async def aclose(self) -> None:
         for session_id in tuple(self._transport_workers):
             with contextlib.suppress(Exception):
                 await self.stop_session(session_id)
         if self._nccl_ranks:
-            await asyncio.gather(*(self._request(worker_id, "nccl_destroy") for worker_id in self._nccl_ranks), return_exceptions=True)
+            await asyncio.gather(
+                *(self._request(worker_id, "nccl_destroy") for worker_id in self._nccl_ranks), return_exceptions=True
+            )
             self._nccl_ranks.clear()
         await super().aclose()
 
@@ -245,7 +559,14 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
         port = sock.getsockname()[1]
         sock.close()
         workers = sorted(self._active_workers)
-        await asyncio.gather(*(self._request(worker_id, "nccl_init", rank=rank, world_size=len(workers), init_method=f"tcp://127.0.0.1:{port}") for rank, worker_id in enumerate(workers)))
+        await asyncio.gather(
+            *(
+                self._request(
+                    worker_id, "nccl_init", rank=rank, world_size=len(workers), init_method=f"tcp://127.0.0.1:{port}"
+                )
+                for rank, worker_id in enumerate(workers)
+            )
+        )
         self._nccl_ranks = {worker_id: rank for rank, worker_id in enumerate(workers)}
 
     def _transport_finished(self, session_id: str) -> None:
@@ -261,25 +582,58 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
         if event.get("type") == "model_output":
             metrics = event.get("runtime_metrics")
             if isinstance(metrics, dict):
-                self._worker_runtime_metrics[event["worker_id"]] = {key: value for key, value in metrics.items() if isinstance(value, int | float)}
+                self._worker_runtime_metrics[event["worker_id"]] = {
+                    key: value for key, value in metrics.items() if isinstance(value, int | float | str)
+                }
             session_metrics = event.get("session_runtime_metrics")
             if isinstance(session_metrics, dict):
-                self._session_runtime_metrics[event["session_id"]] = {key: value for key, value in session_metrics.items() if isinstance(value, int | float)}
-            if (output := self._model_outputs.get(event["session_id"])) is not None:
-                output.put_nowait(event["payload"])
+                self._session_runtime_metrics[event["session_id"]] = {
+                    key: value for key, value in session_metrics.items() if isinstance(value, int | float)
+                }
+            output_callback = getattr(self._event_sink, "on_model_output", None)
+            if callable(output_callback):
+                output_callback(
+                    event["worker_id"],
+                    event["session_id"],
+                    event["payload"],
+                    runtime_metrics=metrics if isinstance(metrics, dict) else None,
+                    session_runtime_metrics=session_metrics if isinstance(session_metrics, dict) else None,
+                )
+            self._enqueue_model_output(
+                event["session_id"],
+                _ModelOutput(worker_id=event["worker_id"], payload=event["payload"]),
+            )
             return
         super()._dispatch_event(event)
 
 
-def _nccl_model_worker_main(spec: ProcessWorkerSpec, config_values: dict[str, Any], pipeline_file: str, skip_validation: bool, security_name: str | None, commands: Any, events: Any) -> None:
+def _nccl_model_worker_main(
+    spec: ProcessWorkerSpec,
+    config_values: dict[str, Any],
+    pipeline_file: str,
+    skip_validation: bool,
+    security_name: str | None,
+    commands: Any,
+    events: Any,
+) -> None:
     try:
-        asyncio.run(_run_nccl_model_worker(spec, pipeline_file, skip_validation, security_name, commands, events))
+        asyncio.run(
+            _run_nccl_model_worker(spec, config_values, pipeline_file, skip_validation, security_name, commands, events)
+        )
     finally:
         _close_queue(commands, join=False)
         _close_queue(events)
 
 
-async def _run_nccl_model_worker(spec: ProcessWorkerSpec, pipeline_file: str, skip_validation: bool, security_name: str | None, commands: Any, events: Any) -> None:
+async def _run_nccl_model_worker(
+    spec: ProcessWorkerSpec,
+    config_values: dict[str, Any],
+    pipeline_file: str,
+    skip_validation: bool,
+    security_name: str | None,
+    commands: Any,
+    events: Any,
+) -> None:
     if not spec.gpu_ids:
         raise RuntimeError("process-nccl requires one CUDA GPU per worker")
     torch.cuda.set_device(int(spec.gpu_ids[0]))
@@ -287,22 +641,66 @@ async def _run_nccl_model_worker(spec: ProcessWorkerSpec, pipeline_file: str, sk
     adapter.start(pipeline_file, skip_validation=skip_validation, gpu_num=1, gpu_ids=spec.gpu_ids)
     if adapter.stream_mode != STREAM_MODE_BIDIRECTIONAL:
         raise RuntimeError("process-nccl requires a bidirectional pipeline")
-    profile = adapter.configure_session_capacity(None)
-    events.put({"type": "worker_capacity", "worker_id": spec.worker_id, "capacity": int((profile or {}).get("effective_capacity", 1)), "profile": profile})
+    # Honour the operator ceiling in process-NCCL too. Previously this path
+    # always auto-sized and then overwrote --max-sessions-per-worker at the
+    # parent scheduler, which can violate a measured per-session FPS SLO.
+    from .config import LiveKitServeConfig
+
+    config = LiveKitServeConfig(**config_values)
+    profile = adapter.configure_session_capacity(config.session_capacity_limit())
+    events.put(
+        {
+            "type": "worker_capacity",
+            "worker_id": spec.worker_id,
+            "capacity": int((profile or {}).get("effective_capacity", 1)),
+            "profile": profile,
+        }
+    )
     events.put({"type": "worker_status", "worker_id": spec.worker_id, "status": "idle"})
     events.put({"type": "worker_ready", "worker_id": spec.worker_id})
     service = adapter.stream_service.service
     outputs: dict[str, asyncio.Task[None]] = {}
+    output_credits: dict[str, asyncio.BoundedSemaphore] = {}
     outgoing: dict[str, dict[tuple[Any, ...], torch.Tensor]] = {}
-    incoming: dict[str, tuple[dict[str, Any], dict[tuple[Any, ...], torch.Tensor], str, int]] = {}
+    incoming: dict[str, tuple[dict[str, Any], dict[tuple[Any, ...], torch.Tensor], str, int, int]] = {}
 
-    async def pump(session_id: str) -> None:
-        async for payload in adapter.pull_chunks(session_id):
-            events.put({"type": "model_output", "worker_id": spec.worker_id, "session_id": session_id, "payload": payload, "runtime_metrics": adapter.runtime_metrics() or {}, "session_runtime_metrics": service.runtime_metrics(session_id)})
+    def start_pump(session_id: str, *, credit_window: int = _MODEL_OUTPUT_PARENT_QUEUE_SIZE) -> None:
+        credits = output_credits.get(session_id)
+        if credits is None:
+            credits = asyncio.BoundedSemaphore(max(1, int(credit_window)))
+            output_credits[session_id] = credits
+        if session_id not in outputs:
+            outputs[session_id] = asyncio.create_task(
+                _pump_model_outputs(
+                    adapter,
+                    service,
+                    worker_id=spec.worker_id,
+                    session_id=session_id,
+                    credits=credits,
+                    events=events,
+                ),
+                name=f"model-output-{session_id}",
+            )
+
+    async def stop_pump(session_id: str, *, drop_credit_state: bool = False) -> None:
+        task = outputs.pop(session_id, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if drop_credit_state:
+            output_credits.pop(session_id, None)
 
     async def result(request_id: str | None, value: Any = True, error: Exception | None = None) -> None:
         if request_id is not None:
-            events.put({"type": "command_result", "worker_id": spec.worker_id, "request_id": request_id, "result": value, "error": repr(error) if error else None})
+            events.put(
+                {
+                    "type": "command_result",
+                    "worker_id": spec.worker_id,
+                    "request_id": request_id,
+                    "result": value,
+                    "error": repr(error) if error else None,
+                }
+            )
 
     try:
         while True:
@@ -311,44 +709,75 @@ async def _run_nccl_model_worker(spec: ProcessWorkerSpec, pipeline_file: str, sk
             try:
                 if kind == "model_create":
                     session_id = adapter.create_session(command["config"])
-                    outputs[session_id] = asyncio.create_task(pump(session_id))
+                    start_pump(
+                        session_id,
+                        credit_window=int(command.get("model_output_credit_window", _MODEL_OUTPUT_PARENT_QUEUE_SIZE)),
+                    )
                 elif kind == "model_push":
                     adapter.push_chunk(command["session_id"], command["chunk"])
                 elif kind == "model_close":
+                    await stop_pump(command["session_id"], drop_credit_state=True)
                     adapter.close_session(command["session_id"])
-                    if (task := outputs.pop(command["session_id"], None)):
-                        task.cancel()
+                elif kind == "model_output_credit":
+                    credits = output_credits.get(command["session_id"])
+                    if credits is not None:
+                        with contextlib.suppress(ValueError):
+                            credits.release()
+                elif kind == "model_output_pause":
+                    await stop_pump(command["session_id"])
+                elif kind == "model_output_resume":
+                    has_session = getattr(service, "has_session", None)
+                    if not callable(has_session) or has_session(command["session_id"]):
+                        start_pump(command["session_id"])
                 elif kind == "nccl_init":
-                    await asyncio.to_thread(dist.init_process_group, "nccl", init_method=command["init_method"], rank=command["rank"], world_size=command["world_size"])
+                    await asyncio.to_thread(
+                        dist.init_process_group,
+                        "nccl",
+                        init_method=command["init_method"],
+                        rank=command["rank"],
+                        world_size=command["world_size"],
+                    )
                 elif kind == "scheduler_pause":
                     await asyncio.to_thread(service.pause_scheduler)
                 elif kind == "scheduler_resume":
                     service.resume_scheduler()
                 elif kind == "nccl_export":
-                    metadata = service.prepare_migration_nccl_metadata(command["session_id"])
+                    metadata = await asyncio.to_thread(service.prepare_migration_nccl_metadata, command["session_id"])
                     outgoing[command["transfer_id"]] = metadata.pop("_nccl_tensor_leaves")
                     await result(request_id, metadata)
                     continue
                 elif kind == "nccl_prepare_recv":
                     metadata = command["metadata"]
-                    leaves = allocate_tensor_tree_leaves(metadata["tensor_manifest"], torch.device(f"cuda:{spec.gpu_ids[0]}"))
-                    incoming[command["transfer_id"]] = (metadata, leaves, command["owner_worker_id"], command["ownership_epoch"])
+                    leaves = allocate_tensor_tree_leaves(
+                        metadata["tensor_manifest"], torch.device(f"cuda:{spec.gpu_ids[0]}")
+                    )
+                    incoming[command["transfer_id"]] = (
+                        metadata,
+                        leaves,
+                        command["owner_worker_id"],
+                        command["ownership_epoch"],
+                        int(command.get("model_output_credit_window", _MODEL_OUTPUT_PARENT_QUEUE_SIZE)),
+                    )
                 elif kind == "nccl_send":
-                    transfer_tensor_leaves_nccl(outgoing.pop(command["transfer_id"]), peer_rank=command["target_rank"], send=True)
+                    transfer_tensor_leaves_nccl(
+                        outgoing.pop(command["transfer_id"]), peer_rank=command["target_rank"], send=True
+                    )
                 elif kind == "nccl_recv":
-                    metadata, leaves, owner, epoch = incoming.pop(command["transfer_id"])
+                    metadata, leaves, owner, epoch, credit_window = incoming.pop(command["transfer_id"])
                     transfer_tensor_leaves_nccl(leaves, peer_rank=command["source_rank"], send=False)
-                    session_id = service.import_migration_nccl(metadata, leaves, owner_worker_id=owner, ownership_epoch=epoch)
-                    outputs[session_id] = asyncio.create_task(pump(session_id))
+                    session_id = service.import_migration_nccl(
+                        metadata, leaves, owner_worker_id=owner, ownership_epoch=epoch
+                    )
+                    start_pump(session_id, credit_window=credit_window)
                 elif kind == "nccl_commit_source":
+                    await stop_pump(command["session_id"], drop_credit_state=True)
                     service.commit_migration(command["session_id"])
-                    if (task := outputs.pop(command["session_id"], None)):
-                        task.cancel()
                 elif kind == "nccl_abort_source":
                     service.abort_migration(command["session_id"])
                     outgoing.pop(command.get("transfer_id", ""), None)
                 elif kind == "nccl_discard":
                     incoming.pop(command["transfer_id"], None)
+                    await stop_pump(command["session_id"], drop_credit_state=True)
                     if service.has_session(command["session_id"]):
                         service.close_session(command["session_id"])
                 elif kind == "nccl_destroy":
@@ -362,9 +791,8 @@ async def _run_nccl_model_worker(spec: ProcessWorkerSpec, pipeline_file: str, sk
             except Exception as exc:
                 await result(request_id, error=exc)
     finally:
-        for task in outputs.values():
-            task.cancel()
-        await asyncio.gather(*outputs.values(), return_exceptions=True)
+        for session_id in tuple(outputs):
+            await stop_pump(session_id, drop_credit_state=True)
         if dist.is_initialized():
             with contextlib.suppress(Exception):
                 dist.destroy_process_group()

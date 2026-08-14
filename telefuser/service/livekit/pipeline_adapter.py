@@ -60,7 +60,7 @@ class LiveKitPipelineAdapter:
         """Configure and return the loaded pipeline's optional capacity profile."""
         return self.stream_service.configure_session_capacity(max_sessions)
 
-    def runtime_metrics(self) -> dict[str, float | int] | None:
+    def runtime_metrics(self) -> dict[str, float | int | str] | None:
         """Return optional model-service scheduling measurements for placement."""
         service = getattr(self.stream_service, "service", None)
         metrics = getattr(service, "runtime_metrics", None)

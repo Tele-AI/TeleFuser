@@ -217,6 +217,18 @@ class TestHistogram:
         assert any('le="0.1"' in line for line in lines)
         assert any('le="0.5"' in line for line in lines)
 
+    def test_histogram_prometheus_buckets_are_cumulative(self) -> None:
+        """Prometheus buckets must not be cumulatively added a second time."""
+        hist = Histogram("request_duration", "Request duration", buckets=[0.1, 0.5])
+        hist.observe(0.05)
+        hist.observe(0.2)
+
+        lines = hist.to_prometheus()
+
+        assert 'request_duration_bucket{le="0.1"} 1' in lines
+        assert 'request_duration_bucket{le="0.5"} 2' in lines
+        assert 'request_duration_bucket{le="+Inf"} 2' in lines
+
     def test_histogram_reset(self) -> None:
         """Test resetting a histogram."""
         hist = Histogram("request_duration", "Request duration")

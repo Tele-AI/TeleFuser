@@ -280,6 +280,7 @@ stateDiagram-v2
 | `/v1/service/ready` | GET | Readiness probe |
 | `/v1/service/metadata` | GET | Runtime 拓扑与服务 metadata |
 | `/v1/service/metrics` | GET | Prometheus 文本指标 |
+| `/metrics` | GET | `/v1/service/metrics` 的 Prometheus 兼容别名 |
 | `/v1/service/metrics/json` | GET | JSON 服务与 LiveKit 健康指标 |
 
 创建 controller session：
@@ -312,6 +313,21 @@ curl -X DELETE http://127.0.0.1:8088/v1/stream/sessions/<session_id>
 直接准入返回 HTTP 200；有界等待返回 HTTP 202 和 `queue_position`；队列禁用或已满时返回 HTTP 429。
 一分钟 LingBot-World v2 workload 与四张 H100 的实测结果见
 [TeleFuser 与 AIPerf](benchmark_aiperf.md)。
+
+
+## Serving 可观测性
+
+`/metrics` 是 `/v1/service/metrics` 的标准 Prometheus scrape 别名。对
+ABot-World，它导出有界的 worker/GPU、scheduler、batch、队列、pipeline stage、SLO、
+migration、action-to-first-frame 和 published-FPS 指标；不会把 session ID 作为
+Prometheus label。JSON 端点只返回聚合后的 serving 摘要。
+
+四卡实验可直接启动仓库内的 [Prometheus、Grafana、DCGM Exporter 和 Node
+Exporter 栈](../../deploy/observability/README.md)。其中 compose 监控物理 GPU
+0--3（默认值）；可通过 `TELEFUSER_MONITOR_GPU_IDS` 选择其他物理卡。它与
+serving 进程的逻辑 `CUDA_VISIBLE_DEVICES` 视图不同。若实验机无法运行 Docker，
+可运行 `tools/validation/capture_abot_serving_metrics.py` 保存同一 serving
+指标作为实验 artifact；该方式不包含 DCGM 的 GPU 硬件计数器。
 
 ## LiveKit 数据协议
 

@@ -63,35 +63,45 @@ def _drain_outputs(service: ABotWorldLiveKitService, session_id: str, stop: thre
 
 def _rank_main(rank: int, args: argparse.Namespace, port: int) -> None:
     torch.cuda.set_device(rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
-        rank=rank,
-        world_size=2,
-    )
     service: ABotWorldLiveKitService | None = None
     try:
-        loader = _loader_module()
-        pipeline = loader.get_pipeline(
-            model_root=args.model_root,
-            pipeline_class=ABotWorldInteractivePipeline,
-            device_id=rank,
+        dist.init_process_group(
+            backend="nccl",
+            init_method=f"tcp://127.0.0.1:{port}",
+            rank=rank,
+            world_size=2,
         )
-        service = ABotWorldLiveKitService(
-            pipeline,
-            max_batch_size=1,
-            default_session_config={
-                "image_path": str(args.image),
-                "prompt": args.prompt,
-                "fps": 12,
-                "control_latent_frames": args.control_latent_frames,
-                "seed": args.seed,
-            },
-        )
-        # A process-nccl child preloads its replica at worker startup.  The
-        # target must do the same before it adopts CUDA session tensors.
-        if rank == 1:
-            service.start()
+        print(f"rank={rank} phase=nccl_ready", flush=True)
+
+        # Process workers are started serially in the real serving pool.  Do
+        # the same here: concurrently materializing two 25-GB checkpoints on
+        # this shared filesystem can make a migration smoke test look like an
+        # NCCL deadlock before either rank reaches the communicator.
+        for loading_rank in range(2):
+            if rank == loading_rank:
+                print(f"rank={rank} phase=load_replica", flush=True)
+                loader = _loader_module()
+                pipeline = loader.get_pipeline(
+                    model_root=args.model_root,
+                    pipeline_class=ABotWorldInteractivePipeline,
+                    device_id=rank,
+                )
+                service = ABotWorldLiveKitService(
+                    pipeline,
+                    max_batch_size=1,
+                    default_session_config={
+                        "image_path": str(args.image),
+                        "prompt": args.prompt,
+                        "fps": 12,
+                        "control_latent_frames": args.control_latent_frames,
+                        "seed": args.seed,
+                    },
+                )
+                service.start()
+                torch.cuda.synchronize(rank)
+                print(f"rank={rank} phase=replica_ready", flush=True)
+            dist.barrier()
+        assert service is not None
         session_id = "nccl-validation-session"
         metadata: dict[str, Any] | None = None
         leaves: dict[tuple[Any, ...], torch.Tensor] | None = None
@@ -151,7 +161,8 @@ def _rank_main(rank: int, args: argparse.Namespace, port: int) -> None:
             session = service._session(session_id)
             assert session is not None
             print(
-                f"target_chunk={target_chunk.get('index')} next_latent_frame={session.pipeline_session.next_latent_frame} "
+                f"target_chunk={target_chunk.get('index')} "
+                f"next_latent_frame={session.pipeline_session.next_latent_frame} "
                 f"emitted_frames={session.pipeline_session.emitted_frames}",
                 flush=True,
             )

@@ -36,6 +36,18 @@ class WorkerEventSink(Protocol):
     def on_session_status(self, session_id: str, status: SessionStatus, error: str | None = None) -> None: ...
     def on_pipeline_session(self, session_id: str, pipeline_session_id: str) -> None: ...
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None: ...
+    def on_control_received(self, worker_id: str, session_id: str) -> None: ...
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None: ...
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None: ...
 
 
 class NullWorkerEventSink:
@@ -54,6 +66,24 @@ class NullWorkerEventSink:
         return None
 
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
+        return None
+
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        return None
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        return None
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
         return None
 
 
@@ -208,6 +238,9 @@ class LiveKitWorker:
             self._delivery_ack_event.set()
             return
 
+        control_callback = getattr(self.event_sink, "on_control_received", None)
+        if callable(control_callback):
+            control_callback(self.worker_id, record.session_id)
         self.pipeline_adapter.push_chunk(self._pipeline_session_id, chunk)
         if chunk.get("type") == "stop":
             self._stop_event.set()
@@ -227,6 +260,22 @@ class LiveKitWorker:
                 break
 
             frames, audio, metadata = split_chunk_media(chunk)
+            model_output_callback = getattr(self.event_sink, "on_model_output", None)
+            if callable(model_output_callback) and self._pipeline_session_id is not None:
+                chunk_data_for_metrics = chunk.get("data") if isinstance(chunk.get("data"), dict) else chunk
+                scheduler = (
+                    chunk_data_for_metrics.get("scheduler") if isinstance(chunk_data_for_metrics, dict) else None
+                )
+                model_output_callback(
+                    self.worker_id,
+                    self._pipeline_session_id,
+                    {
+                        "type": chunk.get("type"),
+                        "fps": chunk_data_for_metrics.get("fps", chunk.get("fps", self.config.default_fps)),
+                        "scheduler": dict(scheduler) if isinstance(scheduler, dict) else {},
+                        "frame_count": len(frames),
+                    },
+                )
             decoded_ready_at = chunk.get("timestamp")
             publish_started_at = time.time()
             publish_started_monotonic = time.monotonic()
@@ -244,6 +293,7 @@ class LiveKitWorker:
                 await self.room_client.publish_video_track("telefuser-output", width, height, fps=fps)
                 await asyncio.sleep(_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS)
 
+            first_frame_at: float | None = None
             for frame in frames:
                 if self._stop_event.is_set():
                     break
@@ -254,6 +304,8 @@ class LiveKitWorker:
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await self.room_client.publish_video_frame(frame, fps=fps)
+                if first_frame_at is None:
+                    first_frame_at = time.monotonic()
                 next_frame_at += frame_interval
                 published_frames += 1
 
@@ -267,6 +319,9 @@ class LiveKitWorker:
             if self._stop_event.is_set():
                 break
             if frames:
+                published_callback = getattr(self.event_sink, "on_chunk_published", None)
+                if callable(published_callback):
+                    published_callback(self.worker_id, session_id, len(frames), first_frame_at)
                 chunk_count += 1
                 metadata["transport_measurement"] = {
                     "decoded_ready_at": decoded_ready_at if isinstance(decoded_ready_at, int | float) else None,

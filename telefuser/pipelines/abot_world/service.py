@@ -64,6 +64,9 @@ _MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
 _DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"preview", "chunk"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"error", "done"})
+_PACING_SAFETY_FACTOR = 1.10
+_PACING_MAX_COALESCING_SECONDS = 0.010
+_PACING_RENDEZVOUS_WAKE_GUARD_SECONDS = 0.001
 
 
 @dataclass
@@ -91,6 +94,9 @@ class _ABotWorldLiveKitSession:
     batch_items: int = 0
     total_queue_wait_seconds: float = 0.0
     total_compute_seconds: float = 0.0
+    last_compute_seconds: float = 0.0
+    last_chunk_duration_seconds: float = 0.0
+    pacing_ready_at: float = field(default_factory=time.monotonic)
     last_error: str | None = None
     migrating: bool = False
 
@@ -109,13 +115,13 @@ class ABotWorldMigrationBundle:
 
 
 class ABotWorldLiveKitService:
-    """One-GPU retained-session owner with TurboServe-style round-robin stepping.
+    """One-GPU retained-session owner with coalesced causal-block scheduling.
 
-    ``round_robin`` is the default and mirrors TurboServe: every scheduler turn
-    selects exactly one runnable session and advances it by one causal block.
-    Session KV/VAE state stays resident and is never collated across sessions.
-    ``batched`` retains the former experimental path for research comparisons;
-    it is deliberately opt-in because it is not the TurboServe execution model.
+    By default, compatible ready sessions are coalesced into one DiT invocation
+    and their independent KV/RNG state is scattered back afterwards. This is
+    the execution model described by TurboServe's paper and is the production
+    ABot serving baseline. ``round_robin`` remains available as an ablation: it
+    advances exactly one runnable session per scheduler turn.
     """
 
     def __init__(
@@ -130,7 +136,7 @@ class ABotWorldLiveKitService:
         max_batch_size: int = 8,
         batching_window_ms: float = 2.0,
         idle_suspension_seconds: float = 5.0,
-        scheduler_mode: str = "round_robin",
+        scheduler_mode: str = "batched",
     ) -> None:
         if default_fps < 1:
             raise ValueError(f"default_fps must be positive, got {default_fps}")
@@ -166,6 +172,11 @@ class ABotWorldLiveKitService:
         self._batch_item_count = 0
         self._maximum_batch_size = 0
         self._last_stage_metrics: dict[str, float | int] = {}
+        self._pacing_eligible_sessions = 0
+        self._pacing_throttled_sessions = 0
+        self._pacing_buffered_sessions = 0
+        # Observed wall-clock runtimes make deadline rendezvous conservative.
+        self._batch_compute_estimates: dict[int, float] = {}
         self._workload_detector = TurboServeWorkloadDetector()
 
     def start(self) -> None:
@@ -383,6 +394,7 @@ class ABotWorldLiveKitService:
         with self._scheduler_condition, state.lock:
             if not state.active:
                 return
+            was_controlled = bool(state.controls)
             if message_type == "stop":
                 state.active = False
                 state.controls.clear()
@@ -410,6 +422,11 @@ class ABotWorldLiveKitService:
             now = time.monotonic()
             state.last_control_at = now
             state.ready_since = now if state.controls else None
+            # A newly reactivated session should not wait behind an old playout
+            # prediction. Existing active sessions keep their pacing deadline so
+            # frequent control updates cannot force the scheduler to free-run.
+            if state.controls and not was_controlled:
+                state.pacing_ready_at = now
             state.control_event.set()
             if state.controls:
                 self._workload_detector.record_active(session_id, now)
@@ -481,12 +498,17 @@ class ABotWorldLiveKitService:
         """Quiesce a session and describe its resident tensors for direct NCCL transfer."""
         state = self._quiesce_migration(session_id, timeout)
         session = state.pipeline_session
+        if session.taew_decode_state is None:
+            raise RuntimeError("ABot session is missing its TAeW2.2 decode state")
         payload = {
             "prompt_emb": session.prompt_emb,
             "first_frame_latent": session.first_frame_latent,
             "self_cache": session.self_cache,
             "cross_cache": session.cross_cache,
             "vae_feat_cache": session.vae_decode_state.feat_cache,
+            "taew_decode_state": self.pipeline.taew_decode_stage.export_decode_state_for_nccl(
+                session.taew_decode_state
+            ),
         }
         skeleton, manifest, leaves = flatten_tensor_tree(payload)
         return {
@@ -526,6 +548,7 @@ class ABotWorldLiveKitService:
             cross_cache=tuple(payload["cross_cache"]),
             vae_feat_cache=tuple(payload["vae_feat_cache"]),
             vae_feat_idx=tuple(int(value) for value in metadata["vae_feat_idx"]),
+            taew_decode_state=dict(payload["taew_decode_state"]),
             generator_state=metadata["generator_state"],
             next_latent_frame=int(metadata["next_latent_frame"]),
             emitted_frames=int(metadata["emitted_frames"]),
@@ -688,6 +711,9 @@ class ABotWorldLiveKitService:
                     "batches": self._batch_count,
                     "batch_items": self._batch_item_count,
                     "maximum_batch_size": self._maximum_batch_size,
+                    "pacing_eligible_sessions": self._pacing_eligible_sessions,
+                    "pacing_throttled_sessions": self._pacing_throttled_sessions,
+                    "pacing_buffered_sessions": self._pacing_buffered_sessions,
                     "active_sessions": workload.active_sessions,
                     "arrivals_per_second": round(workload.arrivals_per_second, 6),
                     "activation_volatility": round(workload.activation_volatility, 6),
@@ -710,6 +736,8 @@ class ABotWorldLiveKitService:
                     "emitted_frames": int(getattr(state.pipeline_session, "emitted_frames", 0)),
                     "total_queue_wait_seconds": round(state.total_queue_wait_seconds, 6),
                     "total_compute_seconds": round(state.total_compute_seconds, 6),
+                    "pacing_ready_in_seconds": round(max(0.0, state.pacing_ready_at - time.monotonic()), 6),
+                    "pacing_buffered_video_payloads": self._queued_video_payloads(state),
                 }
 
     def _ensure_scheduler_started(self) -> None:
@@ -751,18 +779,15 @@ class ABotWorldLiveKitService:
                             break
                 ready = self._ready_sessions(now)
                 if not ready and suspend_candidate is None:
-                    self._scheduler_condition.wait(timeout=0.05)
+                    self._scheduler_condition.wait(timeout=self._next_scheduler_wake_seconds(now))
                     continue
-                if (
-                    self.scheduler_mode == "batched"
-                    and ready
-                    and len(ready) < self.max_batch_size
-                    and self.batching_window_seconds
-                ):
-                    self._scheduler_condition.wait(timeout=self.batching_window_seconds)
+                if self.scheduler_mode == "batched" and ready and len(ready) < self.max_batch_size:
+                    wait_seconds = self._batch_formation_wait_seconds(ready, now)
+                    if wait_seconds > 0:
+                        self._scheduler_condition.wait(timeout=wait_seconds)
                     now = time.monotonic()
                     ready = self._ready_sessions(now)
-                batch = self._select_batch(ready)
+                batch = self._select_batch(ready, now=now)
                 controls: list[dict[str, bool]] = []
                 if batch:
                     for state in batch:
@@ -781,6 +806,9 @@ class ABotWorldLiveKitService:
 
     def _ready_sessions(self, now: float) -> list[_ABotWorldLiveKitSession]:
         ready: list[_ABotWorldLiveKitSession] = []
+        pacing_eligible = 0
+        pacing_throttled = 0
+        pacing_buffered = 0
         for state in self._sessions.values():
             with state.lock:
                 lossless_blocked = (
@@ -795,20 +823,176 @@ class ABotWorldLiveKitService:
                 ):
                     if state.ready_since is None:
                         state.ready_since = now
+                    if state.config["delivery_mode"] == "latest":
+                        buffered_video_payloads = self._queued_video_payloads(state)
+                        pacing_ready = now + self._pacing_coalescing_slack_seconds(state) >= state.pacing_ready_at
+                        if buffered_video_payloads or not pacing_ready:
+                            pacing_throttled += 1
+                            pacing_buffered += int(bool(buffered_video_payloads))
+                            continue
+                        pacing_eligible += 1
                     ready.append(state)
+        self._pacing_eligible_sessions = pacing_eligible
+        self._pacing_throttled_sessions = pacing_throttled
+        self._pacing_buffered_sessions = pacing_buffered
         ready.sort(key=lambda state: (state.next_playout_deadline, state.ready_since or now, state.session_id))
         return ready
+
+    def _next_scheduler_wake_seconds(self, now: float) -> float:
+        """Wake promptly for a pacing deadline while retaining event-driven idling."""
+        next_wake_at: float | None = None
+        for state in self._sessions.values():
+            with state.lock:
+                if state.active and state.controls:
+                    control_expiry = state.last_control_at + state.control_idle_timeout
+                    next_wake_at = control_expiry if next_wake_at is None else min(next_wake_at, control_expiry)
+                    if (
+                        state.config["delivery_mode"] == "latest"
+                        and not state.in_flight
+                        and not state.migrating
+                        and not self._queued_video_payloads(state)
+                    ):
+                        pacing_wake = state.pacing_ready_at - self._pacing_coalescing_slack_seconds(state)
+                        next_wake_at = pacing_wake if next_wake_at is None else min(next_wake_at, pacing_wake)
+                elif not state.in_flight and state.pipeline_session.is_resident and not state.controls:
+                    suspension_at = state.last_control_at + self.idle_suspension_seconds
+                    next_wake_at = suspension_at if next_wake_at is None else min(next_wake_at, suspension_at)
+        if next_wake_at is None:
+            return 0.05
+        return max(0.001, next_wake_at - now)
+
+    def _pacing_coalescing_slack_seconds(self, state: _ABotWorldLiveKitSession) -> float:
+        """Allow a small, bounded early window so near-aligned sessions still batch."""
+        if state.last_chunk_duration_seconds <= 0:
+            return self.batching_window_seconds
+        return max(
+            self.batching_window_seconds,
+            min(_PACING_MAX_COALESCING_SECONDS, state.last_chunk_duration_seconds * 0.05),
+        )
+
+    def _batch_formation_wait_seconds(
+        self,
+        ready: Sequence[_ABotWorldLiveKitSession],
+        now: float,
+    ) -> float:
+        """Wait for a compatible continuation only while all playout deadlines are safe."""
+        batch = self._select_batch(ready, now=now)
+        if not batch or len(batch) >= self.max_batch_size:
+            return 0.0
+
+        # First generated chunks stay latency-critical. They may coalesce when
+        # peers are ready in the same turn, but never wait for a future peer.
+        if any(state.scheduled_chunks == 0 for state in batch):
+            return 0.0
+        # Lossless queues are governed by consumer backpressure rather than a
+        # playout deadline, so preserve their original micro-batching behavior.
+        if any(state.config["delivery_mode"] != "latest" for state in batch):
+            return self.batching_window_seconds
+        legacy_wait = min(
+            self.batching_window_seconds,
+            max(0.0, self._latest_safe_batch_start(batch) - now),
+        )
+
+        pivot_key = self._batch_key(batch[0])
+        selected_ids = {state.session_id for state in batch}
+        rendezvous_waits: list[float] = []
+        for candidate in self._sessions.values():
+            if candidate.session_id in selected_ids:
+                continue
+            with candidate.lock:
+                if (
+                    not candidate.active
+                    or not candidate.controls
+                    or candidate.in_flight
+                    or candidate.migrating
+                    or candidate.config["delivery_mode"] != "latest"
+                    or candidate.scheduled_chunks == 0
+                    or self._batch_key(candidate) != pivot_key
+                    # A generated chunk owned by the publisher has an external
+                    # dequeue time, so it cannot be a rendezvous promise.
+                    or self._queued_video_payloads(candidate)
+                ):
+                    continue
+
+                release_at = candidate.pacing_ready_at - self._pacing_coalescing_slack_seconds(candidate)
+                if release_at <= now:
+                    # An already-eligible session should be in ready. Avoid
+                    # turning a state race into an extra scheduler delay.
+                    continue
+                proposed_batch = [*batch, candidate]
+                latest_safe_start = self._latest_safe_batch_start(proposed_batch)
+                if release_at + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS <= latest_safe_start:
+                    rendezvous_waits.append(release_at - now + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS)
+
+        if rendezvous_waits:
+            # Earliest compatible release minimizes queueing; the condition
+            # wait is followed by a full readiness/deadline revalidation.
+            return min(rendezvous_waits)
+        return legacy_wait
+
+    def _latest_safe_batch_start(self, batch: Sequence[_ABotWorldLiveKitSession]) -> float:
+        """Return the latest launch time that still meets every playout deadline."""
+        if not batch:
+            return float("-inf")
+        predicted_compute_seconds = self._estimated_batch_compute_seconds(batch)
+        return min(state.next_playout_deadline for state in batch) - predicted_compute_seconds
+
+    def _estimated_batch_compute_seconds(self, batch: Sequence[_ABotWorldLiveKitSession]) -> float:
+        """Conservatively estimate batch wall time from observed service work."""
+        batch_size = len(batch)
+        observed = self._batch_compute_estimates.get(batch_size)
+        if observed is None:
+            singleton_seconds = max((state.last_compute_seconds for state in batch), default=0.0)
+            observed = singleton_seconds * batch_size
+        return observed * _PACING_SAFETY_FACTOR
+
+    @staticmethod
+    def _queued_video_payloads(state: _ABotWorldLiveKitSession) -> int:
+        """Return generated chunks not yet taken by the real-time publisher.
+
+        ``latest`` output intentionally evicts stale payloads, so Queue.full()
+        cannot express a prefetch bound. The preview is not generated video and
+        must not delay the latency-critical first chunk. Keeping at most one
+        queued chunk makes it the only chunk ahead of the one being played.
+        """
+        with state.output_queue.mutex:
+            return sum(item.get("type") == "chunk" for item in state.output_queue.queue)
 
     def _select_batch(
         self,
         ready: Sequence[_ABotWorldLiveKitSession],
+        *,
+        now: float | None = None,
     ) -> list[_ABotWorldLiveKitSession]:
         if not ready:
             return []
         if self.scheduler_mode == "round_robin":
             return self._select_round_robin_session(ready)
         pivot_key = self._batch_key(ready[0])
-        return [state for state in ready if self._batch_key(state) == pivot_key][: self.max_batch_size]
+        batch = [state for state in ready if self._batch_key(state) == pivot_key][: self.max_batch_size]
+        if len(batch) <= 1:
+            return batch
+
+        # First chunks are latency-critical but intentionally retain their
+        # same-turn coalescing behavior. Lossless sessions are paced by their
+        # consumer queues rather than a playout deadline. Only a batch made
+        # entirely of already-playing latest-mode sessions has a deadline that
+        # makes a larger batch potentially worse than two singleton turns.
+        if any(
+            state.scheduled_chunks == 0 or state.config["delivery_mode"] != "latest"
+            for state in batch
+        ):
+            return batch
+
+        selected_at = time.monotonic() if now is None else now
+        if selected_at <= self._latest_safe_batch_start(batch):
+            return batch
+
+        # The earliest state owns the earliest playout deadline because ready
+        # is deadline-sorted. Do not let an observed slow B>1 execution turn
+        # an otherwise feasible pair of B=1 continuations into an avoidable
+        # playout miss.
+        return [batch[0]]
 
     def _select_round_robin_session(
         self,
@@ -890,7 +1074,15 @@ class ABotWorldLiveKitService:
             completed_at = time.monotonic()
             stage_metrics_callback = getattr(self.pipeline, "last_stage_metrics", None)
             self._last_stage_metrics = dict(stage_metrics_callback()) if callable(stage_metrics_callback) else {}
-            self._workload_detector.record_chunk(completed_at - started_at, completed_at)
+            observed_compute_seconds = completed_at - started_at
+            previous_estimate = self._batch_compute_estimates.get(len(batch), 0.0)
+            # Keep a service-run high-water mark so a transient fast batch
+            # cannot make a later rendezvous overrun a playout deadline.
+            self._batch_compute_estimates[len(batch)] = max(
+                observed_compute_seconds,
+                previous_estimate,
+            )
+            self._workload_detector.record_chunk(observed_compute_seconds, completed_at)
             self._batch_count += 1
             self._batch_item_count += len(batch)
             self._maximum_batch_size = max(self._maximum_batch_size, len(batch))
@@ -915,10 +1107,31 @@ class ABotWorldLiveKitService:
                             **self._last_stage_metrics,
                         },
                     }
+                    chunk_duration_seconds = max(1, len(frames)) / int(state.config["fps"])
+                    previous_compute_seconds = state.last_compute_seconds
                     state.next_chunk_index += 1
-                    state.next_playout_deadline = max(state.next_playout_deadline, completed_at) + len(frames) / int(
-                        state.config["fps"]
+                    state.next_playout_deadline = (
+                        max(state.next_playout_deadline, completed_at) + chunk_duration_seconds
                     )
+                    state.last_chunk_duration_seconds = chunk_duration_seconds
+                    state.last_compute_seconds = observed_compute_seconds
+                    if state.config["delivery_mode"] == "latest":
+                        if state.scheduled_chunks <= 1:
+                            # The first chunk is latency-critical; immediately allow one
+                            # successor once the publisher has taken this chunk.
+                            state.pacing_ready_at = completed_at
+                        else:
+                            # Start the next block early enough to meet the start of the
+                            # sole prefetched block, but never run before this block ends.
+                            predicted_compute_seconds = max(
+                                observed_compute_seconds, previous_compute_seconds
+                            ) * _PACING_SAFETY_FACTOR
+                            next_chunk_playout_start = state.next_playout_deadline - chunk_duration_seconds
+                            state.pacing_ready_at = max(
+                                completed_at, next_chunk_playout_start - predicted_compute_seconds
+                            )
+                    else:
+                        state.pacing_ready_at = completed_at
                     state.ready_since = completed_at if state.controls else None
                 self._put_output(state, payload)
         finally:

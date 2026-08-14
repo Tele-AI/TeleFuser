@@ -74,6 +74,7 @@ class ABotWorldSessionSnapshot:
     cross_cache: tuple[dict[str, Any], ...]
     vae_feat_cache: tuple[object, ...]
     vae_feat_idx: tuple[int, ...]
+    taew_decode_state: dict[str, Any]
     generator_state: torch.Tensor
     next_latent_frame: int
     emitted_frames: int
@@ -283,12 +284,9 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 decode_started_at = time.monotonic()
             if any(session.taew_decode_state is None for session in sessions):
                 raise RuntimeError("ABot session is missing its TAeW2.2 decode state")
-            decoded = torch.cat(
-                [
-                    self.taew_decode_stage.decode_chunk(latents[index : index + 1], session.taew_decode_state)
-                    for index, session in enumerate(sessions)
-                ],
-                dim=0,
+            decoded = self.taew_decode_stage.decode_chunks(
+                latents,
+                [session.taew_decode_state for session in sessions],
             )
             if use_cuda_events:
                 vae_finished.record()
@@ -311,6 +309,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 "denoise_seconds": denoise_seconds,
                 "cache_scatter_seconds": cache_scatter_seconds,
                 "vae_decode_seconds": decode_seconds,
+                **self.taew_decode_stage.last_decode_metrics(),
                 "postprocess_seconds": time.monotonic() - postprocess_started_at,
                 "total_seconds": time.monotonic() - batch_started_at,
             }
@@ -380,6 +379,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                     for value in session.vae_decode_state.feat_cache
                 ),
                 vae_feat_idx=tuple(session.vae_decode_state.feat_idx),
+                taew_decode_state=self._snapshot_taew_decode_state(session),
                 generator_state=session.generator.get_state().to("cpu").clone(),
                 next_latent_frame=session.next_latent_frame,
                 emitted_frames=session.emitted_frames,
@@ -441,7 +441,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                     if isinstance(value, torch.Tensor)
                 )
                 tensors.extend(value for value in snapshot.vae_feat_cache if isinstance(value, torch.Tensor))
-                if any(tensor.device != expected_device for tensor in tensors):
+                if any(not self._matches_pipeline_device(tensor.device, expected_device) for tensor in tensors):
                     raise ValueError("NCCL migration tensors must already reside on the target pipeline device")
                 prompt_emb = snapshot.prompt_emb
                 first_frame_latent = snapshot.first_frame_latent
@@ -457,6 +457,10 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                     value.to(self.device).clone() if isinstance(value, torch.Tensor) else value
                     for value in snapshot.vae_feat_cache
                 ]
+            taew_decode_state = self.taew_decode_stage.restore_decode_state(
+                snapshot.taew_decode_state,
+                direct_device_tensors=direct_device_tensors,
+            )
             session = ABotWorldInteractiveSession(
                 session_id=snapshot.session_id,
                 prompt_emb=prompt_emb,
@@ -469,6 +473,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                     feat_cache=vae_feat_cache,
                     feat_idx=list(snapshot.vae_feat_idx),
                 ),
+                taew_decode_state=taew_decode_state,
                 next_latent_frame=snapshot.next_latent_frame,
                 emitted_frames=snapshot.emitted_frames,
                 owner_worker_id=owner_worker_id,
@@ -479,6 +484,24 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 raise ValueError(f"ABot interactive session {session.session_id!r} already exists")
             self._interactive_sessions[session.session_id] = session
         return session
+
+    def _snapshot_taew_decode_state(self, session: ABotWorldInteractiveSession) -> dict[str, Any]:
+        if session.taew_decode_state is None:
+            raise RuntimeError("ABot session is missing its TAeW2.2 decode state")
+        return self.taew_decode_stage.snapshot_decode_state(session.taew_decode_state)
+
+    def _move_taew_decode_state(
+        self,
+        session: ABotWorldInteractiveSession,
+        device: str | torch.device,
+    ) -> None:
+        if session.taew_decode_state is None:
+            raise RuntimeError("ABot session is missing its TAeW2.2 decode state")
+        self.taew_decode_stage.move_decode_state(session.taew_decode_state, device)
+
+    @staticmethod
+    def _matches_pipeline_device(actual: torch.device, expected: torch.device) -> bool:
+        return actual.type == expected.type and (expected.index is None or actual.index == expected.index)
 
     @staticmethod
     def _clone_cache_to_cpu(caches: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -516,6 +539,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 value.to("cpu") if isinstance(value, torch.Tensor) else value
                 for value in session.vae_decode_state.feat_cache
             ]
+            self._move_taew_decode_state(session, "cpu")
             session.lifecycle = ABotWorldSessionLifecycle.SUSPENDED
 
     def restore_interactive_session(self, session: ABotWorldInteractiveSession) -> None:
@@ -532,6 +556,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 value.to(self.device) if isinstance(value, torch.Tensor) else value
                 for value in session.vae_decode_state.feat_cache
             ]
+            self._move_taew_decode_state(session, self.device)
             session.lifecycle = ABotWorldSessionLifecycle.READY
 
     @staticmethod
@@ -559,6 +584,9 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 target.cross_cache.clear()
                 target.vae_decode_state.feat_cache.clear()
                 target.vae_decode_state.feat_idx = [0]
+                if target.taew_decode_state is not None:
+                    self.taew_decode_stage.clear_decode_state(target.taew_decode_state)
+                    target.taew_decode_state = None
                 target.lifecycle = ABotWorldSessionLifecycle.CLOSED
                 self._interactive_sessions.pop(target.session_id, None)
 

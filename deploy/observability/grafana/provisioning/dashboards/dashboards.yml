@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: TeleFuser
+    orgId: 1
+    folder: TeleFuser
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

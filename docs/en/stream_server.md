@@ -294,6 +294,7 @@ The current runtime has these deliberate documentation-visible limitations:
 | `/v1/service/ready` | GET | Readiness probe |
 | `/v1/service/metadata` | GET | Runtime topology and service metadata |
 | `/v1/service/metrics` | GET | Prometheus text metrics |
+| `/metrics` | GET | Prometheus-compatible alias of `/v1/service/metrics` |
 | `/v1/service/metrics/json` | GET | JSON service and LiveKit health metrics |
 
 Create a controller session:
@@ -326,6 +327,24 @@ curl -X DELETE http://127.0.0.1:8088/v1/stream/sessions/<session_id>
 A direct admission returns HTTP 200. A bounded wait returns HTTP 202 with `queue_position`; a disabled or full queue
 returns HTTP 429. The one-minute LingBot-World v2 workload and observed four-H100 results are documented in
 [TeleFuser and AIPerf](benchmark_aiperf.md).
+
+
+## Serving observability
+
+`/metrics` is the conventional Prometheus scrape alias for `/v1/service/metrics`.
+For ABot-World it includes bounded worker/GPU, scheduler, batch, queue, pipeline
+stage, SLO, migration, action-to-first-frame, and published-FPS series; it never
+uses a session ID as a Prometheus label. The companion JSON endpoint contains only
+aggregate serving summaries.
+
+For the four-GPU experiment, launch the checked-in [Prometheus, Grafana, DCGM
+Exporter, and Node Exporter stack](../../deploy/observability/README.md). The
+checked-in compose file monitors physical GPUs 0--3 by default; override
+`TELEFUSER_MONITOR_GPU_IDS` to select another physical set. Keep this distinct
+from the serving process's logical `CUDA_VISIBLE_DEVICES` view. If Docker is not
+available, use `tools/validation/capture_abot_serving_metrics.py` to save the
+same serving metrics as an experiment artifact (it does not collect DCGM GPU
+hardware counters).
 
 ## LiveKit data protocol
 

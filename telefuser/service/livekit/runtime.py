@@ -11,11 +11,12 @@ from telefuser.service.security.security_validator import SecurityLevel
 from telefuser.utils.logging import logger
 
 from .config import LiveKitServeConfig
+from .metrics import LiveKitServingMetrics
 from .multi_session_worker import MultiSessionLiveKitWorker as LiveKitWorker
+from .nccl_process_worker_pool import NCCLProcessLiveKitWorkerPool
 from .pipeline_adapter import LiveKitPipelineAdapter
 from .pipeline_router import TurboServePipelineRouter
 from .process_worker_pool import ProcessLiveKitWorkerPool, ProcessWorkerSpec
-from .nccl_process_worker_pool import NCCLProcessLiveKitWorkerPool
 from .scheduler import LiveKitScheduler, SchedulerAdmission
 from .schemas import (
     LiveKitHealthResponse,
@@ -28,17 +29,17 @@ from .schemas import (
 from .session_registry import TERMINAL_SESSION_STATUSES, SessionRecord, SessionRegistry
 from .token_service import LiveKitTokenService
 from .turboserve import (
-    TurboServeClusterScheduler,
-    TurboServeRuntimeCalibration,
-    TurboServeSchedulerConfig,
-    TurboServeSchedulingSnapshot,
-    TurboServeSessionView,
     TurboServeAutoscalingController,
+    TurboServeClusterScheduler,
     TurboServeMigrationPlan,
     TurboServeOwnership,
     TurboServePlacementController,
+    TurboServeRuntimeCalibration,
     TurboServeScaleDecision,
+    TurboServeSchedulerConfig,
+    TurboServeSchedulingSnapshot,
     TurboServeSessionDemand,
+    TurboServeSessionView,
     TurboServeWorkerLoad,
 )
 from .worker_pool import InProcessLiveKitWorkerPool, WorkerPool
@@ -121,6 +122,7 @@ class LiveKitServeRuntime:
         self._last_scale_decision: TurboServeScaleDecision | None = None
         self._last_migration_plan: TurboServeMigrationPlan | None = None
         self._last_migration_error: str | None = None
+        self._serving_metrics = LiveKitServingMetrics()
         self._lock = threading.RLock()
 
     @property
@@ -170,6 +172,7 @@ class LiveKitServeRuntime:
             timeout_s=self.config.session_timeout,
         )
         admission = self.scheduler.assign(session_id=session_id, room_name=room_name)
+        self._serving_metrics.record_admission(admission.status)
         if admission.status == "rejected":
             self.registry.delete(session_id)
             return CreateSessionResult(record=record, token="", admission=admission)
@@ -258,7 +261,53 @@ class LiveKitServeRuntime:
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
         """Release capacity after a worker session exits."""
         del worker_id
-        self._finish_session(session_id, error=error)
+        record = self._finish_session(session_id, error=error)
+        self._serving_metrics.record_session_finished(record.status, error=error)
+
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        """Record a validated controller action entering the serving pipeline."""
+        self._serving_metrics.on_control_received(worker_id, session_id)
+
+    def on_chunk_published(
+        self,
+        worker_id: str,
+        session_id: str,
+        frames: int,
+        first_frame_at: float | None = None,
+    ) -> None:
+        """Record frames accepted by the LiveKit video publisher."""
+        self._serving_metrics.on_chunk_published(
+            worker_id=worker_id,
+            session_id=session_id,
+            frames=frames,
+            first_frame_at=first_frame_at,
+        )
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        """Ingest a child-model output forwarded by the process-NCCL pool."""
+        self._serving_metrics.on_model_output(
+            self,
+            worker_id=worker_id,
+            pipeline_session_id=session_id,
+            payload=payload,
+            runtime_metrics=runtime_metrics,
+            session_runtime_metrics=session_runtime_metrics,
+        )
+
+    def prometheus_metrics(self) -> str:
+        """Render runtime, scheduler, session, and pipeline serving metrics."""
+        return self._serving_metrics.render_prometheus(self)
+
+    def serving_metrics_snapshot(self) -> dict:
+        """Return aggregate serving metrics for the JSON endpoint and experiments."""
+        return self._serving_metrics.json_snapshot(self)
 
     def health(self) -> LiveKitHealthResponse:
         """Return service health based on current scheduler state."""
@@ -347,7 +396,16 @@ class LiveKitServeRuntime:
         migrate = getattr(self.worker_pool, "migrate_session", None)
         if not callable(migrate):
             raise RuntimeError("Configured worker pool does not support TurboServe migration")
-        ownership = await migrate(record.pipeline_session_id, target_worker_id)
+        migration_started_at = asyncio.get_running_loop().time()
+        try:
+            ownership = await migrate(record.pipeline_session_id, target_worker_id)
+        except Exception as exc:
+            self._serving_metrics.record_migration(success=False, error=str(exc))
+            raise
+        self._serving_metrics.record_migration(
+            success=True,
+            duration_seconds=asyncio.get_running_loop().time() - migration_started_at,
+        )
         self.scheduler.reassign_session(session_id, target_worker_id)
         self.registry.assign_worker(session_id, target_worker_id)
         return ownership
@@ -384,7 +442,11 @@ class LiveKitServeRuntime:
                 ProcessWorkerSpec(worker_id=state.worker_id, gpu_ids=list(state.gpu_ids))
                 for state in self.scheduler.workers()
             ]
-            pool_type = NCCLProcessLiveKitWorkerPool if self.config.worker_mode == "process-nccl" else ProcessLiveKitWorkerPool
+            pool_type = (
+                NCCLProcessLiveKitWorkerPool
+                if self.config.worker_mode == "process-nccl"
+                else ProcessLiveKitWorkerPool
+            )
             return pool_type(
                 specs,
                 config=self.config,
@@ -501,7 +563,11 @@ class LiveKitServeRuntime:
         if not isinstance(worker_metrics, dict):
             worker_metrics = {}
         base_latency_ms = max(
-            (float(values.get("p95_chunk_seconds", 0.0)) * 1000 for values in worker_metrics.values() if isinstance(values, dict)),
+            (
+                float(values.get("p95_chunk_seconds", 0.0)) * 1000
+                for values in worker_metrics.values()
+                if isinstance(values, dict)
+            ),
             default=0.0,
         )
         decision = self._cluster_scheduler.decide(
@@ -611,7 +677,11 @@ class LiveKitServeRuntime:
         profiles = self._worker_capacity_profiles
         sessions: list[TurboServeSessionDemand] = []
         for record in self.registry.list_records():
-            if record.status in TERMINAL_SESSION_STATUSES or record.pipeline_session_id is None or record.worker_id is None:
+            if (
+                record.status in TERMINAL_SESSION_STATUSES
+                or record.pipeline_session_id is None
+                or record.worker_id is None
+            ):
                 continue
             profile = profiles.get(record.worker_id, {})
             state_bytes = int(profile.get("estimated_session_bytes", 1)) if isinstance(profile, dict) else 1

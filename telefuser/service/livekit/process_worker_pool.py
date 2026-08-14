@@ -319,6 +319,29 @@ class ProcessLiveKitWorkerPool:
                 if owner == worker_id and pipeline_session_id == event.get("pipeline_session_id"):
                     self._pipeline_routes.pop(pipeline_session_id, None)
             self._event_sink.on_session_finished(worker_id, session_id, event.get("error"))
+        elif event_type == "control_received":
+            callback = getattr(self._event_sink, "on_control_received", None)
+            if callable(callback):
+                callback(worker_id, event["session_id"])
+        elif event_type == "chunk_published":
+            callback = getattr(self._event_sink, "on_chunk_published", None)
+            if callable(callback):
+                callback(
+                    worker_id,
+                    event["session_id"],
+                    int(event.get("frames", 0)),
+                    event.get("first_frame_at"),
+                )
+        elif event_type == "model_output":
+            callback = getattr(self._event_sink, "on_model_output", None)
+            if callable(callback):
+                callback(
+                    worker_id,
+                    event["session_id"],
+                    event["payload"],
+                    runtime_metrics=event.get("runtime_metrics"),
+                    session_runtime_metrics=event.get("session_runtime_metrics"),
+                )
 
     async def _monitor_loop(self) -> None:
         while True:
@@ -635,5 +658,42 @@ class _ProcessEventSink:
                 "session_id": session_id,
                 "pipeline_session_id": self._pipeline_sessions.pop(session_id, None),
                 "error": error,
+            }
+        )
+
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        self.events.put(
+            {"type": "control_received", "worker_id": worker_id, "session_id": session_id}
+        )
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        self.events.put(
+            {
+                "type": "chunk_published",
+                "worker_id": worker_id,
+                "session_id": session_id,
+                "frames": frames,
+                "first_frame_at": first_frame_at,
+            }
+        )
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        self.events.put(
+            {
+                "type": "model_output",
+                "worker_id": worker_id,
+                "session_id": session_id,
+                "payload": payload,
+                "runtime_metrics": runtime_metrics,
+                "session_runtime_metrics": session_runtime_metrics,
             }
         )

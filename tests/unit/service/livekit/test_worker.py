@@ -121,6 +121,9 @@ class FakeSink:
         self.session_statuses: list[tuple[str, str, str | None]] = []
         self.pipeline_sessions: list[tuple[str, str]] = []
         self.finished: list[tuple[str, str, str | None]] = []
+        self.controls: list[tuple[str, str]] = []
+        self.published: list[tuple[str, str, int, float | None]] = []
+        self.model_outputs: list[tuple[str, str, dict]] = []
 
     def on_worker_status(self, worker_id: str, status: str) -> None:
         self.worker_statuses.append((worker_id, status))
@@ -133,6 +136,25 @@ class FakeSink:
 
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
         self.finished.append((worker_id, session_id, error))
+
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        self.controls.append((worker_id, session_id))
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        self.published.append((worker_id, session_id, frames, first_frame_at))
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        del runtime_metrics, session_runtime_metrics
+        self.model_outputs.append((worker_id, session_id, payload))
 
 
 def _jpeg_chunk() -> dict:
@@ -241,6 +263,13 @@ def test_livekit_worker_runs_pipeline_and_forwards_control() -> None:
         assert room.statuses[-1]["type"] == "done"
         assert room.disconnected is True
         assert sink.pipeline_sessions == [("session-1", "pipeline-session-1")]
+        assert sink.controls == [("worker-0", "session-1")]
+        assert [output[2]["frame_count"] for output in sink.model_outputs] == [0, 1, 1, 0]
+        assert [(item[0], item[1], item[2]) for item in sink.published] == [
+            ("worker-0", "session-1", 1),
+            ("worker-0", "session-1", 1),
+        ]
+        assert all(item[3] is not None for item in sink.published)
         assert room.statuses[-1]["total_chunks"] == 2
         assert room.statuses[-1]["published_frames"] == 2
         assert sink.finished == [("worker-0", "session-1", None)]

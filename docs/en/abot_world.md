@@ -115,31 +115,161 @@ This fixed logical position policy is an intentional difference from the
 original non-sink ABot baseline and must be evaluated as part of any future
 long-horizon quality claim.
 
-## Multi-GPU and autoscaling
+## Four-GPU Black-Box User-Wave Baseline
 
-Assign exactly one numeric GPU ID to each ABot worker. For example, four warm
-replicas with hardware-sized retained-session capacity use:
+The checked-in ABot factory fixes the real-time baseline at **12 FPS**,
+**three control latents per chunk** (12 decoded frames), `scheduler_mode=batched`,
+and `max_batch_size=2`. The following launch uses four physical GPUs (4--7),
+one spawned model worker per GPU, two retained sessions per worker, and a bounded
+HTTP admission queue. It is a black-box deployment: clients call only the public
+HTTP/LiveKit interfaces and never select a GPU.
+
+Start a local LiveKit server in a separate terminal. A loopback experiment does
+not need the public TURN setup; retain the TURN setup above when clients are remote.
 
 ```bash
-telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
+livekit-server --dev --bind 127.0.0.1
+```
+
+Use the source-tree CLI below. The currently installed `telefuser` console script
+may be older than this checkout and omit `process-nccl`; `python -m` with
+`PYTHONPATH=$PWD` is therefore intentional.
+
+```bash
+cd /public/fanyk1/lwb/TeleFuser-abot-world
+
+export PYTHONPATH=$PWD
+export TF_MODEL_ZOO_PATH=/public/fanyk1/lwb/model_zoo
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+
+/public/fanyk1/lwb/envs/telefuser_sage291/bin/python -m telefuser.entrypoints.cli.main \
+  stream-serve examples/abot_world/abot_world_livekit_service.py \
+  --host 127.0.0.1 --port 8088 \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey --livekit-api-secret secret \
   --num-workers 4 --worker-gpu-map '0;1;2;3' \
   --worker-mode process-nccl \
-  --max-sessions-per-worker auto --queue-size 32 \
-  --port 8088 --skip-validation
+  --max-sessions-per-worker 2 --queue-size 16 \
+  --skip-validation
 ```
 
-`process-nccl` is the cross-process TurboServe baseline. The parent keeps each
-LiveKit room, ingress, and egress alive; a source GPU quiesces at a chunk boundary,
-the target GPU receives retained CUDA tensors directly with NCCL P2P, and routing
-changes only after source release and ownership commit. Controls received during
-that window are buffered in the parent and replayed on the committed owner.
+`CUDA_VISIBLE_DEVICES=4,5,6,7` remaps physical GPUs 4--7 to logical IDs 0--3,
+which is why the worker map is exactly `'0;1;2;3'` rather than `'4;5;6;7'`.
+The parent admission scheduler assigns each incoming session to the least-loaded
+worker; no browser or workload-client GPU argument exists. `process-nccl` keeps
+LiveKit transport in the parent, holds model state in the children, batches each
+worker's compatible ready sessions, and can migrate retained state at a chunk
+boundary. Rebalancing is enabled by default.
 
-It deliberately uses a fixed one-GPU-per-worker NCCL group, so it does not combine
-with process autoscaling. Plain `--worker-mode process` remains independent-replica
-batching and reports `migration_supported: false`; it is not a TurboServe migration
-baseline. In-process migration remains useful for debugging, but stages state via CPU.
+Wait for readiness and record the public configuration before the load starts:
+
+```bash
+curl --noproxy '*' --fail --silent http://127.0.0.1:8088/v1/service/ready
+curl --noproxy '*' --fail --silent http://127.0.0.1:8088/v1/service/metadata | python -m json.tool
+```
+
+The metadata must report `worker_mode: process-nccl`, `num_workers: 4`, and
+`configured_max_sessions_per_worker: 2`. It also reports the routing snapshot and
+any rebalance decision. Do not claim a migration result merely because
+`migration_supported` is true: first pass the focused ABot TAeW migration validation
+after its state-snapshot patch has landed. A balanced user wave normally exercises
+placement, local batching, admission queueing, and recovery; it need not create an
+imbalanced placement worth migrating.
+
+### Run the arrival/burst/recovery workload
+
+The tracked scenario at
+`tools/validation/workloads/abot_livekit_4gpu_lf3_12fps_wave.json` drives real
+LiveKit controller clients. Each client creates a session through
+`POST /v1/stream/sessions`, joins its room, sends reliable `tf.control` states,
+counts received WebRTC video frames, and deletes its public session on departure.
+The workload has four phases: 4-user warmup, 8-user SLO-capacity ramp, 12-user
+burst (four requests should queue under the 4 x 2 admission cap), then recovery to
+4 users. Scale-down removes the newest sessions first, so long-lived session state
+is preserved; a client stays counted until its scheduled shutdown actually runs.
+
+```bash
+cd /public/fanyk1/lwb/TeleFuser-abot-world
+
+PYTHONPATH=$PWD /public/fanyk1/lwb/envs/telefuser_sage291/bin/python \
+  tools/validation/benchmark_abot_livekit_burst.py \
+  --scenario tools/validation/workloads/abot_livekit_4gpu_lf3_12fps_wave.json \
+  --output /public/fanyk1/lwb/results/experiments/abot_livekit_4gpu_lf3_12fps_wave/result.json
+```
+
+Use `--dry-run` first to validate the JSON without contacting the service. The
+result artifact keeps raw one-second delivery samples, session admissions, phase
+events, server metadata snapshots, and a concise phase table. `Aggregate FPS` is
+all generated frames actually received by the WebRTC clients. `FPS/all-user` and SLO
+attainment use every requested session after its 15-second grace interval; an
+unassigned, disconnected, or stalled request contributes zero FPS. The legacy
+`FPS/controlled` field remains available for comparison with active media clients.
+
+This is an end-to-end client-delivery experiment, not a model-only benchmark.
+Correlate its artifact with `/metrics` or the Prometheus/Grafana stack for GPU,
+queue, batching, and stage telemetry; do not infer GPU utilization from delivery
+FPS alone.
+
+### All-active peak-16 capacity trace
+
+Use the following trace to measure fixed four-GPU overload behavior without hiding
+users behind an admission queue. It requires four warm workers, four retained
+sessions per worker, batch cap four, and `--queue-size 0`: the 16 requested users
+must all receive an immediate `assigned` response. A queued, rejected, disconnected,
+or zero-output user remains in the `FPS/all-user` and SLO denominator after grace;
+there is no per-client GPU selection.
+
+| Phase | Duration | Arrival/departure window | Target users |
+| --- | ---: | ---: | ---: |
+| warmup | 45 s | arrivals over 10 s | 4 |
+| ramps | 55 s + 55 s | arrivals over 15 s | 8, 12 |
+| peak | 80 s | arrivals over 15 s | 16 |
+| recovery | 50 s + 45 s | departures over 15 s | 8, 4 |
+
+Start the service on physical GPUs 0--3 with the all-active profile:
+
+```bash
+cd /public/fanyk1/lwb/TeleFuser-abot-world
+export PYTHONPATH=$PWD
+export TF_MODEL_ZOO_PATH=/public/fanyk1/lwb/model_zoo
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export TELEFUSER_ABOT_SCHEDULER_MODE=batched
+export TELEFUSER_ABOT_MAX_BATCH_SIZE=4
+export TELEFUSER_ABOT_BATCHING_WINDOW_MS=2
+
+/public/fanyk1/lwb/envs/telefuser_sage291/bin/python -m telefuser.entrypoints.cli.main \
+  stream-serve examples/abot_world/abot_world_livekit_service.py \
+  --host 127.0.0.1 --port 8088 \
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  --num-workers 4 --worker-gpu-map '0;1;2;3' \
+  --worker-mode process-nccl \
+  --max-sessions-per-worker 4 --queue-size 0 \
+  --skip-validation
+```
+
+Then run the black-box client trace:
+
+```bash
+PYTHONPATH=$PWD /public/fanyk1/lwb/envs/telefuser_sage291/bin/python \
+  tools/validation/benchmark_abot_livekit_burst.py \
+  --scenario tools/validation/workloads/abot_livekit_4gpu_lf3_12fps_all_active_peak16_wave.json \
+  --output /public/fanyk1/lwb/results/experiments/abot_livekit_4gpu_lf3_12fps_all_active_peak16_wave/result.json
+```
+
+The printed `admitted` column must be `16/16` in the peak phase. The JSON phase
+summary also records `max_requested_users`, all-user FPS, and immediate-assignment
+contract status, so a queue or failed admission invalidates rather than improves the
+reported serving result.
+
+## Multi-GPU and autoscaling
+
+`process-nccl` deliberately uses a fixed one-GPU-per-worker NCCL group, so it does
+not combine with process autoscaling. Plain `--worker-mode process` remains
+independent-replica batching and reports `migration_supported: false`; it is not a
+TurboServe migration baseline. In-process migration remains useful for debugging,
+but stages state via CPU.
 
 For plain `process` mode, optional cold-replica autoscaling starts only the requested
 minimum and scales within the GPUs declared above. For example:

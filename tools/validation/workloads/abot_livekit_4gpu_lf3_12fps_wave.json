@@ -1,0 +1,62 @@
+{
+  "name": "abot_livekit_4gpu_lf3_12fps_user_wave",
+  "server_url": "http://127.0.0.1:8088",
+  "expected_worker_mode": "process-nccl",
+  "expected_num_workers": 4,
+  "seed": 20260813,
+  "session": {
+    "prompt": "A smooth first-person exploration through a vivid natural landscape.",
+    "image_path": "../ABot-World/web_client/datasets/images/84b90ad568b693d2.png",
+    "fps": 12,
+    "control_latent_frames": 3,
+    "delivery_mode": "latest",
+    "expected_preview_frames": 1,
+    "control": {
+      "interval_seconds": 0.5,
+      "jitter_seconds": 0.1,
+      "idle_probability": 0.0,
+      "idle_min_seconds": 0.2,
+      "idle_max_seconds": 1.0,
+      "action_states": [
+        ["KeyW"],
+        ["KeyW", "KeyA"],
+        ["KeyW", "KeyD"],
+        ["KeyI"]
+      ]
+    }
+  },
+  "measurement": {
+    "sample_interval_seconds": 1.0,
+    "connect_timeout_seconds": 90.0,
+    "http_timeout_seconds": 30.0,
+    "shutdown_timeout_seconds": 20.0,
+    "first_generation_grace_seconds": 15.0,
+    "slo_fps_tolerance": 0.25
+  },
+  "phases": [
+    {
+      "name": "warmup_4_users",
+      "duration_seconds": 45.0,
+      "target_users": 4,
+      "arrival_window_seconds": 15.0
+    },
+    {
+      "name": "ramp_to_slo_capacity_8_users",
+      "duration_seconds": 75.0,
+      "target_users": 8,
+      "arrival_window_seconds": 25.0
+    },
+    {
+      "name": "burst_above_admission_capacity_12_users",
+      "duration_seconds": 75.0,
+      "target_users": 12,
+      "arrival_window_seconds": 15.0
+    },
+    {
+      "name": "recovery_to_4_users",
+      "duration_seconds": 60.0,
+      "target_users": 4,
+      "departure_window_seconds": 15.0
+    }
+  ]
+}

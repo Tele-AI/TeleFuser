@@ -1,0 +1,73 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.8-3.6.0-ubuntu22.04
+    command:
+      - --collectors
+      - /etc/dcgm-exporter/telefuser.csv
+      - --collect-interval
+      - "5000"
+    ports:
+      - "9400:9400"
+    runtime: nvidia
+    cap_add:
+      - SYS_ADMIN
+    # NVIDIA Container Toolkit applies this physical-GPU allowlist before the
+    # container starts. Do not use the serving process's logical CUDA IDs here.
+    # Override it at launch, for example:
+    # TELEFUSER_MONITOR_GPU_IDS=0,1,2,3,4,5,6,7 docker compose up -d
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${TELEFUSER_MONITOR_GPU_IDS:-0,1,2,3}"
+      NVIDIA_DRIVER_CAPABILITIES: utility
+    volumes:
+      - ./dcgm-metrics.csv:/etc/dcgm-exporter/telefuser.csv:ro
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+    ports:
+      - "9100:9100"
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

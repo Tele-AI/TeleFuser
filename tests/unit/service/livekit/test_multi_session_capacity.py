@@ -105,3 +105,38 @@ def test_runtime_starts_two_sessions_on_one_model_worker() -> None:
     assert worker_pool.started == [first.record.session_id, second.record.session_id]
     assert runtime.registry.require(first.record.session_id).config["control_idle_timeout"] == 8.0
     assert runtime.registry.require(second.record.session_id).worker_id == "worker-0"
+
+
+def test_runtime_assigns_all_peak16_sessions_without_waiting_when_capacity_is_four_per_worker() -> None:
+    """A fixed 4x4 deployment admits its complete peak before a queue exists."""
+    worker_pool = _WorkerPool()
+    runtime = LiveKitServeRuntime(
+        config=LiveKitServeConfig(
+            livekit_url="wss://livekit.example",
+            livekit_api_key="key",
+            livekit_api_secret="secret",
+            num_workers=4,
+            worker_gpu_map="0;1;2;3",
+            worker_mode="process-nccl",
+            max_sessions_per_worker=4,
+            # A peak-16 all-active trace must not convert capacity pressure
+            # into invisible zero-FPS queued sessions.
+            queue_size=0,
+        ),
+        pipeline_file="pipeline.py",
+        token_service=_TokenService(),
+        worker_pool=worker_pool,
+    )
+
+    admissions = [
+        runtime.create_session(SessionCreateRequest(identity=f"controller-{index}")) for index in range(16)
+    ]
+
+    assert all(result.admission.status == "assigned" for result in admissions)
+    assert len(worker_pool.started) == 16
+    assert [len(worker.session_ids) for worker in runtime.scheduler.workers()] == [4, 4, 4, 4]
+    assert runtime.scheduler.health_snapshot()["queued_sessions"] == 0
+
+    overflow = runtime.create_session(SessionCreateRequest(identity="controller-overflow"))
+    assert overflow.admission.status == "rejected"
+    assert runtime.scheduler.health_snapshot()["queued_sessions"] == 0

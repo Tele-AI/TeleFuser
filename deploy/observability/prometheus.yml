@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: telefuser-serving
+    metrics_path: /metrics
+    static_configs:
+      # The serving process runs on the host. On Linux, replace this with the
+      # host IP or start this compose stack with network_mode: host.
+      - targets: ["host.docker.internal:8088"]
+        labels:
+          service: telefuser-abot-world
+
+  - job_name: dcgm
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]

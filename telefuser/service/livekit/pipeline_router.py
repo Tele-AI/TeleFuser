@@ -148,7 +148,7 @@ class TurboServePipelineRouter:
         retained_by_worker = {worker_id: 0 for worker_id in self._backends}
         for worker_id in routes.values():
             retained_by_worker[worker_id] += 1
-        runtime_metrics: dict[str, dict[str, float | int]] = {}
+        runtime_metrics: dict[str, dict[str, float | int | str]] = {}
         for worker_id, backend in self._backends.items():
             metrics = getattr(backend, "runtime_metrics", None)
             if not callable(metrics):

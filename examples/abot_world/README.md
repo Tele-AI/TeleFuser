@@ -58,6 +58,12 @@ enable process autoscaling. Use plain `--worker-mode process` plus a non-zero qu
 Each worker continuously batches compatible retained sessions through both DiT
 and cached VAE decode; GPU IDs are passed explicitly to the ABot model factory.
 
+For the reproducible four-GPU black-box baseline (physical GPUs 4--7, logical
+worker map `'0;1;2;3'`, `process-nccl`, retained capacity 2 per worker, and
+12 FPS / three-latent chunks), use the exact source-tree launch and LiveKit
+arrival/burst/recovery workload in the [ABot serving guide](../../docs/en/abot_world.md#four-gpu-black-box-user-wave-baseline).
+Clients do not choose a GPU; the parent scheduler assigns each public session.
+
 Serve the reused browser page in another terminal:
 
 ```bash

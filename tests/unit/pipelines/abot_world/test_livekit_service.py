@@ -50,6 +50,8 @@ class _FakePipeline:
             )
         )
         self.generate_calls: list[tuple[str, dict[str, bool]]] = []
+        self.call_times: list[float] = []
+        self.frames_per_chunk = 1
         self.batch_sizes: list[int] = []
         self.closed_sessions: list[str] = []
         self.suspended_sessions: list[str] = []
@@ -82,9 +84,13 @@ class _FakePipeline:
     ) -> list[Image.Image]:
         assert control_latent_frames == 3
         self.generate_calls.append((session.session_id, controls))
+        self.call_times.append(time.monotonic())
         self.batch_sizes.append(1)
         session.next_latent_frame += control_latent_frames
-        return [Image.new("RGB", (8, 8), color=(20, len(self.generate_calls) % 255, 40))]
+        return [
+            Image.new("RGB", (8, 8), color=(20, len(self.generate_calls) % 255, 40))
+            for _ in range(self.frames_per_chunk)
+        ]
 
     def generate_next_blocks(
         self,
@@ -97,8 +103,14 @@ class _FakePipeline:
         results = []
         for session, state in zip(sessions, controls):
             self.generate_calls.append((session.session_id, state))
+            self.call_times.append(time.monotonic())
             session.next_latent_frame += control_latent_frames
-            results.append([Image.new("RGB", (8, 8), color=(20, len(self.generate_calls) % 255, 40))])
+            results.append(
+                [
+                    Image.new("RGB", (8, 8), color=(20, len(self.generate_calls) % 255, 40))
+                    for _ in range(self.frames_per_chunk)
+                ]
+            )
         return results
 
     def suspend_interactive_session(self, session: _FakePipelineSession) -> None:
@@ -137,6 +149,27 @@ def _create(service: ABotWorldLiveKitService, session_id: str, **config: object)
     )
 
 
+def _take_and_notify(
+    service: ABotWorldLiveKitService,
+    state: _ABotWorldLiveKitSession,
+    *,
+    timeout: float = 1.0,
+) -> dict[str, object]:
+    payload = state.output_queue.get(timeout=timeout)
+    with service._scheduler_condition:
+        service._scheduler_condition.notify_all()
+    return payload
+
+
+def _wait_for(predicate, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.002)
+    assert predicate()
+
+
 def test_service_matches_shared_multi_session_bidirectional_contract() -> None:
     service, _ = _service()
     assert isinstance(service, BidirectionalService)
@@ -168,7 +201,7 @@ def test_capacity_profile_accepts_explicit_cuda_device_string(monkeypatch) -> No
     assert profile["effective_capacity"] == 2
     service.stop()
 
-def test_round_robin_capacity_uses_one_active_workspace(monkeypatch) -> None:
+def test_batched_capacity_accounts_for_active_batch_workspace(monkeypatch) -> None:
     service, pipeline = _service(max_batch_size=8)
     pipeline.device = "cuda:0"
     monkeypatch.setattr("telefuser.pipelines.abot_world.service.torch.cuda.is_available", lambda: True)
@@ -184,16 +217,16 @@ def test_round_robin_capacity_uses_one_active_workspace(monkeypatch) -> None:
 
     profile = service.configure_session_capacity(10)
 
-    assert profile["computed_capacity"] == 7
-    assert profile["effective_capacity"] == 7
-    assert profile["estimated_batch_workspace_bytes"] == 200
-    assert profile["scheduler_mode"] == "round_robin"
+    assert profile["computed_capacity"] == 3
+    assert profile["effective_capacity"] == 3
+    assert profile["estimated_batch_workspace_bytes"] == 600
+    assert profile["scheduler_mode"] == "batched"
     service.stop()
 
 
 
 def test_two_ready_sessions_are_generated_in_one_batch_and_keep_order() -> None:
-    service, pipeline = _service(output_queue_size=4, batching_window_ms=30, scheduler_mode="batched")
+    service, pipeline = _service(output_queue_size=4, batching_window_ms=30)
     service.configure_session_capacity(2)
     first = _create(service, "first")
     second = _create(service, "second")
@@ -230,7 +263,7 @@ def test_service_accepts_two_latent_experimental_chunk() -> None:
         service.stop()
 
 
-def test_default_scheduler_round_robins_single_session_steps() -> None:
+def test_default_scheduler_coalesces_compatible_sessions() -> None:
     service, pipeline = _service(output_queue_size=4)
     service.configure_session_capacity(2)
     first = _create(service, "first")
@@ -246,11 +279,247 @@ def test_default_scheduler_round_robins_single_session_steps() -> None:
     first_chunk = first_state.output_queue.get(timeout=2)
     second_chunk = second_state.output_queue.get(timeout=2)
 
-    assert first_chunk["scheduler"]["batch_size"] == 1
-    assert second_chunk["scheduler"]["batch_size"] == 1
-    assert pipeline.batch_sizes[:2] == [1, 1]
-    assert service.runtime_metrics()["scheduler_mode"] == "round_robin"
+    assert first_chunk["scheduler"]["batch_size"] == 2
+    assert second_chunk["scheduler"]["batch_size"] == 2
+    assert pipeline.batch_sizes[:1] == [2]
+    assert service.runtime_metrics()["scheduler_mode"] == "batched"
     service.stop()
+
+
+def test_round_robin_remains_single_session_ablation() -> None:
+    service, pipeline = _service(output_queue_size=4, scheduler_mode="round_robin")
+    service.configure_session_capacity(2)
+    first = _create(service, "first")
+    second = _create(service, "second")
+    first_state = service._session(first)
+    second_state = service._session(second)
+    assert first_state is not None and second_state is not None
+    try:
+        assert _take_and_notify(service, first_state)["type"] == "preview"
+        assert _take_and_notify(service, second_state)["type"] == "preview"
+        service.push_chunk(first, {"type": "control_state", "controls": ["KeyW"]})
+        service.push_chunk(second, {"type": "control_state", "controls": ["KeyD"]})
+        assert _take_and_notify(service, first_state, timeout=2)["type"] == "chunk"
+        assert _take_and_notify(service, second_state, timeout=2)["type"] == "chunk"
+        assert pipeline.batch_sizes[:2] == [1, 1]
+    finally:
+        service.stop()
+
+
+def test_latest_mode_bounds_prefetch_and_resumes_at_playout_deadline() -> None:
+    service, pipeline = _service(output_queue_size=4, batching_window_ms=0, control_idle_timeout=30)
+    pipeline.frames_per_chunk = 12
+    service.configure_session_capacity(1)
+    session_id = _create(service, "paced", fps=12, control_latent_frames=3)
+    state = service._session(session_id)
+    assert state is not None
+    try:
+        assert _take_and_notify(service, state)["type"] == "preview"
+        service.push_chunk(session_id, {"type": "control_state", "controls": ["KeyW"]})
+        _wait_for(lambda: len(pipeline.generate_calls) >= 1)
+        assert _take_and_notify(service, state)["type"] == "chunk"
+        _wait_for(lambda: len(pipeline.generate_calls) >= 2)
+
+        with state.lock:
+            expected_resume_at = state.next_playout_deadline - state.last_chunk_duration_seconds
+            assert state.pacing_ready_at <= expected_resume_at
+        remaining = expected_resume_at - time.monotonic()
+        if remaining > 0.05:
+            time.sleep(remaining - 0.05)
+        # The second chunk is the sole prefetch. It remains queued while the
+        # first 12-frame chunk is being played, so there is no free-running c3.
+        assert len(pipeline.generate_calls) == 2
+        metrics = service.runtime_metrics(session_id)
+        assert metrics["pacing_buffered_video_payloads"] == 1
+        assert service.runtime_metrics()["pacing_throttled_sessions"] == 1
+
+        remaining = expected_resume_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        assert _take_and_notify(service, state)["type"] == "chunk"
+        dequeued_at = time.monotonic()
+        _wait_for(lambda: len(pipeline.generate_calls) >= 3)
+        third_started_at = pipeline.call_times[2]
+        assert third_started_at >= expected_resume_at - 0.05
+        assert third_started_at <= dequeued_at + 0.15
+    finally:
+        service.stop()
+
+
+def test_latest_mode_batches_mildly_staggered_playout_consumers() -> None:
+    service, pipeline = _service(output_queue_size=4, batching_window_ms=20, control_idle_timeout=30)
+    pipeline.frames_per_chunk = 12
+    service.configure_session_capacity(2)
+    first = _create(service, "first", fps=12, control_latent_frames=3)
+    second = _create(service, "second", fps=12, control_latent_frames=3)
+    first_state = service._session(first)
+    second_state = service._session(second)
+    assert first_state is not None and second_state is not None
+    try:
+        assert _take_and_notify(service, first_state)["type"] == "preview"
+        assert _take_and_notify(service, second_state)["type"] == "preview"
+        service.push_chunk(first, {"type": "control_state", "controls": ["KeyW"]})
+        service.push_chunk(second, {"type": "control_state", "controls": ["KeyD"]})
+        _wait_for(lambda: len(pipeline.batch_sizes) >= 1)
+        assert pipeline.batch_sizes[0] == 2
+
+        assert _take_and_notify(service, first_state)["type"] == "chunk"
+        time.sleep(0.003)
+        assert _take_and_notify(service, second_state)["type"] == "chunk"
+        _wait_for(lambda: len(pipeline.batch_sizes) >= 2)
+        assert pipeline.batch_sizes[1] == 2
+
+        with first_state.lock:
+            continuation_at = first_state.next_playout_deadline - first_state.last_chunk_duration_seconds
+        remaining = continuation_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        assert _take_and_notify(service, first_state)["type"] == "chunk"
+        time.sleep(0.003)
+        assert _take_and_notify(service, second_state)["type"] == "chunk"
+        _wait_for(lambda: len(pipeline.batch_sizes) >= 3)
+        assert pipeline.batch_sizes[2] == 2
+    finally:
+        service.stop()
+
+
+def _prepare_latest_continuation(
+    state: _ABotWorldLiveKitSession,
+    *,
+    now: float,
+    pacing_ready_at: float,
+    next_playout_deadline: float,
+) -> None:
+    with state.lock:
+        state.controls = {"W"}
+        state.ready_since = now
+        state.scheduled_chunks = 2
+        state.last_chunk_duration_seconds = 1.0
+        state.last_compute_seconds = 0.05
+        state.pacing_ready_at = pacing_ready_at
+        state.next_playout_deadline = next_playout_deadline
+        state.pipeline_session.next_latent_frame = 6
+
+
+def test_latest_mode_rendezvouses_staggered_continuations_within_deadline_slack() -> None:
+    service, pipeline = _service(output_queue_size=4, batching_window_ms=2, control_idle_timeout=30)
+    with service._scheduler_condition:
+        service._scheduler_paused = True
+    service.configure_session_capacity(2)
+    first = _create(service, "first")
+    second = _create(service, "second")
+    first_state = service._session(first)
+    second_state = service._session(second)
+    assert first_state is not None and second_state is not None
+    try:
+        now = 10_000.0
+        _prepare_latest_continuation(
+            first_state,
+            now=now,
+            pacing_ready_at=now,
+            next_playout_deadline=now + 1.0,
+        )
+        _prepare_latest_continuation(
+            second_state,
+            now=now,
+            pacing_ready_at=now + 0.12,
+            next_playout_deadline=now + 1.12,
+        )
+
+        ready = service._ready_sessions(now)
+        assert [state.session_id for state in ready] == [first]
+        wait_seconds = service._batch_formation_wait_seconds(ready, now)
+        # 10 ms pacing slack makes the second continuation eligible at +110 ms.
+        assert wait_seconds == pytest.approx(0.11, abs=0.002)
+
+        ready = service._ready_sessions(now + wait_seconds + 0.001)
+        batch = service._select_batch(ready, now=now + wait_seconds + 0.001)
+        assert [state.session_id for state in batch] == [first, second]
+        service._execute_batch(batch, [{"W": True}, {"D": True}])
+        assert pipeline.batch_sizes[-1] == 2
+    finally:
+        service.stop()
+
+
+def test_latest_mode_rendezvous_never_waits_past_a_playout_deadline() -> None:
+    service, _ = _service(output_queue_size=4, batching_window_ms=2, control_idle_timeout=30)
+    with service._scheduler_condition:
+        service._scheduler_paused = True
+    service.configure_session_capacity(2)
+    first = _create(service, "first")
+    second = _create(service, "second")
+    first_state = service._session(first)
+    second_state = service._session(second)
+    assert first_state is not None and second_state is not None
+    try:
+        now = 20_000.0
+        _prepare_latest_continuation(
+            first_state,
+            now=now,
+            pacing_ready_at=now,
+            next_playout_deadline=now + 0.20,
+        )
+        _prepare_latest_continuation(
+            second_state,
+            now=now,
+            pacing_ready_at=now + 0.16,
+            next_playout_deadline=now + 0.36,
+        )
+
+        ready = service._ready_sessions(now)
+        assert [state.session_id for state in ready] == [first]
+        wait_seconds = service._batch_formation_wait_seconds(ready, now)
+        # A B=2 estimate is 2 * 50 ms * 1.1, leaving only 90 ms for first.
+        # The peer releases at 150 ms, so use only the legacy 2 ms window.
+        assert wait_seconds == pytest.approx(service.batching_window_seconds)
+        assert now + wait_seconds < service._latest_safe_batch_start([first_state, second_state])
+        ready_after_window = service._ready_sessions(now + wait_seconds)
+        assert [state.session_id for state in service._select_batch(ready_after_window, now=now + wait_seconds)] == [first]
+    finally:
+        service.stop()
+
+
+def test_latest_mode_falls_back_to_singleton_when_observed_batch_misses_deadline() -> None:
+    service, _ = _service(output_queue_size=4, batching_window_ms=2, control_idle_timeout=30)
+    with service._scheduler_condition:
+        service._scheduler_paused = True
+    service.configure_session_capacity(2)
+    first = _create(service, "first")
+    second = _create(service, "second")
+    first_state = service._session(first)
+    second_state = service._session(second)
+    assert first_state is not None and second_state is not None
+    try:
+        now = 30_000.0
+        _prepare_latest_continuation(
+            first_state,
+            now=now,
+            pacing_ready_at=now,
+            next_playout_deadline=now + 0.50,
+        )
+        _prepare_latest_continuation(
+            second_state,
+            now=now,
+            pacing_ready_at=now,
+            next_playout_deadline=now + 1.00,
+        )
+        # A measured B=2 takes 1.01 seconds, while each B=1 takes 0.40s.
+        # With the 10% safety margin, B=2 misses the first deadline, but B=1
+        # followed by B=1 still fits the two respective deadlines.
+        service._batch_compute_estimates.update({1: 0.40, 2: 1.01})
+        ready = service._ready_sessions(now)
+        assert [state.session_id for state in ready] == [first, second]
+        assert service._latest_safe_batch_start(ready) < now
+        assert now <= service._latest_safe_batch_start([first_state])
+        assert now + service._estimated_batch_compute_seconds([first_state]) <= service._latest_safe_batch_start(
+            [second_state]
+        )
+
+        batch = service._select_batch(ready, now=now)
+
+        assert [state.session_id for state in batch] == [first]
+    finally:
+        service.stop()
 
 
 def test_lossless_sessions_each_stream_thirty_chunks_without_drops() -> None:

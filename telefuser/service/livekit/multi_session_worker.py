@@ -36,6 +36,36 @@ class _SessionWorkerEventSink:
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
         self._owner.event_sink.on_session_finished(worker_id, session_id, error)
 
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        callback = getattr(self._owner.event_sink, "on_control_received", None)
+        if callable(callback):
+            callback(worker_id, session_id)
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        callback = getattr(self._owner.event_sink, "on_chunk_published", None)
+        if callable(callback):
+            callback(worker_id, session_id, frames, first_frame_at)
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        callback = getattr(self._owner.event_sink, "on_model_output", None)
+        if callable(callback):
+            callback(
+                worker_id,
+                session_id,
+                payload,
+                runtime_metrics=runtime_metrics,
+                session_runtime_metrics=session_runtime_metrics,
+            )
+
 
 class MultiSessionLiveKitWorker:
     """Load one model pipeline and retain multiple independent room sessions."""

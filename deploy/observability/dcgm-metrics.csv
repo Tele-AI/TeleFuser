@@ -1,0 +1,15 @@
+# TeleFuser ABot-World serving collector set.
+# DCGM field, Prometheus type, help text. Profiling fields are emitted only
+# when the installed driver/DCGM version supports them.
+DCGM_FI_DEV_GPU_UTIL, gauge, GPU utilization (in %).
+DCGM_FI_DEV_MEM_COPY_UTIL, gauge, GPU memory-copy utilization (in %).
+DCGM_FI_DEV_FB_USED, gauge, Framebuffer or HBM memory used (in MiB).
+DCGM_FI_DEV_FB_FREE, gauge, Framebuffer or HBM memory free (in MiB).
+DCGM_FI_DEV_POWER_USAGE, gauge, GPU board power draw (in W).
+DCGM_FI_DEV_GPU_TEMP, gauge, GPU temperature (in C).
+DCGM_FI_DEV_MEMORY_TEMP, gauge, GPU memory temperature (in C).
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL, gauge, Aggregate NVLink throughput.
+DCGM_FI_PROF_PCIE_TX_BYTES, gauge, Active PCIe transmit bandwidth in bytes per second.
+DCGM_FI_PROF_PCIE_RX_BYTES, gauge, Active PCIe receive bandwidth in bytes per second.
+DCGM_FI_PROF_DRAM_ACTIVE, gauge, Ratio of cycles with DRAM active.
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE, gauge, Ratio of cycles with tensor cores active.

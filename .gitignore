@@ -148,6 +148,11 @@ docs/**/modelzoo.md
 !benchmarks/telefuser_aiperf/configs/*.json
 !benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
 !benchmarks/baseline/sglang_lingbot_stream/configs/*.json
+!tools/validation/workloads/*.json
+
+# Version the reproducible ABot LiveKit user-wave scenario, not generated result JSON.
+!tools/validation/workloads/
+!tools/validation/workloads/abot_livekit_4gpu_lf3_12fps_wave.json
 
 project
 output
