@@ -13,11 +13,7 @@ SUMMARY_PAD = 64
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=warps, num_stages=stages)
-        for warps in (4, 8)
-        for stages in (1, 2)
-    ],
+    configs=[triton.Config({}, num_warps=warps, num_stages=stages) for warps in (4, 8) for stages in (1, 2)],
     key=["T"],
 )
 @triton.jit
@@ -28,6 +24,9 @@ def _reduce_kv_kernel(
     v_scale,
     kc,
     vc,
+    kc_fp8,
+    vc_fp8,
+    kc_out_scale,
     T,
     TP,
     NPAD,
@@ -36,28 +35,54 @@ def _reduce_kv_kernel(
     D: tl.constexpr,
     BLOCK: tl.constexpr,
     FP8: tl.constexpr,
+    TOKEN_SCALES: tl.constexpr,
+    V_CHANNEL_SCALE: tl.constexpr,
+    V_TOKEN_CONTIGUOUS: tl.constexpr,
+    SM90_FP8_OUTPUTS: tl.constexpr,
 ):
     block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
     tokens = block * BLOCK + tl.arange(0, BLOCK)
     dims = tl.arange(0, D)
     valid = tokens < T
-    offsets = (
-        ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D
-        + dims[None, :]
-    )
+    offsets = ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D + dims[None, :]
+    v_offsets = offsets
+    if V_TOKEN_CONTIGUOUS:
+        v_offsets = ((batch * H + head) * D + dims[None, :]) * TP + tokens[:, None]
     k_values = tl.load(k + offsets, mask=valid[:, None], other=0.0)
-    v_values = tl.load(v + offsets, mask=valid[:, None], other=0.0)
+    v_raw = tl.load(v + v_offsets, mask=valid[:, None], other=0.0)
+    v_values = v_raw
     if FP8:
         scale_offset = (batch * N + block) * H + head
-        k_values = k_values.to(tl.float32) * tl.load(k_scale + scale_offset)
-        v_values = v_values.to(tl.float32) * tl.load(v_scale + scale_offset)
+        if TOKEN_SCALES:
+            token_scale_offsets = (batch * TP + tokens) * H + head
+            k_values = (
+                k_values.to(tl.float32)
+                * tl.load(
+                    k_scale + token_scale_offsets,
+                    mask=valid,
+                    other=0.0,
+                )[:, None]
+            )
+        else:
+            k_values = k_values.to(tl.float32) * tl.load(k_scale + scale_offset)
+        if V_CHANNEL_SCALE:
+            channel_offsets = (batch * H + head) * D + dims
+            v_values = v_values.to(tl.float32) * tl.load(v_scale + channel_offsets)[None, :]
+        else:
+            v_values = v_values.to(tl.float32) * tl.load(v_scale + scale_offset)
     block_len = tl.minimum(BLOCK, T - block * BLOCK).to(tl.float32)
-    summary_offsets = (
-        ((batch * NPAD + block) * H + head) * D + dims
-    )
-    tl.store(kc + summary_offsets, tl.sum(k_values, axis=0) / block_len)
-    tl.store(vc + summary_offsets, tl.sum(v_values, axis=0))
+    summary_offsets = ((batch * NPAD + block) * H + head) * D + dims
+    k_summary = tl.sum(k_values, axis=0) / block_len
+    tl.store(kc + summary_offsets, k_summary)
+    if SM90_FP8_OUTPUTS:
+        kc_s = tl.maximum(tl.max(tl.abs(k_summary), axis=0), 1.0e-6) / 448.0
+        tl.store(kc_out_scale + (batch * NPAD + block) * H + head, kc_s)
+        tl.store(kc_fp8 + summary_offsets, k_summary / kc_s)
+        vc_offsets = ((batch * H + head) * D + dims) * NPAD + block
+        tl.store(vc_fp8 + vc_offsets, tl.sum(v_raw.to(tl.float32), axis=0) / block_len)
+    else:
+        tl.store(vc + summary_offsets, tl.sum(v_values, axis=0))
 
 
 @triton.jit
@@ -81,10 +106,7 @@ def _reduce_kc_stats_kernel(
     for start in range(0, N, GROUP):
         block_indices = start + blocks
         valid = block_indices < N
-        offsets = (
-            ((batch * NPAD + block_indices[:, None]) * H + head) * D
-            + dims[None, :]
-        )
+        offsets = ((batch * NPAD + block_indices[:, None]) * H + head) * D + dims[None, :]
         values = tl.load(
             kc + offsets,
             mask=valid[:, None],
@@ -115,19 +137,28 @@ def _diag_threshold_kernel(
     BLOCK: tl.constexpr,
     TAU: tl.constexpr,
     FP8: tl.constexpr,
+    TOKEN_SCALES: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
     tokens = q_block * BLOCK + tl.arange(0, BLOCK)
     dims = tl.arange(0, D)
     valid = tokens < T
-    offsets = (
-        ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D
-        + dims[None, :]
-    )
+    offsets = ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D + dims[None, :]
     q_values = tl.load(q + offsets, mask=valid[:, None], other=0.0)
     if FP8:
-        q_values = q_values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
+        if TOKEN_SCALES:
+            token_scale_offsets = (batch * TP + tokens) * H + head
+            q_values = (
+                q_values.to(tl.float32)
+                * tl.load(
+                    q_scale + token_scale_offsets,
+                    mask=valid,
+                    other=0.0,
+                )[:, None]
+            )
+        else:
+            q_values = q_values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
     q_len = tl.minimum(BLOCK, T - q_block * BLOCK).to(tl.float32)
     q_centroid = tl.sum(q_values.to(tl.float32), axis=0) / q_len
     mean_kc = tl.load(kc_mean + batch_head * D + dims)
@@ -157,19 +188,28 @@ def _pool_query_kernel(
     D: tl.constexpr,
     BLOCK: tl.constexpr,
     FP8: tl.constexpr,
+    TOKEN_SCALES: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
     batch, head = batch_head // H, batch_head % H
     tokens = q_block * BLOCK + tl.arange(0, BLOCK)
     dims = tl.arange(0, D)
     valid = tokens < T
-    offsets = (
-        ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D
-        + dims[None, :]
-    )
+    offsets = ((batch * TP + tokens[:, None]).to(tl.int64) * H + head) * D + dims[None, :]
     values = tl.load(q + offsets, mask=valid[:, None], other=0.0)
     if FP8:
-        values = values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
+        if TOKEN_SCALES:
+            token_scale_offsets = (batch * TP + tokens) * H + head
+            values = (
+                values.to(tl.float32)
+                * tl.load(
+                    q_scale + token_scale_offsets,
+                    mask=valid,
+                    other=0.0,
+                )[:, None]
+            )
+        else:
+            values = values.to(tl.float32) * tl.load(q_scale + (batch * N + q_block) * H + head)
     q_len = tl.minimum(BLOCK, T - q_block * BLOCK).to(tl.float32)
     centroid = tl.sum(values.to(tl.float32), axis=0) / q_len
     tl.store(q_bar + (batch_head * N + q_block) * D + dims, centroid)
@@ -198,12 +238,7 @@ def _exact_fused_threshold_kernel(
         other=0.0,
     )
     mean_kc = tl.load(kc_mean + batch_head * D + dims)
-    second_moment = tl.load(
-        kc_second_moment
-        + batch_head * D * D
-        + dims[:, None] * D
-        + dims[None, :]
-    )
+    second_moment = tl.load(kc_second_moment + batch_head * D * D + dims[:, None] * D + dims[None, :])
     raw_mean = tl.sum(q_centroid.to(tl.float32) * mean_kc[None, :], axis=1)
     projected = tl.dot(q_centroid, second_moment, out_dtype=tl.float32)
     raw_second_moment = tl.sum(
@@ -244,6 +279,8 @@ def _reduce_kv(
     )
     vc = torch.zeros_like(kc)
     fp8_inputs = k.dtype == torch.float8_e4m3fn
+    v_channel_scale = fp8_inputs and v_scale is not None and v_scale.shape == (batch, heads, head_dim)
+    v_token_contiguous = v.stride(1) == 1
     dummy_scale = torch.ones((1,), device=k.device, dtype=torch.float32)
     _reduce_kv_kernel[(blocks, batch * heads)](
         k,
@@ -252,6 +289,9 @@ def _reduce_kv(
         v_scale if fp8_inputs else dummy_scale,
         kc,
         vc,
+        kc,
+        vc,
+        dummy_scale,
         tokens,
         padded_tokens,
         padded_blocks,
@@ -260,8 +300,91 @@ def _reduce_kv(
         head_dim,
         BLOCK_SIZE,
         FP8=fp8_inputs,
+        TOKEN_SCALES=False,
+        V_CHANNEL_SCALE=v_channel_scale,
+        V_TOKEN_CONTIGUOUS=v_token_contiguous,
+        SM90_FP8_OUTPUTS=False,
     )
     return kc, vc
+
+
+def prepare_sm90_fp8(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    tau: float,
+    scale: float,
+    thresh_type: str = "diag",
+    tokens: int | None = None,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build BF16 threshold stats and TMA-ready FP8 summaries in one reduction."""
+
+    batch, padded_tokens, heads, head_dim = k.shape
+    tokens = padded_tokens if tokens is None else int(tokens)
+    blocks = triton.cdiv(tokens, BLOCK_SIZE)
+    padded_blocks = triton.cdiv(blocks, SUMMARY_PAD) * SUMMARY_PAD
+    kc_stats = torch.zeros(
+        (batch, padded_blocks, heads, head_dim),
+        device=k.device,
+        dtype=torch.bfloat16,
+    )
+    kc_fp8 = torch.zeros_like(kc_stats, dtype=torch.float8_e4m3fn)
+    vc_storage = torch.zeros(
+        (batch, heads, head_dim, padded_blocks),
+        device=k.device,
+        dtype=torch.float8_e4m3fn,
+    )
+    kc_out_scale = torch.ones(
+        (batch, padded_blocks, heads),
+        device=k.device,
+        dtype=torch.float32,
+    )
+    _reduce_kv_kernel[(blocks, batch * heads)](
+        k,
+        v,
+        k_scale,
+        v_scale,
+        kc_stats,
+        kc_stats,
+        kc_fp8,
+        vc_storage,
+        kc_out_scale,
+        tokens,
+        padded_tokens,
+        padded_blocks,
+        heads,
+        blocks,
+        head_dim,
+        BLOCK_SIZE,
+        FP8=True,
+        TOKEN_SCALES=True,
+        V_CHANNEL_SCALE=True,
+        V_TOKEN_CONTIGUOUS=True,
+        SM90_FP8_OUTPUTS=True,
+    )
+    if thresh_type == "exact":
+        threshold = _compute_exact_threshold(
+            q,
+            kc_stats,
+            tau=tau,
+            scale=scale,
+            tokens=tokens,
+            q_scale=q_scale,
+        )
+    else:
+        threshold = _compute_diag_threshold(
+            q,
+            kc_stats,
+            tau=tau,
+            scale=scale,
+            tokens=tokens,
+            q_scale=q_scale,
+        )
+    return kc_fp8, vc_storage.permute(0, 3, 1, 2), threshold, kc_out_scale
 
 
 def _compute_diag_threshold(
@@ -315,6 +438,7 @@ def _compute_diag_threshold(
         BLOCK_SIZE,
         tau,
         FP8=q.dtype == torch.float8_e4m3fn,
+        TOKEN_SCALES=q_scale is not None and q_scale.shape[1] == padded_tokens,
         num_warps=4,
         num_stages=2,
     )
@@ -362,13 +486,12 @@ def _compute_exact_threshold(
         head_dim,
         BLOCK_SIZE,
         FP8=q.dtype == torch.float8_e4m3fn,
+        TOKEN_SCALES=q_scale is not None and q_scale.shape[1] == padded_tokens,
         num_warps=4,
         num_stages=1,
     )
     block_m = 64
-    _exact_fused_threshold_kernel[
-        (triton.cdiv(blocks, block_m), batch_heads)
-    ](
+    _exact_fused_threshold_kernel[(triton.cdiv(blocks, block_m), batch_heads)](
         q_bar,
         kc_mean,
         kc_second_moment,
@@ -420,4 +543,4 @@ def prepare(
     return kc, vc, threshold
 
 
-__all__ = ["prepare"]
+__all__ = ["prepare", "prepare_sm90_fp8"]

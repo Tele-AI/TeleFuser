@@ -166,8 +166,11 @@ def _resolve_sol_kv_splits(q: Tensor, kv_splits: int | str) -> int:
     """Match the official Sol-Engine automatic split policy."""
     if kv_splits != "auto":
         return int(kv_splits)
-    if torch.cuda.get_device_capability(q.device) == (9, 0) and q.shape[1] >= 65536:
-        return 4
+    if torch.cuda.get_device_capability(q.device) == (9, 0):
+        if q.dtype == torch.float8_e4m3fn and q.shape[1] >= 16384:
+            return 4
+        if q.shape[1] >= 65536:
+            return 4
     return 1
 
 
@@ -427,7 +430,7 @@ def attention(
                 output = sol_attn(
                     q.contiguous(),
                     k.contiguous(),
-                    v.contiguous(),
+                    v if q.dtype == torch.float8_e4m3fn else v.contiguous(),
                     scale=scale,
                     tau=sparse_config.sol_tau,
                     thresh_type=sparse_config.sol_threshold_type,
@@ -442,11 +445,26 @@ def attention(
                     _warned_attn_fallback.add(msg)
                     logger.warning("%s: %s", msg, error)
                 if q.dtype == torch.float8_e4m3fn:
-                    from telefuser.ops.fp8_attention import dequantize_fp8_per_block
+                    from telefuser.ops.fp8_attention import (
+                        dequantize_fp8_per_block,
+                        dequantize_fp8_per_channel,
+                        dequantize_fp8_per_token,
+                    )
 
-                    q = dequantize_fp8_per_block(q, q_scale, torch.bfloat16)
-                    k = dequantize_fp8_per_block(k, k_scale, torch.bfloat16)
-                    v = dequantize_fp8_per_block(v, v_scale, torch.bfloat16)
+                    if (
+                        q_scale.shape[0] == q.shape[0]
+                        and q_scale.shape[1] >= q.shape[1]
+                        and q_scale.shape[2] == q.shape[2]
+                    ):
+                        q = dequantize_fp8_per_token(q, q_scale, torch.bfloat16)
+                        k = dequantize_fp8_per_token(k, k_scale, torch.bfloat16)
+                    else:
+                        q = dequantize_fp8_per_block(q, q_scale, torch.bfloat16)
+                        k = dequantize_fp8_per_block(k, k_scale, torch.bfloat16)
+                    if v_scale.shape == (v.shape[0], v.shape[2], v.shape[3]):
+                        v = dequantize_fp8_per_channel(v, v_scale, torch.bfloat16)
+                    else:
+                        v = dequantize_fp8_per_block(v, v_scale, torch.bfloat16)
 
     # Fallback to SDPA
     if output is None:

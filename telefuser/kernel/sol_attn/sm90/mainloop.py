@@ -1,48 +1,47 @@
 # Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 # SM90 (Hopper) forward pass for flash attention, extracted from flash_fwd.py.
 
+from functools import partial
 from types import SimpleNamespace
 from typing import Callable, Optional
-from functools import partial
 
 import cuda.bindings.driver as cuda
-
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Int32, const_expr
-from cutlass.cute.nvgpu import cpasync, warpgroup
-from cutlass.utils import LayoutEnum
 import cutlass.utils.hopper_helpers as sm90_utils_basic
-from cutlass import pipeline
-from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
+from cutlass import Float32, Int32, const_expr, pipeline
 from cutlass.base_dsl.arch import Arch
+from cutlass.cute.nvgpu import cpasync, warpgroup
+from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
+from cutlass.utils import LayoutEnum
 
-from ._compat import copy_utils
-from ._compat import layout_utils
-from ._compat import sm90_utils
-
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute import pipeline as pipeline_custom
 from telefuser.kernel.sol_attn._vendor.flash_attn.cute import utils
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.mask import AttentionMask
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.softmax import Softmax, apply_score_mod_inner
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.seqlen_info import SeqlenInfoQK
 from telefuser.kernel.sol_attn._vendor.flash_attn.cute.block_info import BlockInfo
 from telefuser.kernel.sol_attn._vendor.flash_attn.cute.block_sparsity import BlockSparseTensors
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute import pipeline as pipeline_custom
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.pack_gqa import PackGQA, pack_gqa_layout, make_packgqa_tiled_tma_atom
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.named_barrier import NamedBarrierFwd
-from ._compat.cute_dsl_utils import ParamsBase
-from telefuser.kernel.sol_attn._vendor.flash_attn.cute.tile_scheduler import (
-    TileSchedulerArguments,
-    SingleTileScheduler,
-    SingleTileLPTScheduler,
-    SingleTileVarlenScheduler,
-)
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
 from telefuser.kernel.sol_attn._vendor.flash_attn.cute.flash_fwd import FlashAttentionForwardBase
-from . import atoms as sol_attn_atoms
-from . import exact as exact_stream
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.mask import AttentionMask
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.named_barrier import NamedBarrierFwd
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.pack_gqa import (
+    PackGQA,
+    make_packgqa_tiled_tma_atom,
+    pack_gqa_layout,
+)
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.seqlen_info import SeqlenInfoQK
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.softmax import Softmax, apply_score_mod_inner
+from telefuser.kernel.sol_attn._vendor.flash_attn.cute.tile_scheduler import (
+    SingleTileLPTScheduler,
+    SingleTileScheduler,
+    SingleTileVarlenScheduler,
+    TileSchedulerArguments,
+)
 from telefuser.kernel.sol_attn.common import selector as sol_attn_selector
 
+from . import atoms as sol_attn_atoms
+from . import exact as exact_stream
+from ._compat import copy_utils, layout_utils, sm90_utils
+from ._compat.cute_dsl_utils import ParamsBase
 
 SOL_ATTN_ROUTE_MASK_BARRIER_ID = 7
 SOL_ATTN_ROUTE_SUM_BARRIER_ID = 8
@@ -62,11 +61,15 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         sol_attn_exact_mask_seqlen_last_only: bool = False,
         sol_attn_tail16_lane_group_route_reduce: bool = False,
         sol_attn_num_splits: int = 1,
+        fp8_inputs: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.qk_dtype = cutlass.BFloat16
-        self.pv_dtype = self.dtype
+        self.fp8_inputs = fp8_inputs
+        self.qk_dtype = cutlass.Float8E4M3FN if fp8_inputs else cutlass.BFloat16
+        self.p_dtype = cutlass.Float8E4M3FN if fp8_inputs else self.dtype
+        self.v_dtype = cutlass.Float8E4M3FN if fp8_inputs else self.dtype
+        self.fp8_probability_scale = 1.0
         self.sol_attn_group_size = 64
         self.sol_attn_group_words = 2
         self.mma_pv_is_rs = True
@@ -82,9 +85,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         self.sol_attn_assume_full_route_groups = sol_attn_assume_full_route_groups
         self.sol_attn_static_num_full_route_groups = sol_attn_static_num_full_route_groups
         self.sol_attn_static_tail_valid_count = sol_attn_static_tail_valid_count
-        self.sol_attn_tail_exact_words1 = (
-            sol_attn_tail_exact_words1 and 0 < self.sol_attn_static_tail_valid_count <= 32
-        )
+        self.sol_attn_tail_exact_words1 = sol_attn_tail_exact_words1 and 0 < self.sol_attn_static_tail_valid_count <= 32
         self.sol_attn_tail_route_mask_words1 = False
         self.sol_attn_tail_physical_tile16 = (
             sol_attn_tail_physical_tile16 and 0 < self.sol_attn_static_tail_valid_count <= 16
@@ -109,25 +110,22 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
 
     def _get_smem_layout_atom(self):
         sQ_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils_basic.get_smem_layout_atom(
-                LayoutEnum.ROW_MAJOR, self.qk_dtype, self.tile_hdim
-            ),
+            sm90_utils_basic.get_smem_layout_atom(LayoutEnum.ROW_MAJOR, self.qk_dtype, self.tile_hdim),
             self.qk_dtype,
         )
         sK_layout_atom = sQ_layout_atom
         sV_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils_basic.get_smem_layout_atom(
-                LayoutEnum.ROW_MAJOR, self.pv_dtype, self.tile_hdimv
-            ),
-            self.pv_dtype,
+            sm90_utils_basic.get_smem_layout_atom(LayoutEnum.ROW_MAJOR, self.v_dtype, self.tile_hdimv),
+            self.v_dtype,
         )
-        sO_layout_atom = sV_layout_atom
+        sO_layout_atom = warpgroup.make_smem_layout_atom(
+            sm90_utils_basic.get_smem_layout_atom(LayoutEnum.ROW_MAJOR, self.dtype, self.tile_hdimv),
+            self.dtype,
+        )
         if not self.mma_pv_is_rs:
             sP_layout_atom = warpgroup.make_smem_layout_atom(
-                sm90_utils_basic.get_smem_layout_atom(
-                    LayoutEnum.ROW_MAJOR, self.pv_dtype, self.tile_n
-                ),
-                self.pv_dtype,
+                sm90_utils_basic.get_smem_layout_atom(LayoutEnum.ROW_MAJOR, self.p_dtype, self.tile_n),
+                self.p_dtype,
             )
         else:
             sP_layout_atom = None
@@ -135,18 +133,21 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
 
     def _get_tiled_mma(self):
         tiled_mma_qk = sm90_utils.make_tiled_mma(
-            cutlass.BFloat16,
+            self.qk_dtype,
             "K",
             "K",
             self.tile_n,
             source="SS",
             atom_layout_mnk=(self.tile_m // 64, 1, 1),
-            b_dtype=cutlass.BFloat16,
+            b_dtype=self.qk_dtype,
             acc_dtype=Float32,
         )
         tiled_mma_pv = sol_attn_atoms.make_pv_mma(
             tile_m=self.tile_m,
             tile_v=self.tile_hdimv,
+            a_dtype=self.p_dtype,
+            b_dtype=self.v_dtype,
+            source="RS" if self.mma_pv_is_rs else "SS",
         )
         return tiled_mma_qk, tiled_mma_pv
 
@@ -175,27 +176,193 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             swap_AB,
         )
 
+    @cute.jit
+    def sol_attn_pv_gemm(
+        self,
+        tiled_mma: cute.TiledMma,
+        acc: cute.Tensor,
+        tile_acc: Optional[cute.Tensor],
+        tCrA: cute.Tensor,
+        tCrB: cute.Tensor,
+        zero_init,
+        B_idx: Int32,
+        wg_wait: cutlass.Constexpr[int],
+    ):
+        if const_expr(self.fp8_inputs and self.sol_attn_num_splits == 1):
+            sm90_utils.gemm_w_idx(
+                tiled_mma,
+                tile_acc,
+                tCrA,
+                tCrB,
+                zero_init=True,
+                B_idx=B_idx,
+                wg_wait=0,
+            )
+            acc.store(acc.load() + tile_acc.load())
+        elif const_expr(self.fp8_inputs):
+            sm90_utils.gemm_w_idx(
+                tiled_mma,
+                acc,
+                tCrA,
+                tCrB,
+                zero_init=False,
+                B_idx=B_idx,
+                wg_wait=wg_wait,
+            )
+        else:
+            sm90_utils.gemm_w_idx(
+                tiled_mma,
+                acc,
+                tCrA,
+                tCrB,
+                zero_init=zero_init,
+                B_idx=B_idx,
+                wg_wait=wg_wait,
+            )
+
+    @cute.jit
+    def sol_attn_scale_exact_scores(
+        self,
+        acc_S: cute.Tensor,
+        q_block: Int32,
+        n_block: Int32,
+        q_scale: cute.Tensor,
+        k_scale: cute.Tensor,
+    ):
+        """Apply one Q/K scale per N64 tile to an FP8 QK accumulator."""
+
+        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
+        factor = Float32(q_scale[q_block * Int32(self.tile_m)]) * Float32(
+            k_scale[n_block * Int32(self.tile_n)]
+        )
+        for i in cutlass.range_constexpr(cute.size(acc_S_mn)):
+            acc_S_mn[i] = Float32(acc_S_mn[i]) * factor
+
+    @cute.jit
+    def sol_attn_scale_route_scores(
+        self,
+        acc_S: cute.Tensor,
+        tScS_mn: cute.Tensor,
+        q_block: Int32,
+        route_n_block: Int32,
+        q_scale: cute.Tensor,
+        kc_scale: cute.Tensor,
+    ):
+        """Apply block-scaled Q and per-centroid K dequantization."""
+
+        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
+        q_factor = Float32(q_scale[q_block * Int32(self.tile_m)])
+        for i in cutlass.range_constexpr(cute.size(acc_S_mn)):
+            col = tScS_mn[i][1]
+            factor = q_factor * Float32(kc_scale[route_n_block + col])
+            acc_S_mn[i] = Float32(acc_S_mn[i]) * factor
+
+    @cute.jit
+    def sol_attn_scale_route_probabilities(
+        self,
+        acc_S: cute.Tensor,
+        tScS_mn: cute.Tensor,
+        route_n_block: Int32,
+        seqlen: SeqlenInfoQK,
+    ):
+        """Convert centroid probabilities to equivalent block-sum weights."""
+
+        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
+        for i in cutlass.range_constexpr(cute.size(acc_S_mn)):
+            col = tScS_mn[i][1]
+            n_block = route_n_block + col
+            current_len = seqlen.seqlen_k - n_block * Int32(self.tile_n)
+            if current_len > Int32(self.tile_n):
+                current_len = Int32(self.tile_n)
+            if current_len < Int32(0):
+                current_len = Int32(0)
+            acc_S_mn[i] = Float32(acc_S_mn[i]) * Float32(current_len)
+
+    @cute.jit
+    def sol_attn_convert_probability(
+        self,
+        src: cute.Tensor,
+        dst: cute.Tensor,
+    ):
+        """Convert post-softmax probabilities to the PV MMA operand dtype."""
+
+        if const_expr(self.fp8_inputs and self.mma_pv_is_rs):
+            for i in cutlass.range_constexpr(cute.size(src)):
+                dst[i] = cutlass.Float8E4M3FN(Float32(src[i]) * Float32(self.fp8_probability_scale))
+
+            tid = cute.arch.thread_idx()[0] % Int32(4)
+            values_u32 = cute.recast_tensor(dst, cutlass.Uint32)
+            for n in cutlass.range_constexpr(cute.size(values_u32, mode=[1])):
+                for k in cutlass.range_constexpr(cute.size(values_u32, mode=[2])):
+                    for ii in cutlass.range_constexpr(0, 8, 4):
+                        value0 = values_u32[ii // 2, n, k]
+                        value1 = values_u32[ii // 2 + 1, n, k]
+
+                        send_high = 1
+                        if tid == Int32(1) or tid == Int32(2):
+                            send_high = 0
+                        recv_lane = (Int32(0x3021) >> (tid * Int32(4))) & Int32(0xF)
+                        value_a = value1
+                        if send_high == 0:
+                            value_a = value0
+                        value_a = cute.arch.shuffle_sync_op(value_a, recv_lane, 0xFFFFFFFF, 7199)
+
+                        send_high = 1 - send_high
+                        recv_lane = (Int32(0x2130) >> (tid * Int32(4))) & Int32(0xF)
+                        value_b = value1
+                        if send_high == 0:
+                            value_b = value0
+                        value_b = cute.arch.shuffle_sync_op(value_b, recv_lane, 0xFFFFFFFF, 7199)
+
+                        order0 = 0x5410
+                        order1 = 0x7632
+                        if send_high == 0:
+                            order0 = 0x1054
+                            order1 = 0x3276
+                        values_u32[ii // 2, n, k] = cute.arch.prmt(value_a, value_b, order0)
+                        values_u32[ii // 2 + 1, n, k] = cute.arch.prmt(value_a, value_b, order1)
+        elif const_expr(self.fp8_inputs):
+            for i in cutlass.range_constexpr(cute.size(src)):
+                dst[i] = cutlass.Float8E4M3FN(Float32(src[i]) * Float32(self.fp8_probability_scale))
+        else:
+            utils.cvt_f16(src, dst)
+
+    @cute.jit
+    def sol_attn_apply_v_scale(
+        self,
+        acc_O: cute.Tensor,
+        tiled_mma_pv: cute.TiledMma,
+        tidx: Int32,
+        v_scale: cute.Tensor,
+    ):
+        """Apply the per-channel V scale after all FP8 PV accumulations."""
+
+        thr_mma = tiled_mma_pv.get_slice(tidx)
+        cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
+        taccOcO = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cO))
+        acc_O_mn = layout_utils.reshape_acc_to_mn(acc_O)
+        for i in cutlass.range(cute.size(acc_O_mn), unroll_full=True):
+            col = taccOcO[i][1]
+            acc_O_mn[i] = Float32(acc_O_mn[i]) * Float32(v_scale[col]) / Float32(self.fp8_probability_scale)
+
     def _get_shared_storage_cls(self):
-        sQ_struct, sK_struct = [
-            cute.struct.Align[
-                cute.struct.MemRange[self.qk_dtype, cute.cosize(layout)], self.buffer_align_bytes
-            ]
-            for layout in (self.sQ_layout, self.sK_layout)
+        sQ_elements = cute.cosize(self.sQ_layout)
+        if const_expr(self.fp8_inputs):
+            sQ_elements = max(sQ_elements, cute.cosize(self.sO_layout) * 2)
+        sQ_struct = cute.struct.Align[cute.struct.MemRange[self.qk_dtype, sQ_elements], self.buffer_align_bytes]
+        sK_struct = cute.struct.Align[
+            cute.struct.MemRange[self.qk_dtype, cute.cosize(self.sK_layout)], self.buffer_align_bytes
         ]
         sV_struct = cute.struct.Align[
-            cute.struct.MemRange[self.pv_dtype, cute.cosize(self.sV_layout)],
+            cute.struct.MemRange[self.v_dtype, cute.cosize(self.sV_layout)],
             self.buffer_align_bytes,
         ]
         cosize_sQV = max(cute.cosize(self.sQ_layout), cute.cosize(self.sV_layout))
-        sQV_struct = cute.struct.Align[cute.struct.MemRange[self.pv_dtype, cosize_sQV], 1024]
+        sQV_struct = cute.struct.Align[cute.struct.MemRange[self.v_dtype, cosize_sQV], 1024]
         cosize_sP = cute.cosize(self.sP_layout) if const_expr(self.sP_layout is not None) else 0
-        sP_struct = cute.struct.Align[cute.struct.MemRange[self.pv_dtype, cosize_sP], 1024]
-        route_mask_struct = cute.struct.Align[
-            cute.struct.MemRange[Int32, 4], 16
-        ]
-        route_sums_struct = cute.struct.Align[
-            cute.struct.MemRange[Float32, 4 * self.tile_n], 16
-        ]
+        sP_struct = cute.struct.Align[cute.struct.MemRange[self.p_dtype, cosize_sP], 1024]
+        route_mask_struct = cute.struct.Align[cute.struct.MemRange[Int32, 4], 16]
+        route_sums_struct = cute.struct.Align[cute.struct.MemRange[Float32, 4 * self.tile_n], 16]
         # 1 stage * 2 for Q pipeline (full + empty), self.num_stages*2 for K, self.num_stages*2 for V,
         mbar_ptr_Q_struct = cute.struct.MemRange[cutlass.Int64, 1 * 2]
         mbar_ptr_K_struct = cute.struct.MemRange[cutlass.Int64, self.num_stages * 2]
@@ -264,7 +431,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
     ):
         """Fallback route-column reduction that ignores invalid q rows."""
 
-        for off in cutlass.range_constexpr(self.tile_n):
+        for off in cutlass.range(self.tile_n, unroll_full=True):
             partial = Float32(0.0)
             for i in cutlass.range(cute.size(acc_S_mn), unroll_full=True):
                 row = tScS_mn[i][0]
@@ -502,12 +669,8 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     off1 = Int32(32) + lane
                     route_col0 = route_col_offset + off0
                     route_col1 = route_col_offset + off1
-                    col_sum0 = Float32(route_sums[0, route_col0]) + Float32(
-                        route_sums[1, route_col0]
-                    )
-                    col_sum1 = Float32(route_sums[0, route_col1]) + Float32(
-                        route_sums[1, route_col1]
-                    )
+                    col_sum0 = Float32(route_sums[0, route_col0]) + Float32(route_sums[1, route_col0])
+                    col_sum1 = Float32(route_sums[0, route_col1]) + Float32(route_sums[1, route_col1])
                     col_sum0 += Float32(route_sums[2, route_col0])
                     col_sum1 += Float32(route_sums[2, route_col1])
                     col_sum0 += Float32(route_sums[3, route_col0])
@@ -547,12 +710,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                         off = Int32(word * 32) + lane
                         route_col = route_col_offset + off
                         valid = True
-                        if const_expr(
-                            not (
-                                self.sol_attn_assume_full_route_groups
-                                or assume_full_route_group
-                            )
-                        ):
+                        if const_expr(not (self.sol_attn_assume_full_route_groups or assume_full_route_group)):
                             valid = off < valid_count
                         exact = False
                         if valid:
@@ -572,10 +730,8 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                             )
                             if sink_enabled:
                                 exact = exact or (
-                                    group_start_n_block + off
-                                    >= sink_start_block
-                                    and group_start_n_block + off
-                                    < sink_end_block
+                                    group_start_n_block + off >= sink_start_block
+                                    and group_start_n_block + off < sink_end_block
                                 )
                         if const_expr(self.sol_attn_approx_colmask):
                             column_mask = -Float32.inf
@@ -588,21 +744,11 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                             word_bits = Int32(0)
                             if exact:
                                 word_bits = Int32(1) << lane
-                            word_bits = word_bits | cute.arch.shuffle_sync_down(
-                                word_bits, 16
-                            )
-                            word_bits = word_bits | cute.arch.shuffle_sync_down(
-                                word_bits, 8
-                            )
-                            word_bits = word_bits | cute.arch.shuffle_sync_down(
-                                word_bits, 4
-                            )
-                            word_bits = word_bits | cute.arch.shuffle_sync_down(
-                                word_bits, 2
-                            )
-                            word_bits = word_bits | cute.arch.shuffle_sync_down(
-                                word_bits, 1
-                            )
+                            word_bits = word_bits | cute.arch.shuffle_sync_down(word_bits, 16)
+                            word_bits = word_bits | cute.arch.shuffle_sync_down(word_bits, 8)
+                            word_bits = word_bits | cute.arch.shuffle_sync_down(word_bits, 4)
+                            word_bits = word_bits | cute.arch.shuffle_sync_down(word_bits, 2)
+                            word_bits = word_bits | cute.arch.shuffle_sync_down(word_bits, 1)
                         if lane == Int32(0):
                             if const_expr(word == 0):
                                 mask0 = word_bits
@@ -619,9 +765,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             for off in cutlass.range_constexpr(self.sol_attn_group_size):
                 route_col = route_col_offset + Int32(off)
                 valid = True
-                if const_expr(
-                    not (self.sol_attn_assume_full_route_groups or assume_full_route_group)
-                ):
+                if const_expr(not (self.sol_attn_assume_full_route_groups or assume_full_route_group)):
                     valid = Int32(off) < valid_count
                 col_sum = (
                     Float32(route_sums[0, route_col])
@@ -640,16 +784,12 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     )
                     if sink_enabled:
                         exact = exact or (
-                            group_start_n_block + Int32(off)
-                            >= sink_start_block
-                            and group_start_n_block + Int32(off)
-                            < sink_end_block
+                            group_start_n_block + Int32(off) >= sink_start_block
+                            and group_start_n_block + Int32(off) < sink_end_block
                         )
                     if exact:
-                        mask0, mask1, mask2, mask3 = (
-                            sol_attn_selector.sol_attn_set_exact_bit(
-                                mask0, mask1, mask2, mask3, Int32(off)
-                            )
+                        mask0, mask1, mask2, mask3 = sol_attn_selector.sol_attn_set_exact_bit(
+                            mask0, mask1, mask2, mask3, Int32(off)
                         )
 
         return mask0, mask1, mask2, mask3
@@ -685,19 +825,14 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     valid = group_col >= Int32(0)
                     if valid:
                         valid = group_col < valid_count
-                elif const_expr(
-                    not (self.sol_attn_assume_full_route_groups or assume_full_route_group)
-                ):
+                elif const_expr(not (self.sol_attn_assume_full_route_groups or assume_full_route_group)):
                     valid = col < valid_count
                 exact = False
                 if valid:
                     route_mask_words = self.sol_attn_group_words
                     if const_expr(route_mask_words_override != 0):
                         route_mask_words = route_mask_words_override
-                    if const_expr(
-                        self.sol_attn_tail_route_mask_words1
-                        and not assume_full_route_group
-                    ):
+                    if const_expr(self.sol_attn_tail_route_mask_words1 and not assume_full_route_group):
                         route_mask_words = 1
                     exact = sol_attn_selector.sol_attn_test_exact_bit_limited_words(
                         mask0, mask1, mask2, mask3, group_col, route_mask_words
@@ -771,9 +906,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         """Correct route approx denominator for VC tiles that are block sums."""
 
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
-        last_n_block = (
-            (seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)
-        ) - Int32(1)
+        last_n_block = ((seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)) - Int32(1)
         tail_len = seqlen.seqlen_k - last_n_block * Int32(self.tile_n)
         for r in cutlass.range(cute.size(softmax.row_sum), unroll_full=True):
             extra = Float32(0.0)
@@ -807,9 +940,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
     ):
         """Fast denominator correction for full-length route groups."""
 
-        last_n_block = (
-            (seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)
-        ) - Int32(1)
+        last_n_block = ((seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)) - Int32(1)
         tail_len = seqlen.seqlen_k - last_n_block * Int32(self.tile_n)
         group_end = group_start_n_block + valid_count
         full_len_group = (tail_len == Int32(self.tile_n)) or (group_end <= last_n_block)
@@ -846,8 +977,13 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         mVC: cute.Tensor,
         mGlobalThresh: cute.Tensor,
         mLSE: Optional[cute.Tensor],
+        mQScale: cute.Tensor,
+        mKScale: cute.Tensor,
+        mVScale: cute.Tensor,
+        mKCScale: cute.Tensor,
         softmax_scale: Float32,
         sink_range: Int32,
+        logical_tokens: Int32,
         stream: cuda.CUstream = None,
     ):
         """Configure and launch the Hopper Sol-Attn kernel."""
@@ -866,34 +1002,27 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         aux_tensors = None
         self.varlen_q = mCuSeqlensQ is not None or mSeqUsedQ is not None
 
-        mQ, mK, mV, mO, mKC, mVC, mGlobalThresh = [
+        mQ, mK, mV, mO, mKC, mVC, mGlobalThresh, mQScale, mKScale, mVScale, mKCScale = [
             assume_tensor_aligned(t)
-            for t in (mQ, mK, mV, mO, mKC, mVC, mGlobalThresh)
+            for t in (mQ, mK, mV, mO, mKC, mVC, mGlobalThresh, mQScale, mKScale, mVScale, mKCScale)
         ]
         if const_expr(piecewise_k is not None):
-            piecewise_k, piecewise_v = [
-                assume_tensor_aligned(t) for t in (piecewise_k, piecewise_v)
-            ]
+            piecewise_k, piecewise_v = [assume_tensor_aligned(t) for t in (piecewise_k, piecewise_v)]
         SOL_ATTN_BTHD_TRANSPOSE = [1, 3, 2, 0]
         SOL_ATTN_BNH_TRANSPOSE = [1, 2, 0]
-        mQ, mK, mV, mO, mKC, mVC = [
-            layout_utils.select(t, SOL_ATTN_BTHD_TRANSPOSE)
-            for t in (mQ, mK, mV, mO, mKC, mVC)
-        ]
-        mGlobalThresh = layout_utils.select(
-            mGlobalThresh, SOL_ATTN_BNH_TRANSPOSE
-        )
+        mQ, mK, mV, mO, mKC, mVC = [layout_utils.select(t, SOL_ATTN_BTHD_TRANSPOSE) for t in (mQ, mK, mV, mO, mKC, mVC)]
+        mGlobalThresh = layout_utils.select(mGlobalThresh, SOL_ATTN_BNH_TRANSPOSE)
+        if const_expr(self.fp8_inputs):
+            mQScale, mKScale, mKCScale = [
+                layout_utils.select(t, SOL_ATTN_BNH_TRANSPOSE) for t in (mQScale, mKScale, mKCScale)
+            ]
+            mVScale = layout_utils.select(mVScale, [2, 1, 0])
         if const_expr(piecewise_k is not None):
             piecewise_k, piecewise_v = [
-                layout_utils.select(t, SOL_ATTN_BTHD_TRANSPOSE)
-                for t in (piecewise_k, piecewise_v)
+                layout_utils.select(t, SOL_ATTN_BTHD_TRANSPOSE) for t in (piecewise_k, piecewise_v)
             ]
         LSE_layout_transpose = [1, 2, 0]
-        mLSE = (
-            layout_utils.select(mLSE, LSE_layout_transpose)
-            if const_expr(mLSE is not None)
-            else None
-        )
+        mLSE = layout_utils.select(mLSE, LSE_layout_transpose) if const_expr(mLSE is not None) else None
 
         tiled_mma_qk, tiled_mma_pv = self._get_tiled_mma()
         self.num_mma_threads = tiled_mma_qk.size
@@ -906,9 +1035,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         self.num_producer_threads = 32
         self.num_Q_load_threads = self.num_threads_per_warp_group  # If not TMA_Q
         self.num_epilogue_threads = self.num_mma_threads
-        self.num_mma_regs, self.num_producer_regs = {1: (256, 56), 2: (240, 24), 3: (160, 32)}[
-            self.num_wg_mma
-        ]
+        self.num_mma_regs, self.num_producer_regs = {1: (256, 56), 2: (240, 24), 3: (160, 32)}[self.num_wg_mma]
         self.use_block_sparsity = cutlass.const_expr(blocksparse_tensors is not None)
         self.has_piecewise_kv = cutlass.const_expr(piecewise_k is not None)
         if const_expr(self.use_block_sparsity):
@@ -917,17 +1044,13 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             raise NotImplementedError("one-warpgroup SOL_ATTN path does not support piecewise KV")
 
         self.use_scheduler_barrier = self.num_wg_mma == 2
-        self.use_tma_Q = self.arch >= Arch.sm_90 and not (
-            self.pack_gqa and self.tile_m % self.qhead_per_kvhead != 0
-        )
+        self.use_tma_Q = self.arch >= Arch.sm_90 and not (self.pack_gqa and self.tile_m % self.qhead_per_kvhead != 0)
         if const_expr(not self.use_tma_Q):
             raise NotImplementedError("one-warpgroup SOL_ATTN path requires TMA Q/O")
         # FP32 split partials require a direct register-to-global epilogue.
         # A BF16 split partial matches V/O dtype and can reuse the shared-memory
         # plus TMA-O epilogue.
-        self.use_tma_O = (
-            self.sol_attn_num_splits == 1 or mO.element_type == self.dtype
-        )
+        self.use_tma_O = self.sol_attn_num_splits == 1 or mO.element_type == self.dtype
         # Producer needs more registers when doing cp.async Q or KV loads
         if const_expr(self.num_wg_mma == 2 and (not self.use_tma_Q or not self.use_tma_KV)):
             self.num_mma_regs, self.num_producer_regs = 224, 40
@@ -936,18 +1059,26 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         self.rescale_O_before_gemm = False
         self._setup_attributes()
         # TODO: we prob don't need most of what's in _setup_attributes
-        self.sQ_layout, self.sK_layout, self.sV_layout, self.sO_layout = [
+        self.sQ_layout, self.sK_layout = [
             sm90_utils.make_smem_layout(mX.element_type, LayoutEnum.ROW_MAJOR, shape, stage)
             for mX, shape, stage in [
                 (mQ, (self.tile_m, self.tile_hdim), None),
                 (mK, (self.tile_n, self.tile_hdim), self.num_stages),
-                (mV, (self.tile_n, self.tile_hdimv), self.num_stages),
-                # sO always holds the BF16 PV epilogue tile.  Split-KV's
-                # global mO is an FP32 partial workspace, so derive this
-                # shared-memory layout from V instead of global O.
-                (mV, (self.tile_m, self.tile_hdimv), None),
             ]
         ]
+        v_layout = LayoutEnum.COL_MAJOR if const_expr(self.fp8_inputs) else LayoutEnum.ROW_MAJOR
+        self.sV_layout = sm90_utils.make_smem_layout(
+            mV.element_type,
+            v_layout,
+            (self.tile_n, self.tile_hdimv),
+            self.num_stages,
+        )
+        self.sO_layout = sm90_utils.make_smem_layout(
+            self.dtype,
+            LayoutEnum.ROW_MAJOR,
+            (self.tile_m, self.tile_hdimv),
+            None,
+        )
         self.sP_layout = None
         if const_expr(not self.mma_pv_is_rs):
             self.sP_layout = sm90_utils.make_smem_layout(
@@ -1042,9 +1173,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         if const_expr(self.use_tma_O):
             mO_tma = mO_og if const_expr(self.pack_gqa) else mO
             if const_expr(self.varlen_q):
-                mO_tma = copy_utils.create_ragged_tensor_for_tma(
-                    mO_tma, ragged_dim=0, ptr_shift=True
-                )
+                mO_tma = copy_utils.create_ragged_tensor_for_tma(mO_tma, ragged_dim=0, ptr_shift=True)
             tma_atom_O, tma_tensor_O = make_tiled_tma_atom_fn(
                 gmem_tiled_copy_O,
                 mO_tma,
@@ -1055,20 +1184,14 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             TileScheduler = SingleTileVarlenScheduler
         else:
             TileScheduler = (
-                SingleTileScheduler
-                if const_expr(not self.is_causal or self.is_local)
-                else SingleTileLPTScheduler
+                SingleTileScheduler if const_expr(not self.is_causal or self.is_local) else SingleTileLPTScheduler
             )
         tile_sched_args = TileSchedulerArguments(
             cute.ceil_div(cute.size(mQ.shape[0]), self.tile_m),
             cute.size(mQ.shape[2]),
-            cute.size(mQ.shape[3])
-            if const_expr(mCuSeqlensQ is None)
-            else cute.size(mCuSeqlensQ.shape[0] - 1),
+            cute.size(mQ.shape[3]) if const_expr(mCuSeqlensQ is None) else cute.size(mCuSeqlensQ.shape[0] - 1),
             self.sol_attn_num_splits,
-            cute.size(mK.shape[0])
-            if const_expr(mPageTable is None)
-            else mK.shape[0] * mPageTable.shape[1],
+            cute.size(mK.shape[0]) if const_expr(mPageTable is None) else mK.shape[0] * mPageTable.shape[1],
             mQ.shape[1],
             mV.shape[1],
             total_q=cute.size(mQ.shape[0])
@@ -1085,14 +1208,10 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(
-            softmax_scale, self.score_mod
-        )
+        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(softmax_scale, self.score_mod)
         window_size_left = Int32(window_size_left) if window_size_left is not None else None
         window_size_right = Int32(window_size_right) if window_size_right is not None else None
-        fastdiv_mods = utils.compute_fastdiv_mods(
-            mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors, mPageTable
-        )
+        fastdiv_mods = utils.compute_fastdiv_mods(mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_tensors, mPageTable)
 
         self.kernel(
             tma_tensor_Q if const_expr(self.use_tma_Q) else mQ,
@@ -1105,6 +1224,10 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             tma_tensor_O if const_expr(self.use_tma_O) else mO,
             mGlobalThresh,
             mLSE,
+            mQScale,
+            mKScale,
+            mVScale,
+            mKCScale,
             mCuSeqlensQ,
             mCuSeqlensK,
             mSeqUsedQ,
@@ -1121,6 +1244,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             softmax_scale_log2,
             softmax_scale,
             sink_range,
+            logical_tokens,
             window_size_left,
             window_size_right,
             learnable_sink,
@@ -1160,6 +1284,10 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         mO: cute.Tensor,
         mGlobalThresh: cute.Tensor,
         mLSE: Optional[cute.Tensor],
+        mQScale: cute.Tensor,
+        mKScale: cute.Tensor,
+        mVScale: cute.Tensor,
+        mKCScale: cute.Tensor,
         mCuSeqlensQ: Optional[cute.Tensor],
         mCuSeqlensK: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -1176,6 +1304,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         softmax_scale_log2: Float32,
         softmax_scale: Optional[Float32],
         sink_range: Int32,
+        logical_tokens: Int32,
         window_size_left: Optional[Int32],
         window_size_right: Optional[Int32],
         learnable_sink: Optional[cute.Tensor],
@@ -1290,9 +1419,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         if const_expr(not self.Q_in_regs):
             sV = storage.sV.get_tensor(sV_layout.outer, swizzle=sV_layout.inner)
         else:
-            sV = storage.sQ.get_tensor(
-                sV_layout.outer, swizzle=sV_layout.inner, dtype=mV.element_type
-            )
+            sV = storage.sQ.get_tensor(sV_layout.outer, swizzle=sV_layout.inner, dtype=mV.element_type)
         # Transpose view of V to tensor with layout (head_dim_v, tile_n) for tiled mma
         sVt = layout_utils.transpose_view(sV)
         sP = None
@@ -1300,9 +1427,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             sP = storage.sP.get_tensor(sP_layout.outer, swizzle=sP_layout.inner)
         # reuse sQ's data iterator
         sO = storage.sQ.get_tensor(sO_layout.outer, swizzle=sO_layout.inner, dtype=self.dtype)
-        route_mask = storage.route_mask.get_tensor(
-            cute.make_layout((4,))
-        )
+        route_mask = storage.route_mask.get_tensor(cute.make_layout((4,)))
         route_sums = storage.route_sums.get_tensor(cute.make_layout((4, self.tile_n)))
 
         block_info = BlockInfo(
@@ -1317,10 +1442,8 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         )
         SeqlenInfoCls = partial(
             SeqlenInfoQK.create,
-            seqlen_q_static=mQ.shape[0] if const_expr(not self.pack_gqa) else mQ.shape[0][1],
-            seqlen_k_static=mK.shape[0]
-            if const_expr(mPageTable is None)
-            else mK.shape[0] * mPageTable.shape[1],
+            seqlen_q_static=(logical_tokens if const_expr(not self.pack_gqa) else mQ.shape[0][1]),
+            seqlen_k_static=(logical_tokens if const_expr(mPageTable is None) else mK.shape[0] * mPageTable.shape[1]),
             mCuSeqlensQ=mCuSeqlensQ,
             mCuSeqlensK=mCuSeqlensK,
             mSeqUsedQ=mSeqUsedQ,
@@ -1371,6 +1494,10 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             AttentionMaskCls,
             TileSchedulerCls,
             mGlobalThresh,
+            mQScale,
+            mKScale,
+            mVScale,
+            mKCScale,
             route_mask,
             route_sums,
             softmax_scale_log2,
@@ -1403,9 +1530,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             barrier_id=int(NamedBarrierFwd.Epilogue),
             number_of_threads=self.num_epilogue_threads,
         )
-        smem_copy_atom_O = utils.get_smem_store_atom(
-            self.arch.major * 10 + self.arch.minor, self.dtype
-        )
+        smem_copy_atom_O = utils.get_smem_store_atom(self.arch.major * 10 + self.arch.minor, self.dtype)
         smem_thr_copy_O = cute.make_tiled_copy_C(smem_copy_atom_O, tiled_mma).get_slice(tidx)
         taccOrO = smem_thr_copy_O.retile(rO)
         taccOsO = smem_thr_copy_O.partition_D(sO)
@@ -1415,9 +1540,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         if const_expr(mLSE is not None):
             mLSE_cur = mLSE[None, head_idx, batch_idx]
             gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
-            gLSE_expanded_layout = cute.append(
-                gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,))
-            )
+            gLSE_expanded_layout = cute.append(gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,)))
             gLSE_expanded = cute.make_tensor(gLSE.iterator, gLSE_expanded_layout)
             thr_mma = tiled_mma.get_slice(tidx)
             taccOgLSE = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(gLSE_expanded))
@@ -1425,10 +1548,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             t0accOcO = layout_utils.reshape_acc_to_mn(thr_mma.get_slice(0).partition_C(cO))
             if taccOcO[0][1] == 0:
                 for m in cutlass.range_constexpr(cute.size(taccOgLSE.shape[1])):
-                    if (
-                        t0accOcO[m, 0][0]
-                        < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]
-                    ):
+                    if t0accOcO[m, 0][0] < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]:
                         taccOgLSE[m, 0] = lse[m]
 
         mO_cur = mO[None, None, head_idx, batch_idx]
@@ -1438,9 +1558,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
             number_of_threads=self.num_epilogue_threads,
         )
         gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
-        store_O, _, _ = copy_utils.tma_get_copy_fn(
-            tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True
-        )
+        store_O, _, _ = copy_utils.tma_get_copy_fn(tma_atom_O, 0, cute.make_layout(1), sO, gO, single_stage=True)
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         if warp_idx == Int32(0):
             store_O()
@@ -1469,9 +1587,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         """
 
         mO_cur = mO[None, None, partial_head_idx, batch_idx]
-        gO = cute.local_tile(
-            mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0)
-        )
+        gO = cute.local_tile(mO_cur, (self.tile_m, self.tile_hdimv), (m_block, 0))
         copy_atom = cute.make_copy_atom(
             cute.nvgpu.CopyUniversalOp(),
             Float32,
@@ -1486,29 +1602,16 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
 
         mLSE_cur = mLSE[None, partial_head_idx, batch_idx]
         gLSE = cute.local_tile(mLSE_cur, (self.tile_m,), (m_block,))
-        gLSE_expanded_layout = cute.append(
-            gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,))
-        )
-        gLSE_expanded = cute.make_tensor(
-            gLSE.iterator, gLSE_expanded_layout
-        )
+        gLSE_expanded_layout = cute.append(gLSE.layout, cute.make_layout((self.tile_hdimv,), stride=(0,)))
+        gLSE_expanded = cute.make_tensor(gLSE.iterator, gLSE_expanded_layout)
         thr_mma = tiled_mma.get_slice(tidx)
-        taccOgLSE = layout_utils.reshape_acc_to_mn(
-            thr_mma.partition_C(gLSE_expanded)
-        )
+        taccOgLSE = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(gLSE_expanded))
         cO = cute.make_identity_tensor((self.tile_m, self.tile_hdimv))
         taccOcO = layout_utils.reshape_acc_to_mn(thr_mma.partition_C(cO))
-        t0accOcO = layout_utils.reshape_acc_to_mn(
-            thr_mma.get_slice(0).partition_C(cO)
-        )
+        t0accOcO = layout_utils.reshape_acc_to_mn(thr_mma.get_slice(0).partition_C(cO))
         if taccOcO[0][1] == 0:
             for m in cutlass.range_constexpr(cute.size(taccOgLSE.shape[1])):
-                if (
-                    t0accOcO[m, 0][0]
-                    < seqlen.seqlen_q
-                    - m_block * self.tile_m
-                    - taccOcO[0][0]
-                ):
+                if t0accOcO[m, 0][0] < seqlen.seqlen_q - m_block * self.tile_m - taccOcO[0][0]:
                     taccOgLSE[m, 0] = lse[m]
 
     @cute.jit
@@ -1543,6 +1646,10 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         AttentionMaskCls: Callable,
         TileSchedulerCls: cutlass.Constexpr[Callable],
         mGlobalThresh: cute.Tensor,
+        mQScale: cute.Tensor,
+        mKScale: cute.Tensor,
+        mVScale: cute.Tensor,
+        mKCScale: cute.Tensor,
         route_mask: cute.Tensor,
         route_sums: cute.Tensor,
         softmax_scale_log2: Float32,
@@ -1560,38 +1667,32 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         else:
             q_producer_phase = Int32(1)
             q_consumer_phase = Int32(0)
-            kv_producer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Producer, self.num_stages
-            )
-            kv_consumer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Consumer, self.num_stages
-            )
+            kv_producer_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Producer, self.num_stages)
+            kv_consumer_state = pipeline.make_pipeline_state(pipeline.PipelineUserType.Consumer, self.num_stages)
             tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
 
             if work_tile.is_valid_tile:
                 m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
                 partial_head_idx = (
-                    head_idx
-                    + split_idx * mQ.shape[2]
-                    if const_expr(self.sol_attn_num_splits > 1)
-                    else head_idx
+                    head_idx + split_idx * mQ.shape[2] if const_expr(self.sol_attn_num_splits > 1) else head_idx
                 )
                 seqlen = SeqlenInfoCls(batch_idx)
-                head_idx_kv = (
-                    head_idx // self.qhead_per_kvhead
-                    if const_expr(not self.pack_gqa)
-                    else head_idx
-                )
+                head_idx_kv = head_idx // self.qhead_per_kvhead if const_expr(not self.pack_gqa) else head_idx
                 mQ_cur = seqlen.offset_batch_Q(mQ, batch_idx, dim=3)[None, None, head_idx]
-                mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[
-                    None, None, head_idx_kv
-                ]
-                mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[
-                    None, None, head_idx_kv
-                ]
+                mK_cur = seqlen.offset_batch_K(mK, batch_idx, dim=3)[None, None, head_idx_kv]
+                mV_cur = seqlen.offset_batch_K(mV, batch_idx, dim=3)[None, None, head_idx_kv]
                 mKC_cur = mKC[None, None, head_idx_kv, batch_idx]
                 mVC_cur = mVC[None, None, head_idx_kv, batch_idx]
+                mQScale_cur = None
+                mKScale_cur = None
+                mVScale_cur = None
+                mKCScale_cur = None
+                if const_expr(self.fp8_inputs):
+                    mQScale_cur = mQScale[None, head_idx, batch_idx]
+                    mKScale_cur = mKScale[None, head_idx_kv, batch_idx]
+                    mVScale_cur = mVScale[None, head_idx_kv, batch_idx]
+                    mKCScale_cur = mKCScale[None, head_idx_kv, batch_idx]
 
                 gQ = cute.local_tile(mQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0))
                 gK = cute.local_tile(mK_cur, (self.tile_n, self.tile_hdim), (None, 0))
@@ -1599,38 +1700,22 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                 gKC = cute.local_tile(mKC_cur, (self.tile_n, self.tile_hdim), (None, 0))
                 gVC = cute.local_tile(mVC_cur, (self.tile_n, self.tile_hdimv), (None, 0))
 
-                load_Q, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_Q, 0, cute.make_layout(1), gQ, sQ, single_stage=True
-                )
-                tma_load_K_fn, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_K, 0, cute.make_layout(1), gK, sK
-                )
+                load_Q, _, _ = copy_utils.tma_get_copy_fn(tma_atom_Q, 0, cute.make_layout(1), gQ, sQ, single_stage=True)
+                tma_load_K_fn, _, _ = copy_utils.tma_get_copy_fn(tma_atom_K, 0, cute.make_layout(1), gK, sK)
                 tma_load_K_fn = copy_utils.tma_producer_copy_fn(tma_load_K_fn, pipeline_k)
-                tma_load_V_fn, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_V, 0, cute.make_layout(1), gV, sV
-                )
+                tma_load_V_fn, _, _ = copy_utils.tma_get_copy_fn(tma_atom_V, 0, cute.make_layout(1), gV, sV)
                 tma_load_V_fn = copy_utils.tma_producer_copy_fn(tma_load_V_fn, pipeline_v)
-                tma_load_KC_fn, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_KC, 0, cute.make_layout(1), gKC, sK
-                )
-                tma_load_KC_fn = copy_utils.tma_producer_copy_fn(
-                    tma_load_KC_fn, pipeline_k
-                )
-                tma_load_VC_fn, _, _ = copy_utils.tma_get_copy_fn(
-                    tma_atom_VC, 0, cute.make_layout(1), gVC, sV
-                )
-                tma_load_VC_fn = copy_utils.tma_producer_copy_fn(
-                    tma_load_VC_fn, pipeline_v
-                )
+                tma_load_KC_fn, _, _ = copy_utils.tma_get_copy_fn(tma_atom_KC, 0, cute.make_layout(1), gKC, sK)
+                tma_load_KC_fn = copy_utils.tma_producer_copy_fn(tma_load_KC_fn, pipeline_k)
+                tma_load_VC_fn, _, _ = copy_utils.tma_get_copy_fn(tma_atom_VC, 0, cute.make_layout(1), gVC, sV)
+                tma_load_VC_fn = copy_utils.tma_producer_copy_fn(tma_load_VC_fn, pipeline_v)
 
                 if warp_idx == Int32(0):
                     pipeline_q.producer_acquire_w_index_phase(0, q_producer_phase)
                     load_Q(tma_bar_ptr=pipeline_q.sync_object_full.get_barrier(0))
 
                 pipeline_q.consumer_wait_w_index_phase(0, q_consumer_phase)
-                warp_group_thread_layout = cute.make_layout(
-                    1, stride=self.num_threads_per_warp_group
-                )
+                warp_group_thread_layout = cute.make_layout(1, stride=self.num_threads_per_warp_group)
                 thr_mma_qk = tiled_mma_qk.get_slice(tidx)
                 wg_mma_qk = tiled_mma_qk.get_slice(warp_group_thread_layout(Int32(0)))
                 wg_mma_pv = tiled_mma_pv.get_slice(warp_group_thread_layout(Int32(0)))
@@ -1647,23 +1732,32 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                 acc_O, tOrP, tOrVt = sm90_utils.partition_fragment_ABC(
                     wg_mma_pv, (self.tile_m, self.tile_hdimv, self.tile_n), sP, sVt
                 )
-                mma_pv_fn = partial(sm90_utils.gemm_w_idx, tiled_mma_pv, acc_O, tOrP, tOrVt)
-                smem_copy_atom_P = utils.get_smem_store_atom(
-                    self.arch.major * 10 + self.arch.minor, self.dtype
+                tile_acc_O = (
+                    cute.make_rmem_tensor_like(acc_O, Float32)
+                    if const_expr(self.fp8_inputs and self.sol_attn_num_splits == 1)
+                    else None
                 )
-                smem_thr_copy_P = cute.make_tiled_copy_C(
-                    smem_copy_atom_P, tiled_mma_qk
-                ).get_slice(tidx)
+                mma_pv_fn = partial(
+                    self.sol_attn_pv_gemm,
+                    tiled_mma_pv,
+                    acc_O,
+                    tile_acc_O,
+                    tOrP,
+                    tOrVt,
+                )
+                smem_copy_atom_P = utils.get_smem_store_atom(
+                    self.arch.major * 10 + self.arch.minor,
+                    self.p_dtype,
+                )
+                smem_thr_copy_P = cute.make_tiled_copy_C(smem_copy_atom_P, tiled_mma_qk).get_slice(tidx)
                 tPsP = smem_thr_copy_P.partition_D(sP) if const_expr(sP is not None) else None
+                cS_route = cute.make_identity_tensor((self.tile_m, self.tile_n))
                 smem_copy_params = SimpleNamespace(
                     smem_thr_copy_P=smem_thr_copy_P,
                     tPsP=tPsP,
                 )
                 acc_O.fill(0.0)
-                cS_route = cute.make_identity_tensor((self.tile_m, self.tile_n))
-                tScS_route_mn = layout_utils.reshape_acc_to_mn(
-                    thr_mma_qk.partition_C(cS_route)
-                )
+                tScS_route_mn = layout_utils.reshape_acc_to_mn(thr_mma_qk.partition_C(cS_route))
                 mask = AttentionMaskCls(seqlen)
                 mask_fn = partial(
                     mask.apply_mask,
@@ -1696,6 +1790,14 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                 if const_expr(self.sol_attn_neutral_softmax_state):
                     softmax.row_max.fill(-Float32.inf)
                     softmax.row_sum.fill(0.0)
+                exact_score_scale_fn = None
+                if const_expr(self.fp8_inputs):
+                    exact_score_scale_fn = partial(
+                        self.sol_attn_scale_exact_scores,
+                        q_block=m_block,
+                        q_scale=mQScale_cur,
+                        k_scale=mKScale_cur,
+                    )
                 exact_mma_one_n_block = partial(
                     self.mma_one_n_block,
                     mma_qk_fn=mma_qk_fn,
@@ -1706,7 +1808,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     smem_copy_params=smem_copy_params,
                     softmax=softmax,
                     score_mod_fn=score_mod_fn,
-                    score_scale_fn=None,
+                    score_scale_fn=exact_score_scale_fn,
                     check_inf=not self.sol_attn_assume_nonempty_rows,
                 )
                 n_block_min, n_block_max = block_info.get_n_block_min_max(seqlen, m_block)
@@ -1718,16 +1820,11 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     else:
                         tail_valid_count = Int32(0)
                 elif const_expr(self.sol_attn_assume_full_route_groups):
-                    num_full_route_groups = cute.ceil_div(
-                        route_block_count, self.sol_attn_group_size
-                    )
+                    num_full_route_groups = cute.ceil_div(route_block_count, self.sol_attn_group_size)
                     tail_valid_count = Int32(0)
                 else:
                     num_full_route_groups = route_block_count // Int32(self.sol_attn_group_size)
-                    tail_valid_count = (
-                        route_block_count
-                        - num_full_route_groups * Int32(self.sol_attn_group_size)
-                    )
+                    tail_valid_count = route_block_count - num_full_route_groups * Int32(self.sol_attn_group_size)
                 num_route_groups = num_full_route_groups
                 if tail_valid_count > Int32(0):
                     num_route_groups += Int32(1)
@@ -1735,34 +1832,22 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     split_group_begin = Int32(0)
                     split_num_route_groups = num_route_groups
                 else:
-                    groups_per_split = (
-                        num_route_groups + self.sol_attn_num_splits - 1
-                    ) // self.sol_attn_num_splits
+                    groups_per_split = (num_route_groups + self.sol_attn_num_splits - 1) // self.sol_attn_num_splits
                     split_group_begin = split_idx * groups_per_split
-                    split_group_end = cutlass.min(
-                        split_group_begin + groups_per_split, num_route_groups
-                    )
-                    split_num_route_groups = cutlass.max(
-                        split_group_end - split_group_begin, Int32(0)
-                    )
+                    split_group_end = cutlass.min(split_group_begin + groups_per_split, num_route_groups)
+                    split_num_route_groups = cutlass.max(split_group_end - split_group_begin, Int32(0))
                 O_should_accumulate = self.sol_attn_neutral_softmax_state
-                for local_group_iter in cutlass.range(
-                    split_num_route_groups, unroll=1
-                ):
+                for local_group_iter in cutlass.range(split_num_route_groups, unroll=1):
                     group_iter = split_group_begin + local_group_iter
                     group_start = n_block_min + group_iter * Int32(self.sol_attn_group_size)
                     route_valid_count = Int32(self.sol_attn_group_size)
                     if const_expr(not self.sol_attn_assume_full_route_groups):
                         if group_iter == num_full_route_groups and tail_valid_count > Int32(0):
                             route_valid_count = tail_valid_count
-                    route_col_offset = group_start - (
-                        group_start // Int32(self.tile_n)
-                    ) * Int32(self.tile_n)
+                    route_col_offset = group_start - (group_start // Int32(self.tile_n)) * Int32(self.tile_n)
                     route_n_block = group_start - route_col_offset
                     route_tile = route_n_block // Int32(self.tile_n)
-                    has_next_route_group = (
-                        local_group_iter + Int32(1) < split_num_route_groups
-                    )
+                    has_next_route_group = local_group_iter + Int32(1) < split_num_route_groups
                     next_route_tile = Int32(-1)
                     if has_next_route_group:
                         next_group_start = group_start + Int32(self.sol_attn_group_size)
@@ -1802,6 +1887,15 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     acc_S = mma_qk_fn(B_idx=kv_consumer_state.index, wg_wait=-1)
                     warpgroup.wait_group(0)
                     pipeline_k.consumer_release(kv_consumer_state)
+                    if const_expr(self.fp8_inputs):
+                        self.sol_attn_scale_route_scores(
+                            acc_S,
+                            tScS_route_mn,
+                            m_block,
+                            route_n_block,
+                            mQScale_cur,
+                            mKCScale_cur,
+                        )
                     mask0, mask1, mask2, mask3 = self.sol_attn_build_route_mask_from_acc(
                         acc_S,
                         route_sums,
@@ -1846,34 +1940,23 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     exact_mask3 = mask3
 
                     first_exact_exists = (
-                        (mask0 != Int32(0))
-                        or (mask1 != Int32(0))
-                        or (mask2 != Int32(0))
-                        or (mask3 != Int32(0))
+                        (mask0 != Int32(0)) or (mask1 != Int32(0)) or (mask2 != Int32(0)) or (mask3 != Int32(0))
                     )
                     if mask0 != Int32(0):
                         first_lowbit = mask0 & (Int32(0) - mask0)
-                        first_exact_n_block += sol_attn_selector.sol_attn_bfind_b32(
-                            first_lowbit
-                        )
+                        first_exact_n_block += sol_attn_selector.sol_attn_bfind_b32(first_lowbit)
                         exact_mask0 = mask0 & (mask0 - Int32(1))
                     elif mask1 != Int32(0):
                         first_lowbit = mask1 & (Int32(0) - mask1)
-                        first_exact_n_block += Int32(32) + (
-                            sol_attn_selector.sol_attn_bfind_b32(first_lowbit)
-                        )
+                        first_exact_n_block += Int32(32) + (sol_attn_selector.sol_attn_bfind_b32(first_lowbit))
                         exact_mask1 = mask1 & (mask1 - Int32(1))
                     elif mask2 != Int32(0):
                         first_lowbit = mask2 & (Int32(0) - mask2)
-                        first_exact_n_block += Int32(64) + (
-                            sol_attn_selector.sol_attn_bfind_b32(first_lowbit)
-                        )
+                        first_exact_n_block += Int32(64) + (sol_attn_selector.sol_attn_bfind_b32(first_lowbit))
                         exact_mask2 = mask2 & (mask2 - Int32(1))
                     elif mask3 != Int32(0):
                         first_lowbit = mask3 & (Int32(0) - mask3)
-                        first_exact_n_block += Int32(96) + (
-                            sol_attn_selector.sol_attn_bfind_b32(first_lowbit)
-                        )
+                        first_exact_n_block += Int32(96) + (sol_attn_selector.sol_attn_bfind_b32(first_lowbit))
                         exact_mask3 = mask3 & (mask3 - Int32(1))
                     if first_exact_exists and warp_idx == Int32(0):
                         pipeline_k.producer_acquire(kv_producer_state)
@@ -1911,9 +1994,8 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                             valid_bits1 = Int32(-1)
                             if valid1 < Int32(32):
                                 valid_bits1 = (Int32(1) << valid1) - Int32(1)
-                        route_has_approx = (
-                            ((mask0 & valid_bits0) != valid_bits0)
-                            or ((mask1 & valid_bits1) != valid_bits1)
+                        route_has_approx = ((mask0 & valid_bits0) != valid_bits0) or (
+                            (mask1 & valid_bits1) != valid_bits1
                         )
                     self.sol_attn_mask_route_approx_columns(
                         acc_S,
@@ -1934,17 +2016,13 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                     )
                     if route_has_approx:
                         row_sum_prev = None
-                        if const_expr(
-                            self.sol_attn_fast_route_lens
-                            and not self.sol_attn_full_block_row_sum_prescale
-                        ):
+                        if const_expr(self.sol_attn_fast_route_lens and not self.sol_attn_full_block_row_sum_prescale):
                             row_sum_prev = cute.make_fragment_like(softmax.row_sum, Float32)
                             row_sum_prev.store(softmax.row_sum.load())
+                        row_scale = cute.make_fragment_like(softmax.row_sum, Float32)
                         if O_should_accumulate:
                             if const_expr(self.sol_attn_full_block_row_sum_prescale):
-                                for r in cutlass.range(
-                                    cute.size(softmax.row_sum), unroll_full=True
-                                ):
+                                for r in cutlass.range(cute.size(softmax.row_sum), unroll_full=True):
                                     softmax.row_sum[r] *= Float32(1.0 / self.tile_n)
                             row_scale = softmax.online_softmax(
                                 acc_S,
@@ -1953,9 +2031,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                             )
                             softmax.rescale_O(acc_O, row_scale)
                             if const_expr(self.sol_attn_full_block_row_sum_prescale):
-                                for r in cutlass.range(
-                                    cute.size(softmax.row_sum), unroll_full=True
-                                ):
+                                for r in cutlass.range(cute.size(softmax.row_sum), unroll_full=True):
                                     softmax.row_sum[r] *= Float32(self.tile_n)
                             elif const_expr(self.sol_attn_fast_route_lens):
                                 self.sol_attn_apply_route_current_lens_to_row_sum_fast(
@@ -1987,9 +2063,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                                 check_inf=not self.sol_attn_assume_nonempty_rows,
                             )
                             if const_expr(self.sol_attn_full_block_row_sum_prescale):
-                                for r in cutlass.range(
-                                    cute.size(softmax.row_sum), unroll_full=True
-                                ):
+                                for r in cutlass.range(cute.size(softmax.row_sum), unroll_full=True):
                                     softmax.row_sum[r] *= Float32(self.tile_n)
                             elif const_expr(self.sol_attn_fast_route_lens):
                                 self.sol_attn_apply_route_current_lens_to_row_sum_fast(
@@ -2014,13 +2088,20 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                                     seqlen,
                                     softmax,
                                 )
+                        if const_expr(self.fp8_inputs and self.sol_attn_num_splits == 1):
+                            self.sol_attn_scale_route_probabilities(
+                                acc_S,
+                                tScS_route_mn,
+                                route_n_block,
+                                seqlen,
+                            )
                         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
                         tOrP_cur = (
                             tOrP
                             if const_expr(self.mma_pv_is_rs)
-                            else cute.make_rmem_tensor_like(tOrP_acc, self.dtype)
+                            else cute.make_rmem_tensor_like(tOrP_acc, self.p_dtype)
                         )
-                        utils.cvt_f16(tOrP_acc, tOrP_cur)
+                        self.sol_attn_convert_probability(tOrP_acc, tOrP_cur)
                         if const_expr(not self.mma_pv_is_rs):
                             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
                             cute.copy(
@@ -2030,39 +2111,48 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                             )
                             cute.arch.fence_view_async_shared()
                             cute.arch.sync_warp()
-                        if O_should_accumulate:
+                        if const_expr(self.fp8_inputs and self.sol_attn_num_splits == 1):
+                            sm90_utils.gemm_w_idx(
+                                tiled_mma_pv,
+                                tile_acc_O,
+                                tOrP_cur if const_expr(self.mma_pv_is_rs) else tOrP,
+                                tOrVt,
+                                zero_init=True,
+                                B_idx=kv_consumer_state.index,
+                                wg_wait=0,
+                            )
+                            acc_O.store(acc_O.load() + tile_acc_O.load())
+                        elif O_should_accumulate:
                             sm90_utils.gemm_w_idx(
                                 tiled_mma_pv,
                                 acc_O,
-                                tOrP_cur,
+                                tOrP_cur if const_expr(self.mma_pv_is_rs) else tOrP,
                                 tOrVt,
                                 zero_init=False,
                                 B_idx=kv_consumer_state.index,
                                 wg_wait=-1,
                             )
+                            warpgroup.wait_group(0)
                         else:
                             sm90_utils.gemm_w_idx(
                                 tiled_mma_pv,
                                 acc_O,
-                                tOrP_cur,
+                                tOrP_cur if const_expr(self.mma_pv_is_rs) else tOrP,
                                 tOrVt,
                                 zero_init=True,
                                 B_idx=kv_consumer_state.index,
                                 wg_wait=-1,
                             )
-                        warpgroup.wait_group(0)
+                            warpgroup.wait_group(0)
                         O_should_accumulate = True
                     pipeline_v.consumer_release(kv_consumer_state)
                     kv_consumer_state.advance()
 
                     last_n_block = Int32(-1)
                     if const_expr(
-                        (not self.sol_attn_assume_full_k_exact_blocks)
-                        or self.sol_attn_exact_mask_seqlen_last_only
+                        (not self.sol_attn_assume_full_k_exact_blocks) or self.sol_attn_exact_mask_seqlen_last_only
                     ):
-                        last_n_block = (
-                            (seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)
-                        ) - Int32(1)
+                        last_n_block = ((seqlen.seqlen_k + Int32(self.tile_n - 1)) // Int32(self.tile_n)) - Int32(1)
                     if O_should_accumulate:
                         (
                             kv_producer_state,
@@ -2141,6 +2231,13 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                 pipeline_q.consumer_release_w_index(0)
                 final_scale = softmax.finalize(sink_val=None)
                 softmax.rescale_O(acc_O, final_scale)
+                if const_expr(self.fp8_inputs):
+                    self.sol_attn_apply_v_scale(
+                        acc_O,
+                        tiled_mma_pv,
+                        tidx,
+                        mVScale_cur,
+                    )
                 if const_expr(self.use_tma_O):
                     self.epilogue_one_warpgroup_tma_o(
                         acc_O,
@@ -2222,12 +2319,8 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
 
         row_scale = softmax.online_softmax(acc_S, is_first=is_first_n_block, check_inf=check_inf)
         tOrP_acc = layout_utils.reshape_acc_to_frgA(acc_S)
-        tOrP_cur = (
-            tOrP
-            if const_expr(self.mma_pv_is_rs)
-            else cute.make_rmem_tensor_like(tOrP_acc, self.dtype)
-        )
-        utils.cvt_f16(tOrP_acc, tOrP_cur)
+        tOrP_cur = tOrP if const_expr(self.mma_pv_is_rs) else cute.make_rmem_tensor_like(tOrP_acc, self.p_dtype)
+        self.sol_attn_convert_probability(tOrP_acc, tOrP_cur)
         if const_expr(not self.mma_pv_is_rs):
             tPrP = smem_copy_params.smem_thr_copy_P.retile(tOrP_cur)
             cute.copy(smem_copy_params.smem_thr_copy_P, tPrP, smem_copy_params.tPsP)
@@ -2291,9 +2384,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
     def warp_scheduler_barrier_sync(self):
         if const_expr(self.use_scheduler_barrier):
             cute.arch.barrier(
-                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1)
-                - 1
-                + utils.canonical_warp_group_idx(sync=False),
+                barrier_id=int(NamedBarrierFwd.WarpSchedulerWG1) - 1 + utils.canonical_warp_group_idx(sync=False),
                 number_of_threads=2 * self.num_threads_per_warp_group,
             )
 

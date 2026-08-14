@@ -71,6 +71,7 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn routing threshold
     sol_threshold_type: str = "diag"        # "diag" or "exact"
     sol_kv_splits: int | str = "auto"       # "auto", 1, 2, or 4
+    sol_fp8: bool = False                    # Native FP8 Q/K/V Sol-Attn on SM90
 ```
 
 ## Calling Flow
@@ -197,10 +198,12 @@ config = AttentionConfig.sol_attention()
 pipe_config.dit_config.attention_config = config
 ```
 
-Sol-Attn is used only for contiguous, noncausal BF16 self-attention with equal Q/K/V
-shapes and head dimension 128. Unsupported calls, dense warmup layers or timesteps,
-and kernel runtime failures fall back to the existing dense attention path. Ring/USP
-also remains dense because its online merge requires log-sum-exp output.
+Sol-Attn is used for contiguous, noncausal self-attention with equal Q/K/V shapes
+and head dimension 128. BF16 is supported by the architecture-specific kernels;
+SM90 additionally supports E4M3 Q/K/V with FP32 accumulation. Unsupported calls,
+dense warmup layers or timesteps, and kernel runtime failures fall back to the
+existing dense attention path. Ring/USP remains dense because its online merge
+requires log-sum-exp output.
 
 ### QwenImagePipeline / ZImagePipeline
 

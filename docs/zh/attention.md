@@ -71,6 +71,7 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn 路由阈值
     sol_threshold_type: str = "diag"        # "diag" 或 "exact"
     sol_kv_splits: int | str = "auto"       # "auto"、1、2 或 4
+    sol_fp8: bool = False                    # SM90 原生 FP8 Q/K/V Sol-Attn
 ```
 
 ## 调用流程
@@ -197,8 +198,9 @@ config = AttentionConfig.sol_attention()
 pipe_config.dit_config.attention_config = config
 ```
 
-Sol-Attn 仅用于连续、非因果、BF16、Q/K/V 形状相同且 head dimension 为 128 的
-self-attention。其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
+Sol-Attn 用于连续、非因果、Q/K/V 形状相同且 head dimension 为 128 的
+self-attention。各架构内核支持 BF16，SM90 还支持使用 FP32 累加的 E4M3 Q/K/V。
+其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
 Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端。
 
 ### QwenImagePipeline / ZImagePipeline

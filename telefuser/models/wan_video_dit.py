@@ -37,7 +37,7 @@ from telefuser.offload import (
 from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
-from telefuser.ops.fp8_attention import quantize_fp8_per_block
+from telefuser.ops.fp8_attention import quantize_fp8_per_block, quantize_fp8_qkv
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
@@ -148,16 +148,10 @@ class SelfAttention(nn.Module):
         v: torch.Tensor,
         sparse_state: SparseAttentionState | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None]:
-        # H100 currently has no native FP8 CuTe Sol-Attn mainloop. Keeping
-        # QKV in BF16 lets the production SM90 kernel run without paying the
-        # quantize/dequantize overhead that otherwise makes this path slower.
-        native_fp8_sol = not (q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0))
-        if (
-            self._is_sol_active(sparse_state)
-            and sparse_state is not None
-            and sparse_state.config.sol_fp8
-            and native_fp8_sol
-        ):
+        if self._is_sol_active(sparse_state) and sparse_state is not None and sparse_state.config.sol_fp8:
+            if q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0):
+                q, k, v, q_scale, k_scale, v_scale = quantize_fp8_qkv(q, k, v)
+                return q, k, v, (q_scale, k_scale, v_scale)
             q, q_scale = quantize_fp8_per_block(q)
             k, k_scale = quantize_fp8_per_block(k)
             v, v_scale = quantize_fp8_per_block(v)

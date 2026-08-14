@@ -1,5 +1,7 @@
 """Hopper forward operators."""
 
+import math
+
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
@@ -18,7 +20,7 @@ class SolAttnSplitForwardSm90(SolAttnMainloopSm90):
             head_dim=self.tile_hdimv,
             tile_m=16,
             k_block_size=64,
-            log_max_splits=1 if self.sol_attn_num_splits == 2 else 2,
+            log_max_splits=int(math.log2(self.sol_attn_num_splits)),
             num_threads=128,
             stages=4,
             partial_dtype=cutlass.BFloat16,
@@ -35,10 +37,15 @@ class SolAttnSplitForwardSm90(SolAttnMainloopSm90):
         vc: cute.Tensor,
         threshold: cute.Tensor,
         lse: cute.Tensor,
+        q_scale: cute.Tensor,
+        k_scale: cute.Tensor,
+        v_scale: cute.Tensor,
+        kc_scale: cute.Tensor,
         o_partial: cute.Tensor,
         lse_partial: cute.Tensor,
         softmax_scale: cutlass.Float32,
         sink_range: cutlass.Int32,
+        logical_tokens: cutlass.Int32,
         stream: cuda.CUstream = None,
     ):
         SolAttnMainloopSm90.__call__(
@@ -51,8 +58,13 @@ class SolAttnSplitForwardSm90(SolAttnMainloopSm90):
             vc,
             threshold,
             lse_partial,
+            q_scale,
+            k_scale,
+            v_scale,
+            kc_scale,
             softmax_scale,
             sink_range,
+            logical_tokens,
             stream=stream,
         )
 

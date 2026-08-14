@@ -15,6 +15,22 @@ _CUTE_BACKENDS = {
 _compiled = {}
 
 
+def _is_token_contiguous_bthd(x: torch.Tensor) -> bool:
+    batch, tokens, heads, head_dim = x.shape
+    return x.stride() == (
+        heads * head_dim * tokens,
+        1,
+        head_dim * tokens,
+        tokens,
+    )
+
+
+def _to_token_contiguous_bthd(x: torch.Tensor) -> torch.Tensor:
+    if _is_token_contiguous_bthd(x):
+        return x
+    return x.permute(0, 2, 3, 1).contiguous().permute(0, 3, 1, 2)
+
+
 def _validate_inputs(
     q,
     k,
@@ -31,8 +47,9 @@ def _validate_inputs(
         raise TypeError("q, k, and v must use torch.bfloat16 or torch.float8_e4m3fn")
     if q.device.type != "cuda" or k.device != q.device or v.device != q.device:
         raise ValueError("q, k, and v must be on the same CUDA device")
-    if not (q.is_contiguous() and k.is_contiguous() and v.is_contiguous()):
-        raise ValueError("q, k, and v must be contiguous BTHD tensors")
+    v_layout_valid = v.is_contiguous() or (v.dtype == torch.float8_e4m3fn and _is_token_contiguous_bthd(v))
+    if not (q.is_contiguous() and k.is_contiguous() and v_layout_valid):
+        raise ValueError("q and k must be contiguous BTHD; FP8 v may also be token-contiguous BTHD")
     if thresh_type not in ("diag", "exact"):
         raise ValueError("thresh_type must be 'diag' or 'exact'")
     if not isinstance(sink_tokens, int):
@@ -70,17 +87,10 @@ def _backend_for_arch(
     """Select CuTe when specialized and available, otherwise Triton."""
 
     if arch[0] < 8:
-        raise RuntimeError(
-            "Sol-Attn requires an NVIDIA GPU with compute capability >= 8.0; "
-            f"got SM{arch[0]}{arch[1]}"
-        )
+        raise RuntimeError(f"Sol-Attn requires an NVIDIA GPU with compute capability >= 8.0; got SM{arch[0]}{arch[1]}")
     cute_backend = _CUTE_BACKENDS.get(arch)
     if cute_backend is not None:
-        available = (
-            _cute_runtime_available()
-            if cute_available is None
-            else cute_available
-        )
+        available = _cute_runtime_available() if cute_available is None else cute_available
         if available:
             return cute_backend
     return "triton"
@@ -125,18 +135,20 @@ def _compile_sm90(
     kv_splits,
     sink_range,
     stream,
+    fp8_inputs,
 ):
     import cutlass.cute as cute
 
     from .sm90 import make_kernel
 
-    operator = make_kernel(tokens, kv_splits)
+    operator = make_kernel(tokens, kv_splits, fp8_inputs=fp8_inputs)
     args = _to_cute_tensors(tensors)
     compiled = cute.compile(
         operator,
         *args,
         scale,
         sink_range,
+        tokens,
         stream=stream,
         options="--enable-tvm-ffi",
     )
@@ -209,28 +221,68 @@ def _sol_attn_cute(
     kv_splits,
     sink_tokens,
     sink_start,
+    q_scale=None,
+    k_scale=None,
+    v_scale=None,
 ):
-    from .preprocess import prepare
-
     batch, tokens, heads, _ = q.shape
+    fp8_inputs = q.dtype == torch.float8_e4m3fn
 
     with torch.cuda.device(q.device):
-        kc, vc, threshold = prepare(
-            q,
-            k,
-            v,
-            scale=scale,
-            tau=tau,
-            thresh_type=thresh_type,
-        )
-        output = torch.empty_like(v)
+        if fp8_inputs:
+            from .triton_ref.preprocess import prepare_sm90_fp8
+
+            kc, vc, threshold, kc_scale = prepare_sm90_fp8(
+                q,
+                k,
+                v,
+                scale=scale,
+                tau=tau,
+                thresh_type=thresh_type,
+                tokens=tokens,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+        else:
+            from .preprocess import prepare
+
+            kc, vc, threshold = prepare(
+                q,
+                k,
+                v,
+                scale=scale,
+                tau=tau,
+                thresh_type=thresh_type,
+            )
+            dummy_scale = torch.ones((1,), device=q.device, dtype=torch.float32)
+            q_scale = k_scale = v_scale = kc_scale = dummy_scale
+        if fp8_inputs and tokens % BLOCK_SIZE:
+            padded_tokens = ((tokens + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+            q_padded = torch.zeros(
+                (batch, padded_tokens, heads, q.shape[-1]),
+                device=q.device,
+                dtype=q.dtype,
+            )
+            k_padded = torch.zeros_like(q_padded)
+            q_padded[:, :tokens].copy_(q)
+            k_padded[:, :tokens].copy_(k)
+            v_storage = torch.zeros(
+                (batch, heads, v.shape[-1], padded_tokens),
+                device=v.device,
+                dtype=v.dtype,
+            )
+            v_storage[..., :tokens].copy_(v.permute(0, 2, 3, 1))
+            q, k = q_padded, k_padded
+            v = v_storage.permute(0, 3, 1, 2)
+        output = torch.empty(v.shape, device=v.device, dtype=torch.bfloat16)
         lse = torch.empty(
-            (batch, tokens, heads),
+            (batch, q.shape[1], heads),
             device=q.device,
             dtype=torch.float32,
         )
         stream = _stream(q.device)
-        key = (q.device.index, arch, batch, tokens, heads, kv_splits)
+        key = (q.device.index, arch, batch, tokens, heads, kv_splits, q.dtype)
 
         if arch == (9, 0):
             if sink_tokens:
@@ -242,17 +294,17 @@ def _sol_attn_cute(
                 sink_range = sink_start_block | (sink_end_block << 16)
             else:
                 sink_range = 0
-            tensors = [q, k, v, output, kc, vc, threshold, lse]
+            tensors = [q, k, v, output, kc, vc, threshold, lse, q_scale, k_scale, v_scale, kc_scale]
             if kv_splits > 1:
                 tensors.extend(
                     [
                         torch.empty(
-                            (batch, tokens, kv_splits * heads, 128),
+                            (batch, q.shape[1], kv_splits * heads, 128),
                             device=q.device,
                             dtype=torch.bfloat16,
                         ),
                         torch.empty(
-                            (batch, tokens, kv_splits * heads),
+                            (batch, q.shape[1], kv_splits * heads),
                             device=q.device,
                             dtype=torch.float32,
                         ),
@@ -268,6 +320,7 @@ def _sol_attn_cute(
                     kv_splits,
                     sink_range,
                     stream,
+                    fp8_inputs,
                 )
             else:
                 args = _to_cute_tensors(tensors)
@@ -275,6 +328,7 @@ def _sol_attn_cute(
                 *args,
                 scale,
                 sink_range,
+                tokens,
                 stream=stream,
             )
         elif arch == (10, 0):
@@ -329,7 +383,7 @@ def _sol_attn_cute(
                 sink_end_block,
                 stream=stream,
             )
-    return output
+    return output[:, :tokens]
 
 
 def sol_attn(
@@ -356,37 +410,53 @@ def sol_attn(
 
     fp8_inputs = any(x.dtype == torch.float8_e4m3fn for x in (q, k, v))
     if fp8_inputs:
+        if kv_splits not in (1, 2, 4):
+            raise ValueError("kv_splits must be 1, 2, or 4")
         if not all(x.dtype == torch.float8_e4m3fn for x in (q, k, v)):
             raise TypeError("q, k, and v must all use the same dtype")
         if any(scale is None for scale in (q_scale, k_scale, v_scale)):
             raise ValueError("FP8 Sol-Attn requires q_scale, k_scale, and v_scale")
         _validate_inputs(q, k, v, thresh_type, sink_tokens, sink_start)
-        if kv_splits != 1:
-            raise ValueError("FP8 Sol-Attn currently supports kv_splits=1")
+        arch = tuple(torch.cuda.get_device_capability(q.device))
+        native_sm90_fp8 = arch == (9, 0) and _cute_runtime_available()
         blocks = (q.shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
-        expected_scale_shape = (q.shape[0], blocks, q.shape[2])
-        for name, tensor in (("q_scale", q_scale), ("k_scale", k_scale), ("v_scale", v_scale)):
+        expected_scale_shape = (
+            (q.shape[0], blocks * BLOCK_SIZE, q.shape[2])
+            if native_sm90_fp8
+            else (q.shape[0], blocks, q.shape[2])
+        )
+        for name, tensor in (("q_scale", q_scale), ("k_scale", k_scale)):
             if tensor.shape != expected_scale_shape or tensor.device != q.device:
                 raise ValueError(f"{name} must have shape {expected_scale_shape} on the Q/K/V device")
             if not tensor.is_contiguous():
                 raise ValueError(f"{name} must be contiguous")
-        # Use the production CuTe path on SM90 until its native FP8 mainloop
-        # is available; the pointer Triton fallback is substantially slower.
-        arch = tuple(torch.cuda.get_device_capability(q.device))
-        if arch == (9, 0) and _cute_runtime_available():
-            from telefuser.ops.fp8_attention import dequantize_fp8_per_block
-
-            return sol_attn(
-                dequantize_fp8_per_block(q, q_scale, torch.bfloat16),
-                dequantize_fp8_per_block(k, k_scale, torch.bfloat16),
-                dequantize_fp8_per_block(v, v_scale, torch.bfloat16),
+        if native_sm90_fp8:
+            expected_v_scale_shape = (q.shape[0], q.shape[2], q.shape[3])
+            if v_scale.shape != expected_v_scale_shape or v_scale.device != q.device:
+                raise ValueError("SM90 FP8 Sol-Attn requires v_scale with shape [B, H, D]")
+            if not v_scale.is_contiguous():
+                raise ValueError("v_scale must be contiguous")
+            v = _to_token_contiguous_bthd(v)
+            scale = q.shape[-1] ** -0.5 if scale is None else float(scale)
+            return _sol_attn_cute(
+                q,
+                k,
+                v,
+                arch=arch,
                 scale=scale,
-                tau=tau,
+                tau=float(tau),
                 thresh_type=thresh_type,
                 kv_splits=kv_splits,
                 sink_tokens=sink_tokens,
                 sink_start=sink_start,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
+        if v_scale.shape != expected_scale_shape or v_scale.device != q.device:
+            raise ValueError(f"v_scale must have shape {expected_scale_shape} on the Q/K/V device")
+        if not v_scale.is_contiguous():
+            raise ValueError("v_scale must be contiguous")
         from .triton_ref import sol_attn as triton_sol_attn
 
         return triton_sol_attn(
@@ -445,6 +515,9 @@ def sol_attn(
         kv_splits=kv_splits,
         sink_tokens=sink_tokens,
         sink_start=sink_start,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
 
 
