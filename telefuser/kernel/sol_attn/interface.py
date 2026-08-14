@@ -400,6 +400,7 @@ def sol_attn(
     q_scale: torch.Tensor | None = None,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    force_triton: bool = False,
 ) -> torch.Tensor:
     """Compute noncausal Sol-Attn for contiguous BF16 or FP8 BTHD tensors.
 
@@ -410,6 +411,8 @@ def sol_attn(
 
     fp8_inputs = any(x.dtype == torch.float8_e4m3fn for x in (q, k, v))
     if fp8_inputs:
+        if force_triton:
+            raise ValueError("force_triton is only supported for BF16 Sol-Attn")
         if kv_splits not in (1, 2, 4):
             raise ValueError("kv_splits must be 1, 2, or 4")
         if not all(x.dtype == torch.float8_e4m3fn for x in (q, k, v)):
@@ -420,11 +423,7 @@ def sol_attn(
         arch = tuple(torch.cuda.get_device_capability(q.device))
         native_sm90_fp8 = arch == (9, 0) and _cute_runtime_available()
         blocks = (q.shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
-        expected_scale_shape = (
-            (q.shape[0], blocks * BLOCK_SIZE, q.shape[2])
-            if native_sm90_fp8
-            else (q.shape[0], blocks, q.shape[2])
-        )
+        expected_scale_shape = (q.shape[0], blocks, q.shape[2])
         for name, tensor in (("q_scale", q_scale), ("k_scale", k_scale)):
             if tensor.shape != expected_scale_shape or tensor.device != q.device:
                 raise ValueError(f"{name} must have shape {expected_scale_shape} on the Q/K/V device")
@@ -483,7 +482,7 @@ def sol_attn(
     )
     if kv_splits not in (1, 2, 4):
         raise ValueError("kv_splits must be 1, 2, or 4")
-    backend = _backend_for_arch(arch)
+    backend = "triton" if force_triton else _backend_for_arch(arch)
     scale = q.shape[-1] ** -0.5 if scale is None else float(scale)
     tau = float(tau)
 

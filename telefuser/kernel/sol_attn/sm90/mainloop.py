@@ -72,7 +72,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         self.fp8_probability_scale = 1.0
         self.sol_attn_group_size = 64
         self.sol_attn_group_words = 2
-        self.mma_pv_is_rs = True
+        self.mma_pv_is_rs = not fp8_inputs
         self.sol_attn_mma_regs_override = 128
         self.sol_attn_warp_route_mask = True
         self.sol_attn_fast_route_lens = True
@@ -232,9 +232,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         """Apply one Q/K scale per N64 tile to an FP8 QK accumulator."""
 
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
-        factor = Float32(q_scale[q_block * Int32(self.tile_m)]) * Float32(
-            k_scale[n_block * Int32(self.tile_n)]
-        )
+        factor = Float32(q_scale[q_block]) * Float32(k_scale[n_block])
         for i in cutlass.range_constexpr(cute.size(acc_S_mn)):
             acc_S_mn[i] = Float32(acc_S_mn[i]) * factor
 
@@ -251,7 +249,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
         """Apply block-scaled Q and per-centroid K dequantization."""
 
         acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S)
-        q_factor = Float32(q_scale[q_block * Int32(self.tile_m)])
+        q_factor = Float32(q_scale[q_block])
         for i in cutlass.range_constexpr(cute.size(acc_S_mn)):
             col = tScS_mn[i][1]
             factor = q_factor * Float32(kc_scale[route_n_block + col])

@@ -39,9 +39,9 @@ def _quantize_qkv_fp8_stage1(
 
     q_s = tl.maximum(tl.max(tl.max(tl.abs(q_values), axis=1), axis=0), 1.0e-6) / 448.0
     k_s = tl.maximum(tl.max(tl.max(tl.abs(k_values), axis=1), axis=0), 1.0e-6) / 448.0
-    scale_offsets = (batch * tl.cdiv(tokens, block) * block + token_offsets) * heads + head
-    tl.store(q_scale + scale_offsets, q_s, mask=valid)
-    tl.store(k_scale + scale_offsets, k_s, mask=valid)
+    scale_offset = (batch * tl.cdiv(tokens, block) + block_idx) * heads + head
+    tl.store(q_scale + scale_offset, q_s)
+    tl.store(k_scale + scale_offset, k_s)
     tl.store(q_out + offsets, q_values / q_s, mask=valid[:, None])
     tl.store(k_out + offsets, k_values / k_s, mask=valid[:, None])
 
@@ -93,8 +93,7 @@ def quantize_fp8_qkv(
     q_out = torch.empty(q.shape, device=q.device, dtype=torch.float8_e4m3fn)
     k_out = torch.empty_like(q_out)
     v_storage = torch.empty((batch, heads, head_dim, tokens), device=q.device, dtype=torch.float8_e4m3fn)
-    padded_tokens = blocks * FP8_ATTENTION_BLOCK_SIZE
-    q_scale = torch.ones((batch, padded_tokens, heads), device=q.device, dtype=torch.float32)
+    q_scale = torch.empty((batch, blocks, heads), device=q.device, dtype=torch.float32)
     k_scale = torch.ones_like(q_scale)
     v_scale = torch.zeros((batch, heads, head_dim), device=q.device, dtype=torch.float32)
     grid = (blocks, batch * heads)

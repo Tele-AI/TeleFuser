@@ -361,7 +361,7 @@ def prepare_sm90_fp8(
         head_dim,
         BLOCK_SIZE,
         FP8=True,
-        TOKEN_SCALES=True,
+        TOKEN_SCALES=False,
         V_CHANNEL_SCALE=True,
         V_TOKEN_CONTIGUOUS=True,
         SM90_FP8_OUTPUTS=True,
@@ -438,7 +438,7 @@ def _compute_diag_threshold(
         BLOCK_SIZE,
         tau,
         FP8=q.dtype == torch.float8_e4m3fn,
-        TOKEN_SCALES=q_scale is not None and q_scale.shape[1] == padded_tokens,
+        TOKEN_SCALES=False,
         num_warps=4,
         num_stages=2,
     )
@@ -486,7 +486,7 @@ def _compute_exact_threshold(
         head_dim,
         BLOCK_SIZE,
         FP8=q.dtype == torch.float8_e4m3fn,
-        TOKEN_SCALES=q_scale is not None and q_scale.shape[1] == padded_tokens,
+        TOKEN_SCALES=False,
         num_warps=4,
         num_stages=1,
     )

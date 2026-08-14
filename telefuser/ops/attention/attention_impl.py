@@ -168,7 +168,7 @@ def _resolve_sol_kv_splits(q: Tensor, kv_splits: int | str) -> int:
         return int(kv_splits)
     if torch.cuda.get_device_capability(q.device) == (9, 0):
         if q.dtype == torch.float8_e4m3fn and q.shape[1] >= 16384:
-            return 4
+            return 2
         if q.shape[1] >= 65536:
             return 4
     return 1
@@ -243,6 +243,11 @@ def attention(
         elif attn_impl == AttnImplType.SOL_ATTN:
             if sparse_state.should_use_dense():
                 attn_impl = AttnImplType.FLASH_ATTN_2
+            elif sparse_state.config.sol_fp8 and sparse_state.config.sol_tau < 0.0 and q.dtype == torch.bfloat16:
+                # FP8 Dense only needs the CuTe exact mainloop in quantized
+                # layers. Unquantized layers use the faster dense backend and
+                # avoid compiling a second BF16 CuTe specialization.
+                attn_impl = AttnImplType.TORCH_SDPA
         else:
             if sparse_state.mask_map is None:
                 raise RuntimeError("Radial attention requires a mask map")
@@ -438,6 +443,11 @@ def attention(
                     q_scale=q_scale,
                     k_scale=k_scale,
                     v_scale=v_scale,
+                    # A partial FP8 layer range otherwise compiles both BF16
+                    # and FP8 CuTe specializations on the first sparse step.
+                    # Triton is a better cold-start tradeoff for the remaining
+                    # sparse BF16 layers; exact FP8 Dense keeps CuTe throughout.
+                    force_triton=(sparse_config.sol_fp8 and q.dtype == torch.bfloat16 and sparse_config.sol_tau >= 0.0),
                 )
             except (RuntimeError, TypeError, ValueError) as error:
                 msg = "Sol-Attn execution failed, falling back to TORCH_SDPA"

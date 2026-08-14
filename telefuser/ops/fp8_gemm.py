@@ -239,45 +239,56 @@ class FP8Linear(nn.Module):
                 "Use fp16_weight_storage='cpu_offload' (or 'keep') for CPU fallback."
             )
 
-        # tf-kernel FP8 GEMM only supports fp16/bf16 outputs.
+        if x.dtype not in (torch.float16, torch.bfloat16) and not self.options.cast_inputs:
+            if self.linear is not None:
+                return self.linear(x)
+            if self._fp16_weight_cpu is not None:
+                weight = self._fp16_weight_cpu.to(device=x.device, dtype=x.dtype)
+                bias = self._fp16_bias_cpu
+                bias = bias.to(device=x.device, dtype=x.dtype) if bias is not None else None
+                return torch.nn.functional.linear(x, weight, bias)
+            raise RuntimeError("cast_inputs=False requires FP16 weights for fallback, but they were discarded.")
+
+        x_fp, in_dtype, out_dtype = self._prepare_cuda_input(x)
+        x_shape = x_fp.shape
+        x_2d = x_fp.reshape(-1, x_shape[-1]).contiguous()
+        qinput = torch.empty_like(x_2d, dtype=torch.float8_e4m3fn)
+        input_scale = torch.empty((x_2d.shape[0], 1), dtype=torch.float32, device=x_fp.device)
+        self._tf_kernel.tf_per_token_quant_fp8(x_2d, qinput, input_scale)
+        return self._forward_quantized(qinput, input_scale, x_shape, in_dtype, out_dtype)
+
+    def _prepare_cuda_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.dtype, torch.dtype]:
+        """Cast an activation to a dtype supported by tf-kernel FP8 GEMM."""
         in_dtype = x.dtype
         if in_dtype not in (torch.float16, torch.bfloat16):
-            if not self.options.cast_inputs:
-                # Fall back if we still have FP16 weights.
-                if self.linear is not None:
-                    return self.linear(x)
-                if self._fp16_weight_cpu is not None:
-                    w = self._fp16_weight_cpu.to(device=x.device, dtype=in_dtype)
-                    b = self._fp16_bias_cpu
-                    b = b.to(device=x.device, dtype=in_dtype) if b is not None else None
-                    return torch.nn.functional.linear(x, w, b)
-                raise RuntimeError("cast_inputs=False requires FP16 weights for fallback, but they were discarded.")
-            # import nvtx
-            # nvtx.push_range(f"cast_input")
             x_fp = x.to(torch.bfloat16)
-            # nvtx.pop_range()
             out_dtype = torch.bfloat16
         else:
             x_fp = x
             out_dtype = in_dtype
+        return x_fp, in_dtype, out_dtype
 
-        self._maybe_requantize_weight(x_fp.device)
+    def _forward_quantized(
+        self,
+        qinput: torch.Tensor,
+        input_scale: torch.Tensor,
+        x_shape: torch.Size,
+        in_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Run this Linear using an already quantized shared activation."""
+        self._maybe_requantize_weight(qinput.device)
 
         if self.linear is not None:
             bias = self.linear.bias
         else:
             bias = self.bias
         if bias is not None:
-            if bias.device != x_fp.device:
-                bias = bias.to(device=x_fp.device, non_blocking=True)
+            if bias.device != qinput.device:
+                bias = bias.to(device=qinput.device, non_blocking=True)
             if bias.dtype != out_dtype:
                 bias = bias.to(dtype=out_dtype)
 
-        x_shape = x_fp.shape
-        x_2d = x_fp.reshape(-1, x_shape[-1]).contiguous()
-        qinput = torch.empty_like(x_2d, dtype=torch.float8_e4m3fn)
-        input_scale = torch.empty((x_2d.shape[0], 1), dtype=torch.float32, device=x_fp.device)
-        self._tf_kernel.tf_per_token_quant_fp8(x_2d, qinput, input_scale)
         y = self._tf_kernel.fp8_scaled_mm(
             qinput,
             self._fp8_weight,
@@ -291,6 +302,24 @@ class FP8Linear(nn.Module):
         if self.options.cast_inputs and self.options.cast_output_back and y.dtype != in_dtype:
             return y.to(in_dtype)
         return y
+
+
+def fp8_linear_forward_many(linears: tuple[FP8Linear, ...], x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Reuse one dynamic activation quantization across compatible FP8 Linears."""
+    if not linears:
+        return ()
+    first = linears[0]
+    unsupported_no_cast = x.dtype not in (torch.float16, torch.bfloat16) and not first.options.cast_inputs
+    if not x.is_cuda or unsupported_no_cast or any(linear.options != first.options for linear in linears[1:]):
+        return tuple(linear(x) for linear in linears)
+
+    x_fp, in_dtype, out_dtype = first._prepare_cuda_input(x)
+    x_shape = x_fp.shape
+    x_2d = x_fp.reshape(-1, x_shape[-1]).contiguous()
+    qinput = torch.empty_like(x_2d, dtype=torch.float8_e4m3fn)
+    input_scale = torch.empty((x_2d.shape[0], 1), dtype=torch.float32, device=x_fp.device)
+    first._tf_kernel.tf_per_token_quant_fp8(x_2d, qinput, input_scale)
+    return tuple(linear._forward_quantized(qinput, input_scale, x_shape, in_dtype, out_dtype) for linear in linears)
 
 
 def enable_fp8_gemm(

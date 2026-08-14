@@ -150,7 +150,7 @@ class SparseAttentionConfig:
     use_sage_attention: bool = False  # Use sage attention backend
     sol_tau: float = 1.0  # Sol-Attn routing threshold multiplier
     sol_threshold_type: str = "diag"  # Sol-Attn threshold estimator: "diag" or "exact"
-    sol_kv_splits: int | str = "auto"  # Auto selects split 4 for long SM90 sequences
+    sol_kv_splits: int | str = "auto"  # Auto selects split 2 for long FP8 SM90 sequences
     sol_fp8: bool = False  # Quantize post-RoPE Q/K/V activations for FP8 Sol-Attn
     sol_fp8_layer_start: int = 0  # First transformer layer using FP8 Sol-Attn
     sol_fp8_layer_end: int | None = None  # Exclusive end; None enables all remaining layers

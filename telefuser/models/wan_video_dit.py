@@ -38,6 +38,7 @@ from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
 from telefuser.ops.fp8_attention import quantize_fp8_per_block, quantize_fp8_qkv
+from telefuser.ops.fp8_gemm import FP8Linear, fp8_linear_forward_many
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
@@ -135,9 +136,15 @@ class SelfAttention(nn.Module):
         x: torch.Tensor,
         sparse_state: SparseAttentionState | None,
     ) -> torch.Tensor:
-        # TorchAO preserves Wan's FP32 residual dtype, unlike autocast nn.Linear.
-        # Cast once before q/k/v instead of casting all three projected tensors.
-        if self._is_sol_active(sparse_state) and x.dtype != torch.bfloat16 and torch.is_autocast_enabled(x.device.type):
+        # Cast once before q/k/v instead of inside all three FP8 projections.
+        # Keeping the outer projection dtype in sync also avoids a redundant
+        # BF16 -> FP32 -> BF16 round trip before the output FP8 Linear.
+        shared_fp8_qkv = all(isinstance(projection, FP8Linear) for projection in (self.q, self.k, self.v))
+        if (
+            (self._is_sol_active(sparse_state) or shared_fp8_qkv)
+            and x.dtype != torch.bfloat16
+            and torch.is_autocast_enabled(x.device.type)
+        ):
             return x.to(torch.bfloat16)
         return x
 
@@ -233,9 +240,14 @@ class SelfAttention(nn.Module):
         input_dtype = x.dtype
         x = self._prepare_sol_projection_input(x, sparse_state)
         projection_dtype = x.dtype
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(x))
-        v = self.v(x)
+        if all(isinstance(projection, FP8Linear) for projection in (self.q, self.k, self.v)):
+            q, k, v = fp8_linear_forward_many((self.q, self.k, self.v), x)
+            q = self.norm_q(q)
+            k = self.norm_k(k)
+        else:
+            q = self.norm_q(self.q(x))
+            k = self.norm_k(self.k(x))
+            v = self.v(x)
         q = rope_apply(q, freqs_cos, freqs_sin, self.num_heads)
         k = rope_apply(k, freqs_cos, freqs_sin, self.num_heads)
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)

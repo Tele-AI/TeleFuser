@@ -9,10 +9,10 @@ from telefuser.ops.attention import SparseAttentionState, attention_impl
 from telefuser.ops.fp8_attention import (
     dequantize_fp8_per_block,
     dequantize_fp8_per_channel,
-    dequantize_fp8_per_token,
     quantize_fp8_per_block,
     quantize_fp8_qkv,
 )
+from telefuser.ops.fp8_gemm import FP8Linear
 
 
 def test_wan_model_enables_sol_attention_state() -> None:
@@ -137,6 +137,23 @@ def test_wan_self_attention_casts_projection_input_once_under_autocast() -> None
     assert sol_x.dtype is torch.bfloat16
 
 
+def test_wan_self_attention_casts_shared_fp8_qkv_input_during_dense_warmup() -> None:
+    module = SelfAttention(dim=128, num_heads=1)
+    for name in ("q", "k", "v"):
+        projection = FP8Linear.__new__(FP8Linear)
+        torch.nn.Module.__init__(projection)
+        setattr(module, name, projection)
+    config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=1, dense_layers=0)
+    state = SparseAttentionState(config, mask_map=None)
+    x = torch.randn(1, 4, 128)
+
+    with patch("telefuser.models.wan_video_dit.torch.is_autocast_enabled", return_value=True):
+        prepared = module._prepare_sol_projection_input(x, state)
+
+    assert state.should_use_dense()
+    assert prepared.dtype is torch.bfloat16
+
+
 def test_wan_self_attention_quantizes_qkv_for_fp8_sol() -> None:
     module = SelfAttention(dim=128, num_heads=1).to(torch.bfloat16)
     config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=0, sol_fp8=True)
@@ -250,8 +267,8 @@ def test_wan_self_attention_executes_fp8_sol_on_h100(monkeypatch: pytest.MonkeyP
     assert captured["k"].dtype is torch.float8_e4m3fn
     assert captured["v"].dtype is torch.float8_e4m3fn
     assert captured["v"].stride(1) == 1
-    assert captured["q_scale"].shape == (1, 256, 1)
-    assert captured["k_scale"].shape == (1, 256, 1)
+    assert captured["q_scale"].shape == (1, 4, 1)
+    assert captured["k_scale"].shape == (1, 4, 1)
     assert captured["v_scale"].shape == (1, 1, 128)
 
 
@@ -268,12 +285,12 @@ def test_fused_fp8_qkv_quantization_on_h100() -> None:
     assert q_fp8.shape == q.shape
     assert k_fp8.shape == k.shape
     assert v_fp8.shape == v.shape
-    assert q_scale.shape == (1, 192, 2)
-    assert k_scale.shape == (1, 192, 2)
+    assert q_scale.shape == (1, 3, 2)
+    assert k_scale.shape == (1, 3, 2)
     assert v_scale.shape == (1, 2, 128)
     assert v_fp8.stride(1) == 1
     torch.testing.assert_close(
-        dequantize_fp8_per_token(q_fp8, q_scale, torch.bfloat16),
+        dequantize_fp8_per_block(q_fp8, q_scale, torch.bfloat16),
         q,
         rtol=0.15,
         atol=0.05,
@@ -305,8 +322,8 @@ def test_fp8_sol_handles_partial_tail_on_h100() -> None:
         v_scale=v_scale,
     )
     reference = attention_impl.sol_attn(
-        dequantize_fp8_per_token(q_fp8, q_scale, torch.bfloat16).contiguous(),
-        dequantize_fp8_per_token(k_fp8, k_scale, torch.bfloat16).contiguous(),
+        dequantize_fp8_per_block(q_fp8, q_scale, torch.bfloat16).contiguous(),
+        dequantize_fp8_per_block(k_fp8, k_scale, torch.bfloat16).contiguous(),
         dequantize_fp8_per_channel(v_fp8, v_scale, torch.bfloat16).contiguous(),
         tau=-1000.0,
     )

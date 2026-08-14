@@ -187,7 +187,7 @@ Attention choices:
 
 For both FP8 modes, `--fp8-layer-start` and `--fp8-layer-end` select the
 half-open transformer-layer range that uses FP8 Q/K/V. Other layers use the
-corresponding BF16 exact or Sol path. Restricting FP8 Q/K/V to middle layers
+corresponding BF16 dense or Sol path. Restricting FP8 Q/K/V to middle layers
 avoids accumulating small quantization changes across the full denoiser.
 
 Quantization choices:
@@ -244,11 +244,16 @@ quantized and QK/PV run through the CuTe SM90 WGMMA mainloop. Q/K use one scale
 per 64-token block, V uses per-channel scales and a K-major layout, and FP32
 accumulators are used throughout. `fp8-dense` forces every routed KV block onto
 the exact path, while `fp8-sol` permits centroid approximation. `auto` selects
-four KV splits for long FP8 sequences to bound Hopper FP8 accumulation error.
+two KV splits for long FP8 sequences, which is faster at Wan's sequence length
+without changing the FP32 accumulation contract.
 Partial tiles are physically padded while the original sequence length remains
 masked in the kernel. FP8 split execution restores the represented N64 route
 length before PV, matching the BF16 summed-centroid contract. The accompanying
-FP8 Linear GEMMs use the tf-kernel backend.
+FP8 Linear GEMMs use the tf-kernel backend. Self-attention Q/K/V projections
+share one dynamic activation quantization instead of quantizing the same input
+three times. With a partial FP8 layer range, FP8 Dense sends unquantized layers
+to SDPA and FP8 Sol sends unquantized sparse layers to Triton, avoiding a second
+CuTe specialization in the cold-start path.
 The final log reports generation time, frames per second, and peak allocated and
 reserved CUDA memory.
 
@@ -265,14 +270,14 @@ same generation interval.
 | --- | --- | ---: | ---: |
 | BF16 | Dense | 0.8491 | 16.147 |
 | BF16 | Sol-Attn | 1.1090 | 17.023 |
-| FP8 | Dense (Q/K/V layers 10-19, exact) | 0.8392 | 15.730 |
-| FP8 | Sol-Attn (Q/K/V layers 10-19) | 1.0202 | 15.730 |
+| FP8 | Dense (Q/K/V layers 10-19, exact) | 0.8739 | 15.730 |
+| FP8 | Sol-Attn (Q/K/V layers 10-19) | 1.1565 | 15.730 |
 
 Both FP8 rows quantize all 300 transformer-block Linear layers and use the same
 E4M3 attention layer range. FP8 Dense therefore measures this implementation's
 exact QK/PV path, not BF16 SDPA with only Linear quantization. Against the
-corresponding BF16 output, FP8 Dense measures 22.3664 dB PSNR / 0.839404 SSIM,
-and FP8 Sol measures 20.8865 dB PSNR / 0.795351 SSIM.
+corresponding BF16 output, FP8 Dense measures 22.0257 dB PSNR / 0.828783 SSIM,
+and FP8 Sol measures 20.8502 dB PSNR / 0.792656 SSIM.
 
 The benchmark prompt is:
 
