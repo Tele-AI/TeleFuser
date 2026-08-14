@@ -1,4 +1,4 @@
-# LingBot-VLA v2 Base Model SDK
+# LingBot-VLA v2
 
 This example loads the official LingBot-VLA v2 6B base checkpoint through TeleFuser and returns its normalized
 55-dimensional canonical action chunk. The RobotWin profile is used only to prepare the example observation; the
@@ -6,6 +6,50 @@ result is not converted to physical RobotWin actions.
 
 The native HTTP and full-project CI evidence for TeleFuser commit `baf3d18` is recorded in
 [VALIDATION_BAF3D18.md](VALIDATION_BAF3D18.md).
+
+## Model Directory
+
+The examples use the existing model-zoo layout:
+
+```text
+${TF_MODEL_ZOO_PATH}/
+  lingbot/lingbot-vla-v2-6b/
+  Qwen3-VL-4B-Instruct/
+```
+
+Set the model root before running an example or service:
+
+```bash
+export TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo
+```
+
+## Feature Support
+
+| Feature | Support |
+| --- | --- |
+| Official 6B base checkpoint | Supported |
+| Public loader and RobotWin preprocessing | Supported |
+| Canonical action output (`50 x 55`) | Supported |
+| Strict upstream parity | Frozen 38-tensor baseline |
+| Native structured HTTP service | Supported |
+| AIPerf structured workload | Supported |
+| Request-level replicas | Supported |
+| Single-policy FSDP/TP/PP | Not enabled |
+| Physical robot action mapping and safety control | Not included |
+
+Request-level replicas use one GPU per policy copy; this is not tensor or pipeline parallelism inside one policy.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `lingbot_vla_v2_inference.py` | Direct in-process inference |
+| `lingbot_vla_v2_native_service.py` | Native TeleFuser structured service contract |
+| `../../telefuser/pipelines/lingbot_vla_v2/` | Pipeline, preprocessing, policy, and service adapter |
+| `../../tools/validation/` | Parity, runtime, service, and fault validators |
+| `VALIDATION_BAF3D18.md` | Native HTTP and full-project CI evidence |
+
+Generated captures and benchmark artifacts belong under `work_dirs/` and are not committed.
 
 ## Validated H100 Development Environment
 
@@ -96,12 +140,12 @@ The pipeline returns `LingBotVlaV2CanonicalActionChunk` with:
 The VLA directory must contain `model.safetensors.index.json` and every referenced shard. The Qwen3-VL directory
 supplies the visual-language backbone configuration and processor.
 
-## Example
+## Direct Inference
 
 ```bash
-python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
   --camera-high /data/cam_high.png \
   --camera-left-wrist /data/cam_left_wrist.png \
   --camera-right-wrist /data/cam_right_wrist.png \
