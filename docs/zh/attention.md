@@ -72,6 +72,8 @@ class SparseAttentionConfig:
     sol_threshold_type: str = "diag"        # "diag" 或 "exact"
     sol_kv_splits: int | str = "auto"       # "auto"、1、2 或 4
     sol_fp8: bool = False                    # SM90 原生 FP8 Q/K/V Sol-Attn
+    sol_fp8_layer_start: int = 0             # 启用 FP8 Sol-Attn 的首层
+    sol_fp8_layer_end: int | None = None     # 结束层（不包含）；None 表示其余所有层
 ```
 
 ## 调用流程
@@ -202,6 +204,10 @@ Sol-Attn 用于连续、非因果、Q/K/V 形状相同且 head dimension 为 128
 self-attention。各架构内核支持 BF16，SM90 还支持使用 FP32 累加的 E4M3 Q/K/V。
 其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
 Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端。
+
+`sol_fp8_layer_start` 和 `sol_fp8_layer_end` 用半开区间限制使用 E4M3 Q/K/V
+的 transformer 层，区间外的稀疏层继续使用 BF16 Sol-Attn，以控制扩散模型中
+逐层累积的 FP8 路由误差。
 
 ### QwenImagePipeline / ZImagePipeline
 

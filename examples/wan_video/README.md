@@ -184,10 +184,22 @@ Attention choices:
 - `sol`: Sol-Attn with dense warm-up and fallback calls
 - `sol-fp8`: native E4M3 Q/K/V Sol-Attn on H100
 
+For `sol-fp8`, `--sol-fp8-layer-start` and `--sol-fp8-layer-end` select the
+half-open transformer-layer range that uses FP8 Q/K/V. Other sparse layers use
+BF16 Sol-Attn. Restricting FP8 Q/K/V to middle layers avoids accumulating small
+routing changes across the full denoiser.
+
 Quantization choices:
 
 - `none`: BF16 DiT
 - `tf-kernel-fp8`: TeleFuser dynamic W8A8 FP8 GEMM
+
+`--fp8-linear-scope all` quantizes every transformer-block Linear layer.
+`--fp8-linear-scope ffn` keeps self/cross-attention projections in BF16 and
+quantizes the 60 FFN Linear layers. The latter is recommended when Linear FP8
+and FP8 Sol-Attn are enabled together. The default `auto` selects `all` for
+dense attention and `ffn` for `sol-fp8`; the default FP8 Sol layer range is
+10-19 for this 30-layer Wan2.1 model.
 
 Only DiT transformer-block Linear layers are quantized; the VAE and text encoder
 remain BF16. Select the two optimization axes independently:
@@ -213,6 +225,9 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --model-root /path/to/Wan2.1-T2V-1.3B \
     --attention sol-fp8 \
     --quantization tf-kernel-fp8 \
+    --fp8-linear-scope ffn \
+    --sol-fp8-layer-start 10 \
+    --sol-fp8-layer-end 20 \
     --dense-timesteps 10 \
     --dense-layers 1 \
     --tau 1.0 \
@@ -226,7 +241,9 @@ SM90 WGMMA mainloop. Q/K use one scale per 64-token block, V uses per-channel
 scales and a K-major layout, and FP32 accumulators are used throughout. `auto`
 selects four KV splits for long FP8 sequences to bound Hopper FP8 accumulation
 error. Partial tiles are physically padded while the original sequence length
-remains masked in the kernel. The Sol tuning options apply to both modes.
+remains masked in the kernel. FP8 split execution restores the represented N64
+route length before PV, matching the BF16 summed-centroid contract. The Sol
+tuning options apply to both modes.
 The final log reports generation time, frames per second, and peak allocated and
 reserved CUDA memory.
 
@@ -244,7 +261,8 @@ same generation interval.
 | BF16 | Dense | 0.8491 | 16.147 |
 | BF16 | Sol-Attn | 1.1090 | 17.023 |
 | tf-kernel FP8 | Dense | 0.8771 | 14.855 |
-| tf-kernel FP8 | Sol-FP8 (native SM90 QKV) | 1.1879 | 15.730 |
+| tf-kernel FP8 | Sol-FP8 (all Linear/QKV layers, aggressive) | 1.1879 | 15.730 |
+| tf-kernel FP8 FFN | Sol-FP8 (QKV layers 10-19, precision) | 1.0347 | 16.256 |
 
 The benchmark prompt is:
 
@@ -259,6 +277,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
     --attention sol \
     --quantization tf-kernel-fp8 \
+    --fp8-linear-scope all \
     --width 832 --height 480 \
     --num-frames 81 --num-inference-steps 50 \
     --sample-solver unipc --cfg-scale 5.0 --sigma-shift 5.0 --seed 42

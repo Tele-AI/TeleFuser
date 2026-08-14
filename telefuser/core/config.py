@@ -152,6 +152,8 @@ class SparseAttentionConfig:
     sol_threshold_type: str = "diag"  # Sol-Attn threshold estimator: "diag" or "exact"
     sol_kv_splits: int | str = "auto"  # Auto selects split 4 for long SM90 sequences
     sol_fp8: bool = False  # Quantize post-RoPE Q/K/V activations for FP8 Sol-Attn
+    sol_fp8_layer_start: int = 0  # First transformer layer using FP8 Sol-Attn
+    sol_fp8_layer_end: int | None = None  # Exclusive end; None enables all remaining layers
 
     def __post_init__(self) -> None:
         if self.sparse_impl != "sol":
@@ -160,6 +162,10 @@ class SparseAttentionConfig:
             raise ValueError("Sol-Attn threshold type must be 'diag' or 'exact'")
         if self.sol_kv_splits not in ("auto", 1, 2, 4):
             raise ValueError("Sol-Attn KV splits must be 'auto', 1, 2, or 4")
+        if self.sol_fp8_layer_start < 0:
+            raise ValueError("Sol-Attn FP8 layer start must be non-negative")
+        if self.sol_fp8_layer_end is not None and self.sol_fp8_layer_end <= self.sol_fp8_layer_start:
+            raise ValueError("Sol-Attn FP8 layer end must be greater than its start")
 
     def should_use_dense(self, numeral_timestep: int, layer_idx: int) -> bool:
         """Check if dense attention should be used for current step/layer.
@@ -231,6 +237,8 @@ class AttentionConfig:
         threshold_type: str = "diag",
         kv_splits: int | str = "auto",
         sol_fp8: bool = False,
+        sol_fp8_layer_start: int = 0,
+        sol_fp8_layer_end: int | None = None,
         **kwargs: any,
     ) -> AttentionConfig:
         """Create a Sol-Attn config for dynamic sparse video self-attention."""
@@ -244,6 +252,8 @@ class AttentionConfig:
                 sol_threshold_type=threshold_type,
                 sol_kv_splits=kv_splits,
                 sol_fp8=sol_fp8,
+                sol_fp8_layer_start=sol_fp8_layer_start,
+                sol_fp8_layer_end=sol_fp8_layer_end,
             ),
             **kwargs,
         )

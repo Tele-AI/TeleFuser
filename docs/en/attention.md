@@ -72,6 +72,8 @@ class SparseAttentionConfig:
     sol_threshold_type: str = "diag"        # "diag" or "exact"
     sol_kv_splits: int | str = "auto"       # "auto", 1, 2, or 4
     sol_fp8: bool = False                    # Native FP8 Q/K/V Sol-Attn on SM90
+    sol_fp8_layer_start: int = 0             # First layer using FP8 Sol-Attn
+    sol_fp8_layer_end: int | None = None     # Exclusive end; None means all remaining layers
 ```
 
 ## Calling Flow
@@ -204,6 +206,10 @@ SM90 additionally supports E4M3 Q/K/V with FP32 accumulation. Unsupported calls,
 dense warmup layers or timesteps, and kernel runtime failures fall back to the
 existing dense attention path. Ring/USP remains dense because its online merge
 requires log-sum-exp output.
+
+`sol_fp8_layer_start` and `sol_fp8_layer_end` restrict E4M3 Q/K/V to a half-open
+transformer-layer range. Sparse layers outside that range continue to use BF16
+Sol-Attn. This controls accumulated FP8 routing error in diffusion models.
 
 ### QwenImagePipeline / ZImagePipeline
 

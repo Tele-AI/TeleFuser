@@ -148,7 +148,13 @@ class SelfAttention(nn.Module):
         v: torch.Tensor,
         sparse_state: SparseAttentionState | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None]:
+        fp8_layer_active = False
         if self._is_sol_active(sparse_state) and sparse_state is not None and sparse_state.config.sol_fp8:
+            layer_end = sparse_state.config.sol_fp8_layer_end
+            fp8_layer_active = sparse_state.layer_idx >= sparse_state.config.sol_fp8_layer_start and (
+                layer_end is None or sparse_state.layer_idx < layer_end
+            )
+        if fp8_layer_active:
             if q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0):
                 q, k, v, q_scale, k_scale, v_scale = quantize_fp8_qkv(q, k, v)
                 return q, k, v, (q_scale, k_scale, v_scale)

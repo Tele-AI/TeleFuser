@@ -158,6 +158,27 @@ def test_wan_self_attention_quantizes_qkv_for_fp8_sol() -> None:
     assert torch.isfinite(restored).all()
 
 
+def test_wan_self_attention_limits_fp8_sol_to_configured_layers() -> None:
+    module = SelfAttention(dim=128, num_heads=1)
+    config = SparseAttentionConfig(
+        sparse_impl="sol",
+        dense_timesteps=0,
+        sol_fp8=True,
+        sol_fp8_layer_start=1,
+        sol_fp8_layer_end=2,
+    )
+    state = SparseAttentionState(config, mask_map=None)
+    q = torch.randn(1, 64, 1, 128)
+
+    bf16_qkv = module._prepare_sol_qkv(q, q, q, state)
+    assert bf16_qkv[3] is None
+
+    state.update(layer_idx=1)
+    fp8_qkv = module._prepare_sol_qkv(q, q, q, state)
+    assert fp8_qkv[0].dtype is torch.float8_e4m3fn
+    assert fp8_qkv[3] is not None
+
+
 @pytest.mark.gpu
 def test_wan_self_attention_executes_sol_on_h100(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
@@ -314,3 +335,29 @@ def test_native_fp8_sol_preserves_constant_values_at_long_sequence_on_h100() -> 
     )
 
     torch.testing.assert_close(output.float(), torch.ones_like(output, dtype=torch.float32), rtol=0.02, atol=0.02)
+
+
+@pytest.mark.gpu
+def test_native_fp8_sol_split_preserves_sparse_route_weights_on_h100() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("split FP8 Sol-Attn test requires H100")
+
+    torch.manual_seed(7)
+    q = torch.randn(1, 4160, 1, 128, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    reference = attention_impl.sol_attn(q, k, v, tau=1.0, kv_splits=1)
+    q, k, v, q_scale, k_scale, v_scale = quantize_fp8_qkv(q, k, v)
+    output = attention_impl.sol_attn(
+        q,
+        k,
+        v,
+        tau=1.0,
+        kv_splits=2,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+    cosine = torch.nn.functional.cosine_similarity(output.float().flatten(), reference.float().flatten(), dim=0)
+    assert cosine > 0.98

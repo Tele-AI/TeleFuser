@@ -6,6 +6,7 @@ import torch
 from examples.wan_video.wan21_1_3b_text_to_video_optimized_h100 import (
     make_attention_config,
     make_quant_config,
+    resolve_fp8_linear_scope,
     run,
 )
 from telefuser.core.config import AttnImplType, QuantConfig, QuantKernelBackend, QuantType
@@ -33,10 +34,12 @@ def test_wan_optimized_example_builds_dense_attention_config() -> None:
 
 
 def test_wan_optimized_example_builds_fp8_sol_config() -> None:
-    attention = make_attention_config("sol-fp8")
+    attention = make_attention_config("sol-fp8", fp8_layer_start=10, fp8_layer_end=20)
     assert attention.attn_impl is AttnImplType.SOL_ATTN
     assert attention.sparse_config is not None
     assert attention.sparse_config.sol_fp8
+    assert attention.sparse_config.sol_fp8_layer_start == 10
+    assert attention.sparse_config.sol_fp8_layer_end == 20
 
 
 def test_wan_optimized_example_rejects_unknown_attention() -> None:
@@ -66,6 +69,22 @@ def test_wan_optimized_example_quantization_choices(name, quant_type, backend) -
 def test_wan_optimized_example_rejects_unknown_quantization() -> None:
     with pytest.raises(ValueError, match="quantization must be"):
         make_quant_config("int8")
+
+
+def test_wan_optimized_example_builds_ffn_only_fp8_config() -> None:
+    config = make_quant_config("tf-kernel-fp8", fp8_linear_scope="ffn")
+
+    assert config.quantize_modules == (".ffn.",)
+
+
+def test_wan_optimized_example_uses_quality_safe_auto_fp8_scope() -> None:
+    assert resolve_fp8_linear_scope("dense", "auto") == "all"
+    assert resolve_fp8_linear_scope("sol-fp8", "auto") == "ffn"
+
+
+def test_wan_optimized_example_rejects_unknown_fp8_linear_scope() -> None:
+    with pytest.raises(ValueError, match="fp8_linear_scope must be"):
+        resolve_fp8_linear_scope("sol-fp8", "attention")
 
 
 def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks(monkeypatch: pytest.MonkeyPatch) -> None:

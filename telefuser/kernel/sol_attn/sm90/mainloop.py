@@ -2088,7 +2088,7 @@ class SolAttnMainloopSm90(FlashAttentionForwardBase):
                                     seqlen,
                                     softmax,
                                 )
-                        if const_expr(self.fp8_inputs and self.sol_attn_num_splits == 1):
+                        if const_expr(self.fp8_inputs):
                             self.sol_attn_scale_route_probabilities(
                                 acc_S,
                                 tScS_route_mn,
