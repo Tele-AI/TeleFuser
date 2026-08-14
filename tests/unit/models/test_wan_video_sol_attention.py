@@ -213,7 +213,7 @@ def test_wan_self_attention_executes_sol_on_h100(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.gpu
-def test_wan_self_attention_executes_native_fp8_sol_on_h100(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wan_self_attention_executes_fp8_sol_on_h100(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Wan FP8 Sol-Attn execution test requires H100")
 
@@ -287,7 +287,7 @@ def test_fused_fp8_qkv_quantization_on_h100() -> None:
 
 
 @pytest.mark.gpu
-def test_native_fp8_sol_handles_partial_tail_on_h100() -> None:
+def test_fp8_sol_handles_partial_tail_on_h100() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("partial-tail FP8 Sol-Attn test requires H100")
 
@@ -316,7 +316,7 @@ def test_native_fp8_sol_handles_partial_tail_on_h100() -> None:
 
 
 @pytest.mark.gpu
-def test_native_fp8_sol_preserves_constant_values_at_long_sequence_on_h100() -> None:
+def test_fp8_sol_preserves_constant_values_at_long_sequence_on_h100() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("long-sequence FP8 Sol-Attn test requires H100")
 
@@ -338,7 +338,7 @@ def test_native_fp8_sol_preserves_constant_values_at_long_sequence_on_h100() -> 
 
 
 @pytest.mark.gpu
-def test_native_fp8_sol_split_preserves_sparse_route_weights_on_h100() -> None:
+def test_fp8_sol_split_preserves_sparse_route_weights_on_h100() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("split FP8 Sol-Attn test requires H100")
 

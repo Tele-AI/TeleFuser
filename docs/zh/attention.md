@@ -71,7 +71,7 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn 路由阈值
     sol_threshold_type: str = "diag"        # "diag" 或 "exact"
     sol_kv_splits: int | str = "auto"       # "auto"、1、2 或 4
-    sol_fp8: bool = False                    # SM90 原生 FP8 Q/K/V Sol-Attn
+    sol_fp8: bool = False                    # SM90 FP8 Q/K/V Sol-Attn
     sol_fp8_layer_start: int = 0             # 启用 FP8 Sol-Attn 的首层
     sol_fp8_layer_end: int | None = None     # 结束层（不包含）；None 表示其余所有层
 ```
@@ -208,6 +208,10 @@ Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端�
 `sol_fp8_layer_start` 和 `sol_fp8_layer_end` 用半开区间限制使用 E4M3 Q/K/V
 的 transformer 层，区间外的稀疏层继续使用 BF16 Sol-Attn，以控制扩散模型中
 逐层累积的 FP8 路由误差。
+
+设置 `dense_timesteps=0`、`dense_layers=0` 和负数 `tau` 会强制所有 KV block
+走 exact 路径。Wan 优化示例将其暴露为 `--attention fp8-dense`；
+`--attention fp8-sol` 使用相同的 FP8 Q/K/V 与 QK/PV kernel 并启用质心路由。
 
 ### QwenImagePipeline / ZImagePipeline
 

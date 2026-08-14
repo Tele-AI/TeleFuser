@@ -71,7 +71,7 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn routing threshold
     sol_threshold_type: str = "diag"        # "diag" or "exact"
     sol_kv_splits: int | str = "auto"       # "auto", 1, 2, or 4
-    sol_fp8: bool = False                    # Native FP8 Q/K/V Sol-Attn on SM90
+    sol_fp8: bool = False                    # FP8 Q/K/V Sol-Attn on SM90
     sol_fp8_layer_start: int = 0             # First layer using FP8 Sol-Attn
     sol_fp8_layer_end: int | None = None     # Exclusive end; None means all remaining layers
 ```
@@ -210,6 +210,10 @@ requires log-sum-exp output.
 `sol_fp8_layer_start` and `sol_fp8_layer_end` restrict E4M3 Q/K/V to a half-open
 transformer-layer range. Sparse layers outside that range continue to use BF16
 Sol-Attn. This controls accumulated FP8 routing error in diffusion models.
+Setting `dense_timesteps=0`, `dense_layers=0`, and a negative `tau` forces all
+KV blocks onto the exact route. The Wan optimized example exposes this as
+`--attention fp8-dense`; `--attention fp8-sol` enables centroid routing with the
+same FP8 Q/K/V and QK/PV kernel.
 
 ### QwenImagePipeline / ZImagePipeline
 

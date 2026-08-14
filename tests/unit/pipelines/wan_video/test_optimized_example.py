@@ -34,10 +34,24 @@ def test_wan_optimized_example_builds_dense_attention_config() -> None:
 
 
 def test_wan_optimized_example_builds_fp8_sol_config() -> None:
-    attention = make_attention_config("sol-fp8", fp8_layer_start=10, fp8_layer_end=20)
+    attention = make_attention_config("fp8-sol", fp8_layer_start=10, fp8_layer_end=20)
     assert attention.attn_impl is AttnImplType.SOL_ATTN
     assert attention.sparse_config is not None
     assert attention.sparse_config.sol_fp8
+    assert attention.sparse_config.sol_tau == 1.0
+    assert attention.sparse_config.sol_fp8_layer_start == 10
+    assert attention.sparse_config.sol_fp8_layer_end == 20
+
+
+def test_wan_optimized_example_builds_fp8_dense_config() -> None:
+    attention = make_attention_config("fp8-dense", fp8_layer_start=10, fp8_layer_end=20)
+
+    assert attention.attn_impl is AttnImplType.SOL_ATTN
+    assert attention.sparse_config is not None
+    assert attention.sparse_config.sol_fp8
+    assert attention.sparse_config.dense_timesteps == 0
+    assert attention.sparse_config.dense_layers == 0
+    assert attention.sparse_config.sol_tau == -1000.0
     assert attention.sparse_config.sol_fp8_layer_start == 10
     assert attention.sparse_config.sol_fp8_layer_end == 20
 
@@ -77,14 +91,16 @@ def test_wan_optimized_example_builds_ffn_only_fp8_config() -> None:
     assert config.quantize_modules == (".ffn.",)
 
 
-def test_wan_optimized_example_uses_quality_safe_auto_fp8_scope() -> None:
+def test_wan_optimized_example_uses_all_linear_layers_for_auto_fp8_scope() -> None:
     assert resolve_fp8_linear_scope("dense", "auto") == "all"
-    assert resolve_fp8_linear_scope("sol-fp8", "auto") == "ffn"
+    assert resolve_fp8_linear_scope("sol", "auto") == "all"
+    assert resolve_fp8_linear_scope("fp8-dense", "auto") == "all"
+    assert resolve_fp8_linear_scope("fp8-sol", "auto") == "all"
 
 
 def test_wan_optimized_example_rejects_unknown_fp8_linear_scope() -> None:
     with pytest.raises(ValueError, match="fp8_linear_scope must be"):
-        resolve_fp8_linear_scope("sol-fp8", "attention")
+        resolve_fp8_linear_scope("fp8-sol", "attention")
 
 
 def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks(monkeypatch: pytest.MonkeyPatch) -> None:

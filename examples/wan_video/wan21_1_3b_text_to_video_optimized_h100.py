@@ -1,8 +1,8 @@
 """Wan2.1 1.3B T2V with optional attention and quantization optimizations.
 
-Attention can use dense SDPA or Sol-Attn. DiT Linear layers can remain BF16 or
-use tf-kernel FP8, TorchAO FP8, or bitsandbytes NF4. The example keeps the DiT
-on CUDA so quantized Linear modules are not repeatedly reconstructed.
+Attention can use BF16 dense/Sol or FP8 dense/Sol kernels. DiT Linear layers can
+remain BF16 or use tf-kernel FP8, TorchAO FP8, or bitsandbytes NF4. The example
+keeps the DiT on CUDA so quantized Linear modules are not repeatedly rebuilt.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ PPL_CONFIG = {
     "cfg_scale": 5.0,
     "sigma_shift": 8.0,
 }
+
+FP8_ATTENTION_MODES = ("fp8-dense", "fp8-sol")
 
 
 def configure_attention_backends() -> None:
@@ -82,9 +84,9 @@ def make_quant_config(quantization: str, *, fp8_linear_scope: str = "all") -> Qu
 
 
 def resolve_fp8_linear_scope(attention: str, fp8_linear_scope: str) -> str:
-    """Resolve the quality-safe scope for the selected attention mode."""
+    """Resolve the Linear FP8 scope for the selected attention mode."""
     if fp8_linear_scope == "auto":
-        return "ffn" if attention == "sol-fp8" else "all"
+        return "all"
     if fp8_linear_scope not in ("all", "ffn"):
         raise ValueError("fp8_linear_scope must be 'auto', 'all', or 'ffn'")
     return fp8_linear_scope
@@ -101,18 +103,22 @@ def make_attention_config(
     fp8_layer_start: int = 10,
     fp8_layer_end: int | None = 20,
 ) -> AttentionConfig:
-    """Build the selected dense or Sol-Attn configuration."""
+    """Build the selected BF16 or FP8 dense/Sol attention configuration."""
     if attention == "dense":
         return AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
-    if attention not in ("sol", "sol-fp8"):
-        raise ValueError("attention must be 'dense', 'sol', or 'sol-fp8'")
+    if attention not in ("sol", *FP8_ATTENTION_MODES):
+        raise ValueError("attention must be 'dense', 'sol', 'fp8-dense', or 'fp8-sol'")
+
+    fp8_dense = attention == "fp8-dense"
     return AttentionConfig.sol_attention(
-        dense_timesteps=dense_timesteps,
-        dense_layers=dense_layers,
-        tau=tau,
+        dense_timesteps=0 if fp8_dense else dense_timesteps,
+        dense_layers=0 if fp8_dense else dense_layers,
+        # A negative threshold makes every routed KV block exact. This runs the
+        # FP8 CuTe mainloop without introducing Sol's centroid approximation.
+        tau=-1000.0 if fp8_dense else tau,
         threshold_type=threshold_type,
         kv_splits=kv_splits,
-        sol_fp8=attention == "sol-fp8",
+        sol_fp8=attention in FP8_ATTENTION_MODES,
         sol_fp8_layer_start=fp8_layer_start,
         sol_fp8_layer_end=fp8_layer_end,
     )
@@ -129,8 +135,8 @@ def get_pipeline(
     tau: float = 1.0,
     threshold_type: str = "diag",
     kv_splits: int | str = "auto",
-    sol_fp8_layer_start: int = 10,
-    sol_fp8_layer_end: int | None = 20,
+    fp8_layer_start: int = 10,
+    fp8_layer_end: int | None = 20,
     sample_solver: str = "euler",
 ) -> Wan21VideoPipeline:
     """Load Wan2.1 with independently selectable attention and quantization."""
@@ -155,8 +161,8 @@ def get_pipeline(
         tau=tau,
         threshold_type=threshold_type,
         kv_splits=kv_splits,
-        fp8_layer_start=sol_fp8_layer_start,
-        fp8_layer_end=sol_fp8_layer_end,
+        fp8_layer_start=fp8_layer_start,
+        fp8_layer_end=fp8_layer_end,
     )
     config.dit_config.quant_config = quant_config
     config.dit_config.offload_config.offload_type = WeightOffloadType.NO_CPU_OFFLOAD
@@ -212,7 +218,11 @@ def run(
 @click.option("--sigma-shift", default=PPL_CONFIG["sigma_shift"], type=float)
 @click.option("--sample-solver", default="euler", type=click.Choice(["euler", "unipc"]))
 @click.option("--model-root", default=PPL_CONFIG["model_root"])
-@click.option("--attention", default="dense", type=click.Choice(["dense", "sol", "sol-fp8"]))
+@click.option(
+    "--attention",
+    default="dense",
+    type=click.Choice(["dense", "sol", "fp8-dense", "fp8-sol"]),
+)
 @click.option(
     "--quantization",
     default="none",
@@ -224,8 +234,8 @@ def run(
 @click.option("--tau", default=1.0, type=float)
 @click.option("--threshold-type", default="diag", type=click.Choice(["diag", "exact"]))
 @click.option("--kv-splits", default="auto", type=click.Choice(["auto", "1", "2", "4"]))
-@click.option("--sol-fp8-layer-start", default=10, type=int)
-@click.option("--sol-fp8-layer-end", default=20, type=int)
+@click.option("--fp8-layer-start", "--sol-fp8-layer-start", default=10, type=int)
+@click.option("--fp8-layer-end", "--sol-fp8-layer-end", default=20, type=int)
 @click.option("--output", default=get_example_name(__file__, "mp4"))
 def main(
     prompt: str,
@@ -247,8 +257,8 @@ def main(
     tau: float,
     threshold_type: str,
     kv_splits: str,
-    sol_fp8_layer_start: int,
-    sol_fp8_layer_end: int | None,
+    fp8_layer_start: int,
+    fp8_layer_end: int | None,
     output: str,
 ) -> None:
     """Run Wan2.1 with optional attention and quantization optimizations."""
@@ -263,8 +273,8 @@ def main(
         tau=tau,
         threshold_type=threshold_type,
         kv_splits=kv_splits if kv_splits == "auto" else int(kv_splits),
-        sol_fp8_layer_start=sol_fp8_layer_start,
-        sol_fp8_layer_end=sol_fp8_layer_end,
+        fp8_layer_start=fp8_layer_start,
+        fp8_layer_end=fp8_layer_end,
         sample_solver=sample_solver,
     )
     torch.cuda.reset_peak_memory_stats()
