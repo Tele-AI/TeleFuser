@@ -481,7 +481,7 @@ def _scenario_payload(*, name: str, workers: int, target_peak: int, trace: Deriv
         },
         "session": {
             "prompt": "A smooth first-person exploration through a vivid natural landscape.",
-            "image_path": "../ABot-World/web_client/datasets/images/84b90ad568b693d2.png",
+            "image_path": "examples/data/1.png",
             "fps": 12,
             "control_latent_frames": 3,
             "delivery_mode": "latest",

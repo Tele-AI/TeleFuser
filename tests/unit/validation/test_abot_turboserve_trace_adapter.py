@@ -6,6 +6,8 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from tools.validation import benchmark_abot_livekit_burst as wave
 from tools.validation import derive_abot_turboserve_trace as adapter
 from tools.validation import replay_abot_livekit_lifecycle_trace as replay
@@ -30,16 +32,17 @@ def _peak_retained(events: list[Mapping[str, object]]) -> int:
     return peak
 
 
-def test_checked_in_turboserve_public_demo_scenarios_are_deterministic_and_runnable() -> None:
-    expected_1gpu, expected_4gpu = adapter.build_scenarios(_SOURCE)
-    for expected in (expected_1gpu, expected_4gpu):
-        filename = f"{expected['name']}.json"
+def test_checked_in_turboserve_public_demo_scenarios_are_self_contained_and_runnable() -> None:
+    for filename, peak in (
+        ("abot_livekit_1gpu_lf3_12fps_turboserve_public_demo_trace_peak4.json", 4),
+        ("abot_livekit_4gpu_lf3_12fps_turboserve_public_demo_trace_peak16.json", 16),
+    ):
         actual = json.loads((_WORKLOADS / filename).read_text(encoding="utf-8"))
-        assert actual == expected
 
         contract = actual["trace_contract"]
         assert contract["not_a_turboserve_production_trace"] is True
         assert contract["not_a_reproduction_of_private_paper_t1_to_t6_traces"] is True
+        assert contract["source"]["sha256"] == "7dc3bb8934df656a710b76df16c663686ceae8f8db7d1a9b3da98e1ecf2eda31"
         assert contract["time_transform"]["source_to_derived_scale"] == 1.0
         assert contract["execution_contract"].startswith("No diagnostic barrier")
 
@@ -48,7 +51,7 @@ def test_checked_in_turboserve_public_demo_scenarios_are_deterministic_and_runna
         assert trace["duration_seconds"] == 1800.0
         events = trace["events"]
         assert isinstance(events, list)
-        assert _peak_retained(events) == contract["capacity_transform"]["target_peak_retained_sessions"]
+        assert _peak_retained(events) == peak
 
         scenario = wave.load_scenario(_WORKLOADS / filename)
         parsed = replay.load_explicit_lifecycle_trace(scenario)
@@ -57,12 +60,20 @@ def test_checked_in_turboserve_public_demo_scenarios_are_deterministic_and_runna
         assert scenario.diagnostic_initial_control_barrier is None
 
 
-def test_public_demo_capacity_normalization_retains_real_pause_resume_events() -> None:
-    one_gpu, four_gpu = adapter.build_scenarios(_SOURCE)
-    for scenario, peak, expected_counts in (
-        (one_gpu, 4, {"session_arrival": 61, "session_departure": 61, "user_active": 66, "user_idle": 69}),
-        (four_gpu, 16, {"session_arrival": 300, "session_departure": 300, "user_active": 282, "user_idle": 323}),
+def test_checked_in_public_demo_scenarios_retain_real_pause_resume_events() -> None:
+    for filename, peak, expected_counts in (
+        (
+            "abot_livekit_1gpu_lf3_12fps_turboserve_public_demo_trace_peak4.json",
+            4,
+            {"session_arrival": 61, "session_departure": 61, "user_active": 66, "user_idle": 69},
+        ),
+        (
+            "abot_livekit_4gpu_lf3_12fps_turboserve_public_demo_trace_peak16.json",
+            16,
+            {"session_arrival": 300, "session_departure": 300, "user_active": 282, "user_idle": 323},
+        ),
     ):
+        scenario = json.loads((_WORKLOADS / filename).read_text(encoding="utf-8"))
         trace = scenario["lifecycle_trace"]
         assert isinstance(trace, Mapping)
         events = trace["events"]
@@ -106,3 +117,32 @@ def test_lifecycle_replay_waits_for_inflight_departure_at_capacity() -> None:
         ]
 
     asyncio.run(check())
+
+
+@pytest.mark.skipif(not _SOURCE.is_file(), reason="requires a sibling TurboServe public trace checkout")
+def test_checked_in_turboserve_public_demo_scenarios_match_external_source() -> None:
+    expected_1gpu, expected_4gpu = adapter.build_scenarios(_SOURCE)
+    for expected in (expected_1gpu, expected_4gpu):
+        filename = f"{expected['name']}.json"
+        actual = json.loads((_WORKLOADS / filename).read_text(encoding="utf-8"))
+        assert actual == expected
+
+
+def test_public_demo_capacity_normalization_is_deterministic_for_peak_186_source() -> None:
+    def event(event_type: str, session_id: int, sequence: int) -> adapter.SourceEvent:
+        return adapter.SourceEvent(
+            time_seconds=0.0 if event_type == "session_arrival" else 1.0,
+            sequence=sequence,
+            event_type=event_type,
+            session_id=session_id,
+            user_id=session_id,
+            active_on_arrival=True if event_type == "session_arrival" else None,
+        )
+
+    source_events = [event("session_arrival", session_id, session_id) for session_id in range(186)]
+    source_events.extend(event("session_departure", session_id, 186 + session_id) for session_id in range(186))
+    first = adapter.derive_trace(source_events, target_peak=4, source_sha256="unit-test-source")
+    second = adapter.derive_trace(source_events, target_peak=4, source_sha256="unit-test-source")
+
+    assert first == second
+    assert first.source_peak_retained_sessions == 186

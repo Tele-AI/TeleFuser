@@ -4,6 +4,10 @@ These two scenarios are deterministic, 30-minute ABot LiveKit workload
 projections of TurboServe's public simulator trace:
 `../../../TurboServe/traces/example_8gpu.json`.
 
+The public source trace is intentionally not vendored into this repository.
+CI validates the committed scenarios' provenance and replay schema; the strict
+source-to-artifact regeneration check runs locally when a sibling TurboServe checkout is available.
+
 They are **not** TurboServe production traces and are **not** reproductions of
 the private paper T1--T6 traces. The source records session lifecycle events,
 not real ABot keyboard actions. The adapter maps its selected events as:

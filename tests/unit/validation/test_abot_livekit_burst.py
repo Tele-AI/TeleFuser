@@ -463,3 +463,12 @@ def test_dry_run_discloses_diagnostic_initial_control_barrier(
     output = capsys.readouterr().out
     assert "DIAGNOSTIC ONLY" in output
     assert "not a real-user arrival trace" in output
+
+
+def test_checked_in_workloads_resolve_repo_native_images() -> None:
+    workload_dir = wave._REPO_ROOT / "tools" / "validation" / "workloads"
+    scenario_paths = sorted(workload_dir.glob("abot_livekit_*.json"))
+    assert scenario_paths
+    for scenario_path in scenario_paths:
+        scenario = wave.load_scenario(scenario_path)
+        assert Path(scenario.session.image_path).is_relative_to(wave._REPO_ROOT)
