@@ -193,6 +193,8 @@ def attention(
     q_scale: Tensor | None = None,
     k_scale: Tensor | None = None,
     v_scale: Tensor | None = None,
+    sink_start: int | None = None,
+    sink_tokens: int = 0,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -212,6 +214,8 @@ def attention(
         return_lse: Return log-sum-exp values.
         sequence_lengths: Length of each sequence packed along the sequence axis.
         cu_seqlens: Optional precomputed cumulative sequence lengths for varlen kernels.
+        sink_start: Start of the exact KV sink used by Sol-Attn.
+        sink_tokens: Number of exact KV sink tokens used by Sol-Attn.
         **kwargs: Implementation-specific arguments.
 
     Returns:
@@ -443,6 +447,8 @@ def attention(
                     q_scale=q_scale,
                     k_scale=k_scale,
                     v_scale=v_scale,
+                    sink_start=sink_start,
+                    sink_tokens=sink_tokens,
                     # A partial FP8 layer range otherwise compiles both BF16
                     # and FP8 CuTe specializations on the first sparse step.
                     # Triton is a better cold-start tradeoff for the remaining

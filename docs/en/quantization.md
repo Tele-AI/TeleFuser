@@ -94,7 +94,7 @@ quant_config = QuantConfig(
 )
 ```
 
-For MiniMax H3, use `quantization="tf-kernel-fp8"` with
+For MiniMax H3, use `quantization="fp8"` (`"tf-kernel-fp8"` remains an alias) with
 `examples/minimax_h3/minimax_h3_fl2va_h100.py`. This backend is single-GPU only and keeps the FP8
 weights resident after first-use conversion. It is distinct from the scaled-FP8 checkpoint path below: the latter
 expects weights and scales already serialized in the checkpoint.

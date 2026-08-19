@@ -317,7 +317,7 @@ MiniMax H3 supports three single-GPU online quantization backends for the DiT tr
 | CLI value | Backend | Weight/activation path |
 |---|---|---|
 | torchao-fp8 | TorchAO | FP8 dynamic activation and FP8 weight when supported, otherwise TorchAO's FP8 weight-only path |
-| tf-kernel-fp8 | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 (W8A8), BF16 output |
+| fp8 (`tf-kernel-fp8` alias) | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 (W8A8), BF16 output |
 | bnb-nf4 | bitsandbytes | NF4 weight-only with BF16 compute |
 
 All three paths convert the 258 Linear layers in the main and token-refiner transformer blocks. The FP32 video/audio
@@ -342,12 +342,13 @@ python examples/minimax_h3/minimax_h3_fl2va_h100.py \
   --output outputs/minimax_h3_bnb_nf4.mp4
 python examples/minimax_h3/minimax_h3_fl2va_h100.py \
   --mode t2va \
-  --quantization tf-kernel-fp8 \
+  --quantization fp8 \
   --duration 5 \
   --output outputs/minimax_h3_tf_kernel_fp8.mp4
 ~~~
 
-The FL2VA CLI accepts `--quantization` with `torchao-fp8`, `tf-kernel-fp8`, or `bnb-nf4`; omit it for BF16. The Python
+The FL2VA CLI accepts `--quantization` with `fp8`, `torchao-fp8`, or `bnb-nf4`; `tf-kernel-fp8` remains a compatibility
+alias and omitting the option keeps BF16. The Python
 loader accepts the same names:
 
 ~~~python
@@ -356,7 +357,7 @@ from examples.minimax_h3.common import load_minimax_h3_pipeline
 pipeline = load_minimax_h3_pipeline(
     "/path/to/MiniMaxAI_MiniMax-H3",
     partition="FL2VA",
-    quantization="tf-kernel-fp8",
+    quantization="fp8",
 )
 ~~~
 
@@ -364,12 +365,42 @@ Online quantization currently requires ulysses_degree=1, tp_degree=1, and FSDP d
 would invalidate those wrappers' BF16 parameter-sharding contract, so unsupported combinations fail before checkpoint
 loading.
 
+### FP8 Sol-Attn
+
+The same FL2VA example exposes dense/Sol and BF16/FP8 as independent switches. `--quantization fp8` applies
+tf-kernel W8A8 Linear GEMMs to the transformer blocks. `--attn-impl SOL_ATTN` enables the MiniMax-H3 Sol policy:
+the first 10 denoising steps and first 2 DiT layers remain dense, the full condition prefix is an exact KV sink, and
+prefix queries are recomputed with BF16 dense attention. Adding `--sol-fp8` quantizes post-RoPE Q/K/V in active sparse
+layers and dispatches the SM90 CuTe FP8 Sol mainloop.
+
+~~~bash
+# BF16 dense
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 --mode t2va --output outputs/h3_bf16.mp4
+
+# BF16 Sol
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --mode t2va --attn-impl SOL_ATTN --output outputs/h3_bf16_sol.mp4
+
+# FP8 Linear + dense attention
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --mode t2va --quantization fp8 --output outputs/h3_fp8.mp4
+
+# FP8 Linear + FP8 Sol attention
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
+  --output outputs/h3_fp8_sol.mp4
+~~~
+
+Use `--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, `--sol-threshold-type`,
+`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. The defaults
+match the released H100 MiniMax-H3 Sol profile.
+
 For matched BF16/TorchAO-FP8/tf-kernel-FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
 containing load time, end-to-end generation time, stage timings, and denoising allocator peaks:
 
 ~~~bash
-python tools/validation/benchmark_minimax_h3_quantization.py \
-  --backend tf-kernel-fp8 \
+python -m tools.validation.benchmark_minimax_h3_quantization \
+  --backend fp8-sol \
   --duration 5 \
   --steps 50 \
   --output outputs/minimax_h3_tf_kernel_fp8_50step.mp4

@@ -135,6 +135,13 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "enable_fsdp": True,
                 "online_adaln_cache": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
+                "sol_fp8": False,
+                "sol_dense_steps": 10,
+                "sol_dense_layers": 2,
+                "sol_tau": 1.0,
+                "sol_threshold_type": "exact",
+                "sol_fp8_layer_start": 0,
+                "sol_fp8_layer_end": None,
                 "feature_cache_config": FeatureCacheConfig(
                     enabled=True,
                     model_type="MiniMax-H3-Base",
@@ -167,6 +174,7 @@ def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
     [
         ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
         ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
         ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
         ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
     ],
@@ -220,6 +228,52 @@ def test_standard_example_forwards_selected_quantization(
     assert calls[0][1]["device"] == "cuda:1"
     assert calls[0][1]["quantization"] == quantization
     assert fl2va_example.PIPELINE_MANIFEST["pipeline_name"] == fl2va_example.PPL_CONFIG["name"]
+
+
+def test_standard_example_forwards_fp8_sol_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    sentinel = object()
+
+    def fake_get_pipeline(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_get_pipeline)
+    result = fl2va_example.get_pipeline(
+        1,
+        "/models/h3",
+        attn_impl="SOL_ATTN",
+        sol_fp8=True,
+        sol_dense_steps=10,
+        sol_dense_layers=2,
+        sol_tau=0.9,
+        sol_threshold_type="diag",
+        sol_fp8_layer_start=2,
+        sol_fp8_layer_end=40,
+        quantization="tf-kernel-fp8",
+    )
+
+    assert result is sentinel
+    options = calls[0][1]
+    assert options["attn_impl"] == "SOL_ATTN"
+    assert options["sol_fp8"] is True
+    assert options["sol_dense_steps"] == 10
+    assert options["sol_dense_layers"] == 2
+    assert options["sol_tau"] == 0.9
+    assert options["sol_threshold_type"] == "diag"
+    assert options["sol_fp8_layer_start"] == 2
+    assert options["sol_fp8_layer_end"] == 40
+    assert options["quantization"] == "tf-kernel-fp8"
+
+
+def test_sol_fp8_rejects_dense_attention(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sol_fp8 requires"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            attn_impl=AttnImplType.FLASH_ATTN_4,
+            sol_fp8=True,
+        )
 
 
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:

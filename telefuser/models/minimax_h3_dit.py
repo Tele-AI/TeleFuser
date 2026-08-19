@@ -14,6 +14,7 @@ from typing import Any, Iterable
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
@@ -29,7 +30,8 @@ from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequen
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_heads
 from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
-from telefuser.ops.attention import attention
+from telefuser.ops.attention import SparseAttentionState, attention
+from telefuser.ops.fp8_attention import quantize_fp8_per_block, quantize_fp8_qkv
 from telefuser.ops.rotary import apply_rotary_emb_neox
 from telefuser.utils.logging import logger
 
@@ -446,7 +448,7 @@ class MiniMaxH3Attention(nn.Module):
         self.tp_group = group
 
     @staticmethod
-    def _sage_live_tokens(sequence_lengths: list[int], total_tokens: int) -> int:
+    def _live_tokens(sequence_lengths: list[int], total_tokens: int) -> int:
         if len(sequence_lengths) == 1 and sequence_lengths[0] == total_tokens:
             return total_tokens
         if (
@@ -457,7 +459,42 @@ class MiniMaxH3Attention(nn.Module):
             and total_tokens % 64 == 0
         ):
             return sequence_lengths[0]
-        raise ValueError("MiniMax H3 SageAttention requires one live sequence with optional trailing alignment padding")
+        raise ValueError("MiniMax H3 optimized attention requires one live sequence with optional trailing padding")
+
+    @staticmethod
+    def _is_sol_active(sparse_state: SparseAttentionState | None) -> bool:
+        return sparse_state is not None and not sparse_state.should_use_dense()
+
+    @classmethod
+    def _prepare_sol_qkv(
+        cls,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        sparse_state: SparseAttentionState,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
+    ]:
+        config = sparse_state.config
+        layer_end = config.sol_fp8_layer_end
+        fp8_layer_active = (
+            cls._is_sol_active(sparse_state)
+            and config.sol_fp8
+            and sparse_state.layer_idx >= config.sol_fp8_layer_start
+            and (layer_end is None or sparse_state.layer_idx < layer_end)
+        )
+        if not fp8_layer_active:
+            return query, key, value, None
+        if query.is_cuda and torch.cuda.get_device_capability(query.device) == (9, 0):
+            query, key, value, q_scale, k_scale, v_scale = quantize_fp8_qkv(query, key, value)
+        else:
+            query, q_scale = quantize_fp8_per_block(query)
+            key, k_scale = quantize_fp8_per_block(key)
+            value, v_scale = quantize_fp8_per_block(value)
+        return query, key, value, (q_scale, k_scale, v_scale)
 
     def forward(
         self,
@@ -467,6 +504,8 @@ class MiniMaxH3Attention(nn.Module):
         rope_cos_sin_cache: torch.Tensor | None,
         attention_config: AttentionConfig | None,
         cu_seqlens: torch.Tensor | None = None,
+        sparse_state: SparseAttentionState | None = None,
+        prefix_tokens: int = 0,
     ) -> torch.Tensor:
         sequence, _ = hidden.shape
         qkv = self.qkv_proj(hidden).reshape(sequence, 3, self.num_heads, self.head_dim)
@@ -500,16 +539,53 @@ class MiniMaxH3Attention(nn.Module):
             query = query_wait()
             key = key_wait()
             value = value_wait()
-        if attention_config is not None and attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90:
+        optimized_impls = {AttnImplType.SAGE_ATTN_2_8_8_SM90, AttnImplType.SOL_ATTN}
+        if attention_config is not None and attention_config.attn_impl in optimized_impls:
             total_tokens = query.shape[1]
-            live_tokens = self._sage_live_tokens(sequence_lengths, total_tokens)
+            live_tokens = self._live_tokens(sequence_lengths, total_tokens)
+            live_query = query[:, :live_tokens].contiguous()
+            live_key = key[:, :live_tokens].contiguous()
+            live_value = value[:, :live_tokens].contiguous()
+            scales = None
+            runtime_attention_config = attention_config
+            runtime_sparse_state = sparse_state
+            if attention_config.attn_impl == AttnImplType.SOL_ATTN:
+                if sparse_state is None:
+                    raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
+                if not 0 <= prefix_tokens <= live_tokens:
+                    raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
+                sol_query, sol_key, sol_value, scales = self._prepare_sol_qkv(
+                    live_query,
+                    live_key,
+                    live_value,
+                    sparse_state,
+                )
+                if sparse_state.should_use_dense():
+                    runtime_attention_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
+                    runtime_sparse_state = None
+            else:
+                sol_query, sol_key, sol_value = live_query, live_key, live_value
             live_output = attention(
-                query[:, :live_tokens].contiguous(),
-                key[:, :live_tokens].contiguous(),
-                value[:, :live_tokens].contiguous(),
-                attention_config=attention_config,
+                sol_query,
+                sol_key,
+                sol_value,
+                attention_config=runtime_attention_config,
+                sparse_state=runtime_sparse_state,
                 scale=self.head_dim**-0.5,
+                q_scale=None if scales is None else scales[0],
+                k_scale=None if scales is None else scales[1],
+                v_scale=None if scales is None else scales[2],
+                sink_start=0,
+                sink_tokens=prefix_tokens,
             )
+            if self._is_sol_active(sparse_state) and prefix_tokens:
+                dense_prefix = F.scaled_dot_product_attention(
+                    live_query[:, :prefix_tokens].transpose(1, 2),
+                    live_key.transpose(1, 2),
+                    live_value.transpose(1, 2),
+                    scale=self.head_dim**-0.5,
+                ).transpose(1, 2)
+                live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
             if live_tokens == total_tokens:
                 output = live_output
             else:
@@ -683,6 +759,8 @@ class MiniMaxH3DiTBlock(nn.Module):
         rope_cos_sin_cache: torch.Tensor,
         attention_config: AttentionConfig | None,
         cu_seqlens: torch.Tensor | None = None,
+        sparse_state: SparseAttentionState | None = None,
+        prefix_tokens: int = 0,
         adaln_params: tuple[torch.Tensor, ...] | None = None,
     ) -> torch.Tensor:
         if adaln_params is None:
@@ -696,6 +774,8 @@ class MiniMaxH3DiTBlock(nn.Module):
             rope_cos_sin_cache=rope_cos_sin_cache,
             attention_config=attention_config,
             cu_seqlens=cu_seqlens,
+            sparse_state=sparse_state,
+            prefix_tokens=prefix_tokens,
         )
         hidden = indexed_gate(residual, gate_msa, value, combined_indices)
         residual = hidden
@@ -759,6 +839,25 @@ class MiniMaxH3DiT(BaseModel):
         self._online_adaln_rows: dict[str, tuple[float, tuple[torch.Tensor, ...], torch.Tensor]] = {}
         self._online_adaln_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
         self._online_adaln_copy_device: torch.device | None = None
+        self.sparse_attention_state: SparseAttentionState | None = None
+
+    def set_attention_config(self, attention_config: AttentionConfig) -> None:
+        super().set_attention_config(attention_config)
+        if attention_config.attn_impl == AttnImplType.SOL_ATTN:
+            if attention_config.sparse_config is None:
+                raise ValueError("MiniMax H3 Sol-Attn requires sparse attention configuration")
+            self.sparse_attention_state = SparseAttentionState(
+                config=attention_config.sparse_config,
+                mask_map=None,
+                model_type="minimax_h3",
+            )
+        else:
+            self.sparse_attention_state = None
+
+    def _token_refiner_attention_config(self) -> AttentionConfig:
+        if self.attention_config.is_sparse():
+            return AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
+        return self.attention_config
 
     def adaln_fingerprint(self) -> str:
         if self.time_embedder is None:
@@ -977,7 +1076,7 @@ class MiniMaxH3DiT(BaseModel):
 
         prompt = kwargs["prompt_embeds"].to(device=device, dtype=torch.bfloat16)
         prompt = self.condition_proj(prompt[: text_positions.numel()])
-        prompt = self.token_refiner(prompt, attention_config=self.attention_config)
+        prompt = self.token_refiner(prompt, attention_config=self._token_refiner_attention_config())
         rope_position_ids = kwargs["img_position_ids"].to(device)
         rope_position_ids = rope_position_ids[:, rope_row_start:rope_row_stop]
         rope_frequencies = self.rope(rope_position_ids)
@@ -1026,6 +1125,13 @@ class MiniMaxH3DiT(BaseModel):
         output_positions = self._position_ids(
             kwargs["img_pos_for_infer_output_info"], "img_pos_for_infer_output_info"
         ).to(device)
+        sparse_state = self.sparse_attention_state
+        prefix_tokens = 0
+        if self.attention_config.attn_impl == AttnImplType.SOL_ATTN:
+            if sparse_state is None:
+                raise RuntimeError("MiniMax H3 Sol-Attn was not initialized through set_attention_config")
+            sparse_state.update(numeral_timestep=int(kwargs.get("sparse_step_index", 0)))
+            prefix_tokens = int(kwargs.get("sol_prefix_tokens", output_positions.min().item()))
 
         local_embedding_layout = kwargs.get("local_embedding_layout")
         use_local_embedding = self.usp_flag and local_embedding_layout is not None
@@ -1146,6 +1252,8 @@ class MiniMaxH3DiT(BaseModel):
                     block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
                 )
             for index, block in enumerate(self.blocks):
+                if sparse_state is not None:
+                    sparse_state.update(layer_idx=index)
                 hidden = block(
                     hidden,
                     adaln_input=adaln_input,
@@ -1154,6 +1262,8 @@ class MiniMaxH3DiT(BaseModel):
                     rope_cos_sin_cache=rope_cos_sin_cache,
                     attention_config=self.attention_config,
                     cu_seqlens=cu_seqlens,
+                    sparse_state=sparse_state,
+                    prefix_tokens=prefix_tokens,
                     adaln_params=None if block_adaln_params is None else block_adaln_params[index],
                 )
             if isinstance(feature_cache, AdaTaylorCacheCalibrator):
