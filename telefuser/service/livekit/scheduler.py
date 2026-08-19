@@ -156,9 +156,7 @@ class LiveKitScheduler:
                 worker.room_name = queued.room_name
                 worker.last_heartbeat_at = utc_timestamp()
                 admissions.append(
-                    SchedulerAdmission(
-                        status="assigned", worker_id=worker.worker_id, session_id=queued.session_id
-                    )
+                    SchedulerAdmission(status="assigned", worker_id=worker.worker_id, session_id=queued.session_id)
                 )
         return admissions
 

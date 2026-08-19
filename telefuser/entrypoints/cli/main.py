@@ -160,9 +160,7 @@ def serve(
 )
 @click.option("--enable-autoscaling", is_flag=True, help="Dynamically load workers from the configured GPU map")
 @click.option("--autoscaling-min-workers", default=1, type=int, help="Initially loaded worker replicas")
-@click.option(
-    "--autoscaling-target-utilization", default=0.75, type=float, help="Target retained-session utilization"
-)
+@click.option("--autoscaling-target-utilization", default=0.75, type=float, help="Target retained-session utilization")
 @click.option("--autoscaling-hysteresis", default=0.10, type=float, help="Scale decision hysteresis band")
 @click.option("--autoscaling-cooldown-seconds", default=30.0, type=float, help="Minimum time between scales")
 @click.option("--autoscaling-interval-seconds", default=5.0, type=float, help="Autoscaling control interval")

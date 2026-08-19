@@ -119,9 +119,7 @@ async def _client(
         "consumer_displayed_frames": displayed_frames,
         "consumer_end_to_end_seconds": consumer_completed_at - created_at,
         "consumer_end_to_end_fps": (
-            displayed_frames / (consumer_completed_at - created_at)
-            if consumer_completed_at > created_at
-            else 0.0
+            displayed_frames / (consumer_completed_at - created_at) if consumer_completed_at > created_at else 0.0
         ),
         "consumer_first_frame_seconds": (first_frame_at - created_at) if first_frame_at is not None else None,
         "scheduler_queue_wait_seconds": scheduler_waits,
@@ -249,7 +247,11 @@ def _parse_args() -> argparse.Namespace:
         parser.error("consumer playback FPS must be non-negative")
     if args.control_update_min_seconds <= 0 or args.control_update_max_seconds < args.control_update_min_seconds:
         parser.error("control update range must be positive and ordered")
-    if not 0 <= args.idle_probability <= 1 or args.idle_min_seconds < 0 or args.idle_max_seconds < args.idle_min_seconds:
+    if (
+        not 0 <= args.idle_probability <= 1
+        or args.idle_min_seconds < 0
+        or args.idle_max_seconds < args.idle_min_seconds
+    ):
         parser.error("invalid idle burst configuration")
     return args
 
@@ -258,7 +260,9 @@ def main() -> None:
     args = _parse_args()
     result = asyncio.run(_benchmark(args))
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({key: value for key, value in result.items() if key != "sessions_detail"}, indent=2, sort_keys=True))
+    print(
+        json.dumps({key: value for key, value in result.items() if key != "sessions_detail"}, indent=2, sort_keys=True)
+    )
 
 
 if __name__ == "__main__":

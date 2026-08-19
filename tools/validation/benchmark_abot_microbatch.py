@@ -86,12 +86,12 @@ def _run_point(
                 f"{[len(item) for item in initial_frames]}"
             )
         for _ in range(args.warmup_chunks):
-            frames = pipeline.generate_next_blocks(
-                sessions, controls, control_latent_frames=args.control_latent_frames
-            )
+            frames = pipeline.generate_next_blocks(sessions, controls, control_latent_frames=args.control_latent_frames)
             expected_frames = 4 * args.control_latent_frames
             if any(len(item) != expected_frames for item in frames):
-                raise RuntimeError(f"warmup did not emit {expected_frames} frames per session: {[len(item) for item in frames]}")
+                raise RuntimeError(
+                    f"warmup did not emit {expected_frames} frames per session: {[len(item) for item in frames]}"
+                )
 
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
@@ -101,14 +101,14 @@ def _run_point(
         for _ in range(args.repeats):
             torch.cuda.synchronize(device)
             started_at = time.perf_counter()
-            frames = pipeline.generate_next_blocks(
-                sessions, controls, control_latent_frames=args.control_latent_frames
-            )
+            frames = pipeline.generate_next_blocks(sessions, controls, control_latent_frames=args.control_latent_frames)
             torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - started_at
             expected_frames = 4 * args.control_latent_frames
             if any(len(item) != expected_frames for item in frames):
-                raise RuntimeError(f"sample did not emit {expected_frames} frames per session: {[len(item) for item in frames]}")
+                raise RuntimeError(
+                    f"sample did not emit {expected_frames} frames per session: {[len(item) for item in frames]}"
+                )
             samples.append(elapsed)
             stage_metrics = pipeline.last_stage_metrics()
             denoise_samples.append(float(stage_metrics.get("denoise_seconds", 0.0)))

@@ -128,9 +128,7 @@ def test_runtime_assigns_all_peak16_sessions_without_waiting_when_capacity_is_fo
         worker_pool=worker_pool,
     )
 
-    admissions = [
-        runtime.create_session(SessionCreateRequest(identity=f"controller-{index}")) for index in range(16)
-    ]
+    admissions = [runtime.create_session(SessionCreateRequest(identity=f"controller-{index}")) for index in range(16)]
 
     assert all(result.admission.status == "assigned" for result in admissions)
     assert len(worker_pool.started) == 16

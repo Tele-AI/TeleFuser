@@ -142,7 +142,9 @@ def _run_point(
         vae_decode = [float(item.get("vae_decode_seconds", 0.0)) for item in scheduler]
         total_frames = sum(len(payload.get("frames", [])) for payload in samples)
         elapsed = ended_at - measurement_started_at
-        per_session_frames = [sum(len(payload.get("frames", [])) for payload in outputs[session_id]) for session_id in session_ids]
+        per_session_frames = [
+            sum(len(payload.get("frames", [])) for payload in outputs[session_id]) for session_id in session_ids
+        ]
         return {
             "sessions": sessions,
             "max_batch_size": max_batch_size,

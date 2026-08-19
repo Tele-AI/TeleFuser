@@ -151,10 +151,7 @@ def test_taew_batched_decode_matches_independent_streams() -> None:
     torch.testing.assert_close(actual_first, expected_first)
 
     expected_continuation = torch.cat(
-        [
-            stage._decode_chunks_impl(latents, [state])
-            for latents, state in zip(continuation, serial_states)
-        ],
+        [stage._decode_chunks_impl(latents, [state]) for latents, state in zip(continuation, serial_states)],
         dim=0,
     )
     actual_continuation = stage._decode_chunks_impl(torch.cat(continuation), batched_states)

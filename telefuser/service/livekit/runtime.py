@@ -138,8 +138,10 @@ class LiveKitServeRuntime:
             if self._closed:
                 raise RuntimeError("LiveKit runtime is already closed")
             worker_groups = self.config.worker_gpu_groups()
-            if self.config.worker_mode == "process" and self.config.num_workers > 1 and any(
-                not group for group in worker_groups
+            if (
+                self.config.worker_mode == "process"
+                and self.config.num_workers > 1
+                and any(not group for group in worker_groups)
             ):
                 raise ValueError("worker_gpu_map is required for multiple process workers")
             groups = [gpu_id for group in worker_groups for gpu_id in group]
@@ -443,9 +445,7 @@ class LiveKitServeRuntime:
                 for state in self.scheduler.workers()
             ]
             pool_type = (
-                NCCLProcessLiveKitWorkerPool
-                if self.config.worker_mode == "process-nccl"
-                else ProcessLiveKitWorkerPool
+                NCCLProcessLiveKitWorkerPool if self.config.worker_mode == "process-nccl" else ProcessLiveKitWorkerPool
             )
             return pool_type(
                 specs,
@@ -456,9 +456,7 @@ class LiveKitServeRuntime:
                 initial_workers=initial_workers,
             )
         worker_states = self.scheduler.workers()
-        backends = {
-            state.worker_id: LiveKitPipelineAdapter(security_level=security_level) for state in worker_states
-        }
+        backends = {state.worker_id: LiveKitPipelineAdapter(security_level=security_level) for state in worker_states}
         router = TurboServePipelineRouter(backends)
         workers: dict[str, LiveKitWorker] = {}
         for worker_state in worker_states:
@@ -468,9 +466,7 @@ class LiveKitServeRuntime:
                 pipeline_file=self.pipeline_file,
                 token_service=self.token_service,
                 event_sink=self,
-                pipeline_adapter=router.worker_view(
-                    worker_state.worker_id, gpu_ids=worker_state.gpu_ids or None
-                ),
+                pipeline_adapter=router.worker_view(worker_state.worker_id, gpu_ids=worker_state.gpu_ids or None),
                 gpu_num=max(1, len(worker_state.gpu_ids)),
                 gpu_ids=worker_state.gpu_ids or None,
             )
@@ -594,11 +590,7 @@ class LiveKitServeRuntime:
         migrations = 0
         for session_id, target_worker_id in decision.placement.items():
             record = self.registry.require(session_id)
-            if (
-                target_worker_id is None
-                or target_worker_id == record.worker_id
-                or record.pipeline_session_id is None
-            ):
+            if target_worker_id is None or target_worker_id == record.worker_id or record.pipeline_session_id is None:
                 continue
             try:
                 await self.migrate_session(session_id, target_worker_id)
@@ -625,6 +617,7 @@ class LiveKitServeRuntime:
             self._last_migration_error = None
 
         """Aggregate live ABot control activity when the pool can expose it."""
+
     def _workload_snapshot(self) -> dict[str, float | int]:
         snapshot = getattr(self.worker_pool, "turboserve_snapshot", None)
         routing = snapshot() if callable(snapshot) else None

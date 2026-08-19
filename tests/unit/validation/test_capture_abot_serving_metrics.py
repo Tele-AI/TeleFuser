@@ -14,7 +14,7 @@ class _MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         type(self).paths.append(self.path)
         if self.path == "/metrics":
-            body = b"telefuser_serving_sessions{state=\"active\"} 4\n"
+            body = b'telefuser_serving_sessions{state="active"} 4\n'
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         elif self.path == "/v1/service/metrics/json":
@@ -22,7 +22,7 @@ class _MetricsHandler(BaseHTTPRequestHandler):
                 {
                     "serving": {
                         "summary": {"sessions": {"active": 4}},
-                        "counters": {"telefuser_serving_chunks_total{result=\"processed\"}": 12},
+                        "counters": {'telefuser_serving_chunks_total{result="processed"}': 12},
                     }
                 }
             ).encode("utf-8")
@@ -73,8 +73,7 @@ def test_capture_writes_prometheus_jsonl_and_manifest_without_proxy(
     assert _MetricsHandler.paths.count("/v1/service/metrics/json") >= 1
 
     records = [
-        json.loads(line)
-        for line in (output_dir / "serving-metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in (output_dir / "serving-metrics.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(records) == manifest["samples"]["attempted"]
     assert records[0]["serving"]["snapshot"]["summary"]["sessions"]["active"] == 4

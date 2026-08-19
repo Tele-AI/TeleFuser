@@ -111,9 +111,7 @@ class InProcessLiveKitWorkerPool:
                 f"{_SESSION_CANCEL_GRACE_SECONDS:g}s: session={session_id}"
             )
 
-    async def migrate_session(
-        self, pipeline_session_id: str, target_worker_id: str
-    ) -> TurboServeOwnership:
+    async def migrate_session(self, pipeline_session_id: str, target_worker_id: str) -> TurboServeOwnership:
         """Move model state while the existing LiveKit runner keeps publishing."""
         if self.router is None:
             raise RuntimeError("Worker pool was created without TurboServe routing")

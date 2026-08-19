@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
-from telefuser.service.livekit.nccl_transfer import flatten_tensor_tree, rebuild_tensor_tree
 from telefuser.service.livekit.config import LiveKitServeConfig
+from telefuser.service.livekit.nccl_transfer import flatten_tensor_tree, rebuild_tensor_tree
 
 
 def test_tensor_manifest_round_trip_preserves_nested_structure() -> None:

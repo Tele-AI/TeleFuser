@@ -13,7 +13,9 @@ import torch
 import torch.distributed as dist
 
 
-def flatten_tensor_tree(value: Any, *, path: tuple[Any, ...] = ()) -> tuple[Any, list[dict[str, Any]], dict[tuple[Any, ...], torch.Tensor]]:
+def flatten_tensor_tree(
+    value: Any, *, path: tuple[Any, ...] = ()
+) -> tuple[Any, list[dict[str, Any]], dict[tuple[Any, ...], torch.Tensor]]:
     """Separate a nested tree into scalar skeleton, tensor manifest, and leaves."""
     manifest: list[dict[str, Any]] = []
     leaves: dict[tuple[Any, ...], torch.Tensor] = {}
@@ -41,9 +43,13 @@ def flatten_tensor_tree(value: Any, *, path: tuple[Any, ...] = ()) -> tuple[Any,
     return visit(value, path), manifest, leaves
 
 
-def allocate_tensor_tree_leaves(manifest: list[dict[str, Any]], device: torch.device) -> dict[tuple[Any, ...], torch.Tensor]:
+def allocate_tensor_tree_leaves(
+    manifest: list[dict[str, Any]], device: torch.device
+) -> dict[tuple[Any, ...], torch.Tensor]:
     """Allocate target GPU tensors from a source manifest."""
-    dtype_table = {name.removeprefix("torch."): value for name, value in vars(torch).items() if isinstance(value, torch.dtype)}
+    dtype_table = {
+        name.removeprefix("torch."): value for name, value in vars(torch).items() if isinstance(value, torch.dtype)
+    }
     leaves: dict[tuple[Any, ...], torch.Tensor] = {}
     for entry in manifest:
         dtype_name = str(entry["dtype"])

@@ -411,6 +411,7 @@ class TurboServeOwnershipTable:
             self._pending.pop(session_id, None)
             self._owners.pop(session_id, None)
 
+
 # The classes below intentionally mirror the closed-loop scheduler in the
 # TurboServe reference implementation. The older controllers above are kept
 # for API compatibility with the first TeleFuser prototype.
@@ -463,9 +464,7 @@ class TurboServeSchedulingSnapshot:
     current_workers: int
     worker_order: tuple[str, ...]
     capacity_per_worker: int
-    runtime_calibration: TurboServeRuntimeCalibration = field(
-        default_factory=TurboServeRuntimeCalibration
-    )
+    runtime_calibration: TurboServeRuntimeCalibration = field(default_factory=TurboServeRuntimeCalibration)
 
 
 @dataclass(frozen=True)
@@ -500,14 +499,10 @@ class TurboServeLatencyModel:
         }
     )
 
-    def migration_cost_ms(
-        self, session: TurboServeSessionView, calibration: TurboServeRuntimeCalibration
-    ) -> float:
+    def migration_cost_ms(self, session: TurboServeSessionView, calibration: TurboServeRuntimeCalibration) -> float:
         if calibration.average_migration_total_ms > 0:
             return calibration.average_migration_total_ms
-        return self.migration_alpha_ms + session.state_size_mb / max(
-            1e-9, self.migration_bandwidth_mb_per_ms
-        )
+        return self.migration_alpha_ms + session.state_size_mb / max(1e-9, self.migration_bandwidth_mb_per_ms)
 
     def session_latency_ms(
         self,
@@ -523,7 +518,6 @@ class TurboServeLatencyModel:
         compute *= self.resolution_factors.get(session.resolution, 1.0)
         compute *= max(
             self.min_frame_factor,
-
             (max(1, session.frame_count) / self.frame_reference_count) ** self.frame_exponent,
         )
         return (
@@ -537,7 +531,9 @@ class TurboServeLatencyModel:
 class TurboServeClusterScheduler:
     """Source-aligned closed-loop budget and migration-aware placement."""
 
-    def __init__(self, config: TurboServeSchedulerConfig | None = None, latency_model: TurboServeLatencyModel | None = None) -> None:
+    def __init__(
+        self, config: TurboServeSchedulerConfig | None = None, latency_model: TurboServeLatencyModel | None = None
+    ) -> None:
         self.config = config or TurboServeSchedulerConfig()
         self.latency_model = latency_model or TurboServeLatencyModel()
         self._scale_in_target: int | None = None
@@ -546,7 +542,15 @@ class TurboServeClusterScheduler:
     def decide(self, snapshot: TurboServeSchedulingSnapshot) -> TurboServeSchedulingDecision:
         budget, action = self._autoscale_budget(snapshot)
         placement, metadata = self._place_at_budget(snapshot, budget)
-        metadata.update({"scheduler": "turboserve", "autoscale_action": action, "worker_budget": budget, "active_sessions": sum(session.active for session in snapshot.sessions.values()), "target_utilization": self.config.target_utilization})
+        metadata.update(
+            {
+                "scheduler": "turboserve",
+                "autoscale_action": action,
+                "worker_budget": budget,
+                "active_sessions": sum(session.active for session in snapshot.sessions.values()),
+                "target_utilization": self.config.target_utilization,
+            }
+        )
         return TurboServeSchedulingDecision(budget, placement, metadata)
 
     def _autoscale_budget(self, snapshot: TurboServeSchedulingSnapshot) -> tuple[int, str]:
@@ -587,7 +591,9 @@ class TurboServeClusterScheduler:
     def _clamp(self, value: int, maximum: int) -> int:
         return min(maximum, self.config.max_workers, max(self.config.min_workers, int(value)))
 
-    def _place_at_budget(self, snapshot: TurboServeSchedulingSnapshot, budget: int) -> tuple[dict[str, str | None], dict[str, object]]:
+    def _place_at_budget(
+        self, snapshot: TurboServeSchedulingSnapshot, budget: int
+    ) -> tuple[dict[str, str | None], dict[str, object]]:
         workers = tuple(snapshot.worker_order[:budget])
         capacity = max(1, min(snapshot.capacity_per_worker, self.config.capacity_per_worker))
         loads: dict[str, list[str]] = {worker: [] for worker in workers}
@@ -615,16 +621,36 @@ class TurboServeClusterScheduler:
         if self.config.enable_migration:
             moves, evaluations = self._rebalance(snapshot, loads, placement, capacity)
         after = self._bottleneck(snapshot, loads, capacity)
-        unplaced = sum(session.active and placement.get(session_id) is None for session_id, session in snapshot.sessions.items())
+        unplaced = sum(
+            session.active and placement.get(session_id) is None for session_id, session in snapshot.sessions.items()
+        )
         rho_max = max((len(items) / capacity for items in loads.values()), default=0.0)
-        return placement, {"algorithm": "least_load_with_optional_rebalance", "capacity_per_worker": capacity, "rebalance_moves": moves, "candidate_evaluations": evaluations, "unplaced_active": unplaced, "bottleneck_before_ms": round(before, 3), "bottleneck_after_ms": round(after, 3), "rho_max": round(rho_max, 4)}
+        return placement, {
+            "algorithm": "least_load_with_optional_rebalance",
+            "capacity_per_worker": capacity,
+            "rebalance_moves": moves,
+            "candidate_evaluations": evaluations,
+            "unplaced_active": unplaced,
+            "bottleneck_before_ms": round(before, 3),
+            "bottleneck_after_ms": round(after, 3),
+            "rho_max": round(rho_max, 4),
+        }
 
-    def _rebalance(self, snapshot: TurboServeSchedulingSnapshot, loads: dict[str, list[str]], placement: dict[str, str | None], capacity: int) -> tuple[int, int]:
+    def _rebalance(
+        self,
+        snapshot: TurboServeSchedulingSnapshot,
+        loads: dict[str, list[str]],
+        placement: dict[str, str | None],
+        capacity: int,
+    ) -> tuple[int, int]:
         moves = evaluations = 0
         for _ in range(self.config.rebalance_iteration_limit):
             if not loads:
                 break
-            source = max(loads, key=lambda worker: (self._worker_worst(snapshot, loads[worker], capacity), len(loads[worker]), worker))
+            source = max(
+                loads,
+                key=lambda worker: (self._worker_worst(snapshot, loads[worker], capacity), len(loads[worker]), worker),
+            )
             if not loads[source]:
                 break
             current = self._bottleneck(snapshot, loads, capacity)
@@ -659,4 +685,9 @@ class TurboServeClusterScheduler:
     def _worker_worst(self, snapshot: TurboServeSchedulingSnapshot, sessions: list[str], capacity: int) -> float:
         if not sessions:
             return 0.0
-        return max(self.latency_model.session_latency_ms(snapshot.sessions[session_id], len(sessions), capacity, snapshot.runtime_calibration) for session_id in sessions)
+        return max(
+            self.latency_model.session_latency_ms(
+                snapshot.sessions[session_id], len(sessions), capacity, snapshot.runtime_calibration
+            )
+            for session_id in sessions
+        )

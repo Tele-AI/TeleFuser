@@ -99,10 +99,7 @@ class ABotWorldTAEWDecodeStage(BaseStage):
         )
         if direct_device_tensors:
             expected_device = torch.device(self.device)
-            if any(
-                not self._matches_device(tensor.device, expected_device)
-                for tensor in self._iter_tensors(tree)
-            ):
+            if any(not self._matches_device(tensor.device, expected_device) for tensor in self._iter_tensors(tree)):
                 raise ValueError("NCCL TAeW migration tensors must already reside on the target decoder device")
         state = self.create_decode_state()
         self._apply_decode_state_tensor_tree(state, tree)
@@ -202,10 +199,7 @@ class ABotWorldTAEWDecodeStage(BaseStage):
         decoder_latents: torch.Tensor,
         states: Sequence[ABotWorldTAEWDecodeState],
     ) -> torch.Tensor | None:
-        decoded_parts = [
-            state.stream.decode(decoder_latents[index : index + 1])
-            for index, state in enumerate(states)
-        ]
+        decoded_parts = [state.stream.decode(decoder_latents[index : index + 1]) for index, state in enumerate(states)]
         if all(item is None for item in decoded_parts):
             return None
         if any(item is None for item in decoded_parts):
@@ -253,9 +247,7 @@ class ABotWorldTAEWDecodeStage(BaseStage):
             )
             for index, item in enumerate(reference.decoder_work_queue)
         ]
-        combined.stream.decoder_memory = self._collate_state_values(
-            [state.stream.decoder_memory for state in states]
-        )
+        combined.stream.decoder_memory = self._collate_state_values([state.stream.decoder_memory for state in states])
         combined.stream.n_frames_decoded = int(reference.n_frames_decoded)
         return combined
 
@@ -267,15 +259,9 @@ class ABotWorldTAEWDecodeStage(BaseStage):
         if first is None:
             return None
         if isinstance(first, list):
-            return [
-                cls._collate_state_values([value[index] for value in values])
-                for index in range(len(first))
-            ]
+            return [cls._collate_state_values([value[index] for value in values]) for index in range(len(first))]
         if isinstance(first, tuple):
-            return tuple(
-                cls._collate_state_values([value[index] for value in values])
-                for index in range(len(first))
-            )
+            return tuple(cls._collate_state_values([value[index] for value in values]) for index in range(len(first)))
         if all(value == first for value in values[1:]):
             return first
         raise ValueError("TAeW decoder states cannot be collated")
@@ -388,9 +374,7 @@ class ABotWorldTAEWDecodeStage(BaseStage):
         if not isinstance(decoder_memory, (list, tuple)):
             raise TypeError("TAeW decoder_memory snapshot must be a sequence")
         if len(decoder_memory) != len(self.taew.decoder):
-            raise ValueError(
-                "TAeW decoder_memory snapshot does not match the loaded decoder architecture"
-            )
+            raise ValueError("TAeW decoder_memory snapshot does not match the loaded decoder architecture")
         n_frames_decoded = int(snapshot["n_frames_decoded"])
         if n_frames_decoded < 0:
             raise ValueError("TAeW n_frames_decoded must be non-negative")
@@ -408,8 +392,7 @@ class ABotWorldTAEWDecodeStage(BaseStage):
     def _apply_decode_state_tensor_tree(state: ABotWorldTAEWDecodeState, tree: Mapping[str, Any]) -> None:
         stream = state.stream
         stream.decoder_work_queue = [
-            TWorkItem(item["input_tensor"], int(item["block_index"]))
-            for item in tree["decoder_work_queue"]
+            TWorkItem(item["input_tensor"], int(item["block_index"])) for item in tree["decoder_work_queue"]
         ]
         stream.decoder_memory = list(tree["decoder_memory"])
         stream.n_frames_decoded = int(tree["n_frames_decoded"])
@@ -428,15 +411,9 @@ class ABotWorldTAEWDecodeStage(BaseStage):
                 tensor = tensor.to(device)
             return tensor.clone() if clone_tensors else tensor
         if isinstance(value, list):
-            return [
-                cls._copy_tensor_tree(item, device=device, clone_tensors=clone_tensors)
-                for item in value
-            ]
+            return [cls._copy_tensor_tree(item, device=device, clone_tensors=clone_tensors) for item in value]
         if isinstance(value, tuple):
-            return tuple(
-                cls._copy_tensor_tree(item, device=device, clone_tensors=clone_tensors)
-                for item in value
-            )
+            return tuple(cls._copy_tensor_tree(item, device=device, clone_tensors=clone_tensors) for item in value)
         if isinstance(value, dict):
             return {
                 key: cls._copy_tensor_tree(item, device=device, clone_tensors=clone_tensors)

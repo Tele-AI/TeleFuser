@@ -1547,9 +1547,7 @@ class Wan22VideoVAE(BaseModel):
 
         hidden_states = hidden_states.to(device)
         scale = self._get_scale_on_device(device, hidden_states.dtype)
-        z = hidden_states / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
-            1, self.z_dim, 1, 1, 1
-        )
+        z = hidden_states / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(1, self.z_dim, 1, 1, 1)
         x = self.model.conv2(z)
         feat_idx = [0]
         outputs: list[torch.Tensor] = []

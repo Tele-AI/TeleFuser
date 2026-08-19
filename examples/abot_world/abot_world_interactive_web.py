@@ -806,7 +806,9 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--latent-frames", type=int, default=31)
-    parser.add_argument("--fps", type=int, default=8, help="Playback and downloaded-video FPS; 8 is the real-time target.")
+    parser.add_argument(
+        "--fps", type=int, default=8, help="Playback and downloaded-video FPS; 8 is the real-time target."
+    )
     parser.add_argument(
         "--control-latent-frames",
         type=int,
