@@ -1,0 +1,106 @@
+{
+  "name": "abot_livekit_4gpu_lf3_12fps_intermittent_input_peak16_5min",
+  "server_url": "http://127.0.0.1:8088",
+  "expected_worker_mode": "process-nccl",
+  "expected_num_workers": 4,
+  "admission": {
+    "require_immediate_assignment": true,
+    "expected_max_sessions_per_worker": 4,
+    "expected_queue_size": 0
+  },
+  "seed": 20260818,
+  "session": {
+    "prompt": "A smooth first-person exploration through a vivid natural landscape.",
+    "image_path": "../ABot-World/web_client/datasets/images/84b90ad568b693d2.png",
+    "fps": 12,
+    "control_latent_frames": 3,
+    "delivery_mode": "latest",
+    "expected_preview_frames": 1,
+    "control": {
+      "interval_seconds": 0.5,
+      "jitter_seconds": 0.1,
+      "idle_probability": 0.03,
+      "idle_min_seconds": 1.5,
+      "idle_max_seconds": 6.0,
+      "action_states": [
+        ["KeyW"],
+        ["KeyW", "KeyA"],
+        ["KeyW", "KeyD"],
+        ["KeyI"]
+      ]
+    }
+  },
+  "measurement": {
+    "sample_interval_seconds": 1.0,
+    "connect_timeout_seconds": 90.0,
+    "http_timeout_seconds": 30.0,
+    "shutdown_timeout_seconds": 20.0,
+    "first_generation_grace_seconds": 15.0,
+    "slo_fps_tolerance": 0.25
+  },
+  "phases": [
+    {
+      "name": "warmup_4_continuous",
+      "duration_seconds": 30.0,
+      "target_users": 4,
+      "arrival_window_seconds": 10.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "ramp_8_continuous",
+      "duration_seconds": 35.0,
+      "target_users": 8,
+      "arrival_window_seconds": 15.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "input_lull_8_half_paused",
+      "duration_seconds": 25.0,
+      "target_users": 8,
+      "active_input_fraction": 0.5,
+      "input_transition_window_seconds": 8.0
+    },
+    {
+      "name": "ramp_16_resume_and_arrive",
+      "duration_seconds": 45.0,
+      "target_users": 16,
+      "arrival_window_seconds": 20.0,
+      "active_input_fraction": 1.0,
+      "input_transition_window_seconds": 8.0
+    },
+    {
+      "name": "peak_16_continuous",
+      "duration_seconds": 40.0,
+      "target_users": 16,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "peak_16_half_paused",
+      "duration_seconds": 35.0,
+      "target_users": 16,
+      "active_input_fraction": 0.5,
+      "input_transition_window_seconds": 15.0
+    },
+    {
+      "name": "peak_16_reengage",
+      "duration_seconds": 35.0,
+      "target_users": 16,
+      "active_input_fraction": 1.0,
+      "input_transition_window_seconds": 10.0
+    },
+    {
+      "name": "recovery_8_departures",
+      "duration_seconds": 30.0,
+      "target_users": 8,
+      "departure_window_seconds": 15.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "recovery_4_departures",
+      "duration_seconds": 25.0,
+      "target_users": 4,
+      "departure_window_seconds": 12.0,
+      "active_input_fraction": 1.0
+    }
+  ]
+}

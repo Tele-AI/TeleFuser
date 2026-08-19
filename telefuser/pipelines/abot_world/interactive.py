@@ -43,9 +43,7 @@ class ABotWorldInteractiveSession:
     cross_cache: list[dict[str, Any]]
     scheduler: Any
     generator: torch.Generator
-    vae_decode_state: Wan22VideoVAEStreamingDecodeState = field(
-        default_factory=Wan22VideoVAEStreamingDecodeState
-    )
+    vae_decode_state: Wan22VideoVAEStreamingDecodeState = field(default_factory=Wan22VideoVAEStreamingDecodeState)
     taew_decode_state: ABotWorldTAEWDecodeState | None = None
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     next_latent_frame: int = 0
@@ -227,16 +225,39 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                     )
                 )
 
-            input_prepare_seconds = time.monotonic() - batch_started_at
-            cache_collate_started_at = time.monotonic()
-            original_global_ends = [
-                [int(layer["global_end_index"].item()) for layer in session.self_cache]
-                for session in sessions
-            ]
-            self_cache = self._collate_caches(sessions, "self_cache")
-            cross_cache = self._collate_caches(sessions, "cross_cache")
-            cache_collate_seconds = time.monotonic() - cache_collate_started_at
+            # Keep a singleton session's cache allocation in place. Besides
+            # avoiding a needless cat/scatter clone, this gives the optional
+            # CUDA Graph path stable KV-cache pointers across continuations.
+            direct_session_cache = len(sessions) == 1
             start = sessions[0].next_latent_frame
+            batched_latent: torch.Tensor | None = None
+            batched_prompt: torch.Tensor | None = None
+            batched_action: torch.Tensor | None = None
+            if not direct_session_cache:
+                batched_latent = torch.cat(noises, dim=0).to(dtype=self.torch_dtype)
+                batched_prompt = torch.cat([session.prompt_emb for session in sessions], dim=0)
+                batched_action = torch.cat(action_contexts, dim=0)
+            input_prepare_seconds = time.monotonic() - batch_started_at
+            cache_collate_seconds = 0.0
+            original_global_ends: list[list[int]] | None = None
+            self_cache: list[dict[str, Any]] | None = None
+            cross_cache: list[dict[str, Any]] | None = None
+            graph_batched_cache = False
+            if direct_session_cache:
+                self_cache = sessions[0].self_cache
+                cross_cache = sessions[0].cross_cache
+            elif start == 0:
+                # First chunks initialize per-session caches and stay eager.
+                for session in sessions:
+                    self._release_cuda_graph(session.session_id)
+                self.denoise_stage.record_cuda_graph_not_used()
+                cache_collate_started_at = time.monotonic()
+                original_global_ends = [
+                    [int(layer["global_end_index"].item()) for layer in session.self_cache] for session in sessions
+                ]
+                self_cache = self._collate_caches(sessions, "self_cache")
+                cross_cache = self._collate_caches(sessions, "cross_cache")
+                cache_collate_seconds = time.monotonic() - cache_collate_started_at
             # CUDA events provide stage time without treating asynchronous kernel
             # launch latency as DiT runtime.  The final VAE event is synchronized
             # before metrics are read, while the normal stream ordering remains
@@ -250,33 +271,105 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 denoise_started.record()
             else:
                 denoise_started_at = time.monotonic()
-            latents = self.denoise_stage._denoise_block(
-                torch.cat(noises, dim=0).to(dtype=self.torch_dtype),
-                torch.cat([session.prompt_emb for session in sessions], dim=0),
-                torch.cat(action_contexts, dim=0),
-                torch.cat([session.first_frame_latent for session in sessions], dim=0) if start == 0 else None,
-                self_cache,
-                cross_cache,
-                start,
-                [session.generator for session in sessions],
-                sessions[0].scheduler,
-            )
+            if direct_session_cache and start > 0:
+                assert self_cache is not None and cross_cache is not None
+                latents = self.denoise_stage.denoise_interactive_block(
+                    session_id=sessions[0].session_id,
+                    latent=noises[0].to(dtype=self.torch_dtype),
+                    prompt_emb=sessions[0].prompt_emb,
+                    action_context=action_contexts[0],
+                    self_cache=self_cache,
+                    cross_cache=cross_cache,
+                    current_start=start,
+                    generator=sessions[0].generator,
+                    scheduler=sessions[0].scheduler,
+                )
+            elif start > 0:
+                assert batched_latent is not None and batched_prompt is not None and batched_action is not None
+                latents = self.denoise_stage.denoise_interactive_blocks(
+                    session_ids=[session.session_id for session in sessions],
+                    latent=batched_latent,
+                    prompt_emb=batched_prompt,
+                    action_context=batched_action,
+                    self_caches=[session.self_cache for session in sessions],
+                    cross_caches=[session.cross_cache for session in sessions],
+                    current_starts=[session.next_latent_frame for session in sessions],
+                    generators=[session.generator for session in sessions],
+                    scheduler=sessions[0].scheduler,
+                )
+                if latents is None:
+                    # Generic eager collate/scatter replaces cache tensors;
+                    # invalidate any graph using those pointers first.
+                    for session in sessions:
+                        self._release_cuda_graph(session.session_id)
+                    cache_collate_started_at = time.monotonic()
+                    original_global_ends = [
+                        [int(layer["global_end_index"].item()) for layer in session.self_cache] for session in sessions
+                    ]
+                    self_cache = self._collate_caches(sessions, "self_cache")
+                    cross_cache = self._collate_caches(sessions, "cross_cache")
+                    cache_collate_seconds = time.monotonic() - cache_collate_started_at
+                    latents = self.denoise_stage._denoise_block(
+                        batched_latent,
+                        batched_prompt,
+                        batched_action,
+                        None,
+                        self_cache,
+                        cross_cache,
+                        start,
+                        [session.generator for session in sessions],
+                        sessions[0].scheduler,
+                    )
+                else:
+                    graph_batched_cache = True
+            else:
+                # The singleton first chunk is dynamic as well; its cache is
+                # deliberately not eligible until the full local window exists.
+                assert self_cache is not None and cross_cache is not None
+                if direct_session_cache:
+                    self.denoise_stage.record_cuda_graph_not_used()
+                    latents = self.denoise_stage._denoise_block(
+                        noises[0].to(dtype=self.torch_dtype),
+                        sessions[0].prompt_emb,
+                        action_contexts[0],
+                        sessions[0].first_frame_latent,
+                        self_cache,
+                        cross_cache,
+                        start,
+                        sessions[0].generator,
+                        sessions[0].scheduler,
+                    )
+                else:
+                    assert batched_latent is not None and batched_prompt is not None and batched_action is not None
+                    latents = self.denoise_stage._denoise_block(
+                        batched_latent,
+                        batched_prompt,
+                        batched_action,
+                        torch.cat([session.first_frame_latent for session in sessions], dim=0),
+                        self_cache,
+                        cross_cache,
+                        start,
+                        [session.generator for session in sessions],
+                        sessions[0].scheduler,
+                    )
             if use_cuda_events:
                 denoise_finished.record()
             else:
                 denoise_seconds = time.monotonic() - denoise_started_at
-            global_deltas = [
-                int(layer["global_end_index"].item()) - original_global_ends[0][layer_index]
-                for layer_index, layer in enumerate(self_cache)
-            ]
             cache_scatter_started_at = time.monotonic()
-            self._scatter_caches(sessions, "self_cache", self_cache)
-            for session_index, session in enumerate(sessions):
-                for layer_index, delta in enumerate(global_deltas):
-                    session.self_cache[layer_index]["global_end_index"].fill_(
-                        original_global_ends[session_index][layer_index] + delta
-                    )
-            self._scatter_caches(sessions, "cross_cache", cross_cache)
+            if not direct_session_cache and not graph_batched_cache:
+                assert self_cache is not None and cross_cache is not None and original_global_ends is not None
+                global_deltas = [
+                    int(layer["global_end_index"].item()) - original_global_ends[0][layer_index]
+                    for layer_index, layer in enumerate(self_cache)
+                ]
+                self._scatter_caches(sessions, "self_cache", self_cache)
+                for session_index, session in enumerate(sessions):
+                    for layer_index, delta in enumerate(global_deltas):
+                        session.self_cache[layer_index]["global_end_index"].fill_(
+                            original_global_ends[session_index][layer_index] + delta
+                        )
+                self._scatter_caches(sessions, "cross_cache", cross_cache)
             cache_scatter_seconds = time.monotonic() - cache_scatter_started_at
             if use_cuda_events:
                 vae_started.record()
@@ -310,6 +403,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 "cache_scatter_seconds": cache_scatter_seconds,
                 "vae_decode_seconds": decode_seconds,
                 **self.taew_decode_stage.last_decode_metrics(),
+                **self.denoise_stage.last_cuda_graph_metrics(),
                 "postprocess_seconds": time.monotonic() - postprocess_started_at,
                 "total_seconds": time.monotonic() - batch_started_at,
             }
@@ -367,6 +461,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
         """Clone a quiescent session to CPU for suspend or cross-worker migration."""
         with self._execution_lock, session.lock:
             self._require_session(session)
+            self._release_cuda_graph(session.session_id)
             session.lifecycle = ABotWorldSessionLifecycle.MIGRATING
             return ABotWorldSessionSnapshot(
                 session_id=session.session_id,
@@ -429,6 +524,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
         direct_device_tensors: bool,
     ) -> ABotWorldInteractiveSession:
         with self._execution_lock:
+            self._release_cuda_graph(snapshot.session_id)
             generator = torch.Generator(device=self.device)
             generator.set_state(snapshot.generator_state)
             if direct_device_tensors:
@@ -525,10 +621,17 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
         with self._execution_lock:
             return dict(self._last_stage_metrics)
 
+    def _release_cuda_graph(self, session_id: str) -> None:
+        """Drop optional graph state without coupling test/minimal stages to it."""
+        release = getattr(self.denoise_stage, "release_cuda_graph", None)
+        if callable(release):
+            release(session_id)
+
     def suspend_interactive_session(self, session: ABotWorldInteractiveSession) -> None:
         """Move all material session tensors to CPU at a chunk boundary."""
         with self._execution_lock, session.lock:
             self._require_session(session)
+            self._release_cuda_graph(session.session_id)
             if session.lifecycle == ABotWorldSessionLifecycle.SUSPENDED:
                 return
             session.prompt_emb = session.prompt_emb.to("cpu")
@@ -546,6 +649,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
         """Restore a suspended session to the pipeline execution device."""
         with self._execution_lock, session.lock:
             self._require_session(session)
+            self._release_cuda_graph(session.session_id)
             if session.lifecycle != ABotWorldSessionLifecycle.SUSPENDED:
                 return
             session.prompt_emb = session.prompt_emb.to(self.device, dtype=self.torch_dtype)
@@ -576,6 +680,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
         with self._lifecycle_lock:
             targets = list(self._interactive_sessions.values()) if session is None else [session]
             for target in targets:
+                self._release_cuda_graph(target.session_id)
                 if target.closed:
                     continue
                 target.lifecycle = ABotWorldSessionLifecycle.CLOSING

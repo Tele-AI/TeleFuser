@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,9 +64,23 @@ _MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
 _DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"preview", "chunk"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"error", "done"})
-_PACING_SAFETY_FACTOR = 1.10
+_DEFAULT_BATCH_COMPUTE_SAFETY_FACTOR = 1.10
 _PACING_MAX_COALESCING_SECONDS = 0.010
 _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS = 0.001
+_TRACE_STAGE_FIELDS = {
+    "input_prepare": "input_prepare_seconds",
+    "cache_collate": "cache_collate_seconds",
+    "denoise": "denoise_seconds",
+    "cache_scatter": "cache_scatter_seconds",
+    "vae_decode": "vae_decode_seconds",
+    "postprocess": "postprocess_seconds",
+    "total": "total_seconds",
+}
+_TAEW_DECODE_MODE_NAMES = {
+    0: "singleton",
+    1: "synchronized_batch",
+    2: "serial_fallback",
+}
 
 
 @dataclass
@@ -76,6 +90,7 @@ class _ABotWorldLiveKitSession:
     output_queue: queue.Queue[dict[str, Any]]
     control_event: threading.Event
     config: dict[str, Any]
+    output_available_event: threading.Event = field(default_factory=threading.Event)
     control_idle_timeout: float = 10.0
     controls: set[str] = field(default_factory=set)
     last_control_at: float = field(default_factory=time.monotonic)
@@ -97,6 +112,24 @@ class _ABotWorldLiveKitSession:
     last_compute_seconds: float = 0.0
     last_chunk_duration_seconds: float = 0.0
     pacing_ready_at: float = field(default_factory=time.monotonic)
+    # Frame credit is enabled only when a real-time publisher explicitly opts
+    # in. ``output_queue`` accounts for Fq (model chunks not yet dequeued); the
+    # publisher owns Fp after dequeue and reports successful capture_frame()
+    # calls back here. Keeping the two quantities separate lets the scheduler
+    # make EDF decisions from actual playout slack instead of a virtual chunk
+    # deadline alone.
+    publisher_frame_tracking_enabled: bool = False
+    publisher_unsubmitted_frames: int = 0
+    publisher_progress_sequence: int = -1
+    publisher_progress_updated_at: float | None = None
+    publisher_frames_submitted: int = 0
+    publisher_frames_abandoned: int = 0
+    # A continuation may be held briefly for a compatible peer. This is
+    # deliberately per-session so scheduler wakeups caused by unrelated
+    # controls cannot repeatedly restart the same batching timeout.
+    deadline_batch_wait_until: float | None = None
+    deadline_batch_wait_started_at: float | None = None
+    deadline_batch_force_singleton: bool = False
     last_error: str | None = None
     migrating: bool = False
 
@@ -135,6 +168,15 @@ class ABotWorldLiveKitService:
         close_timeout: float = 300.0,
         max_batch_size: int = 8,
         batching_window_ms: float = 2.0,
+        max_deadline_batch_wait_ms: float = 0.0,
+        batch_compute_prior_seconds: Mapping[int, float] | None = None,
+        batch_compute_profile_name: str = "none",
+        batch_compute_safety_factor: float = _DEFAULT_BATCH_COMPUTE_SAFETY_FACTOR,
+        publisher_frame_credit_enabled: bool = False,
+        publisher_frame_credit_target_seconds: float = 3.0,
+        publisher_frame_credit_target_frames: int | None = None,
+        publisher_frame_credit_reserve_frames: int = 4,
+        publisher_frame_credit_guard_ms: float = 50.0,
         idle_suspension_seconds: float = 5.0,
         scheduler_mode: str = "batched",
     ) -> None:
@@ -146,18 +188,82 @@ class ABotWorldLiveKitService:
             raise ValueError("control_idle_timeout and close_timeout must be positive")
         if max_batch_size < 1:
             raise ValueError("max_batch_size must be positive")
-        if batching_window_ms < 0 or idle_suspension_seconds <= 0:
-            raise ValueError("batching_window_ms must be non-negative and idle_suspension_seconds positive")
+        if publisher_frame_credit_target_frames is not None and (
+            isinstance(publisher_frame_credit_target_frames, bool)
+            or not isinstance(publisher_frame_credit_target_frames, int)
+            or publisher_frame_credit_target_frames <= 0
+        ):
+            raise ValueError("publisher_frame_credit_target_frames must be a positive integer or None")
+        if (
+            not math.isfinite(batching_window_ms)
+            or batching_window_ms < 0
+            or not math.isfinite(max_deadline_batch_wait_ms)
+            or max_deadline_batch_wait_ms < 0
+            or not math.isfinite(publisher_frame_credit_target_seconds)
+            or publisher_frame_credit_target_seconds <= 0
+            or publisher_frame_credit_reserve_frames < 0
+            or not math.isfinite(publisher_frame_credit_guard_ms)
+            or publisher_frame_credit_guard_ms < 0
+            or idle_suspension_seconds <= 0
+        ):
+            raise ValueError(
+                "batching_window_ms, max_deadline_batch_wait_ms, and publisher_frame_credit_guard_ms must be "
+                "non-negative finite values; publisher_frame_credit_target_seconds and "
+                "idle_suspension_seconds must be positive; publisher_frame_credit_reserve_frames must be "
+                "non-negative"
+            )
         if scheduler_mode not in {"round_robin", "batched"}:
             raise ValueError("scheduler_mode must be 'round_robin' or 'batched'")
+        normalized_batch_compute_priors: dict[int, float] = {}
+        for raw_batch_size, raw_seconds in (batch_compute_prior_seconds or {}).items():
+            if isinstance(raw_batch_size, bool) or not isinstance(raw_batch_size, int) or raw_batch_size < 1:
+                raise ValueError("batch_compute_prior_seconds keys must be positive integer batch sizes")
+            try:
+                seconds = float(raw_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("batch_compute_prior_seconds values must be positive finite seconds") from exc
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError("batch_compute_prior_seconds values must be positive finite seconds")
+            normalized_batch_compute_priors[raw_batch_size] = seconds
+        if not isinstance(batch_compute_profile_name, str) or not batch_compute_profile_name.strip():
+            raise ValueError("batch_compute_profile_name must be a non-empty string")
+        try:
+            normalized_batch_compute_safety_factor = float(batch_compute_safety_factor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("batch_compute_safety_factor must be a finite number greater than or equal to 1") from exc
+        if not math.isfinite(normalized_batch_compute_safety_factor) or normalized_batch_compute_safety_factor < 1.0:
+            raise ValueError("batch_compute_safety_factor must be a finite number greater than or equal to 1")
         self.pipeline = pipeline
         self.default_fps = int(default_fps)
         self.default_session_config = dict(default_session_config or {})
         self.output_queue_size = int(output_queue_size)
         self.control_idle_timeout = float(control_idle_timeout)
+        # This is independent of batching_window_seconds: the latter is also
+        # an early-pacing slack, while this is a bounded timeout used to wait
+        # for an otherwise absent compatible peer.
+        self.max_deadline_batch_wait_seconds = float(max_deadline_batch_wait_ms) / 1000.0
         self.close_timeout = float(close_timeout)
         self.max_batch_size = int(max_batch_size)
         self.batching_window_seconds = float(batching_window_ms) / 1000.0
+        # Offline profiles seed B>1 estimates before the first coalesced
+        # dispatch. Without this, the generic fallback assumes B2 is two B1
+        # calls and can make a deadline-aware rendezvous unable to bootstrap.
+        # Values are raw measured wall seconds; the per-service safety factor is
+        # applied only in _estimated_batch_compute_seconds.
+        self.batch_compute_profile_name = batch_compute_profile_name.strip()
+        self._batch_compute_priors = normalized_batch_compute_priors
+        self.batch_compute_safety_factor = normalized_batch_compute_safety_factor
+        # This is an opt-in experimental policy. Existing generic
+        # ``pull_chunks`` consumers do not report capture progress and should
+        # preserve the previous virtual-pacing behavior until a LiveKit
+        # publisher explicitly enables tracking for its session.
+        self.publisher_frame_credit_enabled = bool(publisher_frame_credit_enabled)
+        self.publisher_frame_credit_target_seconds = float(publisher_frame_credit_target_seconds)
+        self.publisher_frame_credit_target_frames = (
+            None if publisher_frame_credit_target_frames is None else int(publisher_frame_credit_target_frames)
+        )
+        self.publisher_frame_credit_reserve_frames = int(publisher_frame_credit_reserve_frames)
+        self.publisher_frame_credit_guard_seconds = float(publisher_frame_credit_guard_ms) / 1000.0
         self.idle_suspension_seconds = float(idle_suspension_seconds)
         self.scheduler_mode = scheduler_mode
         self._sessions: dict[str, _ABotWorldLiveKitSession] = {}
@@ -172,12 +278,20 @@ class ABotWorldLiveKitService:
         self._batch_item_count = 0
         self._maximum_batch_size = 0
         self._last_stage_metrics: dict[str, float | int] = {}
+        self._deadline_batch_waits_started = 0
+        self._deadline_batch_wait_timeouts = 0
+        self._deadline_batch_filler_dispatches = 0
         self._pacing_eligible_sessions = 0
         self._pacing_throttled_sessions = 0
         self._pacing_buffered_sessions = 0
         # Observed wall-clock runtimes make deadline rendezvous conservative.
-        self._batch_compute_estimates: dict[int, float] = {}
+        # Start from any selected offline profile and only move upward online.
+        self._batch_compute_estimates: dict[int, float] = dict(self._batch_compute_priors)
         self._workload_detector = TurboServeWorkloadDetector()
+        # The process-NCCL child installs a small callback which forwards one
+        # record per actual model dispatch to the parent process.
+        self._dispatch_trace_callback: Callable[[dict[str, Any]], None] | None = None
+        self._dispatch_trace_sequence = 0
 
     def start(self) -> None:
         """Preload weights and start the sole GPU scheduling thread."""
@@ -440,15 +554,25 @@ class ABotWorldLiveKitService:
         if state is None:
             return
         while True:
-            try:
-                payload = await asyncio.to_thread(state.output_queue.get, True, 0.25)
-            except queue.Empty:
-                with state.lock:
-                    if not state.active:
-                        return
+            payload: dict[str, Any] | None = None
+            with self._scheduler_condition, state.lock:
+                try:
+                    payload = state.output_queue.get_nowait()
+                except queue.Empty:
+                    state.output_available_event.clear()
+                    active = state.active
+                else:
+                    if state.output_queue.empty():
+                        state.output_available_event.clear()
+                    if state.publisher_frame_tracking_enabled and payload.get("type") == "chunk":
+                        state.publisher_unsubmitted_frames += self._payload_frame_count(payload)
+                    active = True
+                    self._scheduler_condition.notify_all()
+            if payload is None:
+                if not active:
+                    return
+                await asyncio.to_thread(state.output_available_event.wait, 0.25)
                 continue
-            with self._scheduler_condition:
-                self._scheduler_condition.notify_all()
             yield payload
 
     def close_session(self, session_id: str, timeout: float | None = None) -> None:
@@ -463,6 +587,7 @@ class ABotWorldLiveKitService:
                 state.active = False
                 state.controls.clear()
                 state.ready_since = None
+                state.output_available_event.set()
             self._scheduler_condition.notify_all()
             while state.in_flight:
                 remaining = deadline - time.monotonic()
@@ -606,7 +731,11 @@ class ABotWorldLiveKitService:
                 raise KeyError(f"Unknown ABot session {session_id!r}")
             state.migrating = True
             self._scheduler_condition.notify_all()
-            while state.in_flight or not state.output_queue.empty():
+            while (
+                state.in_flight
+                or not state.output_queue.empty()
+                or (state.publisher_frame_tracking_enabled and state.publisher_unsubmitted_frames > 0)
+            ):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     state.migrating = False
@@ -665,7 +794,13 @@ class ABotWorldLiveKitService:
             if not state.migrating or state.in_flight:
                 raise RuntimeError("ABot source session is not quiescent for migration commit")
             self._sessions.pop(session_id)
+            # Wake an existing pull_chunks() generator. The router will then
+            # observe its source iterator close and continue on the target.
+            state.active = False
+            state.controls.clear()
+            state.output_available_event.set()
             self._discard_from_round_robin(session_id)
+            self._scheduler_condition.notify_all()
         self.pipeline.close_interactive_session(state.pipeline_session)
 
     def abort_migration(self, session_id: str) -> None:
@@ -700,7 +835,7 @@ class ABotWorldLiveKitService:
             self._scheduler_paused = False
             self._scheduler_condition.notify_all()
 
-    def runtime_metrics(self, session_id: str | None = None) -> dict[str, float | int]:
+    def runtime_metrics(self, session_id: str | None = None) -> dict[str, float | int | str]:
         """Return raw scheduler facts for service metadata and benchmarks."""
         with self._sessions_lock:
             if session_id is None:
@@ -711,6 +846,24 @@ class ABotWorldLiveKitService:
                     "batches": self._batch_count,
                     "batch_items": self._batch_item_count,
                     "maximum_batch_size": self._maximum_batch_size,
+                    "batch_compute_profile_name": self.batch_compute_profile_name,
+                    "batch_compute_prior_2_seconds": round(self._batch_compute_priors.get(2, 0.0), 6),
+                    "batch_compute_prior_3_seconds": round(self._batch_compute_priors.get(3, 0.0), 6),
+                    "batch_compute_prior_4_seconds": round(self._batch_compute_priors.get(4, 0.0), 6),
+                    "batch_compute_safety_factor": round(self.batch_compute_safety_factor, 6),
+                    "max_deadline_batch_wait_seconds": round(self.max_deadline_batch_wait_seconds, 6),
+                    "deadline_batch_waits_started": self._deadline_batch_waits_started,
+                    "deadline_batch_wait_timeouts": self._deadline_batch_wait_timeouts,
+                    "deadline_batch_filler_dispatches": self._deadline_batch_filler_dispatches,
+                    "publisher_frame_credit_enabled": int(self.publisher_frame_credit_enabled),
+                    "publisher_frame_credit_target_seconds": round(self.publisher_frame_credit_target_seconds, 6),
+                    "publisher_frame_credit_target_frames": (
+                        self.publisher_frame_credit_target_frames
+                        if self.publisher_frame_credit_target_frames is not None
+                        else 0
+                    ),
+                    "publisher_frame_credit_reserve_frames": self.publisher_frame_credit_reserve_frames,
+                    "publisher_frame_credit_guard_seconds": round(self.publisher_frame_credit_guard_seconds, 6),
                     "pacing_eligible_sessions": self._pacing_eligible_sessions,
                     "pacing_throttled_sessions": self._pacing_throttled_sessions,
                     "pacing_buffered_sessions": self._pacing_buffered_sessions,
@@ -723,6 +876,9 @@ class ABotWorldLiveKitService:
                 }
             state = self._sessions[session_id]
             with state.lock:
+                now = time.monotonic()
+                queued_video_frames = self._queued_video_frames(state)
+                frame_credit_frames = queued_video_frames + state.publisher_unsubmitted_frames
                 return {
                     "scheduler_mode": self.scheduler_mode,
                     "scheduled_chunks": state.scheduled_chunks,
@@ -737,8 +893,150 @@ class ABotWorldLiveKitService:
                     "total_queue_wait_seconds": round(state.total_queue_wait_seconds, 6),
                     "total_compute_seconds": round(state.total_compute_seconds, 6),
                     "pacing_ready_in_seconds": round(max(0.0, state.pacing_ready_at - time.monotonic()), 6),
+                    "deadline_batch_wait_remaining_seconds": round(
+                        max(0.0, (state.deadline_batch_wait_until or 0.0) - time.monotonic()), 6
+                    ),
                     "pacing_buffered_video_payloads": self._queued_video_payloads(state),
+                    "publisher_frame_tracking_enabled": int(state.publisher_frame_tracking_enabled),
+                    "queued_video_frames": queued_video_frames,
+                    "frame_credit_target_frames": self._frame_credit_target_frames(state),
+                    "publisher_unsubmitted_frames": state.publisher_unsubmitted_frames,
+                    "frame_credit_frames": frame_credit_frames,
+                    "frame_credit_seconds": round(frame_credit_frames / max(1, int(state.config["fps"])), 6),
+                    "frame_credit_deadline_in_seconds": round(self._session_deadline(state, now) - now, 6),
+                    "publisher_progress_sequence": state.publisher_progress_sequence,
+                    "publisher_frames_submitted": state.publisher_frames_submitted,
+                    "publisher_frames_abandoned": state.publisher_frames_abandoned,
                 }
+
+    def set_dispatch_trace_callback(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        """Install an optional sink for one record per model batch dispatch."""
+        self._dispatch_trace_callback = callback
+
+    @staticmethod
+    def _trace_number(value: object) -> int | float | None:
+        """Convert a scalar metric or scalar tensor into JSON-safe telemetry."""
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                return None
+            value = value.item()
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            return float(value) if math.isfinite(value) else None
+        return None
+
+    def _new_dispatch_session_trace(
+        self,
+        state: _ABotWorldLiveKitSession,
+        controls: Mapping[str, bool],
+        *,
+        selected_at: float,
+    ) -> dict[str, Any]:
+        """Capture one session's position before a model invocation mutates it."""
+        with state.lock:
+            session = state.pipeline_session
+            ready_at = state.ready_since or selected_at
+            queued_video_frames = self._queued_video_frames(state)
+            frame_credit_frames = queued_video_frames + state.publisher_unsubmitted_frames
+            frame_credit_deadline = self._session_deadline(state, selected_at)
+            return {
+                "session_id": str(state.session_id),
+                "chunk_index": int(state.next_chunk_index),
+                "next_latent_frame_before": self._trace_number(getattr(session, "next_latent_frame", None)),
+                "next_latent_frame_after": None,
+                "emitted_frames_before": self._trace_number(getattr(session, "emitted_frames", None)),
+                "emitted_frames_after": None,
+                "frames": None,
+                "controls": sorted(str(key) for key, enabled in controls.items() if enabled),
+                "queue_wait_seconds": max(0.0, selected_at - ready_at),
+                "frame_credit_enabled": int(self._uses_publisher_frame_credit(state)),
+                "queued_video_frames": queued_video_frames,
+                "frame_credit_target_frames": self._frame_credit_target_frames(state),
+                "publisher_unsubmitted_frames": state.publisher_unsubmitted_frames,
+                "frame_credit_frames": frame_credit_frames,
+                "frame_credit_deadline_in_seconds": frame_credit_deadline - selected_at,
+            }
+
+    def _finish_dispatch_session_trace(
+        self,
+        trace: dict[str, Any],
+        state: _ABotWorldLiveKitSession,
+        frames: Sequence[Image.Image],
+    ) -> None:
+        """Fill output facts after the corresponding session's chunk commits."""
+        session = state.pipeline_session
+        trace.update(
+            {
+                "next_latent_frame_after": self._trace_number(getattr(session, "next_latent_frame", None)),
+                "emitted_frames_after": self._trace_number(getattr(session, "emitted_frames", None)),
+                "frames": int(len(frames)),
+            }
+        )
+
+    def _emit_dispatch_trace(
+        self,
+        *,
+        selected_at: float,
+        selected_wall_time: float,
+        model_started_at: float | None,
+        model_started_wall_time: float | None,
+        completed_at: float,
+        completed_wall_time: float,
+        session_traces: Sequence[dict[str, Any]],
+        control_latent_frames: int | None,
+        stage_metrics: Mapping[str, object],
+        outcome: str,
+        error: str | None = None,
+    ) -> None:
+        """Forward an audit record without ever changing serving behavior."""
+        callback = getattr(self, "_dispatch_trace_callback", None)
+        if not callable(callback):
+            return
+        sequence = int(getattr(self, "_dispatch_trace_sequence", 0)) + 1
+        self._dispatch_trace_sequence = sequence
+        mode_value = self._trace_number(stage_metrics.get("taew_decode_mode"))
+        mode = int(mode_value) if mode_value is not None else None
+        record = {
+            "schema_version": 1,
+            "event_type": "model_dispatch",
+            "trace_sequence": sequence,
+            "scheduler_mode": self.scheduler_mode,
+            "selected_monotonic_seconds": selected_at,
+            "selected_unix_seconds": selected_wall_time,
+            "model_started_monotonic_seconds": model_started_at,
+            "model_started_unix_seconds": model_started_wall_time,
+            "model_completed_monotonic_seconds": completed_at,
+            "model_completed_unix_seconds": completed_wall_time,
+            "model_duration_seconds": (
+                max(0.0, completed_at - model_started_at) if model_started_at is not None else None
+            ),
+            "pre_model_overhead_seconds": (
+                max(0.0, model_started_at - selected_at) if model_started_at is not None else None
+            ),
+            "batch_size": len(session_traces),
+            "control_latent_frames": control_latent_frames,
+            "sessions": [dict(trace) for trace in session_traces],
+            "stages_seconds": {
+                name: self._trace_number(stage_metrics.get(metric_name))
+                for name, metric_name in _TRACE_STAGE_FIELDS.items()
+            },
+            "vae_decode": {
+                "mode": mode,
+                "mode_name": _TAEW_DECODE_MODE_NAMES.get(mode) if mode is not None else None,
+                "items": self._trace_number(stage_metrics.get("taew_decode_items")),
+                "effective_batch_size": self._trace_number(stage_metrics.get("taew_decode_batch_size")),
+                "invocations": self._trace_number(stage_metrics.get("taew_decode_invocations")),
+            },
+            "outcome": outcome,
+            "error": error,
+        }
+        try:
+            callback(record)
+        except Exception:
+            logger.exception("ABot dispatch-trace callback failed")
 
     def _ensure_scheduler_started(self) -> None:
         with self._scheduler_condition:
@@ -768,6 +1066,8 @@ class ABotWorldLiveKitService:
                         if state.controls and now - state.last_control_at >= state.control_idle_timeout:
                             state.controls.clear()
                             state.ready_since = None
+                            self._clear_deadline_batch_wait(state)
+                            state.deadline_batch_force_singleton = False
                             state.pipeline_session.lifecycle = ABotWorldSessionLifecycle.IDLE
                         if (
                             not state.controls
@@ -783,8 +1083,15 @@ class ABotWorldLiveKitService:
                     continue
                 if self.scheduler_mode == "batched" and ready and len(ready) < self.max_batch_size:
                     wait_seconds = self._batch_formation_wait_seconds(ready, now)
+                    deadline_wait_active = any(state.deadline_batch_wait_until is not None for state in ready)
                     if wait_seconds > 0:
                         self._scheduler_condition.wait(timeout=wait_seconds)
+                        if deadline_wait_active:
+                            # A new control or peer readiness wakes this
+                            # condition. Re-evaluate from the EDF head instead
+                            # of dispatching the old singleton and losing its
+                            # persistent dynamic-batching hold.
+                            continue
                     now = time.monotonic()
                     ready = self._ready_sessions(now)
                 batch = self._select_batch(ready, now=now)
@@ -792,6 +1099,8 @@ class ABotWorldLiveKitService:
                 if batch:
                     for state in batch:
                         with state.lock:
+                            self._clear_deadline_batch_wait(state)
+                            state.deadline_batch_force_singleton = False
                             state.in_flight = True
                             controls.append({key: True for key in state.controls})
 
@@ -811,9 +1120,7 @@ class ABotWorldLiveKitService:
         pacing_buffered = 0
         for state in self._sessions.values():
             with state.lock:
-                lossless_blocked = (
-                    state.config["delivery_mode"] == "lossless" and state.output_queue.full()
-                )
+                lossless_blocked = state.config["delivery_mode"] == "lossless" and state.output_queue.full()
                 if (
                     state.active
                     and state.controls
@@ -824,8 +1131,12 @@ class ABotWorldLiveKitService:
                     if state.ready_since is None:
                         state.ready_since = now
                     if state.config["delivery_mode"] == "latest":
-                        buffered_video_payloads = self._queued_video_payloads(state)
-                        pacing_ready = now + self._pacing_coalescing_slack_seconds(state) >= state.pacing_ready_at
+                        frame_credit_enabled = self._uses_publisher_frame_credit(state)
+                        buffered_video_payloads = 0 if frame_credit_enabled else self._queued_video_payloads(state)
+                        pacing_ready_at = (
+                            self._frame_credit_ready_at(state, now) if frame_credit_enabled else state.pacing_ready_at
+                        )
+                        pacing_ready = now + self._pacing_coalescing_slack_seconds(state) >= pacing_ready_at
                         if buffered_video_payloads or not pacing_ready:
                             pacing_throttled += 1
                             pacing_buffered += int(bool(buffered_video_payloads))
@@ -835,7 +1146,7 @@ class ABotWorldLiveKitService:
         self._pacing_eligible_sessions = pacing_eligible
         self._pacing_throttled_sessions = pacing_throttled
         self._pacing_buffered_sessions = pacing_buffered
-        ready.sort(key=lambda state: (state.next_playout_deadline, state.ready_since or now, state.session_id))
+        ready.sort(key=lambda state: (self._session_deadline(state, now), state.ready_since or now, state.session_id))
         return ready
 
     def _next_scheduler_wake_seconds(self, now: float) -> float:
@@ -850,9 +1161,13 @@ class ABotWorldLiveKitService:
                         state.config["delivery_mode"] == "latest"
                         and not state.in_flight
                         and not state.migrating
-                        and not self._queued_video_payloads(state)
+                        and (self._uses_publisher_frame_credit(state) or not self._queued_video_payloads(state))
                     ):
-                        pacing_wake = state.pacing_ready_at - self._pacing_coalescing_slack_seconds(state)
+                        pacing_wake = (
+                            self._frame_credit_ready_at(state, now)
+                            if self._uses_publisher_frame_credit(state)
+                            else state.pacing_ready_at - self._pacing_coalescing_slack_seconds(state)
+                        )
                         next_wake_at = pacing_wake if next_wake_at is None else min(next_wake_at, pacing_wake)
                 elif not state.in_flight and state.pipeline_session.is_resident and not state.controls:
                     suspension_at = state.last_control_at + self.idle_suspension_seconds
@@ -870,6 +1185,116 @@ class ABotWorldLiveKitService:
             min(_PACING_MAX_COALESCING_SECONDS, state.last_chunk_duration_seconds * 0.05),
         )
 
+    def _clear_deadline_batch_wait(
+        self,
+        state: _ABotWorldLiveKitSession,
+        *,
+        timed_out: bool = False,
+    ) -> None:
+        """Clear an in-progress deadline-aware batching hold.
+
+        The scheduler owns these transient fields. Callers hold ``state.lock``
+        whenever the service is running concurrently.
+        """
+        if state.deadline_batch_wait_until is None:
+            return
+        if timed_out:
+            self._deadline_batch_wait_timeouts += 1
+        state.deadline_batch_wait_until = None
+        state.deadline_batch_wait_started_at = None
+
+    def _deadline_batch_wait_seconds(
+        self,
+        state: _ABotWorldLiveKitSession,
+        now: float,
+    ) -> tuple[float, bool]:
+        """Return remaining peer-wait budget and whether it just expired.
+
+        A timeout is created once for the EDF head rather than on every
+        scheduler wakeup. The hypothetical second item gives a conservative
+        B=2 latest-start boundary even before a peer is known.
+        """
+        if (
+            self.max_deadline_batch_wait_seconds <= 0
+            or self.max_batch_size < 2
+            or state.scheduled_chunks == 0
+            or state.config["delivery_mode"] != "latest"
+            or (not self._uses_publisher_frame_credit(state) and self._queued_video_payloads(state))
+        ):
+            return 0.0, False
+
+        if state.deadline_batch_wait_until is not None:
+            remaining = state.deadline_batch_wait_until - now
+            if remaining <= 0:
+                self._clear_deadline_batch_wait(state, timed_out=True)
+                return 0.0, True
+            return remaining, False
+
+        latest_start = self._session_deadline(state, now) - self._estimated_batch_compute_seconds((state, state))
+        wait_until = min(now + self.max_deadline_batch_wait_seconds, latest_start)
+        if wait_until <= now:
+            return 0.0, False
+        state.deadline_batch_wait_started_at = now
+        state.deadline_batch_wait_until = wait_until
+        self._deadline_batch_waits_started += 1
+        return wait_until - now, False
+
+    def _active_deadline_batch_waiter(
+        self,
+        ready: Sequence[_ABotWorldLiveKitSession],
+        now: float,
+    ) -> _ABotWorldLiveKitSession | None:
+        """Return the held ready session with the earliest playout deadline."""
+        waiting: list[_ABotWorldLiveKitSession] = []
+        for state in ready:
+            with state.lock:
+                if (
+                    state.deadline_batch_wait_until is not None
+                    and state.deadline_batch_wait_until > now
+                    and not state.deadline_batch_force_singleton
+                ):
+                    waiting.append(state)
+        if not waiting:
+            return None
+        return min(
+            waiting,
+            key=lambda state: (
+                self._session_deadline(state, now),
+                state.deadline_batch_wait_until or float("inf"),
+                state.session_id,
+            ),
+        )
+
+    def _can_dispatch_before_waiter(
+        self,
+        batch: Sequence[_ABotWorldLiveKitSession],
+        waiter: _ABotWorldLiveKitSession,
+        now: float,
+    ) -> bool:
+        """Whether an EDF batch may run before a held singleton safely.
+
+        This reserves enough time for the held session to fall back to B=1.
+        First chunks and lossless work remain latency/consumer critical and are
+        allowed through immediately; they are not part of the optional wait.
+        """
+        if any(state is waiter for state in batch):
+            return True
+        if any(state.scheduled_chunks == 0 or state.config["delivery_mode"] != "latest" for state in batch):
+            return True
+        batch_finish = now + self._estimated_batch_compute_seconds(batch)
+        if batch_finish > min(self._session_deadline(state, now) for state in batch):
+            return False
+        waiter_finish = batch_finish + self._estimated_batch_compute_seconds((waiter,))
+        return waiter_finish <= self._session_deadline(waiter, now)
+
+    def _has_compatible_ready_peer(
+        self,
+        state: _ABotWorldLiveKitSession,
+        ready: Sequence[_ABotWorldLiveKitSession],
+    ) -> bool:
+        pivot_key = self._batch_key(state)
+        return any(candidate is not state and self._batch_key(candidate) == pivot_key for candidate in ready)
+
     def _batch_formation_wait_seconds(
         self,
         ready: Sequence[_ABotWorldLiveKitSession],
@@ -877,6 +1302,42 @@ class ABotWorldLiveKitService:
     ) -> float:
         """Wait for a compatible continuation only while all playout deadlines are safe."""
         batch = self._select_batch(ready, now=now)
+        if batch and batch[0].deadline_batch_force_singleton:
+            return 0.0
+        held_batch_waiter: _ABotWorldLiveKitSession | None = None
+        if len(batch) >= 2 and any(state.deadline_batch_wait_until is not None for state in batch):
+            # A B=1 hold may grow to B=3, but never by consuming the B=2
+            # fallback budget. Larger already-ready batches still launch now.
+            if len(batch) != 2 or self.max_batch_size < 3:
+                return 0.0
+            held_batch_waiter = next(
+                (state for state in batch if state.deadline_batch_wait_until is not None),
+                None,
+            )
+            if held_batch_waiter is None:
+                return 0.0
+
+            # Preserve the original configured cap, then tighten it to the
+            # latest safe B=2 start for both ready members.
+            b2_latest_safe_start = self._latest_safe_batch_start(batch, now=now)
+            with held_batch_waiter.lock:
+                wait_until = held_batch_waiter.deadline_batch_wait_until
+                if wait_until is None:
+                    return 0.0
+                held_batch_waiter.deadline_batch_wait_until = min(wait_until, b2_latest_safe_start)
+                if held_batch_waiter.deadline_batch_wait_until <= now:
+                    return 0.0
+        waiter = self._active_deadline_batch_waiter(ready, now)
+        if waiter is not None and all(state is not waiter for state in batch):
+            if self._can_dispatch_before_waiter(batch, waiter, now):
+                self._deadline_batch_filler_dispatches += 1
+                return 0.0
+            # The EDF candidate would consume the singleton fallback budget of
+            # the held request. Dispatch the held request now rather than
+            # allowing a speculative wait to become an avoidable deadline miss.
+            with waiter.lock:
+                waiter.deadline_batch_force_singleton = True
+            return 0.0
         if not batch or len(batch) >= self.max_batch_size:
             return 0.0
 
@@ -890,8 +1351,17 @@ class ABotWorldLiveKitService:
             return self.batching_window_seconds
         legacy_wait = min(
             self.batching_window_seconds,
-            max(0.0, self._latest_safe_batch_start(batch) - now),
+            max(0.0, self._latest_safe_batch_start(batch, now=now) - now),
         )
+        if len(batch) == 1 and self._has_compatible_ready_peer(batch[0], ready):
+            # A ready peer was considered but did not make a deadline-safe
+            # batch. Waiting for another peer cannot improve this EDF turn.
+            return 0.0
+        wait_state = held_batch_waiter or batch[0]
+        with wait_state.lock:
+            deadline_wait, deadline_wait_expired = self._deadline_batch_wait_seconds(wait_state, now)
+        if deadline_wait_expired:
+            return 0.0
 
         pivot_key = self._batch_key(batch[0])
         selected_ids = {state.session_id for state in batch}
@@ -910,41 +1380,59 @@ class ABotWorldLiveKitService:
                     or self._batch_key(candidate) != pivot_key
                     # A generated chunk owned by the publisher has an external
                     # dequeue time, so it cannot be a rendezvous promise.
-                    or self._queued_video_payloads(candidate)
+                    or (not self._uses_publisher_frame_credit(candidate) and self._queued_video_payloads(candidate))
                 ):
                     continue
 
-                release_at = candidate.pacing_ready_at - self._pacing_coalescing_slack_seconds(candidate)
+                release_at = (
+                    self._frame_credit_ready_at(candidate, now)
+                    if self._uses_publisher_frame_credit(candidate)
+                    else candidate.pacing_ready_at - self._pacing_coalescing_slack_seconds(candidate)
+                )
                 if release_at <= now:
                     # An already-eligible session should be in ready. Avoid
                     # turning a state race into an extra scheduler delay.
                     continue
                 proposed_batch = [*batch, candidate]
-                latest_safe_start = self._latest_safe_batch_start(proposed_batch)
-                if release_at + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS <= latest_safe_start:
+                latest_safe_start = self._latest_safe_batch_start(proposed_batch, now=now)
+                if release_at + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS <= latest_safe_start and (
+                    held_batch_waiter is None
+                    or release_at - now + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS <= deadline_wait
+                ):
                     rendezvous_waits.append(release_at - now + _PACING_RENDEZVOUS_WAKE_GUARD_SECONDS)
 
+        if held_batch_waiter is not None:
+            # A held B=2 may only wait for a specifically viable third peer;
+            # otherwise launch the safe pair without consuming more slack.
+            if deadline_wait <= 0 or not rendezvous_waits:
+                return 0.0
+            return min(deadline_wait, *rendezvous_waits)
+        if deadline_wait > 0:
+            # The timeout is persistent across condition wakeups. A known peer
+            # may wake us sooner, but never extends the caller's max wait.
+            return min(deadline_wait, *rendezvous_waits) if rendezvous_waits else deadline_wait
         if rendezvous_waits:
             # Earliest compatible release minimizes queueing; the condition
             # wait is followed by a full readiness/deadline revalidation.
             return min(rendezvous_waits)
         return legacy_wait
 
-    def _latest_safe_batch_start(self, batch: Sequence[_ABotWorldLiveKitSession]) -> float:
+    def _latest_safe_batch_start(self, batch: Sequence[_ABotWorldLiveKitSession], *, now: float | None = None) -> float:
         """Return the latest launch time that still meets every playout deadline."""
         if not batch:
             return float("-inf")
+        effective_now = time.monotonic() if now is None else now
         predicted_compute_seconds = self._estimated_batch_compute_seconds(batch)
-        return min(state.next_playout_deadline for state in batch) - predicted_compute_seconds
+        return min(self._session_deadline(state, effective_now) for state in batch) - predicted_compute_seconds
 
     def _estimated_batch_compute_seconds(self, batch: Sequence[_ABotWorldLiveKitSession]) -> float:
-        """Conservatively estimate batch wall time from observed service work."""
+        """Conservatively estimate batch wall time from offline priors or observed work."""
         batch_size = len(batch)
         observed = self._batch_compute_estimates.get(batch_size)
         if observed is None:
             singleton_seconds = max((state.last_compute_seconds for state in batch), default=0.0)
             observed = singleton_seconds * batch_size
-        return observed * _PACING_SAFETY_FACTOR
+        return observed * self.batch_compute_safety_factor
 
     @staticmethod
     def _queued_video_payloads(state: _ABotWorldLiveKitSession) -> int:
@@ -968,6 +1456,10 @@ class ABotWorldLiveKitService:
             return []
         if self.scheduler_mode == "round_robin":
             return self._select_round_robin_session(ready)
+        for state in ready:
+            with state.lock:
+                if state.deadline_batch_force_singleton:
+                    return [state]
         pivot_key = self._batch_key(ready[0])
         batch = [state for state in ready if self._batch_key(state) == pivot_key][: self.max_batch_size]
         if len(batch) <= 1:
@@ -978,14 +1470,11 @@ class ABotWorldLiveKitService:
         # consumer queues rather than a playout deadline. Only a batch made
         # entirely of already-playing latest-mode sessions has a deadline that
         # makes a larger batch potentially worse than two singleton turns.
-        if any(
-            state.scheduled_chunks == 0 or state.config["delivery_mode"] != "latest"
-            for state in batch
-        ):
+        if any(state.scheduled_chunks == 0 or state.config["delivery_mode"] != "latest" for state in batch):
             return batch
 
         selected_at = time.monotonic() if now is None else now
-        if selected_at <= self._latest_safe_batch_start(batch):
+        if selected_at <= self._latest_safe_batch_start(batch, now=selected_at):
             return batch
 
         # The earliest state owns the earliest playout deadline because ready
@@ -1017,16 +1506,37 @@ class ABotWorldLiveKitService:
     def _discard_from_round_robin(self, session_id: str) -> None:
         self._round_robin_order = deque(value for value in self._round_robin_order if value != session_id)
 
-    @staticmethod
-    def _batch_key(state: _ABotWorldLiveKitSession) -> tuple[object, ...]:
+    def _uses_relative_rope(self) -> bool:
+        """Return the DiT RoPE mode, failing closed for unknown pipeline adapters.
+
+        ``generate_next_blocks`` accepts sessions with different global frame
+        cursors only for Relative-RoPE. A third-party pipeline adapter that
+        does not expose this capability is therefore treated as Absolute-RoPE
+        rather than risking an invalid mixed-position batch.
+        """
+        denoise_stage = getattr(self.pipeline, "denoise_stage", None)
+        dit = getattr(denoise_stage, "dit", None)
+        return bool(getattr(dit, "use_relative_rope", False))
+
+    def _batch_key(self, state: _ABotWorldLiveKitSession) -> tuple[object, ...]:
         session = state.pipeline_session
         local_end = 0
         if session.self_cache:
             value = session.self_cache[0]["local_end_index"]
             local_end = int(value.item()) if isinstance(value, torch.Tensor) else int(value)
+        # The native batch path collates K/V rows and permits per-session
+        # ``global_end_index`` values; it restores each cursor after applying
+        # the common update delta. Relative-RoPE reindexes the retained KV
+        # window locally, so equal local layout is sufficient here. Absolute
+        # RoPE instead receives one scalar ``current_start`` for the entire
+        # model call and must retain exact global frame alignment.
+        position_key: int | None = None
+        if not self._uses_relative_rope():
+            position_key = int(session.next_latent_frame)
         return (
             int(state.config["control_latent_frames"]),
             session.next_latent_frame == 0,
+            position_key,
             local_end,
             tuple(session.first_frame_latent.shape),
             session.lifecycle == ABotWorldSessionLifecycle.SUSPENDED,
@@ -1037,7 +1547,19 @@ class ABotWorldLiveKitService:
         batch: Sequence[_ABotWorldLiveKitSession],
         controls: Sequence[dict[str, bool]],
     ) -> None:
-        started_at = time.monotonic()
+        # ``selected_*`` measures the scheduler boundary. The model interval is
+        # intentionally narrower: it begins immediately before the real
+        # generate_next_block(s) call, so a timeline is a truthful GPU-work
+        # interval rather than an IPC/queue approximation.
+        selected_at = time.monotonic()
+        selected_wall_time = time.time()
+        model_started_at: float | None = None
+        model_started_wall_time: float | None = None
+        control_latent_frames: int | None = None
+        session_traces = [
+            self._new_dispatch_session_trace(state, applied_controls, selected_at=selected_at)
+            for state, applied_controls in zip(batch, controls)
+        ]
         try:
             for state in batch:
                 if not state.pipeline_session.is_resident:
@@ -1045,21 +1567,39 @@ class ABotWorldLiveKitService:
             frame_counts = {int(state.config["control_latent_frames"]) for state in batch}
             if len(frame_counts) != 1:
                 raise RuntimeError("ABot scheduler selected an incompatible latent-frame batch")
+            control_latent_frames = next(iter(frame_counts))
+            model_started_at = time.monotonic()
+            model_started_wall_time = time.time()
             if len(batch) == 1:
                 results = [
                     self.pipeline.generate_next_block(
                         batch[0].pipeline_session,
                         controls[0],
-                        control_latent_frames=frame_counts.pop(),
+                        control_latent_frames=control_latent_frames,
                     )
                 ]
             else:
                 results = self.pipeline.generate_next_blocks(
                     [state.pipeline_session for state in batch],
                     list(controls),
-                    control_latent_frames=frame_counts.pop(),
+                    control_latent_frames=control_latent_frames,
                 )
         except Exception as exc:
+            completed_at = time.monotonic()
+            completed_wall_time = time.time()
+            self._emit_dispatch_trace(
+                selected_at=selected_at,
+                selected_wall_time=selected_wall_time,
+                model_started_at=model_started_at,
+                model_started_wall_time=model_started_wall_time,
+                completed_at=completed_at,
+                completed_wall_time=completed_wall_time,
+                session_traces=session_traces,
+                control_latent_frames=control_latent_frames,
+                stage_metrics={},
+                outcome="error",
+                error=repr(exc),
+            )
             logger.exception(
                 "ABot TurboServe batch generation failed: sessions=%s",
                 [item.session_id for item in batch],
@@ -1072,9 +1612,10 @@ class ABotWorldLiveKitService:
                 self._put_output(state, {"type": "error", "error": str(exc), "timestamp": time.time()})
         else:
             completed_at = time.monotonic()
+            completed_wall_time = time.time()
             stage_metrics_callback = getattr(self.pipeline, "last_stage_metrics", None)
             self._last_stage_metrics = dict(stage_metrics_callback()) if callable(stage_metrics_callback) else {}
-            observed_compute_seconds = completed_at - started_at
+            observed_compute_seconds = completed_at - selected_at
             previous_estimate = self._batch_compute_estimates.get(len(batch), 0.0)
             # Keep a service-run high-water mark so a transient fast batch
             # cannot make a later rendezvous overrun a playout deadline.
@@ -1086,11 +1627,11 @@ class ABotWorldLiveKitService:
             self._batch_count += 1
             self._batch_item_count += len(batch)
             self._maximum_batch_size = max(self._maximum_batch_size, len(batch))
-            for state, frames, applied_controls in zip(batch, results, controls):
+            for trace, state, frames, applied_controls in zip(session_traces, batch, results, controls):
                 with state.lock:
-                    queue_wait = max(0.0, started_at - (state.ready_since or started_at))
+                    queue_wait = max(0.0, selected_at - (state.ready_since or selected_at))
                     state.total_queue_wait_seconds += queue_wait
-                    state.total_compute_seconds += completed_at - started_at
+                    state.total_compute_seconds += completed_at - selected_at
                     state.scheduled_chunks += 1
                     state.batch_items += len(batch)
                     payload = {
@@ -1103,7 +1644,7 @@ class ABotWorldLiveKitService:
                         "scheduler": {
                             "batch_size": len(batch),
                             "queue_wait_seconds": round(queue_wait, 6),
-                            "compute_seconds": round(completed_at - started_at, 6),
+                            "compute_seconds": round(completed_at - selected_at, 6),
                             **self._last_stage_metrics,
                         },
                     }
@@ -1123,9 +1664,10 @@ class ABotWorldLiveKitService:
                         else:
                             # Start the next block early enough to meet the start of the
                             # sole prefetched block, but never run before this block ends.
-                            predicted_compute_seconds = max(
-                                observed_compute_seconds, previous_compute_seconds
-                            ) * _PACING_SAFETY_FACTOR
+                            predicted_compute_seconds = (
+                                max(observed_compute_seconds, previous_compute_seconds)
+                                * self.batch_compute_safety_factor
+                            )
                             next_chunk_playout_start = state.next_playout_deadline - chunk_duration_seconds
                             state.pacing_ready_at = max(
                                 completed_at, next_chunk_playout_start - predicted_compute_seconds
@@ -1133,7 +1675,20 @@ class ABotWorldLiveKitService:
                     else:
                         state.pacing_ready_at = completed_at
                     state.ready_since = completed_at if state.controls else None
+                    self._finish_dispatch_session_trace(trace, state, frames)
                 self._put_output(state, payload)
+            self._emit_dispatch_trace(
+                selected_at=selected_at,
+                selected_wall_time=selected_wall_time,
+                model_started_at=model_started_at,
+                model_started_wall_time=model_started_wall_time,
+                completed_at=completed_at,
+                completed_wall_time=completed_wall_time,
+                session_traces=session_traces,
+                control_latent_frames=control_latent_frames,
+                stage_metrics=self._last_stage_metrics,
+                outcome="ok",
+            )
         finally:
             with self._scheduler_condition:
                 for state in batch:
@@ -1149,6 +1704,7 @@ class ABotWorldLiveKitService:
                 return False
             if not state.output_queue.full():
                 state.output_queue.put_nowait(payload)
+                state.output_available_event.set()
                 state.output_queue_high_watermark = max(
                     state.output_queue_high_watermark,
                     state.output_queue.qsize(),
@@ -1193,6 +1749,7 @@ class ABotWorldLiveKitService:
                     state.dropped_status_payloads += 1
                     return False
             state.output_queue.put_nowait(payload)
+            state.output_available_event.set()
             state.output_queue_high_watermark = max(state.output_queue_high_watermark, state.output_queue.qsize())
             return True
 
@@ -1239,3 +1796,143 @@ class ABotWorldLiveKitService:
     @classmethod
     def _canonical_controls(cls, values: list[object]) -> set[str]:
         return {cls._canonical_control(value) for value in values}
+
+    @staticmethod
+    def _payload_frame_count(payload: Mapping[str, object]) -> int:
+        """Return video-frame count without treating previews/status as playout."""
+
+        frames = payload.get("frames")
+        if isinstance(frames, Sequence) and not isinstance(frames, str | bytes | bytearray):
+            return len(frames)
+        return 0
+
+    @classmethod
+    def _queued_video_frames(cls, state: _ABotWorldLiveKitSession) -> int:
+        """Return Fq: generated chunk frames not yet dequeued by the publisher."""
+
+        with state.output_queue.mutex:
+            return sum(
+                cls._payload_frame_count(item)
+                for item in state.output_queue.queue
+                if isinstance(item, Mapping) and item.get("type") == "chunk"
+            )
+
+    def _uses_publisher_frame_credit(self, state: _ABotWorldLiveKitSession) -> bool:
+        """Whether this continuation has an authoritative publisher credit."""
+
+        return bool(
+            self.publisher_frame_credit_enabled
+            and state.publisher_frame_tracking_enabled
+            and state.config["delivery_mode"] == "latest"
+            and state.scheduled_chunks > 0
+        )
+
+    def _publisher_frame_credit(self, state: _ABotWorldLiveKitSession) -> int:
+        """Return Fi = Fq + Fp, frames not yet accepted by LiveKit."""
+
+        return self._queued_video_frames(state) + state.publisher_unsubmitted_frames
+
+    def _frame_credit_target_frames(self, state: _ABotWorldLiveKitSession) -> int:
+        fps = max(1, int(state.config["fps"]))
+        target_frames = self.publisher_frame_credit_target_frames
+        if target_frames is None:
+            target_frames = math.ceil(fps * self.publisher_frame_credit_target_seconds)
+        return max(self.publisher_frame_credit_reserve_frames, target_frames)
+
+    def _frame_credit_ready_at(self, state: _ABotWorldLiveKitSession, now: float) -> float:
+        """Predict when an overfilled publisher buffer reaches its low watermark."""
+
+        if not self._uses_publisher_frame_credit(state):
+            return now
+        frames_over_target = max(0, self._publisher_frame_credit(state) - self._frame_credit_target_frames(state))
+        return now + frames_over_target / max(1, int(state.config["fps"]))
+
+    def _session_deadline(self, state: _ABotWorldLiveKitSession, now: float) -> float:
+        """Return completion deadline from real publisher credit or legacy pacing."""
+
+        if not self._uses_publisher_frame_credit(state):
+            return state.next_playout_deadline
+        usable_frames = max(0, self._publisher_frame_credit(state) - self.publisher_frame_credit_reserve_frames)
+        return now + usable_frames / max(1, int(state.config["fps"])) - self.publisher_frame_credit_guard_seconds
+
+    def enable_publisher_frame_tracking(self, session_id: str) -> bool:
+        """Enable publisher handoff tracking for a real-time transport.
+
+        A generic pull consumer may never call capture_frame(). Tracking is
+        therefore explicitly enabled by the LiveKit worker. The scheduler only
+        consumes the resulting credit when ``publisher_frame_credit_enabled``
+        is set, but migration always needs the handoff state to drain safely.
+        """
+        state = self._session(session_id)
+        if state is None:
+            return False
+        with self._scheduler_condition, state.lock:
+            if not state.active:
+                return False
+            if not state.publisher_frame_tracking_enabled:
+                state.publisher_frame_tracking_enabled = True
+                state.publisher_unsubmitted_frames = 0
+                state.publisher_progress_sequence = -1
+                state.publisher_progress_updated_at = None
+            self._scheduler_condition.notify_all()
+        return True
+
+    def migration_drain_status(self, session_id: str) -> dict[str, int | bool]:
+        """Return a source-side barrier snapshot for transport-safe migration.
+
+        A caller uses this only after scheduler pause. It deliberately exposes
+        queue emptiness separately from the parent transport's own drain state;
+        together they prove that no generated payload or publisher-owned frame
+        can be copied into a migrated session.
+        """
+        state = self._session(session_id)
+        if state is None:
+            raise KeyError(f"Unknown ABot session {session_id!r}")
+        with self._scheduler_condition, state.lock:
+            return {
+                "in_flight": bool(state.in_flight),
+                "output_queue_empty": state.output_queue.empty(),
+                "publisher_unsubmitted_frames": int(state.publisher_unsubmitted_frames),
+            }
+
+    def report_publisher_frame_progress(
+        self,
+        session_id: str,
+        *,
+        event: str,
+        frames_delta: int,
+        sequence: int,
+        observed_monotonic_seconds: float | None = None,
+    ) -> bool:
+        """Apply one monotonic publisher progress update.
+
+        frames_delta is negative for both a frame accepted by LiveKit and an
+        abandoned/dropped frame. It is deliberately a delta: dequeue is
+        accounted atomically in pull_chunks(), so no empty-queue race can make
+        the scheduler believe that the publisher has no remaining video.
+        """
+        if event not in {"submitted", "dropped", "abandoned"}:
+            raise ValueError(f"Unsupported publisher progress event: {event!r}")
+        if frames_delta > 0:
+            raise ValueError("publisher progress frames_delta must be non-positive")
+        state = self._session(session_id)
+        if state is None:
+            return False
+        with self._scheduler_condition, state.lock:
+            if not state.active or not state.publisher_frame_tracking_enabled:
+                return False
+            if sequence <= state.publisher_progress_sequence:
+                return False
+            state.publisher_progress_sequence = int(sequence)
+            state.publisher_progress_updated_at = (
+                time.monotonic() if observed_monotonic_seconds is None else float(observed_monotonic_seconds)
+            )
+            previous = state.publisher_unsubmitted_frames
+            state.publisher_unsubmitted_frames = max(0, previous + int(frames_delta))
+            applied = previous - state.publisher_unsubmitted_frames
+            if event == "submitted":
+                state.publisher_frames_submitted += applied
+            else:
+                state.publisher_frames_abandoned += applied
+            self._scheduler_condition.notify_all()
+        return True

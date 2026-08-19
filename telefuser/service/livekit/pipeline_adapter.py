@@ -48,6 +48,24 @@ class LiveKitPipelineAdapter:
         async for chunk in self.stream_service.pull_chunks(session_id):
             yield chunk
 
+    def enable_publisher_frame_tracking(self, session_id: str) -> bool:
+        """Enable the wrapped service's optional real-time frame feedback."""
+
+        return self.stream_service.enable_publisher_frame_tracking(session_id)
+
+    def report_publisher_frame_progress(
+        self, session_id: str, *, event: str, frames_delta: int, sequence: int, observed_monotonic_seconds: float
+    ) -> bool:
+        """Forward one idempotent publisher progress update when supported."""
+
+        return self.stream_service.report_publisher_frame_progress(
+            session_id,
+            event=event,
+            frames_delta=frames_delta,
+            sequence=sequence,
+            observed_monotonic_seconds=observed_monotonic_seconds,
+        )
+
     async def stream_task(self, config: dict) -> AsyncGenerator[dict, None]:
         """Yield chunks from a server-push service."""
         async for chunk in self.stream_service.stream_task(config):

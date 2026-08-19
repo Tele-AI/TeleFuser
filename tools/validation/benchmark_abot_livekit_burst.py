@@ -99,6 +99,37 @@ class AdmissionExpectation:
 
 
 @dataclass(frozen=True)
+class DiagnosticInitialControlBarrier:
+    """Synthetic synchronized-first-control configuration for a diagnostic trace."""
+
+    phase_name: str
+    expected_connected_sessions: int
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class LifecycleTraceEvent:
+    """One explicit user lifecycle transition in a black-box replay."""
+
+    offset_seconds: float
+    sequence: int
+    event: str
+    trace_session_id: str
+    source_session_id: int | None
+    source_user_id: int | None
+    input_enabled: bool | None
+
+
+@dataclass(frozen=True)
+class LifecycleTrace:
+    """An exact per-session lifecycle trace, unlike aggregate phase fractions."""
+
+    kind: str
+    duration_seconds: float
+    events: tuple[LifecycleTraceEvent, ...]
+
+
+@dataclass(frozen=True)
 class Scenario:
     """Validated configuration of one complete black-box experiment."""
 
@@ -116,6 +147,8 @@ class Scenario:
     expected_worker_mode: str | None
     admission: AdmissionExpectation
     expected_num_workers: int | None
+    diagnostic_initial_control_barrier: DiagnosticInitialControlBarrier | None
+    lifecycle_trace: LifecycleTrace | None
     raw: dict[str, Any]
 
 
@@ -233,6 +266,70 @@ def _parse_admission(value: object) -> AdmissionExpectation:
     )
 
 
+def _parse_diagnostic_initial_control_barrier(
+    value: object,
+    phases: Sequence[Phase],
+) -> DiagnosticInitialControlBarrier | None:
+    """Parse an explicitly synthetic synchronized-first-control diagnostic.
+
+    This is deliberately restricted to a fresh first phase.  A later phase
+    would contain users that have already sent controls, so it could not be
+    accurately described as an initial-control alignment.
+    """
+    raw = _require_mapping(value, "diagnostic")
+    barrier_value = raw.get("initial_control_barrier")
+    if barrier_value is None:
+        return None
+    barrier = _require_mapping(barrier_value, "diagnostic.initial_control_barrier")
+    enabled = barrier.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ScenarioError("diagnostic.initial_control_barrier.enabled must be a boolean")
+    if not enabled:
+        return None
+    if barrier.get("kind") != "phase_aligned_initial_control":
+        raise ScenarioError("diagnostic.initial_control_barrier.kind must be phase_aligned_initial_control")
+    if barrier.get("not_a_real_user_trace") is not True:
+        raise ScenarioError("diagnostic.initial_control_barrier.not_a_real_user_trace must be true")
+    phase_name = barrier.get("phase")
+    if not isinstance(phase_name, str) or not phase_name:
+        raise ScenarioError("diagnostic.initial_control_barrier.phase must be a non-empty string")
+    phase_index = next((index for index, phase in enumerate(phases) if phase.name == phase_name), None)
+    if phase_index is None:
+        raise ScenarioError("diagnostic.initial_control_barrier.phase must name a scenario phase")
+    if phase_index != 0:
+        raise ScenarioError(
+            "diagnostic.initial_control_barrier only supports the first phase; "
+            "later phases are not initial-control traces"
+        )
+    phase = phases[phase_index]
+    expected = _require_non_negative_int(
+        barrier.get("expected_connected_sessions"),
+        "diagnostic.initial_control_barrier.expected_connected_sessions",
+    )
+    if expected < 1:
+        raise ScenarioError("diagnostic.initial_control_barrier.expected_connected_sessions must be positive")
+    if expected != phase.target_users:
+        raise ScenarioError(
+            "diagnostic.initial_control_barrier.expected_connected_sessions must equal the fresh phase target_users"
+        )
+    if phase.active_input_fraction != 1.0:
+        raise ScenarioError(
+            "diagnostic.initial_control_barrier requires active_input_fraction=1.0 "
+            "so every released first control is active"
+        )
+    timeout = _require_positive_float(
+        barrier.get("timeout_seconds"),
+        "diagnostic.initial_control_barrier.timeout_seconds",
+    )
+    if timeout >= phase.duration_seconds:
+        raise ScenarioError("diagnostic.initial_control_barrier.timeout_seconds must be shorter than its phase")
+    return DiagnosticInitialControlBarrier(
+        phase_name=phase.name,
+        expected_connected_sessions=expected,
+        timeout_seconds=timeout,
+    )
+
+
 def load_scenario(path: Path, *, server_url_override: str | None = None) -> Scenario:
     """Load and validate a JSON user-wave scenario."""
     try:
@@ -313,11 +410,7 @@ def load_scenario(path: Path, *, server_url_override: str | None = None) -> Scen
             f"phases[{index}].input_transition_window_seconds",
             allow_zero=True,
         )
-        if (
-            arrival_window > duration
-            or departure_window > duration
-            or input_transition_window > duration
-        ):
+        if arrival_window > duration or departure_window > duration or input_transition_window > duration:
             raise ScenarioError(f"phases[{index}] transition windows cannot exceed duration")
         phases.append(
             Phase(
@@ -330,6 +423,11 @@ def load_scenario(path: Path, *, server_url_override: str | None = None) -> Scen
                 input_transition_window_seconds=input_transition_window,
             )
         )
+
+    diagnostic_initial_control_barrier = _parse_diagnostic_initial_control_barrier(
+        raw.get("diagnostic", {}),
+        phases,
+    )
 
     measurement = _require_mapping(raw.get("measurement", {}), "measurement")
     expected_worker_mode = raw.get("expected_worker_mode")
@@ -377,6 +475,8 @@ def load_scenario(path: Path, *, server_url_override: str | None = None) -> Scen
         seed=seed,
         expected_worker_mode=expected_worker_mode,
         expected_num_workers=expected_num_workers,
+        diagnostic_initial_control_barrier=diagnostic_initial_control_barrier,
+        lifecycle_trace=None,
         raw=raw,
     )
 
@@ -424,6 +524,11 @@ class LiveKitWaveSession:
     rtc: Any
     record_event: Any
     started_at: float
+    trace_session_id: str | None = None
+    source_trace_session_id: int | None = None
+    source_trace_user_id: int | None = None
+    diagnostic_initial_control_barrier_phase: str | None = None
+    initial_control_gate: asyncio.Event | None = field(default=None, repr=False)
     _room: Any | None = field(default=None, init=False, repr=False)
     _video_streams: list[Any] = field(default_factory=list, init=False, repr=False)
     _video_tasks: list[asyncio.Task[None]] = field(default_factory=list, init=False, repr=False)
@@ -433,6 +538,8 @@ class LiveKitWaveSession:
     create_started_at: float | None = field(default=None, init=False)
     created_at: float | None = field(default=None, init=False)
     connected_at: float | None = field(default=None, init=False)
+    initial_control_barrier_arrived_at: float | None = field(default=None, init=False)
+    initial_control_barrier_released_at: float | None = field(default=None, init=False)
     first_media_frame_at: float | None = field(default=None, init=False)
     first_generated_frame_at: float | None = field(default=None, init=False)
     last_generated_frame_at: float | None = field(default=None, init=False)
@@ -463,7 +570,7 @@ class LiveKitWaveSession:
 
     @property
     def logical_id(self) -> str:
-        return f"wave-{self.index:03d}"
+        return self.trace_session_id or f"wave-{self.index:03d}"
 
     @property
     def active_controls(self) -> bool:
@@ -483,9 +590,7 @@ class LiveKitWaveSession:
         if enabled:
             self.input_resumes += 1
             paused_for = (
-                max(0.0, now - self.input_pause_started_at)
-                if self.input_pause_started_at is not None
-                else None
+                max(0.0, now - self.input_pause_started_at) if self.input_pause_started_at is not None else None
             )
             self.input_pause_started_at = None
             self.record_event(
@@ -502,7 +607,11 @@ class LiveKitWaveSession:
             controls = ()
 
         # Do not wait for the next heartbeat to clear a stale key state.
-        if self.connected and self._room is not None:
+        if (
+            self.connected
+            and self._room is not None
+            and (self.initial_control_gate is None or self.initial_control_gate.is_set())
+        ):
             try:
                 await self._publish_control_state(controls)
             except Exception as exc:  # noqa: BLE001 - a transition failure is a workload fact
@@ -620,7 +729,20 @@ class LiveKitWaveSession:
             connected_seconds=round(self.connected_at - (self.create_started_at or self.connected_at), 6),
         )
         if not self.stop_requested:
-            self._control_task = asyncio.create_task(self._send_controls(), name=f"abot-controls-{self.logical_id}")
+            if self.initial_control_gate is not None:
+                self.initial_control_barrier_arrived_at = self.connected_at
+                self.record_event(
+                    "diagnostic_initial_control_barrier_arrived",
+                    session=self.logical_id,
+                    phase=self.diagnostic_initial_control_barrier_phase,
+                )
+            self._start_control_task()
+
+    def _start_control_task(self) -> None:
+        """Start the heartbeat once; a diagnostic gate may hold its first send."""
+        if self.stop_requested or self._control_task is not None:
+            return
+        self._control_task = asyncio.create_task(self._send_controls(), name=f"abot-controls-{self.logical_id}")
 
     async def _consume_video(self, stream: Any) -> None:
         try:
@@ -652,6 +774,11 @@ class LiveKitWaveSession:
                 self.record_event("video_stream_error", session=self.logical_id, error=self.error)
 
     async def _send_controls(self) -> None:
+        gate = self.initial_control_gate
+        if gate is not None:
+            await gate.wait()
+        if self.stop_requested:
+            return
         assert self._room is not None
         control = self.scenario.session.control
         idle_until = 0.0
@@ -682,6 +809,9 @@ class LiveKitWaveSession:
     async def _publish_control_state(self, controls: tuple[str, ...]) -> None:
         """Publish one reliable control heartbeat and retain its public state."""
         if self._room is None:
+            return
+        gate = self.initial_control_gate
+        if gate is not None and not gate.is_set():
             return
         payload = {"type": "control_state", "controls": list(controls)}
         await self._room.local_participant.publish_data(
@@ -758,6 +888,8 @@ class LiveKitWaveSession:
         )
         return {
             "logical_session_id": self.logical_id,
+            "source_trace_session_id": self.source_trace_session_id,
+            "source_trace_user_id": self.source_trace_user_id,
             "server_session_id": self.server_session_id,
             "worker_id_at_admission": self.worker_id,
             "admission_status": self.admission_status,
@@ -768,6 +900,20 @@ class LiveKitWaveSession:
             "stop_requested": self.stop_requested,
             "departure_scheduled": self.departure_scheduled,
             "remote_session_deleted": self.remote_session_deleted,
+            "diagnostic_initial_control_barrier_phase": self.diagnostic_initial_control_barrier_phase,
+            "diagnostic_initial_control_barrier_waiting": (
+                self.initial_control_gate is not None and not self.initial_control_gate.is_set()
+            ),
+            "diagnostic_initial_control_barrier_arrived_offset_seconds": (
+                round(self.initial_control_barrier_arrived_at - self.started_at, 6)
+                if self.initial_control_barrier_arrived_at is not None
+                else None
+            ),
+            "diagnostic_initial_control_barrier_released_offset_seconds": (
+                round(self.initial_control_barrier_released_at - self.started_at, 6)
+                if self.initial_control_barrier_released_at is not None
+                else None
+            ),
             "input_enabled": self.input_enabled,
             "active_controls": self.active_controls,
             "input_pauses": self.input_pauses,
@@ -804,6 +950,12 @@ class LiveKitWaveRunner:
         self.scenario = scenario
         self.rtc = _load_livekit_rtc()
         self.started_at = 0.0
+        # ``offset_seconds`` is measured with perf_counter(). Keep a sampled
+        # wall-clock/monotonic triplet from the same workload origin so an
+        # external per-dispatch trace can align client events without guessing
+        # from process start time.
+        self._trace_started_monotonic_seconds = 0.0
+        self._trace_started_unix_seconds = 0.0
         self._sessions: list[LiveKitWaveSession] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._monitor_task: asyncio.Task[None] | None = None
@@ -818,6 +970,9 @@ class LiveKitWaveRunner:
         self._previous_sample_at: float | None = None
         self._server_metadata: list[dict[str, Any]] = []
         self._warnings: list[str] = []
+        # These records are kept separate from user-wave results because a
+        # synchronized first action is a harness diagnostic, not user behavior.
+        self._diagnostic_initial_control_barrier_results: list[dict[str, Any]] = []
 
     def record_event(self, event: str, **values: Any) -> None:
         now = time.perf_counter()
@@ -844,6 +999,8 @@ class LiveKitWaveRunner:
         async with httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False) as http:
             self._http = http
             self.started_at = time.perf_counter()
+            self._trace_started_monotonic_seconds = time.monotonic()
+            self._trace_started_unix_seconds = time.time()
             await self._capture_server_metadata("before_workload")
             self._monitoring = True
             self._monitor_task = asyncio.create_task(self._monitor(), name="abot-livekit-wave-monitor")
@@ -873,6 +1030,20 @@ class LiveKitWaveRunner:
                     "expected_max_sessions_per_worker": self.scenario.admission.expected_max_sessions_per_worker,
                     "expected_queue_size": self.scenario.admission.expected_queue_size,
                 },
+                "diagnostic_initial_control_barrier": (
+                    {
+                        "enabled": True,
+                        "kind": "phase_aligned_initial_control",
+                        "not_a_real_user_trace": True,
+                        "phase": self.scenario.diagnostic_initial_control_barrier.phase_name,
+                        "expected_connected_sessions": (
+                            self.scenario.diagnostic_initial_control_barrier.expected_connected_sessions
+                        ),
+                        "timeout_seconds": self.scenario.diagnostic_initial_control_barrier.timeout_seconds,
+                    }
+                    if self.scenario.diagnostic_initial_control_barrier is not None
+                    else {"enabled": False}
+                ),
                 "phases": [
                     {
                         "name": phase.name,
@@ -886,10 +1057,19 @@ class LiveKitWaveRunner:
                     for phase in self.scenario.phases
                 ],
             },
-            "started_at_unix_seconds": time.time() - max(0.0, completed_at - self.started_at),
+            "trace_clock": {
+                "offset_clock": "time.perf_counter",
+                "origin_performance_counter_seconds": round(self.started_at, 9),
+                "origin_monotonic_seconds": round(self._trace_started_monotonic_seconds, 9),
+                "origin_unix_seconds": round(self._trace_started_unix_seconds, 9),
+                "offset_to_unix_seconds": "origin_unix_seconds + offset_seconds",
+                "offset_to_monotonic_seconds": "origin_monotonic_seconds + offset_seconds",
+            },
+            "started_at_unix_seconds": round(self._trace_started_unix_seconds, 9),
             "elapsed_seconds": round(completed_at - self.started_at, 6),
             "server_metadata": self._server_metadata,
             "warnings": self._warnings,
+            "diagnostic_initial_control_barrier_results": self._diagnostic_initial_control_barrier_results,
             "phase_results": self._phase_results,
             "sessions": [session.snapshot(completed_at) for session in self._sessions],
             "samples": self._samples,
@@ -928,7 +1108,14 @@ class LiveKitWaveRunner:
             session for session in self._sessions if not session.stop_requested and not session.departure_scheduled
         ]
         difference = phase.target_users - len(present)
+        barrier = self.scenario.diagnostic_initial_control_barrier
+        gate: asyncio.Event | None = None
+        if barrier is not None and barrier.phase_name == phase.name:
+            if present or difference != barrier.expected_connected_sessions:
+                raise RuntimeError("Diagnostic initial-control barrier no longer describes a fresh target population")
+            gate = asyncio.Event()
         if difference > 0:
+            barrier_sessions: list[LiveKitWaveSession] = []
             for ordinal in range(difference):
                 session = LiveKitWaveSession(
                     index=len(self._sessions),
@@ -937,11 +1124,25 @@ class LiveKitWaveRunner:
                     rtc=self.rtc,
                     record_event=self.record_event,
                     started_at=self.started_at,
+                    diagnostic_initial_control_barrier_phase=phase.name if gate is not None else None,
+                    initial_control_gate=gate,
                 )
                 session.scheduled_at = time.perf_counter()
                 self._sessions.append(session)
+                barrier_sessions.append(session)
                 offset = self._spread_offset(ordinal + 1, difference, phase.arrival_window_seconds)
                 self._spawn_background(self._delayed_start(session, offset))
+            if gate is not None:
+                assert barrier is not None
+                self.record_event(
+                    "diagnostic_initial_control_barrier_opened",
+                    phase=phase.name,
+                    expected_connected_sessions=barrier.expected_connected_sessions,
+                    not_a_real_user_trace=True,
+                )
+                self._spawn_background(
+                    self._run_diagnostic_initial_control_barrier(phase, barrier, barrier_sessions, gate)
+                )
             return
         if difference < 0:
             # Newest users leave first. This also removes still-queued arrivals before
@@ -951,6 +1152,91 @@ class LiveKitWaveRunner:
                 session.departure_scheduled = True
                 offset = self._spread_offset(ordinal + 1, -difference, phase.departure_window_seconds)
                 self._spawn_background(self._delayed_stop(session, offset))
+
+    async def _run_diagnostic_initial_control_barrier(
+        self,
+        phase: Phase,
+        barrier: DiagnosticInitialControlBarrier,
+        sessions: Sequence[LiveKitWaveSession],
+        gate: asyncio.Event,
+    ) -> None:
+        """Release held control tasks only after the synthetic cohort connects.
+
+        A timeout or failed admission deliberately opens the gate for already
+        connected clients, so the harness never leaves serving sessions held
+        forever.  The artifact records that result as unaligned and invalid for
+        a phase-alignment comparison.
+        """
+        opened_at = time.perf_counter()
+        deadline = opened_at + barrier.timeout_seconds
+        status = "released_aligned"
+        warning: str | None = None
+        connected: list[LiveKitWaveSession] = []
+        try:
+            while True:
+                now = time.perf_counter()
+                connected = [session for session in sessions if session.connected and not session.stop_requested]
+                failed = [session for session in sessions if session.stop_requested or session.error is not None]
+                if failed:
+                    status = "released_unaligned_failure"
+                    warning = (
+                        "Diagnostic initial-control barrier saw failed or stopped sessions; "
+                        "released connected sessions without phase alignment."
+                    )
+                    break
+                if len(connected) == barrier.expected_connected_sessions:
+                    break
+                if now >= deadline:
+                    status = "released_unaligned_timeout"
+                    warning = (
+                        "Diagnostic initial-control barrier timed out before every session connected; "
+                        "released connected sessions without phase alignment."
+                    )
+                    break
+                await asyncio.sleep(min(0.02, max(0.001, deadline - now)))
+        except asyncio.CancelledError:
+            cancelled_at = time.perf_counter()
+            result = {
+                "kind": "phase_aligned_initial_control",
+                "not_a_real_user_trace": True,
+                "phase": phase.name,
+                "expected_connected_sessions": barrier.expected_connected_sessions,
+                "connected_sessions_at_release": len(connected),
+                "status": "cancelled",
+                "opened_offset_seconds": round(opened_at - self.started_at, 6),
+                "released_offset_seconds": round(cancelled_at - self.started_at, 6),
+                "wait_seconds": round(cancelled_at - opened_at, 6),
+            }
+            self._diagnostic_initial_control_barrier_results.append(result)
+            self.record_event("diagnostic_initial_control_barrier_cancelled", phase=phase.name)
+            raise
+
+        released_at = time.perf_counter()
+        for session in connected:
+            session.initial_control_barrier_released_at = released_at
+        gate.set()
+        result = {
+            "kind": "phase_aligned_initial_control",
+            "not_a_real_user_trace": True,
+            "phase": phase.name,
+            "expected_connected_sessions": barrier.expected_connected_sessions,
+            "connected_sessions_at_release": len(connected),
+            "status": status,
+            "opened_offset_seconds": round(opened_at - self.started_at, 6),
+            "released_offset_seconds": round(released_at - self.started_at, 6),
+            "wait_seconds": round(released_at - opened_at, 6),
+        }
+        self._diagnostic_initial_control_barrier_results.append(result)
+        self.record_event(
+            "diagnostic_initial_control_barrier_released",
+            phase=phase.name,
+            status=status,
+            connected_sessions=len(connected),
+            expected_connected_sessions=barrier.expected_connected_sessions,
+            not_a_real_user_trace=True,
+        )
+        if warning is not None:
+            self._warnings.append(warning)
 
     def _schedule_input_activity(self, phase: Phase) -> None:
         """Schedule long input pauses/resumes for sessions present in this phase.
@@ -1353,6 +1639,13 @@ def main() -> None:
     scenario = load_scenario(scenario_path, server_url_override=args.server_url)
     if args.dry_run:
         print(json.dumps(scenario.raw, indent=2, sort_keys=True))
+        barrier = scenario.diagnostic_initial_control_barrier
+        if barrier is not None:
+            print(
+                "\nDIAGNOSTIC ONLY: this scenario synchronizes the first active control after "
+                f"{barrier.expected_connected_sessions} sessions connect in phase {barrier.phase_name!r}. "
+                "It is not a real-user arrival trace."
+            )
         print(f"\nValidated scenario: {scenario.name}")
         return
     if args.output is None:

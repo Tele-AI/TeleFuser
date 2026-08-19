@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import multiprocessing
+import os
+import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from typing import Any
 
 from telefuser.service.security.security_validator import SecurityLevel
@@ -38,6 +43,88 @@ class _ProcessHandle:
     spec: ProcessWorkerSpec
     commands: Any
     process: BaseProcess
+
+
+class _DispatchTraceWriter:
+    """Bounded, parent-owned JSONL writer for experiment audit records.
+
+    Both isolated-worker modes forward model-dispatch callbacks over their
+    existing child-to-parent event queue. Keeping the file descriptor in the
+    parent makes the single-GPU ``process`` schema identical to
+    ``process-nccl``.
+    """
+
+    def __init__(self, path: str, *, max_events: int, workers: dict[str, list[str]]) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self.max_events = int(max_events)
+        self.received_events = 0
+        self.written_events = 0
+        self.dropped_events = 0
+        self.write_errors = 0
+        self._write_error_logged = False
+        self._handle: Any | None = None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            raise FileExistsError(f"dispatch trace path already exists; choose a fresh run-scoped path: {self.path}")
+        self._handle = self.path.open("x", encoding="utf-8")
+        self._write_line(
+            {
+                "schema_version": 1,
+                "event_type": "trace_metadata",
+                "trace_started_monotonic_seconds": time.monotonic(),
+                "trace_started_unix_seconds": time.time(),
+                "trace_started_utc": datetime.now(timezone.utc).isoformat(),
+                "max_dispatch_events": self.max_events,
+                "configured_workers": workers,
+            }
+        )
+
+    def _write_line(self, record: dict[str, Any]) -> bool:
+        handle = self._handle
+        if handle is None:
+            return False
+        try:
+            handle.write(json.dumps(record, allow_nan=False, separators=(",", ":"), sort_keys=True) + "\n")
+            handle.flush()
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            self.write_errors += 1
+            if not self._write_error_logged:
+                self._write_error_logged = True
+                logger.warning("Failed to write ABot dispatch trace %s: %s", self.path, exc)
+            return False
+
+    def append(self, record: dict[str, Any]) -> None:
+        self.received_events += 1
+        if self.received_events > self.max_events:
+            self.dropped_events += 1
+            return
+        enriched = dict(record)
+        enriched["parent_sequence"] = self.received_events
+        enriched["parent_received_monotonic_seconds"] = time.monotonic()
+        enriched["parent_received_unix_seconds"] = time.time()
+        if self._write_line(enriched):
+            self.written_events += 1
+        else:
+            self.dropped_events += 1
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "path": str(self.path),
+            "max_events": self.max_events,
+            "received_events": self.received_events,
+            "written_events": self.written_events,
+            "dropped_events": self.dropped_events,
+            "write_errors": self.write_errors,
+        }
+
+    def close(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                handle.close()
 
 
 class ProcessLiveKitWorkerPool:
@@ -82,6 +169,17 @@ class ProcessLiveKitWorkerPool:
         self._started = False
         self._closing = False
         self._skip_validation = False
+        trace_path_value = getattr(self._config, "dispatch_trace_path", None)
+        trace_path = trace_path_value.strip() if isinstance(trace_path_value, str) else ""
+        self._dispatch_trace = (
+            _DispatchTraceWriter(
+                trace_path,
+                max_events=int(getattr(self._config, "dispatch_trace_max_events", 10_000)),
+                workers={worker_id: list(spec.gpu_ids) for worker_id, spec in self._specs.items()},
+            )
+            if trace_path
+            else None
+        )
 
     async def start(self, *, skip_validation: bool = False) -> None:
         """Spawn and wait for the configured initial replica set."""
@@ -161,6 +259,11 @@ class ProcessLiveKitWorkerPool:
             "active_workers": sorted(self._active_workers),
             "configured_workers": len(self._specs),
             "migration_supported": False,
+            "dispatch_trace": (
+                self._dispatch_trace.snapshot()
+                if getattr(self, "_dispatch_trace", None) is not None
+                else {"enabled": False}
+            ),
         }
 
     async def aclose(self) -> None:
@@ -188,6 +291,9 @@ class ProcessLiveKitWorkerPool:
         self._pending_workers.clear()
         self._startup.clear()
         _close_queue(self._events)
+        trace = getattr(self, "_dispatch_trace", None)
+        if trace is not None:
+            trace.close()
         self._started = False
         self._closing = False
 
@@ -278,8 +384,23 @@ class ProcessLiveKitWorkerPool:
                 return
             self._dispatch_event(event)
 
+    def _record_dispatch_trace(self, event: dict[str, Any]) -> None:
+        """Persist one child-reported model invocation in the parent process."""
+        trace = getattr(self, "_dispatch_trace", None)
+        raw = event.get("trace")
+        if trace is None or not isinstance(raw, dict):
+            return
+        gpu = event.get("gpu")
+        record = dict(raw)
+        record["worker_id"] = str(event.get("worker_id", "unknown"))
+        record["gpu"] = dict(gpu) if isinstance(gpu, dict) else {}
+        trace.append(record)
+
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "model_dispatch_trace":
+            self._record_dispatch_trace(event)
+            return
         worker_id = event.get("worker_id")
         if event_type == "worker_ready":
             future = self._startup.get(worker_id)
@@ -465,6 +586,84 @@ def _close_queue(ipc_queue: Any, *, join: bool = True) -> None:
             ipc_queue.join_thread()
 
 
+def _process_dispatch_trace_gpu_metadata(
+    spec: ProcessWorkerSpec,
+    *,
+    logical_cuda_device: int | None,
+    cuda_visible_devices: str | None = None,
+) -> dict[str, int | str | None]:
+    """Describe the physical CUDA lane without confusing CVD-local indices.
+
+    A process launched as ``CUDA_VISIBLE_DEVICES=1`` sees that card as
+    ``cuda:0``. The worker map therefore correctly contains ``0``, but an
+    experiment timeline must label its lane as physical GPU 1.
+    """
+
+    configured_gpu_id = str(spec.gpu_ids[0]) if spec.gpu_ids else "unknown"
+    logical = logical_cuda_device
+    if logical is None:
+        try:
+            logical = int(configured_gpu_id)
+        except ValueError:
+            logical = None
+    visible = cuda_visible_devices if cuda_visible_devices is not None else os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    visible_ids = [value.strip() for value in visible.split(",") if value.strip()]
+    physical_gpu_id = configured_gpu_id
+    if logical is not None and 0 <= logical < len(visible_ids):
+        physical_gpu_id = visible_ids[logical]
+    return {
+        "physical_gpu_id": physical_gpu_id,
+        "configured_gpu_id": configured_gpu_id,
+        "logical_cuda_device": logical,
+    }
+
+
+def _current_cuda_device_for_trace(spec: ProcessWorkerSpec) -> int | None:
+    """Return the child CUDA-local device without making tracing mandatory."""
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.current_device())
+    except Exception:  # pragma: no cover - diagnostic metadata must never stop serving
+        pass
+    try:
+        return int(spec.gpu_ids[0]) if spec.gpu_ids else None
+    except ValueError:
+        return None
+
+
+def _install_process_dispatch_trace_callback(
+    *,
+    service: Any,
+    config: LiveKitServeConfig,
+    spec: ProcessWorkerSpec,
+    events: Any,
+    logical_cuda_device: int | None,
+) -> bool:
+    """Forward child service records to the parent's bounded JSONL writer."""
+
+    trace_path_value = config.dispatch_trace_path
+    set_callback = getattr(service, "set_dispatch_trace_callback", None)
+    if not isinstance(trace_path_value, str) or not trace_path_value.strip() or not callable(set_callback):
+        return False
+    gpu = _process_dispatch_trace_gpu_metadata(spec, logical_cuda_device=logical_cuda_device)
+
+    def forward_dispatch_trace(record: dict[str, Any]) -> None:
+        events.put(
+            {
+                "type": "model_dispatch_trace",
+                "worker_id": spec.worker_id,
+                "gpu": gpu,
+                "trace": record,
+            }
+        )
+
+    set_callback(forward_dispatch_trace)
+    return True
+
+
 async def _run_process_worker(
     spec: ProcessWorkerSpec,
     config_values: dict[str, Any],
@@ -498,6 +697,14 @@ async def _run_process_worker(
     )
     tasks: dict[str, asyncio.Task[None]] = {}
     await worker.start(skip_validation=skip_validation)
+    service = getattr(getattr(worker.pipeline_adapter, "stream_service", None), "service", None)
+    _install_process_dispatch_trace_callback(
+        service=service,
+        config=config,
+        spec=spec,
+        events=events,
+        logical_cuda_device=_current_cuda_device_for_trace(spec),
+    )
     events.put({"type": "worker_ready", "worker_id": spec.worker_id})
     try:
         while True:
@@ -662,9 +869,7 @@ class _ProcessEventSink:
         )
 
     def on_control_received(self, worker_id: str, session_id: str) -> None:
-        self.events.put(
-            {"type": "control_received", "worker_id": worker_id, "session_id": session_id}
-        )
+        self.events.put({"type": "control_received", "worker_id": worker_id, "session_id": session_id})
 
     def on_chunk_published(
         self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None

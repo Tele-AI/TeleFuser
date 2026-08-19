@@ -299,6 +299,40 @@ class StreamPipelineService:
         async for chunk in svc.pull_chunks(session_id):
             yield chunk
 
+    def enable_publisher_frame_tracking(self, session_id: str) -> bool:
+        """Enable optional publisher feedback on a bidirectional service."""
+
+        service = self._ensure_bidirectional()
+        enable = getattr(service, "enable_publisher_frame_tracking", None)
+        if not callable(enable):
+            return False
+        return bool(enable(session_id))
+
+    def report_publisher_frame_progress(
+        self,
+        session_id: str,
+        *,
+        event: str,
+        frames_delta: int,
+        sequence: int,
+        observed_monotonic_seconds: float,
+    ) -> bool:
+        """Forward optional publisher progress without extending the core protocol."""
+
+        service = self._ensure_bidirectional()
+        report = getattr(service, "report_publisher_frame_progress", None)
+        if not callable(report):
+            return False
+        return bool(
+            report(
+                session_id,
+                event=event,
+                frames_delta=frames_delta,
+                sequence=sequence,
+                observed_monotonic_seconds=observed_monotonic_seconds,
+            )
+        )
+
     def close_session(self, session_id: str) -> None:
         self._ensure_bidirectional().close_session(session_id)
 

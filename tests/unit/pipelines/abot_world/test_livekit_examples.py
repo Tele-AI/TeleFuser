@@ -15,6 +15,14 @@ def test_livekit_service_entrypoint_builds_single_gpu_abot_service(monkeypatch: 
     monkeypatch.delenv("TELEFUSER_ABOT_SCHEDULER_MODE", raising=False)
     monkeypatch.delenv("TELEFUSER_ABOT_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("TELEFUSER_ABOT_BATCHING_WINDOW_MS", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_ENABLED", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_SECONDS", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_FRAMES", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_RESERVE_FRAMES", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_GUARD_MS", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_BATCH_COMPUTE_PROFILE", raising=False)
+    monkeypatch.delenv("TELEFUSER_ABOT_BATCH_COMPUTE_SAFETY_FACTOR", raising=False)
 
     def fake_get_pipeline(**kwargs: object) -> object:
         captured.update(kwargs)
@@ -31,8 +39,12 @@ def test_livekit_service_entrypoint_builds_single_gpu_abot_service(monkeypatch: 
     assert service.default_session_config["control_latent_frames"] == 3
     assert service.scheduler_mode == "batched"
     assert service.max_batch_size == 2
+    assert not service.publisher_frame_credit_enabled
     assert service.default_session_config["seed"] == 42
     assert service.default_session_config["prompt"] == service_example.DEFAULT_PROMPT
+    assert service.batch_compute_profile_name == "none"
+    assert service.batch_compute_safety_factor == pytest.approx(1.10)
+    assert service._batch_compute_priors == {}
     assert str(service.default_session_config["image_path"]).endswith("84b90ad568b693d2.png")
 
 
@@ -44,6 +56,14 @@ def test_livekit_service_entrypoint_selects_batched_four_session_schedule_from_e
     monkeypatch.setenv("TELEFUSER_ABOT_SCHEDULER_MODE", "batched")
     monkeypatch.setenv("TELEFUSER_ABOT_MAX_BATCH_SIZE", "4")
     monkeypatch.setenv("TELEFUSER_ABOT_BATCHING_WINDOW_MS", "2")
+    monkeypatch.setenv("TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS", "125")
+    monkeypatch.setenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_ENABLED", "true")
+    monkeypatch.setenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_SECONDS", "1.5")
+    monkeypatch.setenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_FRAMES", "36")
+    monkeypatch.setenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_RESERVE_FRAMES", "4")
+    monkeypatch.setenv("TELEFUSER_ABOT_BATCH_COMPUTE_SAFETY_FACTOR", "1.05")
+    monkeypatch.setenv("TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_GUARD_MS", "50")
+    monkeypatch.setenv("TELEFUSER_ABOT_BATCH_COMPUTE_PROFILE", "h100_lf3_eager_full_pipeline_v1")
 
     service = service_example.get_service(gpu_num=1, gpu_ids=["0"])
 
@@ -51,14 +71,32 @@ def test_livekit_service_entrypoint_selects_batched_four_session_schedule_from_e
     assert service.scheduler_mode == "batched"
     assert service.max_batch_size == 4
     assert service.batching_window_seconds == pytest.approx(0.002)
+    assert service.max_deadline_batch_wait_seconds == pytest.approx(0.125)
+
+    assert service.publisher_frame_credit_enabled
+    assert service.publisher_frame_credit_target_seconds == pytest.approx(1.5)
+    assert service.publisher_frame_credit_target_frames == 36
+    assert service.batch_compute_safety_factor == pytest.approx(1.05)
+    assert service.publisher_frame_credit_reserve_frames == 4
+    assert service.publisher_frame_credit_guard_seconds == pytest.approx(0.05)
+    assert service.batch_compute_profile_name == "h100_lf3_eager_full_pipeline_v1"
+    assert service._batch_compute_priors == {
+        2: pytest.approx(0.7404982000589371),
+        3: pytest.approx(1.0691392589360476),
+        4: pytest.approx(1.407263021916151),
+    }
 
 
 @pytest.mark.parametrize(
     ("environment", "expected"),
     [
         ({"TELEFUSER_ABOT_SCHEDULER_MODE": "unknown"}, "SCHEDULER_MODE"),
+        ({"TELEFUSER_ABOT_BATCH_COMPUTE_SAFETY_FACTOR": "0.99"}, "BATCH_COMPUTE_SAFETY_FACTOR"),
         ({"TELEFUSER_ABOT_MAX_BATCH_SIZE": "0"}, "MAX_BATCH_SIZE"),
         ({"TELEFUSER_ABOT_BATCHING_WINDOW_MS": "nan"}, "BATCHING_WINDOW_MS"),
+        ({"TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS": "nan"}, "MAX_DEADLINE_BATCH_WAIT_MS"),
+        ({"TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_FRAMES": "0"}, "TARGET_FRAMES"),
+        ({"TELEFUSER_ABOT_BATCH_COMPUTE_PROFILE": "not-a-profile"}, "BATCH_COMPUTE_PROFILE"),
     ],
 )
 def test_livekit_service_entrypoint_rejects_invalid_schedule_environment(

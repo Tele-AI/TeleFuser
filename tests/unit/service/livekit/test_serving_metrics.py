@@ -40,6 +40,10 @@ class _WorkerPool:
                 "pipeline-session-1": {
                     "active": 1,
                     "emitted_frames": 12,
+                    "publisher_frame_tracking_enabled": 1,
+                    "queued_video_frames": 12,
+                    "publisher_unsubmitted_frames": 6,
+                    "frame_credit_frames": 18,
                 }
             },
         }
@@ -109,12 +113,20 @@ def test_serving_metrics_render_scheduler_pipeline_slo_and_no_session_id_labels(
     assert 'telefuser_serving_slo_chunks_total{result="met"} 1' in rendered
     assert "telefuser_serving_action_to_first_frame_seconds_count 1" in rendered
     assert 'telefuser_serving_published_fps{scope="aggregate"}' in rendered
+    assert 'telefuser_serving_frame_credit_frames{state="queued"} 12' in rendered
+    assert 'telefuser_serving_frame_credit_frames{state="total"} 18' in rendered
     assert created.record.session_id not in rendered
     assert "pipeline-session-1" not in rendered
 
     summary = runtime.serving_metrics_snapshot()["summary"]
     assert summary["sessions"] == {"retained": 1, "active": 1, "idle": 0, "waiting": 0}
     assert summary["scheduler_mode"] == "batched"
+    assert summary["frame_credit"] == {
+        "tracked_sessions": 1,
+        "queued_frames": 12,
+        "publisher_unsubmitted_frames": 6,
+        "total_frames": 18,
+    }
 
 
 def test_serving_metrics_records_migration_errors() -> None:
@@ -247,7 +259,6 @@ def test_nccl_parent_transport_and_model_event_hooks_preserve_scheduler_mode() -
             {"active": 1},
         )
     ]
-
 
 
 def test_serving_metrics_distinguish_native_taew_batch_from_dit_batch() -> None:

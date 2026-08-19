@@ -154,3 +154,134 @@ def test_small_dit_forward_preserves_latent_and_cache_contract() -> None:
     assert torch.isfinite(output).all()
     assert all(int(cache["global_end_index"].item()) == frame_tokens for cache in self_cache)
     assert all(bool(cache["is_init"]) for cache in cross_cache)
+
+
+def test_full_window_steady_state_matches_regular_relative_rope_continuation() -> None:
+    """The graph-safe path must preserve the normal rolling-cache result."""
+    torch.manual_seed(7)
+    model = _tiny_dit().eval()
+    model.set_causal_attention_window(local_attn_size=3, sink_size=1)
+    batch, frames, latent_height, latent_width = 1, 1, 8, 8
+    frame_tokens = (latent_height // 2) * (latent_width // 2)
+    head_dim = model.dim // model.num_heads
+    self_cache = [
+        {
+            "k": torch.zeros(batch, 3 * frame_tokens, model.num_heads, head_dim),
+            "v": torch.zeros(batch, 3 * frame_tokens, model.num_heads, head_dim),
+            "global_end_index": torch.zeros(1, dtype=torch.long),
+            "local_end_index": torch.zeros(1, dtype=torch.long),
+        }
+        for _ in range(model.num_layers)
+    ]
+    cross_cache = [
+        {
+            "k": torch.zeros(batch, model.text_len, model.num_heads, head_dim),
+            "v": torch.zeros(batch, model.text_len, model.num_heads, head_dim),
+            "is_init": False,
+            "sequence_length": 0,
+        }
+        for _ in range(model.num_layers)
+    ]
+    context = torch.randn(batch, model.text_len, 16)
+
+    def model_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.randn(batch, model.in_dim, frames, latent_height, latent_width),
+            torch.randn(batch, 32, frames, latent_height * 2, latent_width * 2),
+            torch.tensor([[0.5]]),
+        )
+
+    # Fill the local [sink, rolling-tail] window through the original path.
+    for frame_index in range(model.local_attn_size):
+        latent, action_context, timestep = model_inputs()
+        model(
+            x=latent,
+            timestep=timestep,
+            context=context,
+            act_context=action_context,
+            kv_cache=self_cache,
+            crossattn_cache=cross_cache,
+            current_start=frame_index * frame_tokens,
+        )
+
+    def clone_cache(cache_list: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [
+            {key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in layer.items()}
+            for layer in cache_list
+        ]
+
+    def assert_cache_equal(actual: list[dict[str, object]], expected: list[dict[str, object]]) -> None:
+        for actual_layer, expected_layer in zip(actual, expected, strict=True):
+            assert actual_layer.keys() == expected_layer.keys()
+            for key, actual_value in actual_layer.items():
+                expected_value = expected_layer[key]
+                if isinstance(actual_value, torch.Tensor):
+                    assert isinstance(expected_value, torch.Tensor)
+                    torch.testing.assert_close(actual_value, expected_value)
+                else:
+                    assert actual_value == expected_value
+
+    reference_self = clone_cache(self_cache)
+    reference_cross = clone_cache(cross_cache)
+    steady_self = clone_cache(self_cache)
+    steady_cross = clone_cache(cross_cache)
+    roll_tokens = (model.local_attn_size - model.sink_size - frames) * frame_tokens
+    roll_scratch_k = torch.empty(batch, roll_tokens, model.num_heads, head_dim)
+    roll_scratch_v = torch.empty_like(roll_scratch_k)
+    current_end = torch.tensor([(model.local_attn_size + frames) * frame_tokens], dtype=torch.long)
+    latent, action_context, timestep = model_inputs()
+
+    expected = model(
+        x=latent,
+        timestep=timestep,
+        context=context,
+        act_context=action_context,
+        kv_cache=reference_self,
+        crossattn_cache=reference_cross,
+        current_start=model.local_attn_size * frame_tokens,
+    )
+    actual = model.forward_steady_state(
+        x=latent,
+        timestep=timestep,
+        context=context,
+        act_context=action_context,
+        kv_cache=steady_self,
+        crossattn_cache=steady_cross,
+        current_end=current_end,
+        roll_scratch_k=roll_scratch_k,
+        roll_scratch_v=roll_scratch_v,
+        update_cache=True,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    assert_cache_equal(steady_self, reference_self)
+    assert_cache_equal(steady_cross, reference_cross)
+
+    # Remaining sampler calls use the same logical chunk and overwrite only
+    # its fixed tail slot; they must not roll the window again.
+    latent, action_context, timestep = model_inputs()
+    expected = model(
+        x=latent,
+        timestep=timestep,
+        context=context,
+        act_context=action_context,
+        kv_cache=reference_self,
+        crossattn_cache=reference_cross,
+        current_start=model.local_attn_size * frame_tokens,
+    )
+    actual = model.forward_steady_state(
+        x=latent,
+        timestep=timestep,
+        context=context,
+        act_context=action_context,
+        kv_cache=steady_self,
+        crossattn_cache=steady_cross,
+        current_end=current_end,
+        roll_scratch_k=roll_scratch_k,
+        roll_scratch_v=roll_scratch_v,
+        update_cache=False,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    assert_cache_equal(steady_self, reference_self)
+    assert_cache_equal(steady_cross, reference_cross)

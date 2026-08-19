@@ -1,0 +1,122 @@
+{
+  "name": "abot_livekit_4gpu_lf3_12fps_realistic_async_peak16",
+  "trace_contract": {
+    "kind": "deterministic_asynchronous_synthetic_interactive_user_trace",
+    "not_a_phase_aligned_diagnostic": true,
+    "description": "A repeatable, browser-equivalent user trace. There is deliberately no diagnostic.initial_control_barrier: every user joins, sends controls, pauses, resumes, and leaves on its own schedule.",
+    "arrival_process": "Scale-up arrivals are spread deterministically over each non-zero arrival_window_seconds; they are never released behind a common first-control gate.",
+    "interaction_process": "Connected controllers send a reliable control heartbeat every 0.50 +/- 0.15 seconds. While input is enabled, each heartbeat can begin a 2--8 second stochastic key-release interval; phase transitions additionally create long foreground/background pauses and later re-engagement.",
+    "lifecycle_process": "Scale-down removes the newest retained users over the declared departure window. A paused input is not a session departure, so it preserves that user's retained world-model state.",
+    "admission_contract": "All sixteen retained sessions must be assigned immediately across four workers with capacity four and HTTP queue size zero. Any queued or unassigned user invalidates the workload."
+  },
+  "server_url": "http://127.0.0.1:8088",
+  "expected_worker_mode": "process-nccl",
+  "expected_num_workers": 4,
+  "seed": 20260814,
+  "admission": {
+    "require_immediate_assignment": true,
+    "expected_max_sessions_per_worker": 4,
+    "expected_queue_size": 0
+  },
+  "session": {
+    "prompt": "A smooth first-person exploration through a vivid natural landscape.",
+    "image_path": "../ABot-World/web_client/datasets/images/84b90ad568b693d2.png",
+    "fps": 12,
+    "control_latent_frames": 3,
+    "delivery_mode": "latest",
+    "expected_preview_frames": 1,
+    "control": {
+      "interval_seconds": 0.5,
+      "jitter_seconds": 0.15,
+      "idle_probability": 0.025,
+      "idle_min_seconds": 2.0,
+      "idle_max_seconds": 8.0,
+      "action_states": [
+        ["KeyW"],
+        ["KeyW", "KeyA"],
+        ["KeyW", "KeyD"],
+        ["KeyI"]
+      ]
+    }
+  },
+  "measurement": {
+    "sample_interval_seconds": 1.0,
+    "connect_timeout_seconds": 90.0,
+    "http_timeout_seconds": 30.0,
+    "shutdown_timeout_seconds": 20.0,
+    "first_generation_grace_seconds": 15.0,
+    "slo_fps_tolerance": 0.25
+  },
+  "phases": [
+    {
+      "name": "warmup_4_asynchronous_arrivals",
+      "duration_seconds": 45.0,
+      "target_users": 4,
+      "arrival_window_seconds": 20.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "ramp_to_8_asynchronous_arrivals",
+      "duration_seconds": 55.0,
+      "target_users": 8,
+      "arrival_window_seconds": 25.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "eight_user_foreground_background_mix",
+      "duration_seconds": 35.0,
+      "target_users": 8,
+      "active_input_fraction": 0.625,
+      "input_transition_window_seconds": 18.0
+    },
+    {
+      "name": "surge_to_16_partially_active",
+      "duration_seconds": 65.0,
+      "target_users": 16,
+      "arrival_window_seconds": 35.0,
+      "active_input_fraction": 0.75,
+      "input_transition_window_seconds": 18.0
+    },
+    {
+      "name": "peak_16_all_reengaged",
+      "duration_seconds": 55.0,
+      "target_users": 16,
+      "active_input_fraction": 1.0,
+      "input_transition_window_seconds": 18.0
+    },
+    {
+      "name": "peak_16_mixed_interaction",
+      "duration_seconds": 45.0,
+      "target_users": 16,
+      "active_input_fraction": 0.5,
+      "input_transition_window_seconds": 25.0
+    },
+    {
+      "name": "peak_16_reengagement",
+      "duration_seconds": 45.0,
+      "target_users": 16,
+      "active_input_fraction": 1.0,
+      "input_transition_window_seconds": 18.0
+    },
+    {
+      "name": "post_surge_departure_to_8",
+      "duration_seconds": 35.0,
+      "target_users": 8,
+      "departure_window_seconds": 20.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "post_surge_departure_to_4",
+      "duration_seconds": 30.0,
+      "target_users": 4,
+      "departure_window_seconds": 18.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "final_departures",
+      "duration_seconds": 20.0,
+      "target_users": 0,
+      "departure_window_seconds": 15.0
+    }
+  ]
+}

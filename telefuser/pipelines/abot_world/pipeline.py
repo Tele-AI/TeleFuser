@@ -31,6 +31,10 @@ class ABotWorldPipelineConfig:
     # Match LingBot-World v2: six fixed sink latents plus a twelve-latent rolling tail.
     local_attn_size: int = 18
     sink_size: int = 6
+    # Opt-in only: capture the fixed-shape, steady-state Relative-RoPE DiT
+    # continuation path. Dynamic first chunks, cache warmup, VAE and output
+    # postprocessing remain eager.
+    cuda_graph_enabled: bool = False
 
 
 class ABotWorldPipeline(BasePipeline):
@@ -74,6 +78,7 @@ class ABotWorldPipeline(BasePipeline):
         )
         self.denoise_stage = ABotWorldDenoisingStage("abot_world_denoise", module_manager, config.dit_config)
         self.denoise_stage.parallel_models()
+        self.denoise_stage.configure_cuda_graph(config.cuda_graph_enabled)
         self.denoise_stage.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
     @classmethod

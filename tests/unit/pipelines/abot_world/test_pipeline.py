@@ -9,6 +9,11 @@ from telefuser.pipelines.abot_world import ABotWorldPipeline
 from telefuser.pipelines.abot_world.pipeline import ABotWorldPipelineConfig
 
 
+def test_cuda_graph_configuration_is_opt_in() -> None:
+
+    assert ABotWorldPipelineConfig().cuda_graph_enabled is False
+
+
 def test_action_context_uses_official_wasd_ijkl_channel_layout() -> None:
     action = ABotWorldPipeline.build_action_context(
         {"W": True, "D": True, "L": True},

@@ -109,6 +109,8 @@ class LiveKitWorker:
         self.event_sink = event_sink or NullWorkerEventSink()
         self.pipeline_adapter = pipeline_adapter or LiveKitPipelineAdapter()
         self.room_client = room_client or LiveKitRoomClient()
+        self._publisher_frame_tracking_enabled = False
+        self._publisher_progress_sequence = 0
         self.gpu_num = gpu_num
         self._active_session_id: str | None = None
         self._pipeline_session_id: str | None = None
@@ -158,6 +160,8 @@ class LiveKitWorker:
             self.event_sink.on_session_status(record.session_id, "starting_pipeline")
             if self.pipeline_adapter.stream_mode == STREAM_MODE_BIDIRECTIONAL:
                 self._pipeline_session_id = self.pipeline_adapter.create_session(record.config)
+                self._publisher_progress_sequence = 0
+                self._publisher_frame_tracking_enabled = self._enable_publisher_frame_tracking()
                 self.event_sink.on_pipeline_session(record.session_id, self._pipeline_session_id)
                 chunks = self.pipeline_adapter.pull_chunks(self._pipeline_session_id)
             elif self.pipeline_adapter.stream_mode == STREAM_MODE_SERVER_PUSH:
@@ -213,6 +217,58 @@ class LiveKitWorker:
             with contextlib.suppress(Exception):
                 self.pipeline_adapter.push_chunk(self._pipeline_session_id, {"type": "stop"})
 
+    def _enable_publisher_frame_tracking(self) -> bool:
+        pipeline_session_id = self._pipeline_session_id
+        callback = getattr(self.pipeline_adapter, "enable_publisher_frame_tracking", None)
+        if pipeline_session_id is None or not callable(callback):
+            return False
+        try:
+            return bool(callback(pipeline_session_id))
+        except Exception as exc:  # pragma: no cover - feedback must never stop media publication
+            logger.warning(
+                "Could not enable publisher frame tracking: worker=%s session=%s error=%s",
+                self.worker_id,
+                pipeline_session_id,
+                exc,
+            )
+            return False
+
+    def _report_publisher_frame_progress(self, *, event: str, frames_delta: int) -> None:
+        if not self._publisher_frame_tracking_enabled or self._pipeline_session_id is None:
+            return
+        callback = getattr(self.pipeline_adapter, "report_publisher_frame_progress", None)
+        if not callable(callback):
+            self._publisher_frame_tracking_enabled = False
+            return
+        self._publisher_progress_sequence += 1
+        try:
+            reported = callback(
+                self._pipeline_session_id,
+                event=event,
+                frames_delta=frames_delta,
+                sequence=self._publisher_progress_sequence,
+                observed_monotonic_seconds=time.monotonic(),
+            )
+            if not reported:
+                self._publisher_frame_tracking_enabled = False
+        except Exception as exc:  # pragma: no cover - feedback must never stop media publication
+            self._publisher_frame_tracking_enabled = False
+            logger.warning(
+                "Could not report publisher frame progress: worker=%s session=%s error=%s",
+                self.worker_id,
+                self._pipeline_session_id,
+                exc,
+            )
+
+    def _abandon_publisher_frames(self, *, tracking: bool, total_frames: int, published_frames: int) -> None:
+        """Release frame credit for a chunk that will not reach LiveKit."""
+        if not tracking or published_frames >= total_frames:
+            return
+        self._report_publisher_frame_progress(
+            event="abandoned",
+            frames_delta=-(total_frames - published_frames),
+        )
+
     def _on_data_message(
         self,
         record: SessionRecord,
@@ -256,10 +312,17 @@ class LiveKitWorker:
         published_frames = 0
         next_frame_at: float | None = None
         async for chunk in chunks:
-            if self._stop_event.is_set():
-                break
+            track_publisher_frames = self._publisher_frame_tracking_enabled and chunk.get("type") == "chunk"
+            chunk_published_frames = 0
 
             frames, audio, metadata = split_chunk_media(chunk)
+            if self._stop_event.is_set():
+                self._abandon_publisher_frames(
+                    tracking=track_publisher_frames,
+                    total_frames=len(frames),
+                    published_frames=chunk_published_frames,
+                )
+                break
             model_output_callback = getattr(self.event_sink, "on_model_output", None)
             if callable(model_output_callback) and self._pipeline_session_id is not None:
                 chunk_data_for_metrics = chunk.get("data") if isinstance(chunk.get("data"), dict) else chunk
@@ -290,8 +353,16 @@ class LiveKitWorker:
             frame_interval = 1.0 / fps
             if frames and published_frames == 0 and wait_for_delivery_ack:
                 height, width = frames[0].shape[:2]
-                await self.room_client.publish_video_track("telefuser-output", width, height, fps=fps)
-                await asyncio.sleep(_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS)
+                try:
+                    await self.room_client.publish_video_track("telefuser-output", width, height, fps=fps)
+                    await asyncio.sleep(_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS)
+                except (asyncio.CancelledError, Exception):
+                    self._abandon_publisher_frames(
+                        tracking=track_publisher_frames,
+                        total_frames=len(frames),
+                        published_frames=chunk_published_frames,
+                    )
+                    raise
 
             first_frame_at: float | None = None
             for frame in frames:
@@ -301,14 +372,32 @@ class LiveKitWorker:
                 if next_frame_at is None or now - next_frame_at > frame_interval:
                     next_frame_at = now
                 delay = next_frame_at - now
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                await self.room_client.publish_video_frame(frame, fps=fps)
+                try:
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await self.room_client.publish_video_frame(frame, fps=fps)
+                except (asyncio.CancelledError, Exception):
+                    self._abandon_publisher_frames(
+                        tracking=track_publisher_frames,
+                        total_frames=len(frames),
+                        published_frames=chunk_published_frames,
+                    )
+                    raise
+                chunk_published_frames += 1
+                if track_publisher_frames:
+                    self._report_publisher_frame_progress(event="submitted", frames_delta=-1)
                 if first_frame_at is None:
                     first_frame_at = time.monotonic()
                 next_frame_at += frame_interval
                 published_frames += 1
 
+            self._abandon_publisher_frames(
+                tracking=track_publisher_frames,
+                total_frames=len(frames),
+                published_frames=chunk_published_frames,
+            )
+            if self._stop_event.is_set():
+                break
             if audio is not None:
                 await self.room_client.publish_audio_frame(
                     audio.pcm,
@@ -316,8 +405,6 @@ class LiveKitWorker:
                     channels=audio.channels,
                 )
 
-            if self._stop_event.is_set():
-                break
             if frames:
                 published_callback = getattr(self.event_sink, "on_chunk_published", None)
                 if callable(published_callback):

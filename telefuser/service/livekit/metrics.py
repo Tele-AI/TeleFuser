@@ -263,6 +263,21 @@ class LiveKitServingMetrics:
         worker_metrics = worker_metrics if isinstance(worker_metrics, dict) else {}
         session_metrics = routing.get("session_runtime_metrics", {})
         session_metrics = session_metrics if isinstance(session_metrics, dict) else {}
+        frame_credit_sessions = tuple(values for values in session_metrics.values() if isinstance(values, dict))
+        frame_credit = {
+            "tracked_sessions": int(
+                sum(bool(values.get("publisher_frame_tracking_enabled", 0)) for values in frame_credit_sessions)
+            ),
+            "queued_frames": sum(
+                self._nonnegative(values.get("queued_video_frames")) or 0.0 for values in frame_credit_sessions
+            ),
+            "publisher_unsubmitted_frames": sum(
+                self._nonnegative(values.get("publisher_unsubmitted_frames")) or 0.0 for values in frame_credit_sessions
+            ),
+            "total_frames": sum(
+                self._nonnegative(values.get("frame_credit_frames")) or 0.0 for values in frame_credit_sessions
+            ),
+        }
 
         active = 0
         retained = 0
@@ -315,6 +330,23 @@ class LiveKitServingMetrics:
             health["queued_sessions"],
             {"queue": "admission"},
         )
+        for state, value in (
+            ("queued", frame_credit["queued_frames"]),
+            ("publisher", frame_credit["publisher_unsubmitted_frames"]),
+            ("total", frame_credit["total_frames"]),
+        ):
+            gauge(
+                "telefuser_serving_frame_credit_frames",
+                "Frames retained between ABot output and LiveKit capture_frame",
+                value,
+                {"state": state},
+            )
+        gauge(
+            "telefuser_serving_frame_credit_sessions",
+            "Sessions with publisher frame-credit tracking enabled",
+            frame_credit["tracked_sessions"],
+        )
+
         for state, value in (
             ("configured", health["workers_total"]),
             ("busy", health["workers_busy"]),
@@ -484,6 +516,7 @@ class LiveKitServingMetrics:
                 },
                 "published_fps": fps,
                 "scheduler_mode": scheduler_mode,
+                "frame_credit": frame_credit,
                 "worker_runtime_metrics": {
                     str(worker_id): dict(values)
                     for worker_id, values in worker_metrics.items()

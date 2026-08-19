@@ -177,6 +177,84 @@ after its state-snapshot patch has landed. A balanced user wave normally exercis
 placement, local batching, admission queueing, and recovery; it need not create an
 imbalanced placement worth migrating.
 
+### Experimental EDF deadline-aware micro-batching
+
+`TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS` is a separate, opt-in upper bound for
+waiting to form a compatible continuation batch. It does **not** replace
+`TELEFUSER_ABOT_BATCHING_WINDOW_MS`, which remains the scheduler's legacy/pacing
+coalescing window. Its default is `0`, preserving the baseline behavior.
+
+For an initial B=2 experiment, use a conservative 100 ms cap:
+
+```bash
+export TELEFUSER_ABOT_SCHEDULER_MODE=batched
+export TELEFUSER_ABOT_MAX_BATCH_SIZE=2
+export TELEFUSER_ABOT_BATCHING_WINDOW_MS=2
+export TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS=100
+```
+
+### Offline H100 batch-time priors
+
+Before the first real B=2 dispatch, the generic scheduler would otherwise estimate
+it as two B=1 calls. For the measured ABot-World-0.5B-LF, LF=3, H100 full-pipeline
+profile, select a named, explicit prior table instead:
+
+```bash
+# Eager P95 raw seconds: B2=0.7405, B3=1.0691, B4=1.4073.
+export TELEFUSER_ABOT_BATCH_COMPUTE_PROFILE=h100_lf3_eager_full_pipeline_v1
+
+# Or use the separately validated CUDA-Graph profile: B2=0.6923, B3=1.0319.
+# export TELEFUSER_ABOT_BATCH_COMPUTE_PROFILE=h100_lf3_cuda_graph_v1
+
+# Optional: use raw P95 × 1.05 for this run (default: ×1.10).
+export TELEFUSER_ABOT_BATCH_COMPUTE_SAFETY_FACTOR=1.05
+```
+
+The scheduler applies this factor once to raw profile/observed timing, then retains the
+maximum of the selected prior and every observed runtime. It must be finite and at least
+`1.0`; the default is `1.10`. The default profile is `none`; do not select an H100
+profile for a mismatched GPU, model shape, LF, or execution backend.
+
+When the GPU becomes free, the scheduler holds the EDF-earliest compatible
+continuation only until the earlier of this cap and its deadline-safe B=2 start.
+With `MAX_BATCH_SIZE=3`, once a compatible B arrives, it waits for C only when C's
+predicted release is before both the retained B=2 fallback start and the B=3
+latest-safe-start; otherwise it dispatches B=2 immediately. If no peer arrives, the
+held session falls back to B=1. First chunks never wait. If another EDF job is
+ready during the hold, it runs first only when both its own deadline and the held
+session's B=1 fallback deadline remain safe. Inspect `deadline_batch_waits_started`,
+`deadline_batch_wait_timeouts`, and `deadline_batch_filler_dispatches` in
+`/v1/service/metrics/json` when evaluating the policy.
+
+### Experimental publisher-frame-credit EDF
+
+To make EDF use playout slack rather than only ABot's local output queue, enable
+the following **opt-in** policy:
+
+```bash
+export TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_ENABLED=true
+# Default ABot FPS is 12, so 3 seconds yields F=36 frames.
+export TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_SECONDS=3.0
+# Optional exact override; it takes precedence over TARGET_SECONDS.
+export TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_TARGET_FRAMES=36
+export TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_RESERVE_FRAMES=4
+export TELEFUSER_ABOT_PUBLISHER_FRAME_CREDIT_GUARD_MS=50
+```
+
+The service tracks `F = queued chunk frames + frames dequeued by the publisher but
+not yet accepted by LiveKit's `capture_frame`. `capture_frame` is a server-side
+transport handoff, not a browser render acknowledgement. For latest-mode
+continuations, EDF computes its safe start from `F`, keeps the configured reserve and
+guard, and waits for a compatible peer only while the B=2 fallback remains safe.
+First chunks and lossless sessions retain their existing behavior.
+`TARGET_FRAMES` changes only the low-watermark at which a latest-mode session becomes
+eligible again; it does not replace the reserve used to calculate the deadline. With
+`F=36`, 12 FPS, a 4-frame reserve, and a 50 ms guard, the maximum modeled completion
+slack is `(36 - 4) / 12 - 0.05 = 2.617s`.
+
+Inspect `queued_video_frames`, `publisher_unsubmitted_frames`, `frame_credit_frames`, and
+`frame_credit_deadline_in_seconds` in `/v1/service/metrics/json` or dispatch JSONL.
+
 ### Run the arrival/burst/recovery workload
 
 The tracked scenario at

@@ -1,0 +1,67 @@
+{
+  "name": "abot_livekit_4gpu_lf3_12fps_diagnostic_phase_aligned_16",
+  "server_url": "http://127.0.0.1:8088",
+  "expected_worker_mode": "process-nccl",
+  "expected_num_workers": 4,
+  "seed": 20260814,
+  "admission": {
+    "require_immediate_assignment": true,
+    "expected_max_sessions_per_worker": 4,
+    "expected_queue_size": 0
+  },
+  "diagnostic": {
+    "initial_control_barrier": {
+      "enabled": true,
+      "kind": "phase_aligned_initial_control",
+      "not_a_real_user_trace": true,
+      "description": "DIAGNOSTIC ONLY: hold first active controls until all 16 newly created sessions have connected. This is a synthetic phase-aligned trace, not a real-user arrival trace.",
+      "phase": "diagnostic_phase_aligned_16_users",
+      "expected_connected_sessions": 16,
+      "timeout_seconds": 120.0
+    }
+  },
+  "session": {
+    "prompt": "A smooth first-person exploration through a vivid natural landscape.",
+    "image_path": "../ABot-World/web_client/datasets/images/84b90ad568b693d2.png",
+    "fps": 12,
+    "control_latent_frames": 3,
+    "delivery_mode": "latest",
+    "expected_preview_frames": 1,
+    "control": {
+      "interval_seconds": 0.5,
+      "jitter_seconds": 0.1,
+      "idle_probability": 0.0,
+      "idle_min_seconds": 0.2,
+      "idle_max_seconds": 1.0,
+      "action_states": [
+        ["KeyW"],
+        ["KeyW", "KeyA"],
+        ["KeyW", "KeyD"],
+        ["KeyI"]
+      ]
+    }
+  },
+  "measurement": {
+    "sample_interval_seconds": 1.0,
+    "connect_timeout_seconds": 90.0,
+    "http_timeout_seconds": 30.0,
+    "shutdown_timeout_seconds": 20.0,
+    "first_generation_grace_seconds": 15.0,
+    "slo_fps_tolerance": 0.25
+  },
+  "phases": [
+    {
+      "name": "diagnostic_phase_aligned_16_users",
+      "duration_seconds": 180.0,
+      "target_users": 16,
+      "arrival_window_seconds": 0.0,
+      "active_input_fraction": 1.0
+    },
+    {
+      "name": "diagnostic_drain",
+      "duration_seconds": 30.0,
+      "target_users": 0,
+      "departure_window_seconds": 0.0
+    }
+  ]
+}

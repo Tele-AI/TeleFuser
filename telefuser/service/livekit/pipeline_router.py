@@ -72,6 +72,26 @@ class TurboServePipelineRouter:
             if next_worker_id is None or next_worker_id == worker_id:
                 return
 
+    def enable_publisher_frame_tracking(self, pipeline_session_id: str) -> bool:
+        return self._backend_for(pipeline_session_id).enable_publisher_frame_tracking(pipeline_session_id)
+
+    def report_publisher_frame_progress(
+        self,
+        pipeline_session_id: str,
+        *,
+        event: str,
+        frames_delta: int,
+        sequence: int,
+        observed_monotonic_seconds: float,
+    ) -> bool:
+        return self._backend_for(pipeline_session_id).report_publisher_frame_progress(
+            pipeline_session_id,
+            event=event,
+            frames_delta=frames_delta,
+            sequence=sequence,
+            observed_monotonic_seconds=observed_monotonic_seconds,
+        )
+
     def close_session(self, pipeline_session_id: str) -> None:
         with self._lock:
             worker_id = self._routes.pop(pipeline_session_id, None)
@@ -109,6 +129,9 @@ class TurboServePipelineRouter:
                 owner_worker_id=target_worker_id,
                 ownership_epoch=token.source_epoch + 1,
             )
+            enable_tracking = getattr(target, "enable_publisher_frame_tracking", None)
+            if callable(enable_tracking):
+                enable_tracking(pipeline_session_id)
             imported = True
         except Exception:
             if imported and target is not None:
@@ -239,6 +262,26 @@ class TurboServeWorkerPipelineView:
     async def pull_chunks(self, pipeline_session_id: str) -> AsyncGenerator[dict, None]:
         async for chunk in self._router.pull_chunks(pipeline_session_id):
             yield chunk
+
+    def enable_publisher_frame_tracking(self, pipeline_session_id: str) -> bool:
+        return self._router.enable_publisher_frame_tracking(pipeline_session_id)
+
+    def report_publisher_frame_progress(
+        self,
+        pipeline_session_id: str,
+        *,
+        event: str,
+        frames_delta: int,
+        sequence: int,
+        observed_monotonic_seconds: float,
+    ) -> bool:
+        return self._router.report_publisher_frame_progress(
+            pipeline_session_id,
+            event=event,
+            frames_delta=frames_delta,
+            sequence=sequence,
+            observed_monotonic_seconds=observed_monotonic_seconds,
+        )
 
     def close_session(self, pipeline_session_id: str) -> None:
         self._router.close_session(pipeline_session_id)

@@ -38,6 +38,17 @@ class LiveKitServeConfig(BaseSettings):
         description="Worker isolation mode",
     )
 
+    dispatch_trace_path: str | None = Field(
+        default=None,
+        description="Fresh parent-process JSONL path for bounded model-dispatch audit records",
+    )
+    dispatch_trace_max_events: int = Field(
+        default=10_000,
+        ge=1,
+        le=1_000_000,
+        description="Maximum model-dispatch records written to the optional JSONL audit trace",
+    )
+
     queue_size: int = Field(default=0, ge=0, le=10000, description="Maximum queued sessions")
     autoscaling_enabled: bool = Field(default=False, description="Dynamically load configured GPU workers")
     autoscaling_min_workers: int = Field(default=1, ge=1, le=64)
