@@ -19,9 +19,10 @@ def get_pipeline(
     model_root: str,
     qwen3vl_root: str,
     device: str = "cuda",
+    quantization: str | None = None,
 ) -> LingBotVlaV2Pipeline:
     """Load the official 6B checkpoint and Qwen3-VL processor."""
-    return get_lingbot_vla_v2_pipeline(model_root, qwen3vl_root, device=device)
+    return get_lingbot_vla_v2_pipeline(model_root, qwen3vl_root, device=device, quantization=quantization)
 
 
 @click.command()
@@ -35,6 +36,7 @@ def get_pipeline(
 @click.option("--output", default="canonical_action_chunk.npz", type=click.Path(dir_okay=False))
 @click.option("--seed", default=None, type=int)
 @click.option("--device", default="cuda")
+@click.option("--quantization", type=click.Choice(("torchao-fp8", "tf-kernel-fp8", "bnb-nf4")), default=None)
 def main(
     model_root: str,
     qwen3vl_root: str,
@@ -46,6 +48,7 @@ def main(
     output: str,
     seed: int | None,
     device: str,
+    quantization: str | None,
 ) -> None:
     """Predict and save a normalized canonical action chunk."""
     try:
@@ -69,6 +72,7 @@ def main(
         model_root,
         qwen3vl_root,
         device=device,
+        quantization=quantization,
     )
     try:
         chunk = pipeline(observation, seed=seed)

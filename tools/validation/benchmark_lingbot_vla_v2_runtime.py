@@ -162,6 +162,7 @@ def _load_telefuser(args: argparse.Namespace, device: torch.device) -> tuple[Any
         str(args.model_root.resolve()),
         str(args.qwen3vl_root.resolve()),
         device=str(device),
+        quantization=args.quantization,
     )
     model = pipeline.policy_stage.policy
     config = model.config
@@ -177,6 +178,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     """Run synchronized core-model and runtime-boundary benchmarks."""
     if args.warmup < 0 or args.runs < 1:
         raise ValueError("--warmup must be non-negative and --runs must be positive")
+    if args.implementation == "upstream" and args.quantization is not None:
+        raise ValueError("--quantization is only supported with --implementation telefuser")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("LingBot-VLA v2 runtime benchmarking requires CUDA")
@@ -244,6 +247,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "warmup_runs": args.warmup,
             "measured_runs": args.runs,
             "device": str(device),
+            "quantization": args.quantization or "bf16",
             "device_name": torch.cuda.get_device_name(device),
             "environment": {
                 "python_version": sys.version.split()[0],
@@ -285,6 +289,7 @@ def main() -> None:
     parser.add_argument("--input-artifact", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)

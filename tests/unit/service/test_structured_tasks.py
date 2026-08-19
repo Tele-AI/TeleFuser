@@ -145,6 +145,23 @@ def test_native_vla_entrypoint_returns_action_contract() -> None:
     assert len(result["canonical_normalized_actions"][0]) == 55
 
 
+def test_native_vla_pipeline_keeps_bf16_default_and_forwards_quantization(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+    sentinel = object()
+
+    def fake_get_pipeline(*_args, **kwargs):
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(lingbot_vla_v2_native_service, "get_lingbot_vla_v2_pipeline", fake_get_pipeline)
+    assert lingbot_vla_v2_native_service.get_pipeline() is sentinel
+    assert calls[-1]["quantization"] is None
+
+    monkeypatch.setitem(lingbot_vla_v2_native_service.PPL_CONFIG, "quantization", "torchao-fp8")
+    assert lingbot_vla_v2_native_service.get_pipeline() is sentinel
+    assert calls[-1]["quantization"] == "torchao-fp8"
+
+
 def test_unified_client_encodes_vla_inputs_and_returns_result(tmp_path: Path) -> None:
     image_path = tmp_path / "camera.png"
     Image.new("RGB", (8, 8)).save(image_path)

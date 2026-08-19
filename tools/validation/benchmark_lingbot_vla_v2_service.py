@@ -202,6 +202,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             str(args.model_root),
             str(args.qwen3vl_root),
             device=str(device),
+            quantization=args.quantization,
         ),
         device=device,
         process=process,
@@ -315,6 +316,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "model_root": str(args.model_root.resolve()),
             "qwen3vl_root": str(args.qwen3vl_root.resolve()),
             "device": str(device),
+            "quantization": args.quantization or "bf16",
             "seed": args.seed,
             "instruction": args.instruction,
             "internal_model_image_size": [pipeline.input_processor.image_size] * 2,
@@ -344,6 +346,7 @@ def main() -> None:
     parser.add_argument("--instruction", default="pick up the red block")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument("--execution-mode", choices=("service-thread", "direct"), default="service-thread")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--runs", type=int, default=20)

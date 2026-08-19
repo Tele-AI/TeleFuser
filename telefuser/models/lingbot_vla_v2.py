@@ -31,6 +31,7 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 from transformers.utils import logging
 
+from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.lingbot_vla_v2_loader import (
     LingBotVLAWeightLoader,
     LingBotVlaV2StateDictConverter,
@@ -63,6 +64,22 @@ except Exception:
     dinov3_vitb16 = None
 
 logger = logging.get_logger(__name__)
+
+
+# Quantize the standard Qwen text/vision blocks and action-expert attention.
+# The fused 3-D MoE weights and action/state heads intentionally remain BF16.
+LINGBOT_VLA_V2_DEFAULT_QUANTIZE_MODULES = (
+    "qwenvl.model.language_model.layers.",
+    "qwenvl.model.visual.blocks.",
+    "self_attn.",
+)
+LINGBOT_VLA_V2_REQUIRED_SKIP_MODULES = (
+    "action_in_proj",
+    "action_out_proj",
+    "action_time_mlp",
+    "state_proj",
+    "lm_head",
+)
 
 
 class LingbotVLAConfig(PretrainedConfig):
@@ -1488,6 +1505,78 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
     @staticmethod
     def state_dict_converter(**kwargs):
         return LingBotVlaV2StateDictConverter(**kwargs)
+
+    def enable_quant(self, quant_config: QuantConfig) -> None:
+        """Apply supported online quantization without changing action or MoE heads."""
+        if not isinstance(quant_config, QuantConfig):
+            raise TypeError("LingBot-VLA v2 online quantization requires QuantConfig")
+        if not quant_config.enabled:
+            return
+
+        include_names = quant_config.quantize_modules or LINGBOT_VLA_V2_DEFAULT_QUANTIZE_MODULES
+        exclude_names = tuple(dict.fromkeys((*quant_config.skip_modules, *LINGBOT_VLA_V2_REQUIRED_SKIP_MODULES)))
+
+        if quant_config.quant_type == QuantType.TORCHAO_FP8:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TORCHAO):
+                raise ValueError(
+                    f"LingBot-VLA v2 TorchAO FP8 requires the TorchAO backend; got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self,
+                include_names=include_names,
+                exclude_names=exclude_names,
+            )
+            self.torchao_fp8_replaced_linear = replaced
+        elif quant_config.quant_type == QuantType.BNB_NF4:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.BITSANDBYTES):
+                raise ValueError(
+                    f"LingBot-VLA v2 BNB NF4 requires the bitsandbytes backend; got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.bnb_nf4_linear import replace_linear_layers_with_bnb_nf4
+
+            replaced = replace_linear_layers_with_bnb_nf4(
+                self,
+                compute_dtype=torch.bfloat16,
+                include_names=include_names,
+                exclude_names=exclude_names,
+            )
+            self.bnb_nf4_replaced_linear = replaced
+        elif quant_config.quant_type == QuantType.FP8:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                raise ValueError(
+                    "LingBot-VLA v2 FP8 online quantization requires the tf-kernel backend; "
+                    f"got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+            def module_filter(name: str, _module: nn.Module) -> bool:
+                return any(token in name for token in include_names) and not any(
+                    token and token in name for token in exclude_names
+                )
+
+            replaced = count_linear_layers(self, module_filter=module_filter)
+            enable_fp8_gemm(
+                self,
+                options=FP8GemmOptions(
+                    fp16_weight_storage="keep" if quant_config.keep_fp16_weight else "discard",
+                    materialize_fp8_on_wrap=True,
+                ),
+                module_filter=module_filter,
+            )
+            self.tf_kernel_fp8_replaced_linear = replaced
+        else:
+            raise ValueError(f"LingBot-VLA v2 does not support online quantization type {quant_config.quant_type.name}")
+
+        if replaced == 0:
+            raise RuntimeError("LingBot-VLA v2 online quantization did not select any Linear layers")
+        self.quant_type = quant_config.quant_type
+        logger.info(
+            "LingBot-VLA v2 %s converted %d selected Linear layers; fused MoE and action heads remain BF16",
+            quant_config.quant_type.name,
+            replaced,
+        )
 
 
 # __WRAPPER_END__

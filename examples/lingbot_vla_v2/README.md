@@ -34,6 +34,7 @@ export TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo
 | Native structured HTTP service | Supported |
 | AIPerf structured workload | Supported |
 | Request-level replicas | Supported |
+| Online quantization | BF16 default; TorchAO FP8 and BNB NF4 smoke-validated; tf-kernel FP8 requires a compatible wheel |
 | Single-policy FSDP/TP/PP | Not enabled |
 | Physical robot action mapping and safety control | Not included |
 
@@ -115,6 +116,58 @@ assert metadata.version("triton") == "3.6.0"
 assert torch.cuda.is_available()
 PY
 ```
+
+## Optional Online Quantization
+
+BF16 remains the default and is the only profile covered by strict upstream parity. Online quantization is opt-in and
+does not modify the checkpoint. The VLA profile quantizes 492 standard Qwen text/vision and action-attention Linear
+layers while retaining the fused three-dimensional action MoE weights, state/action projections, AdaNorm projections,
+and action output head in BF16.
+
+Install the H100-validated Python backends only in the repository-local VLA environment:
+
+```bash
+uv pip install --python .venv-vla/bin/python --no-deps \
+  "torchao==0.17.0" \
+  "bitsandbytes==0.48.0"
+```
+
+The tf-kernel option requires an SM90 wheel built for the exact PyTorch/CUDA ABI. Build it from `tf-kernel/` only on a
+host whose CUDA toolkit matches the PyTorch CUDA runtime, then install the resulting wheel into `.venv-vla`. Do not use
+an SM80/SM100 wheel or a wheel built against a different CUDA ABI.
+
+Select one backend during direct inference:
+
+```bash
+.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
+  --model-root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "${TF_MODEL_ZOO_PATH}/Qwen3-VL-4B-Instruct" \
+  --camera-high /path/to/high.png \
+  --camera-left-wrist /path/to/left.png \
+  --camera-right-wrist /path/to/right.png \
+  --task "pick up the red block" \
+  --state-json '[0,0,0,0,0,0,0,0,0,0,0,0,0,0]' \
+  --seed 7 \
+  --quantization torchao-fp8 \
+  --output work_dirs/vla_action_fp8.npz
+```
+
+Accepted values are `torchao-fp8`, `tf-kernel-fp8`, and `bnb-nf4`. Omit `--quantization` for the unchanged BF16 path.
+For the native service, set `PPL_CONFIG["quantization"]` in `lingbot_vla_v2_native_service.py`; it defaults to `None`.
+
+A five-request H100 screening run on the same fixed input produced the following results. These numbers verify the
+benchmark path and expose the trade-off; they are not a frozen long-run production baseline.
+
+| Profile | Mean request | Throughput | Steady GPU allocated | Action cosine vs BF16 | Relative action L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BF16 | 0.668 s | 1.496 req/s | 12,328 MiB | 1.00000 | 0.00% |
+| TorchAO FP8 | 1.385 s | 0.722 req/s | 8,293 MiB | 0.99969 | 2.48% |
+| BNB NF4 | 0.965 s | 1.037 req/s | 6,327 MiB | 0.99822 | 6.06% |
+
+On this H100 profile, both online formats reduce allocated model memory but are slower than BF16. Treat them as memory
+capacity options until a longer benchmark and RoboTwin task-success evaluation establish deployment-specific benefit.
+The tf-kernel FP8 selection is code- and unit-tested but was not run on this host because its available CUDA toolkit is
+12.8 while the VLA PyTorch environment uses CUDA 13.0.
 
 ## Inputs
 

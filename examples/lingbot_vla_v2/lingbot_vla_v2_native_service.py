@@ -19,6 +19,7 @@ PPL_CONFIG = {
     "model_root": str(TF_MODEL_ZOO_PATH / "lingbot" / "lingbot-vla-v2-6b"),
     "qwen3vl_root": str(TF_MODEL_ZOO_PATH / "Qwen3-VL-4B-Instruct"),
     "device": "cuda:0",
+    "quantization": None,
     "max_image_bytes": 10 * 1024 * 1024,
 }
 
@@ -85,6 +86,7 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
         PPL_CONFIG["qwen3vl_root"],
         device=PPL_CONFIG["device"],
         warmup=True,
+        quantization=PPL_CONFIG["quantization"],
     )
 
 

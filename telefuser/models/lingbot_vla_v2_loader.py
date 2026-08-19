@@ -678,6 +678,8 @@ from typing import Any
 
 from transformers import AutoConfig
 
+from telefuser.core.config import QuantConfig
+
 
 class LingBotVLAWeightLoader:
     """Minimal native weight-name mapper retained for model compatibility."""
@@ -918,6 +920,7 @@ def load_lingbot_vla_v2(
     torch_dtype=torch.bfloat16,
     device=None,
     checkpoint_variant: str = "base",
+    quant_config: QuantConfig | None = None,
 ):
     from telefuser.models.lingbot_vla_v2 import LingBotVlaV2Model
 
@@ -936,5 +939,6 @@ def load_lingbot_vla_v2(
             "checkpoint_variant": checkpoint_variant,
             "checkpoint_path": str(checkpoint_path),
         },
+        quant_config=quant_config,
     )
     return module_manager.fetch_module("lingbot_vla_v2")

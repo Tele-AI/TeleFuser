@@ -5,6 +5,7 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 
 import torch
 
+from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
 from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward
 
 
@@ -413,7 +414,7 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         # Ensure input dtypes match weight dtype (needed for gradient checkpointing
         # recomputation where autocast context is lost)
-        param_dtype = self.self_attn.q_proj.weight.dtype
+        param_dtype = linear_compute_dtype(self.self_attn.q_proj, hidden_states.dtype)
         hidden_states = hidden_states.to(param_dtype)
         if att_output is not None:
             att_output = att_output.to(param_dtype)
@@ -434,8 +435,9 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
             return query_state, key_state, value_state
 
         elif output_atten:
-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+            output_dtype = linear_compute_dtype(self.self_attn.o_proj, att_output.dtype)
+            if att_output.dtype != output_dtype:
+                att_output = att_output.to(output_dtype)
             out_emb = self.self_attn.o_proj(att_output[:, start:end])
 
             # first residual
