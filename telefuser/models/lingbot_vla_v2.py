@@ -52,6 +52,12 @@ from telefuser.models.lingbot_vla_v2_moe import (
     Qwen2FusedExperts,
     Qwen2TokenMoeBlock,
 )
+from telefuser.models.lingbot_vla_v2_quantization import (
+    LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256,
+    LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT,
+    build_lingbot_vla_v2_linear_manifest,
+    finalize_lingbot_vla_v2_quantization_identity,
+)
 from telefuser.models.lingbot_vla_v2_qwen import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLPreTrainedModel,
@@ -1513,8 +1519,54 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
         if not quant_config.enabled:
             return
 
+        existing_quant_type = getattr(self, "quant_type", None)
+        if existing_quant_type == quant_config.quant_type:
+            return
+        if existing_quant_type is not None:
+            raise RuntimeError(
+                f"LingBot-VLA v2 is already quantized as {existing_quant_type}, cannot apply {quant_config.quant_type}"
+            )
+
+        profiles = {
+            QuantType.TORCHAO_FP8: "torchao-fp8",
+            QuantType.FP8: "tf-kernel-fp8",
+            QuantType.BNB_NF4: "bnb-nf4",
+        }
+        effective_backends = {
+            QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+            QuantType.FP8: QuantKernelBackend.TF_KERNEL,
+            QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+        }
+        if quant_config.quant_type not in profiles:
+            raise ValueError(f"LingBot-VLA v2 does not support online quantization type {quant_config.quant_type.name}")
+
         include_names = quant_config.quantize_modules or LINGBOT_VLA_V2_DEFAULT_QUANTIZE_MODULES
         exclude_names = tuple(dict.fromkeys((*quant_config.skip_modules, *LINGBOT_VLA_V2_REQUIRED_SKIP_MODULES)))
+        manifest = build_lingbot_vla_v2_linear_manifest(
+            self,
+            include_names=include_names,
+            exclude_names=exclude_names,
+        )
+        selected_count = int(manifest["selected_count"])
+        if selected_count == 0:
+            raise RuntimeError("LingBot-VLA v2 online quantization did not select any Linear layers")
+        frozen_official_profile = (
+            getattr(getattr(self, "config", None), "checkpoint_variant", None) == "base"
+            and quant_config.quantize_modules is None
+            and quant_config.skip_modules == QuantConfig().skip_modules
+        )
+        if frozen_official_profile:
+            manifest_sha256 = str(manifest["manifest_sha256"])
+            if (
+                selected_count != LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT
+                or manifest_sha256 != LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256
+            ):
+                raise RuntimeError(
+                    "LingBot-VLA v2 official 6B quantization manifest changed: "
+                    f"expected count={LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT} "
+                    f"sha256={LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256}, "
+                    f"got count={selected_count} sha256={manifest_sha256}"
+                )
 
         if quant_config.quant_type == QuantType.TORCHAO_FP8:
             if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TORCHAO):
@@ -1566,16 +1618,24 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
                 module_filter=module_filter,
             )
             self.tf_kernel_fp8_replaced_linear = replaced
-        else:
-            raise ValueError(f"LingBot-VLA v2 does not support online quantization type {quant_config.quant_type.name}")
-
-        if replaced == 0:
-            raise RuntimeError("LingBot-VLA v2 online quantization did not select any Linear layers")
+        if replaced != selected_count:
+            raise RuntimeError(
+                f"LingBot-VLA v2 quantization selected {selected_count} Linear layers but converted {replaced}"
+            )
         self.quant_type = quant_config.quant_type
+        finalize_lingbot_vla_v2_quantization_identity(
+            self,
+            profile=profiles[quant_config.quant_type],
+            quant_type=quant_config.quant_type.name,
+            kernel_backend=effective_backends[quant_config.quant_type].name,
+            manifest=manifest,
+        )
         logger.info(
-            "LingBot-VLA v2 %s converted %d selected Linear layers; fused MoE and action heads remain BF16",
+            "LingBot-VLA v2 %s converted %d selected Linear layers (manifest %s); "
+            "fused MoE and action heads remain BF16",
             quant_config.quant_type.name,
             replaced,
+            manifest["manifest_sha256"],
         )
 
 

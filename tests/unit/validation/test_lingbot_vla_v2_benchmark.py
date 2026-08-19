@@ -31,6 +31,7 @@ def test_latency_summary_reports_interpolated_percentiles_and_throughput() -> No
     assert result["count"] == 4
     assert result["mean_seconds"] == 2.5
     assert result["p95_seconds"] == pytest.approx(3.85)
+    assert result["p99_seconds"] == pytest.approx(3.97)
     assert result["throughput_requests_per_second"] == 0.4
 
 

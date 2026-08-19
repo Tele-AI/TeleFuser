@@ -12,6 +12,7 @@ from telefuser.pipelines.lingbot_vla_v2.service import (
     LingBotVlaV2ActionRequest,
     predict_lingbot_vla_v2_action,
 )
+from telefuser.utils.logging import logger
 
 TF_MODEL_ZOO_PATH = Path(os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")).expanduser()
 
@@ -81,6 +82,7 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
     """Load one policy replica for the native TeleFuser service."""
     if parallelism != 1:
         raise ValueError("LingBot-VLA v2 supports parallelism=1 per replica; use --num-replicas for a pipeline pool")
+    logger.info(f"Loading LingBot-VLA v2 service profile quantization={PPL_CONFIG['quantization'] or 'bf16'}")
     return get_lingbot_vla_v2_pipeline(
         PPL_CONFIG["model_root"],
         PPL_CONFIG["qwen3vl_root"],

@@ -31,6 +31,7 @@ export TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo
 | Public loader and RobotWin preprocessing | Supported |
 | Canonical action output (`50 x 55`) | Supported |
 | Strict upstream parity | Frozen 38-tensor baseline |
+| Matched upstream inference-speed comparison | H100 BF16 core/runtime benchmark recorded below |
 | Native structured HTTP service | Supported |
 | AIPerf structured workload | Supported |
 | Request-level replicas | Supported |
@@ -124,6 +125,12 @@ does not modify the checkpoint. The VLA profile quantizes 492 standard Qwen text
 layers while retaining the fused three-dimensional action MoE weights, state/action projections, AdaNorm projections,
 and action output head in BF16.
 
+| CLI value | Backend | Weight/activation path | Validation status |
+| --- | --- | --- | --- |
+| `torchao-fp8` | TorchAO | Dynamic FP8 activation/weight when supported, otherwise FP8 weight-only | H100 real forward, action comparison, and lifecycle validated |
+| `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8, BF16 output | Code and unit tested; compatible SM90 wheel unavailable on this host |
+| `bnb-nf4` | bitsandbytes | NF4 weight-only with BF16 compute | H100 real forward, action comparison, and lifecycle validated |
+
 Install the H100-validated Python backends only in the repository-local VLA environment:
 
 ```bash
@@ -154,6 +161,29 @@ Select one backend during direct inference:
 
 Accepted values are `torchao-fp8`, `tf-kernel-fp8`, and `bnb-nf4`. Omit `--quantization` for the unchanged BF16 path.
 For the native service, set `PPL_CONFIG["quantization"]` in `lingbot_vla_v2_native_service.py`; it defaults to `None`.
+The public Python loader accepts the same values:
+
+```python
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
+
+pipeline = get_lingbot_vla_v2_pipeline(
+    "/path/to/lingbot-vla-v2-6b",
+    "/path/to/Qwen3-VL-4B-Instruct",
+    device="cuda:0",
+    quantization="torchao-fp8",
+)
+```
+
+Each quantized policy replica is currently single-GPU. Request-level scaling uses one independent policy replica per
+GPU through `telefuser serve --num-replicas`; it does not split one 6B policy with TP, PP, or FSDP. Quantization is not
+validated with single-policy TP/PP/FSDP, and unsupported combinations must not be inferred from the generic
+`QuantConfig` types.
+
+For the official base checkpoint, online conversion is guarded by a frozen 492-layer manifest. Runtime and benchmark
+reports include its SHA-256, selected module groups, concrete wrapper and weight types, package versions, and selected
+backend. The official manifest SHA-256 is
+`f9efe28620796060ccc46bd18ac153a580b28d01c7719fa55a8e80631f2ce833`; a changed count or layer-name manifest fails
+before conversion instead of silently quantizing a different model surface.
 
 A five-request H100 screening run on the same fixed input produced the following results. These numbers verify the
 benchmark path and expose the trade-off; they are not a frozen long-run production baseline.
@@ -168,6 +198,42 @@ On this H100 profile, both online formats reduce allocated model memory but are 
 capacity options until a longer benchmark and RoboTwin task-success evaluation establish deployment-specific benefit.
 The tf-kernel FP8 selection is code- and unit-tested but was not run on this host because its available CUDA toolkit is
 12.8 while the VLA PyTorch environment uses CUDA 13.0.
+
+### BF16-to-quantized action comparison
+
+Capture the same input and seed once with the unchanged BF16 path and once per available backend. Use identical camera,
+task, state, `--deterministic-moe`, and output arguments apart from `--quantization`:
+
+```bash
+.venv-vla/bin/python tools/validation/capture_lingbot_vla_v2_telefuser.py \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+  --camera-high /path/to/high.png \
+  --camera-left-wrist /path/to/left.png \
+  --camera-right-wrist /path/to/right.png \
+  --task "pick up the red block" \
+  --state-json '[0,0,0,0,0,0,0,0,0,0,0,0,0,0]' \
+  --seed 7 --deterministic-moe \
+  --output work_dirs/vla_quantization/bf16_seed7.npz
+
+# Repeat the command with these additional arguments:
+# --quantization torchao-fp8 --output work_dirs/vla_quantization/torchao_seed7.npz
+# --quantization bnb-nf4     --output work_dirs/vla_quantization/nf4_seed7.npz
+```
+
+The VLA-specific comparator rejects mismatched checkpoint, processor, normalization, input, seed, step count,
+attention, or MoE identities. Without thresholds it records the action error distribution only:
+
+```bash
+.venv-vla/bin/python tools/validation/compare_lingbot_vla_v2_quantization.py \
+  --reference work_dirs/vla_quantization/bf16_seed7.npz \
+  --candidate work_dirs/vla_quantization/torchao_seed7.npz \
+  --output work_dirs/vla_quantization/bf16_vs_torchao.json
+```
+
+Release-specific gates can additionally pass `--min-cosine`, `--max-relative-l2`, `--max-abs`, and a repeated
+candidate artifact with `--candidate-replay ... --require-exact-replay`. These are quantization regressions against
+TeleFuser BF16, not strict upstream parity and not evidence of RoboTwin task success.
 
 ## Inputs
 
@@ -288,6 +354,11 @@ CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
   --output work_dirs/vla_service_benchmark/report.json
 ```
 
+Pass `--quantization torchao-fp8` or `--quantization bnb-nf4` to benchmark an opt-in backend. The report includes
+p50/p90/p95/p99 latency, throughput, phase timing, peak RSS/CUDA allocation, quantization runtime identity, synchronized
+shutdown duration, and allocator state after `pipeline.close()` plus benchmark-local CUDA cache release. Offloading keeps
+the checkpoint available in CPU memory until the benchmark process exits; it does not reload or mutate the checkpoint.
+
 The native service moves the policy to its target GPU and runs one synthetic fixed-shape warmup before readiness. It
 also keeps the allocator cache between requests. The report records construction and startup warmup separately, while
 the first accepted request represents a ready replica. The default `service-thread` execution mode matches the native
@@ -308,11 +379,16 @@ Run a single-replica smoke and latency check:
 .venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
   --base-url http://127.0.0.1:18080 \
   --image examples/data/lingbot_world_fast/image.jpg \
+  --quantization-profile bf16 \
   --warmup 1 \
   --requests 20 \
   --concurrency 1 \
   --output work_dirs/vla_service_validation/smoke_20.json
 ```
+
+`--quantization-profile` labels the operator-selected service configuration in the validation artifact; it does not
+change the running service. Use the in-process service benchmark above when a report must contain inspected wrapper,
+weight, package, and manifest identity rather than an operator declaration.
 
 When the target was started with two independent replicas, validate request-level concurrency with:
 
@@ -455,12 +531,17 @@ inference keeps the upstream Triton MoE path through `telefuser.ops`; strict cap
 the upstream kernel uses atomic accumulation and is not bitwise repeatable across separate processes. Artifact metadata
 records both `attention_backend` and `moe_backend`, and the comparator rejects mixed-backend artifacts.
 
-## Upstream vs TeleFuser Runtime
+## Official Upstream vs TeleFuser Inference Speed
 
-Use the no-capture runtime benchmark after strict parity has passed. Unlike the parity capture, this benchmark does
-not install layer hooks or copy every intermediate tensor to CPU. Both implementations consume the same frozen
-preprocessed tensors and use the same initial noise, checkpoint paths, device type, software versions, attention
-backend, and MoE backend. The comparator rejects reports when any of these conditions differ.
+This comparison answers whether the TeleFuser integration changes LingBot-VLA v2 inference speed relative to the
+frozen official upstream implementation. Establish strict numerical parity first, then use the no-capture runtime
+benchmark for timing. The parity capture itself is deliberately not timed because its layer hooks and intermediate
+CPU copies add validation overhead that is absent from normal inference.
+
+Both timed implementations consume the same frozen preprocessed tensors and initial noise and use matched checkpoint
+paths, device type, software versions, attention backend, and MoE backend. The report comparator rejects a comparison
+when these conditions differ. It measures both the device-resident core model and a runtime request boundary; it does
+not compare unrelated upstream demo setup time with TeleFuser service time.
 
 Run the official checkout and TeleFuser sequentially on the same otherwise-idle GPU:
 

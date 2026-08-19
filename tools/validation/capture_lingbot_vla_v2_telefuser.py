@@ -13,17 +13,15 @@ from typing import Any, Iterator, Sequence
 import numpy as np
 import torch
 import transformers
-from transformers import AutoProcessor
 
-from telefuser.core.config import ModelRuntimeConfig
-from telefuser.core.module_manager import ModuleManager
-from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2, resolve_lingbot_vla_v2_shards
+from telefuser.models.lingbot_vla_v2_loader import resolve_lingbot_vla_v2_shards
+from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
 from telefuser.pipelines.lingbot_vla_v2 import (
     ROBOTWIN_CAMERA_KEYS,
     LingBotVlaV2Observation,
     LingBotVlaV2Pipeline,
-    LingBotVlaV2PipelineConfig,
 )
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 
 ARTIFACT_SCHEMA_VERSION = 1
 
@@ -138,25 +136,18 @@ def trace_predict_velocity(flow_model: Any, capture: TensorCapture) -> Iterator[
         flow_model._use_compile_predict_velocity = compile_enabled
 
 
-def _build_pipeline(model_root: Path, qwen3vl_root: Path, device: str) -> LingBotVlaV2Pipeline:
-    target_device = torch.device(device)
-    dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
-    processor = AutoProcessor.from_pretrained(str(qwen3vl_root), local_files_only=True, padding_side="right")
-    manager = ModuleManager(torch_dtype=dtype, device="cpu")
-    manager.add_module(processor, "lingbot_vla_v2_processor", path=str(qwen3vl_root))
-    load_lingbot_vla_v2(manager, model_root, qwen3vl_root, torch_dtype=dtype)
-    pipeline = LingBotVlaV2Pipeline(device=device, torch_dtype=dtype)
-    pipeline.init(
-        manager,
-        LingBotVlaV2PipelineConfig(
-            policy_config=ModelRuntimeConfig(
-                device_type=target_device.type,
-                device_id=target_device.index or 0,
-                torch_dtype=dtype,
-            )
-        ),
+def _build_pipeline(
+    model_root: Path,
+    qwen3vl_root: Path,
+    device: str,
+    quantization: str | None,
+) -> LingBotVlaV2Pipeline:
+    return get_lingbot_vla_v2_pipeline(
+        str(model_root),
+        str(qwen3vl_root),
+        device=device,
+        quantization=quantization,
     )
-    return pipeline
 
 
 def capture_artifact(
@@ -171,6 +162,7 @@ def capture_artifact(
     device: str,
     full_checkpoint_hash: bool,
     deterministic_moe: bool,
+    quantization: str | None = None,
 ) -> tuple[Path, Path]:
     if len(image_paths) != len(ROBOTWIN_CAMERA_KEYS):
         raise ValueError(f"expected {len(ROBOTWIN_CAMERA_KEYS)} camera paths, got {len(image_paths)}")
@@ -178,7 +170,7 @@ def capture_artifact(
     metadata_path = output.with_suffix(".json")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    pipeline = _build_pipeline(model_root, qwen3vl_root, device)
+    pipeline = _build_pipeline(model_root, qwen3vl_root, device, quantization)
     if deterministic_moe:
         for module in pipeline.policy_stage.policy.modules():
             if hasattr(module, "_use_robby_moe_kernel"):
@@ -232,6 +224,7 @@ def capture_artifact(
             "device_name": torch.cuda.get_device_name(target_device) if target_device.type == "cuda" else "cpu",
             "torch_version": torch.__version__,
             "transformers_version": transformers.__version__,
+            "quantization": lingbot_vla_v2_quantization_identity(pipeline.policy_stage.policy),
             "arrays": capture.array_metadata,
         }
         np.savez(output, **capture.arrays)
@@ -267,6 +260,7 @@ def main() -> None:
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument(
         "--full-checkpoint-hash",
         action="store_true",
@@ -301,6 +295,7 @@ def main() -> None:
         device=args.device,
         full_checkpoint_hash=args.full_checkpoint_hash,
         deterministic_moe=args.deterministic_moe,
+        quantization=args.quantization,
     )
     print(f"Saved LingBot-VLA v2 capture: {artifact}")
     print(f"Saved LingBot-VLA v2 metadata: {metadata}")

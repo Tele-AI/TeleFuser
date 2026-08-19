@@ -20,6 +20,7 @@ import torch
 from PIL import Image
 
 from telefuser.metrics.runtime import collect_runtime_environment
+from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
 from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 from telefuser.pipelines.lingbot_vla_v2.service import (
     LingBotVlaV2ActionRequest,
@@ -109,6 +110,7 @@ def summarize(values: Sequence[float]) -> dict[str, float | int]:
         "p50_seconds": percentile(values, 0.50),
         "p90_seconds": percentile(values, 0.90),
         "p95_seconds": percentile(values, 0.95),
+        "p99_seconds": percentile(values, 0.99),
         "max_seconds": max(values),
         "throughput_requests_per_second": len(values) / total,
     }
@@ -206,8 +208,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         ),
         device=device,
         process=process,
-        synchronize_cuda=False,
+        synchronize_cuda=True,
     )
+    quantization_runtime = lingbot_vla_v2_quantization_identity(pipeline.policy_stage.policy)
     startup_warmup = None
     if args.startup_warmup:
         _, startup_warmup = measure(
@@ -317,6 +320,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "qwen3vl_root": str(args.qwen3vl_root.resolve()),
             "device": str(device),
             "quantization": args.quantization or "bf16",
+            "quantization_runtime": quantization_runtime,
             "seed": args.seed,
             "instruction": args.instruction,
             "internal_model_image_size": [pipeline.input_processor.image_size] * 2,
@@ -333,7 +337,21 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         if executor is not None:
             executor.shutdown(wait=True)
-        pipeline.close()
+
+        def close_and_release_allocator_cache() -> None:
+            pipeline.close()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        _, shutdown = measure(
+            close_and_release_allocator_cache,
+            device=device,
+            process=process,
+            synchronize_cuda=True,
+        )
+        if "report" in locals():
+            report["shutdown"] = shutdown
+            report["memory_after_close"] = _memory_snapshot(device, process)
     return report
 
 

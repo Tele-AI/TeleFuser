@@ -895,6 +895,7 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         "target": {
             "base_url": base_url,
             "transport": "HTTP native TeleFuser asynchronous structured task API",
+            "declared_quantization_profile": getattr(args, "quantization_profile", "bf16"),
             "metadata": before["metadata"],
             "status_before": before["status"],
             "status_after": after["status"],
@@ -955,6 +956,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--task-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--expected-horizon", type=int, default=50)
     parser.add_argument("--expected-action-dim", type=int, default=55)
+    parser.add_argument(
+        "--quantization-profile",
+        choices=("bf16", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+        default="bf16",
+        help="Operator-declared profile recorded in the report; it does not change the running service.",
+    )
     parser.add_argument("--max-records", type=int, default=1000)
     parser.add_argument(
         "--service-pid",

@@ -196,6 +196,19 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     load_seconds = time.perf_counter() - load_started_at
     pipeline = loaded[0] if args.implementation == "telefuser" else None
     model = loaded[1] if args.implementation == "telefuser" else loaded
+    if pipeline is not None:
+        from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
+
+        quantization_runtime = lingbot_vla_v2_quantization_identity(model)
+    else:
+        quantization_runtime = {
+            "enabled": False,
+            "profile": "bf16",
+            "quant_type": None,
+            "kernel_backend": None,
+            "implementation": "official_upstream",
+            "manifest": None,
+        }
 
     device_inputs = _to_device(cpu_inputs, device)
     device_noise = cpu_noise.to(device=device)
@@ -248,6 +261,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "measured_runs": args.runs,
             "device": str(device),
             "quantization": args.quantization or "bf16",
+            "quantization_runtime": quantization_runtime,
             "device_name": torch.cuda.get_device_name(device),
             "environment": {
                 "python_version": sys.version.split()[0],
