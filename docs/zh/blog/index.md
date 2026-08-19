@@ -12,6 +12,7 @@ description: 记录 TeleFuser 性能与运行时优化的分析、实现和验�
 
 | 日期 | 文章 | 状态 | 验证平台 |
 |---|---|---|---|
+| 2026-08-19 | [FP8 Sol-Attn：H100 视频 DiT 的量化稀疏注意力](fp8_sol_attention.md) | 已验证 | 1 x H100 80 GB |
 | 2026-08-06 | [CUDA IPC Ulysses：在 H100 上重叠 Attention 通信](cuda_ipc_ulysses.md) | 已验证 | 4 x H100 80 GB |
 
 ## 发布约定

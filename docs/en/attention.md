@@ -166,6 +166,7 @@ else:
 | Pipeline | Dense Attention | Radial | Sol-Attn | Notes |
 |----------|-----------------|--------|----------|-------|
 | `Wan21VideoPipeline` | Yes | Yes | Experimental | Sol-Attn covers eligible self-attention calls |
+| `MiniMaxH3Pipeline` | Yes | No | Experimental | FL2VA supports exact prefix sinks and FP8 Q/K/V on SM90 |
 | `Wan22VideoPipeline` | Yes | Yes | No | Sol-Attn is not wired into Wan2.2 yet |
 | `QwenImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
 | `ZImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
@@ -214,6 +215,9 @@ Setting `dense_timesteps=0`, `dense_layers=0`, and a negative `tau` forces all
 KV blocks onto the exact route. The Wan optimized example exposes this as
 `--attention fp8-dense`; `--attention fp8-sol` enables centroid routing with the
 same FP8 Q/K/V and QK/PV kernel.
+For the kernel data flow, precision boundaries, and H100 ablations, see the
+[FP8 Sol-Attn technical article](blog/fp8_sol_attention.md).
+
 
 ### QwenImagePipeline / ZImagePipeline
 

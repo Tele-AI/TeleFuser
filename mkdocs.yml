@@ -127,6 +127,7 @@ plugins:
             Benchmarks: 基准测试
             Technical Blog: 技术博客
             Overview: 总览
+            FP8 Sol-Attn: FP8 Sol-Attn
             CUDA IPC Ulysses: CUDA IPC Ulysses
             Parallel Inference: 并行推理
             Communication Architecture: 通信架构
@@ -181,6 +182,7 @@ nav:
       - TeleFuser and AIPerf: benchmark_aiperf.md
   - Technical Blog:
       - Overview: blog/index.md
+      - FP8 Sol-Attn: blog/fp8_sol_attention.md
       - CUDA IPC Ulysses: blog/cuda_ipc_ulysses.md
   - Configuration:
       - configuration.md

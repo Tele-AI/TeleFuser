@@ -13,6 +13,7 @@ alternatives, implementation tradeoffs, and hardware-specific results behind tha
 
 | Date | Article | Status | Validated platform |
 |---|---|---|---|
+| 2026-08-19 | [FP8 Sol-Attn: Quantized Sparse Attention for Video DiTs on H100](fp8_sol_attention.md) | Validated | 1 x H100 80 GB |
 | 2026-08-06 | [CUDA IPC Ulysses: Overlapping Attention Communication on H100](cuda_ipc_ulysses.md) | Validated | 4 x H100 80 GB |
 
 ## Publication Contract

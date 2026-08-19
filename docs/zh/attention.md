@@ -166,6 +166,7 @@ else:
 | Pipeline | 密集注意力 | Radial | Sol-Attn | 说明 |
 |----------|-----------|--------|----------|------|
 | `Wan21VideoPipeline` | 支持 | 支持 | 实验性 | Sol-Attn 用于满足约束的 self-attention |
+| `MiniMaxH3Pipeline` | 支持 | 不支持 | 实验性 | FL2VA 支持 exact prefix sink 与 SM90 FP8 Q/K/V |
 | `Wan22VideoPipeline` | 支持 | 支持 | 不支持 | 尚未接入 Wan2.2 |
 | `QwenImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
 | `ZImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
@@ -212,6 +213,9 @@ Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端�
 设置 `dense_timesteps=0`、`dense_layers=0` 和负数 `tau` 会强制所有 KV block
 走 exact 路径。Wan 优化示例将其暴露为 `--attention fp8-dense`；
 `--attention fp8-sol` 使用相同的 FP8 Q/K/V 与 QK/PV kernel 并启用质心路由。
+关于 kernel 数据流、精度边界与 H100 消融结果，参见
+[FP8 Sol-Attn 技术文章](blog/fp8_sol_attention.md)。
+
 
 ### QwenImagePipeline / ZImagePipeline
 
