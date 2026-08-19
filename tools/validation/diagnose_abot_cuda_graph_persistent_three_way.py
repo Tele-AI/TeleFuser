@@ -27,6 +27,19 @@ Example:
       --model-root /public/fanyk1/lwb/model_zoo/ABot-World-0-5B-LF \\
       --image /public/fanyk1/lwb/ABot-World/web_client/datasets/images/84b90ad568b693d2.png \\
       --output-dir results/validation/abot_cuda_graph_b1_persistent_three_way
+
+Process-NCCL logical-device smoke (four physical devices visible to one
+worker process, using local cuda:1 / physical GPU 5)::
+
+    CUDA_VISIBLE_DEVICES=4,5,6,7 PYTHONPATH=$PWD \\
+    /public/fanyk1/lwb/envs/telefuser_sage291/bin/python \\
+    tools/validation/diagnose_abot_cuda_graph_persistent_three_way.py \\
+      --batch-size 2 --device-id 1 \\
+      --expected-cuda-visible-devices 4,5,6,7 \\
+      --expected-visible-device-count 4 --nccl-single-rank \\
+      --model-root /public/fanyk1/lwb/model_zoo/ABot-World-0-5B-LF \\
+      --image /public/fanyk1/lwb/ABot-World/web_client/datasets/images/84b90ad568b693d2.png \\
+      --output-dir results/validation/abot_cuda_graph_b2_nccl_visible4567_device1
 """
 
 from __future__ import annotations
@@ -34,11 +47,15 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import socket
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from PIL import Image
 
 
@@ -50,6 +67,149 @@ def _load_base_validator() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _split_cuda_visible_devices(value: str | None) -> list[str] | None:
+    """Return the process-visible device tokens without touching CUDA."""
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _expected_visible_devices(value: str | None) -> list[str] | None:
+    """Validate the optional exact CVD mapping requested by the operator."""
+    if value is None:
+        return None
+    devices = _split_cuda_visible_devices(value)
+    if not devices:
+        raise ValueError("--expected-cuda-visible-devices must contain at least one device token")
+    return devices
+
+
+def _device_context_plan(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate CVD/local-index assumptions before loading a CUDA model.
+
+    Process-NCCL workers receive *logical* GPU ids. For example, a process
+    launched with ``CUDA_VISIBLE_DEVICES=4,5,6,7`` must use ``device_id=1``
+    to select physical GPU 5; passing ``5`` would be invalid in that process.
+    """
+    raw_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    visible = _split_cuda_visible_devices(raw_visible)
+    expected = _expected_visible_devices(args.expected_cuda_visible_devices)
+    if expected is not None and visible != expected:
+        observed = "<unset>" if visible is None else ",".join(visible)
+        raise ValueError(
+            "CUDA_VISIBLE_DEVICES does not match --expected-cuda-visible-devices: "
+            f"expected {','.join(expected)!r}, observed {observed!r}"
+        )
+    if args.expected_visible_device_count is not None and visible is not None:
+        if len(visible) != args.expected_visible_device_count:
+            raise ValueError(
+                "CUDA_VISIBLE_DEVICES count does not match --expected-visible-device-count: "
+                f"expected {args.expected_visible_device_count}, observed {len(visible)}"
+            )
+    if visible is not None and not 0 <= args.device_id < len(visible):
+        raise ValueError(f"--device-id {args.device_id} is not a logical index in CUDA_VISIBLE_DEVICES={raw_visible!r}")
+    return {
+        "cuda_visible_devices": raw_visible,
+        "visible_device_tokens": visible,
+        "expected_cuda_visible_devices": expected,
+        "expected_visible_device_count": args.expected_visible_device_count,
+        "logical_device_requested": args.device_id,
+        "physical_device_token_for_logical_device": (
+            visible[args.device_id] if visible is not None and 0 <= args.device_id < len(visible) else None
+        ),
+    }
+
+
+def _activate_cuda_device_context(args: argparse.Namespace, plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Select the requested local CUDA device before any pipeline/graph work.
+
+    ``torch.cuda.graph`` uses the current CUDA device for its capture stream.
+    This explicit selection mirrors ``_run_nccl_model_worker`` and avoids a
+    standalone validator accidentally capturing on logical cuda:0 while its
+    pipeline tensors reside on logical cuda:1.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("persistent CUDA-Graph diagnostic requires CUDA")
+    runtime_count = int(torch.cuda.device_count())
+    if args.expected_visible_device_count is not None and runtime_count != args.expected_visible_device_count:
+        raise RuntimeError(
+            "torch.cuda.device_count() does not match --expected-visible-device-count: "
+            f"expected {args.expected_visible_device_count}, observed {runtime_count}"
+        )
+    if not 0 <= args.device_id < runtime_count:
+        raise RuntimeError(f"--device-id {args.device_id} is out of range for {runtime_count} visible CUDA device(s)")
+    # Do not call current_device before this: that can initialize CUDA on the
+    # wrong default lane and would not reproduce a process-NCCL worker.
+    torch.cuda.set_device(args.device_id)
+    current = int(torch.cuda.current_device())
+    if current != args.device_id:
+        raise RuntimeError(f"failed to select logical cuda:{args.device_id}; current device is cuda:{current}")
+    properties = torch.cuda.get_device_properties(args.device_id)
+    return {
+        **dict(plan),
+        "runtime_visible_device_count": runtime_count,
+        "logical_device_current_after_set": current,
+        "selected_device": f"cuda:{args.device_id}",
+        "selected_device_name": properties.name,
+        "selected_device_capability": [int(properties.major), int(properties.minor)],
+    }
+
+
+def _free_loopback_port() -> int:
+    """Allocate a short-lived loopback rendezvous port for a rank-0 group."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _start_single_rank_nccl(args: argparse.Namespace, device: torch.device) -> tuple[dict[str, Any], bool]:
+    """Optionally reproduce the worker-local initialized-NCCL context.
+
+    It is intentionally world-size one: CUDA Graph parity needs the same
+    process-local current-device and communicator initialization ordering as a
+    process-NCCL model worker, not a second 25-GB replica or a migration test.
+    """
+    report: dict[str, Any] = {
+        "requested": bool(args.nccl_single_rank),
+        "initialized_by_tool": False,
+        "already_initialized": bool(dist.is_available() and dist.is_initialized()),
+    }
+    if not args.nccl_single_rank:
+        return report, False
+    if not dist.is_available() or not dist.is_nccl_available():
+        raise RuntimeError("--nccl-single-rank requires a PyTorch build with NCCL support")
+    if dist.is_initialized():
+        raise RuntimeError("--nccl-single-rank refuses to reuse or destroy an existing process group")
+    port = _free_loopback_port()
+    try:
+        dist.init_process_group(
+            backend="nccl",
+            init_method=f"tcp://127.0.0.1:{port}",
+            rank=0,
+            world_size=1,
+            timeout=timedelta(seconds=args.nccl_init_timeout_seconds),
+            device_id=device,
+        )
+    except Exception:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        raise
+    if not dist.is_initialized() or str(dist.get_backend()) != "nccl":
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        raise RuntimeError("single-rank NCCL initialization did not produce an NCCL process group")
+    report.update(
+        {
+            "initialized_by_tool": True,
+            "backend": str(dist.get_backend()),
+            "rank": int(dist.get_rank()),
+            "world_size": int(dist.get_world_size()),
+            "current_cuda_device": int(torch.cuda.current_device()),
+        }
+    )
+    return report, True
 
 
 def _tree_exactness(left: Any, right: Any) -> dict[str, Any]:
@@ -477,17 +637,31 @@ def _pair_exact(round_report: Mapping[str, Any], pair: str) -> bool:
 
 @torch.inference_mode()
 def _run(args: argparse.Namespace, base: Any) -> dict[str, Any]:
-    if not torch.cuda.is_available():
-        raise RuntimeError("persistent CUDA-Graph diagnostic requires CUDA")
+    device_context = _activate_cuda_device_context(args, _device_context_plan(args))
     image = Image.open(args.image).convert("RGB")
     pipeline = None
+    nccl_context: dict[str, Any] = {
+        "requested": bool(args.nccl_single_rank),
+        "initialized_by_tool": False,
+    }
+    nccl_owned = False
     cohorts: dict[str, list[Any]] = {"regular": [], "static": [], "graph": []}
     try:
         pipeline = base._make_pipeline(args)
         device = torch.device(pipeline.device)
-        if device.type != "cuda":
-            raise RuntimeError(f"persistent CUDA-Graph diagnostic requires CUDA, got {pipeline.device!r}")
+        expected_device = torch.device("cuda", args.device_id)
+        if device != expected_device:
+            raise RuntimeError(
+                "pipeline device does not match the requested logical CUDA device: "
+                f"expected {expected_device}, got {pipeline.device!r}"
+            )
         pipeline.preload_models()
+        if int(torch.cuda.current_device()) != args.device_id:
+            raise RuntimeError(
+                "pipeline preload changed the current CUDA device: "
+                f"expected cuda:{args.device_id}, got cuda:{torch.cuda.current_device()}"
+            )
+        nccl_context, nccl_owned = _start_single_rank_nccl(args, device)
         pipeline.denoise_stage.configure_cuda_graph(False)
         actions = _parse_actions(args.session_actions, args.batch_size, base)
         seeds = [args.seed + 9973 * index for index in range(args.batch_size)]
@@ -646,6 +820,8 @@ def _run(args: argparse.Namespace, base: Any) -> dict[str, Any]:
             "status": status,
             "diagnostic": "ordinary eager vs persistent-static eager vs CUDA Graph across two continuations",
             "device": str(device),
+            "execution_context": device_context,
+            "nccl_context": nccl_context,
             "batch_size": args.batch_size,
             "control_latent_frames": args.control_latent_frames,
             "session_actions": actions,
@@ -691,6 +867,10 @@ def _run(args: argparse.Namespace, base: Any) -> dict[str, Any]:
                 pipeline.close()
             except Exception:
                 pass
+        if nccl_owned and dist.is_initialized():
+            dist.destroy_process_group()
+        elif args.nccl_single_rank and dist.is_initialized():
+            raise RuntimeError("single-rank NCCL diagnostic left an unowned process group initialized")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -705,6 +885,23 @@ def _write_results(output_dir: Path, result: Mapping[str, Any], args: argparse.N
     second_graph = graph.get("second_continuation", {}) if isinstance(graph, Mapping) else {}
     first_verification = first_graph.get("verification", {}) if isinstance(first_graph, Mapping) else {}
     second_verification = second_graph.get("verification", {}) if isinstance(second_graph, Mapping) else {}
+    execution_context = result.get("execution_context", {})
+    if not isinstance(execution_context, Mapping):
+        execution_context = {}
+    nccl_context = result.get("nccl_context", {})
+    if not isinstance(nccl_context, Mapping):
+        nccl_context = {}
+    visible_tokens = execution_context.get("visible_device_tokens")
+    visible_text = ",".join(str(item) for item in visible_tokens) if isinstance(visible_tokens, list) else "<unset>"
+    logical = execution_context.get("logical_device_requested", "")
+    physical = execution_context.get("physical_device_token_for_logical_device", "")
+    current = execution_context.get("logical_device_current_after_set", "")
+    nccl_summary = (
+        f"requested={nccl_context.get('requested', False)}, "
+        f"initialized={nccl_context.get('initialized_by_tool', False)}, "
+        f"backend={nccl_context.get('backend', '')}, "
+        f"rank/world={nccl_context.get('rank', '')}/{nccl_context.get('world_size', '')}"
+    )
     lines = [
         f"# ABot B={args.batch_size} persistent CUDA-Graph three-way diagnostic",
         "",
@@ -713,6 +910,14 @@ def _write_results(output_dir: Path, result: Mapping[str, Any], args: argparse.N
             "The static control uses the graph's fixed buffers and, at B=2/3, its persistent KV arena but executes "
             "forward_steady_state eagerly."
         ),
+        "",
+        "| Process-NCCL compatibility context | Value |",
+        "| --- | --- |",
+        f"| CUDA_VISIBLE_DEVICES | `{visible_text}` |",
+        f"| Selected logical CUDA / mapped physical token | `cuda:{logical}` / `{physical}` |",
+        f"| Current logical CUDA after selection | `cuda:{current}` |",
+        f"| Runtime visible CUDA device count | {execution_context.get('runtime_visible_device_count', '')} |",
+        f"| Single-rank NCCL | {nccl_summary} |",
         "",
         "| Check | First continuation | Second continuation / persistent replay |",
         "| --- | --- | --- |",
@@ -752,13 +957,47 @@ def _parse_args(base: Any) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--control-latent-frames", type=int, choices=(3,), default=3)
     parser.add_argument("--extra-warmup-chunks", type=int, default=0)
-    parser.add_argument("--device-id", type=int, default=0)
+    parser.add_argument(
+        "--device-id",
+        type=int,
+        default=0,
+        help="Logical CUDA index after CUDA_VISIBLE_DEVICES remapping (not a physical GPU id).",
+    )
+    parser.add_argument(
+        "--expected-cuda-visible-devices",
+        default=None,
+        help="Require this exact comma-separated CVD mapping, e.g. '4,5,6,7'.",
+    )
+    parser.add_argument(
+        "--expected-visible-device-count",
+        type=int,
+        default=None,
+        help="Require this number of CUDA-visible logical devices at runtime.",
+    )
+    parser.add_argument(
+        "--nccl-single-rank",
+        action="store_true",
+        help="Initialize a world-size-one NCCL group after model preload, mirroring a process-NCCL worker.",
+    )
+    parser.add_argument(
+        "--nccl-init-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="Timeout for the optional single-rank NCCL initialization.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.device_id < 0:
+        parser.error("--device-id must be non-negative")
+    if args.expected_visible_device_count is not None and args.expected_visible_device_count < 1:
+        parser.error("--expected-visible-device-count must be positive")
+    if args.nccl_init_timeout_seconds <= 0:
+        parser.error("--nccl-init-timeout-seconds must be positive")
     if args.extra_warmup_chunks < 0:
         parser.error("--extra-warmup-chunks must be non-negative")
     try:
         _parse_actions(args.session_actions, args.batch_size, base)
+        _device_context_plan(args)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))
     if not args.dry_run:
@@ -780,6 +1019,11 @@ def main() -> None:
                 {
                     "mode": "dry_run",
                     "batch_size": args.batch_size,
+                    "cuda_device_context_plan": _device_context_plan(args),
+                    "nccl_single_rank_requested": args.nccl_single_rank,
+                    "nccl_ordering": (
+                        "logical device is selected before pipeline load; optional NCCL initializes after preload"
+                    ),
                     "cohorts": ["ordinary_eager", "persistent_static_eager", "cuda_graph"],
                     "continuations": ["first_capture", "second_persistent_replay"],
                     "comparisons_after_each": ["per-lane latent", "RGB frame hashes", "full retained state"],

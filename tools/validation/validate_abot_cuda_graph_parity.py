@@ -230,6 +230,18 @@ def _graph_verified(metrics: Mapping[str, Any]) -> dict[str, Any]:
 def _make_pipeline(args: argparse.Namespace) -> Any:
     # Warmup has to be eager for both sessions.  The stage is toggled later
     # rather than loading two model copies on the same GPU.
+    # The CUDA Graph capture stream follows the *current* CUDA device. Set the
+    # CVD-local device before any model load so this remains correct under
+    # CUDA_VISIBLE_DEVICES=4,5,6,7 with --device-id 1, as in a process-NCCL
+    # worker.
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA Graph parity validation requires CUDA, but torch.cuda.is_available() is false")
+    visible_count = int(torch.cuda.device_count())
+    if not 0 <= args.device_id < visible_count:
+        raise RuntimeError(f"--device-id {args.device_id} is out of range for {visible_count} visible CUDA device(s)")
+    torch.cuda.set_device(args.device_id)
+    if int(torch.cuda.current_device()) != args.device_id:
+        raise RuntimeError(f"failed to select requested logical CUDA device {args.device_id}")
     original = os.environ.get(_GRAPH_ENV)
     os.environ[_GRAPH_ENV] = "0"
     try:

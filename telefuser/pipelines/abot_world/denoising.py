@@ -15,6 +15,8 @@ from telefuser.models.abot_world_dit import ABotWorldDiT
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 
+_CUDA_GRAPH_WARMUP_ITERATIONS = 1
+
 
 @dataclass
 class _CudaGraphSlot:
@@ -94,6 +96,12 @@ class _ABotSteadyCudaGraph:
         self.static_timestep = torch.empty((latent.shape[0], self.frames), dtype=torch.float32, device=self.device)
         self.static_context = prompt_emb.detach().clone()
         self.current_end = torch.empty(1, dtype=torch.long, device=self.device)
+        # CUDA Graph capture must use an already-warmed non-default stream.
+        # Keeping the stream on this graph state makes the warmup and capture
+        # execute on the same device/stream pair even in a process-NCCL
+        # worker where the assigned CUDA device is not logical device zero.
+        # CPU construction remains supported by lightweight unit tests.
+        self.capture_stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
         capacity = self_cache[0]["k"].shape[1]
         sink_tokens = dit.sink_size * self.frame_tokens
         rolled_tokens = capacity - sink_tokens - latent.shape[2] * self.frame_tokens
@@ -187,9 +195,60 @@ class _ABotSteadyCudaGraph:
         update_cache: bool,
     ) -> _CudaGraphSlot:
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+        assert self.capture_stream is not None
+        # The caller may have restored cache contents on the current stream
+        # after warmup. Make the explicit capture stream observe that work
+        # before entering capture; a graph may not contain a cross-stream
+        # dependency established while capture is active.
+        with torch.cuda.device(self.device):
+            self.capture_stream.wait_stream(torch.cuda.current_stream(self.device))
+            with torch.cuda.graph(
+                graph,
+                stream=self.capture_stream,
+                capture_error_mode="thread_local",
+            ):
+                with torch.autocast(self.device.type, dtype=self.torch_dtype, enabled=self.device.type == "cuda"):
+                    output = self.dit.forward_steady_state(
+                        x=self.static_x,
+                        timestep=self.static_timestep,
+                        context=self.static_context,
+                        act_context=self.static_action,
+                        kv_cache=self_cache,
+                        crossattn_cache=cross_cache,
+                        current_end=self.current_end,
+                        roll_scratch_k=self.roll_scratch_k,
+                        roll_scratch_v=self.roll_scratch_v,
+                        update_cache=update_cache,
+                    )
+        return _CudaGraphSlot(graph=graph, output=output)
+
+    def warmup(
+        self,
+        stage: "ABotWorldDenoisingStage",
+        latent: torch.Tensor,
+        action_context: torch.Tensor,
+        self_cache: list[dict[str, Any]],
+        cross_cache: list[dict[str, Any]],
+        *,
+        current_start: int,
+        scheduler: FlowMatchScheduler,
+    ) -> None:
+        """Warm both fixed DiT call shapes on the eventual capture stream.
+
+        ``forward_steady_state`` is deliberately distinct from the public
+        eager forward that fills the causal KV window. Its first SDPA/kernel
+        plan creation must therefore happen *outside* graph capture. This
+        method is allowed to mutate the supplied caches; callers use private
+        batched arenas or restore their B=1 cache backup before capture.
+        """
+        timesteps = stage._official_denoising_timesteps(scheduler).to(device=self.device)
+        current_end = (current_start + self.frames) * self.frame_tokens
+        assert self.capture_stream is not None
+
+        def warm_slot(timestep: torch.Tensor, *, update_cache: bool) -> None:
+            self._set_inputs(latent, action_context, timestep, current_end=current_end)
             with torch.autocast(self.device.type, dtype=self.torch_dtype, enabled=self.device.type == "cuda"):
-                output = self.dit.forward_steady_state(
+                self.dit.forward_steady_state(
                     x=self.static_x,
                     timestep=self.static_timestep,
                     context=self.static_context,
@@ -201,7 +260,14 @@ class _ABotSteadyCudaGraph:
                     roll_scratch_v=self.roll_scratch_v,
                     update_cache=update_cache,
                 )
-        return _CudaGraphSlot(graph=graph, output=output)
+
+        with torch.cuda.device(self.device):
+            self.capture_stream.wait_stream(torch.cuda.current_stream(self.device))
+            with torch.cuda.stream(self.capture_stream):
+                for _ in range(_CUDA_GRAPH_WARMUP_ITERATIONS):
+                    warm_slot(timesteps[0], update_cache=True)
+                    warm_slot(timesteps[1], update_cache=False)
+            self.capture_stream.synchronize()
 
     @staticmethod
     def _draw_noise(
@@ -322,6 +388,7 @@ class ABotWorldDenoisingStage(BaseStage):
         self._cuda_graph_captures = 0
         self._cuda_graph_replays = 0
         self._cuda_graph_capture_failures = 0
+        self._cuda_graph_capture_disabled = False
         self._last_cuda_graph_metrics: dict[str, int] = {
             "cuda_graph_enabled": 0,
             "cuda_graph_eligible": 0,
@@ -335,6 +402,7 @@ class ABotWorldDenoisingStage(BaseStage):
     def configure_cuda_graph(self, enabled: bool) -> None:
         """Enable the experimental fixed-shape CUDA Graph continuation path."""
         self._cuda_graph_enabled = bool(enabled)
+        self._cuda_graph_capture_disabled = False
         self._cuda_graph_states.clear()
         self._cuda_graph_batch_states.clear()
 
@@ -357,6 +425,7 @@ class ABotWorldDenoisingStage(BaseStage):
             "captures": self._cuda_graph_captures,
             "replays": self._cuda_graph_replays,
             "capture_failures": self._cuda_graph_capture_failures,
+            "capture_disabled": int(self._cuda_graph_capture_disabled),
         }
 
     def last_cuda_graph_metrics(self) -> dict[str, int]:
@@ -366,6 +435,13 @@ class ABotWorldDenoisingStage(BaseStage):
     def record_cuda_graph_not_used(self) -> None:
         """Mark a non-eligible batch without exposing a stale previous hit."""
         self._set_cuda_graph_last_metrics(eligible=False)
+
+    def _record_cuda_graph_capture_failure(self) -> None:
+        """Disable graph capture for this worker after an unsafe capture."""
+        self._cuda_graph_capture_failures += 1
+        self._cuda_graph_capture_disabled = True
+        self._cuda_graph_states.clear()
+        self._cuda_graph_batch_states.clear()
 
     def _cuda_graph_backend_is_supported(self) -> bool:
         """Return whether the active attention backend passed graph parity.
@@ -487,7 +563,11 @@ class ABotWorldDenoisingStage(BaseStage):
         generator: torch.Generator,
     ) -> bool:
         """Check static continuation invariants only before first capture."""
-        if not self._cuda_graph_enabled or torch.device(self.device).type != "cuda":
+        if (
+            not self._cuda_graph_enabled
+            or self._cuda_graph_capture_disabled
+            or torch.device(self.device).type != "cuda"
+        ):
             return False
         if not self._cuda_graph_backend_is_supported():
             return False
@@ -526,7 +606,11 @@ class ABotWorldDenoisingStage(BaseStage):
     ) -> bool:
         """Check B=2/3 fixed-window Relative-RoPE continuation invariants."""
         batch_size = latent.shape[0]
-        if not self._cuda_graph_enabled or torch.device(self.device).type != "cuda":
+        if (
+            not self._cuda_graph_enabled
+            or self._cuda_graph_capture_disabled
+            or torch.device(self.device).type != "cuda"
+        ):
             return False
         if not self._cuda_graph_backend_is_supported():
             return False
@@ -725,6 +809,29 @@ class ABotWorldDenoisingStage(BaseStage):
                 cross_caches,
                 current_starts=current_starts,
             )
+            captured.graph.warmup(
+                self,
+                latent,
+                action_context,
+                captured.self_cache,
+                captured.cross_cache,
+                current_start=current_starts[0],
+                scheduler=scheduler,
+            )
+            for row, (source_self, source_cross) in enumerate(zip(self_caches, cross_caches, strict=True)):
+                for source, arena in zip(source_self, captured.self_cache, strict=True):
+                    arena["k"][row : row + 1].copy_(source["k"])
+                    arena["v"][row : row + 1].copy_(source["v"])
+                for source, arena in zip(source_cross, captured.cross_cache, strict=True):
+                    arena["k"][row : row + 1].copy_(source["k"])
+                    arena["v"][row : row + 1].copy_(source["v"])
+            frame_tokens = (latent.shape[-2] // self.dit.patch_size[1]) * (latent.shape[-1] // self.dit.patch_size[2])
+            capacity = self.dit.local_attn_size * frame_tokens
+            for self_layer, cross_layer in zip(captured.self_cache, captured.cross_cache, strict=True):
+                self_layer["global_end_index"].fill_(current_starts[0] * frame_tokens)
+                self_layer["local_end_index"].fill_(capacity)
+                cross_layer["is_init"] = True
+                cross_layer["sequence_length"] = prompt_emb.shape[1]
             output, replays = captured.graph.run(
                 self,
                 latent,
@@ -739,7 +846,7 @@ class ABotWorldDenoisingStage(BaseStage):
         except (RuntimeError, ValueError) as exc:
             for generator, saved_state in zip(generators, generator_states, strict=True):
                 generator.set_state(saved_state)
-            self._cuda_graph_capture_failures += 1
+            self._record_cuda_graph_capture_failure()
             self._set_cuda_graph_last_metrics(
                 eligible=True,
                 fallback=True,
@@ -844,6 +951,17 @@ class ABotWorldDenoisingStage(BaseStage):
                 cross_cache,
                 torch_dtype=self.torch_dtype,
             )
+            captured.warmup(
+                self,
+                latent,
+                action_context,
+                self_cache,
+                cross_cache,
+                current_start=current_start,
+                scheduler=scheduler,
+            )
+            _ABotSteadyCudaGraph.restore_caches(self_cache, self_backup)
+            _ABotSteadyCudaGraph.restore_caches(cross_cache, cross_backup)
             output, replays = captured.run(
                 self,
                 latent,
@@ -861,7 +979,7 @@ class ABotWorldDenoisingStage(BaseStage):
             if cross_backup is not None:
                 _ABotSteadyCudaGraph.restore_caches(cross_cache, cross_backup)
             generator.set_state(generator_state)
-            self._cuda_graph_capture_failures += 1
+            self._record_cuda_graph_capture_failure()
             self._set_cuda_graph_last_metrics(eligible=True, fallback=True)
             logger.warning("ABot CUDA Graph capture for session {} failed; falling back to eager: {}", session_id, exc)
             return self._denoise_block(
