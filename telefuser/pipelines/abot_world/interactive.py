@@ -250,7 +250,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 # First chunks initialize per-session caches and stay eager.
                 for session in sessions:
                     self._release_cuda_graph(session.session_id)
-                self.denoise_stage.record_cuda_graph_not_used()
+                self._record_cuda_graph_not_used()
                 cache_collate_started_at = time.monotonic()
                 original_global_ends = [
                     [int(layer["global_end_index"].item()) for layer in session.self_cache] for session in sessions
@@ -327,7 +327,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 # deliberately not eligible until the full local window exists.
                 assert self_cache is not None and cross_cache is not None
                 if direct_session_cache:
-                    self.denoise_stage.record_cuda_graph_not_used()
+                    self._record_cuda_graph_not_used()
                     latents = self.denoise_stage._denoise_block(
                         noises[0].to(dtype=self.torch_dtype),
                         sessions[0].prompt_emb,
@@ -403,7 +403,7 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
                 "cache_scatter_seconds": cache_scatter_seconds,
                 "vae_decode_seconds": decode_seconds,
                 **self.taew_decode_stage.last_decode_metrics(),
-                **self.denoise_stage.last_cuda_graph_metrics(),
+                **self._last_cuda_graph_metrics(),
                 "postprocess_seconds": time.monotonic() - postprocess_started_at,
                 "total_seconds": time.monotonic() - batch_started_at,
             }
@@ -623,9 +623,23 @@ class ABotWorldInteractivePipeline(ABotWorldPipeline):
 
     def _release_cuda_graph(self, session_id: str) -> None:
         """Drop optional graph state without coupling test/minimal stages to it."""
-        release = getattr(self.denoise_stage, "release_cuda_graph", None)
+        stage = getattr(self, "denoise_stage", None)
+        release = getattr(stage, "release_cuda_graph", None)
         if callable(release):
             release(session_id)
+
+    def _record_cuda_graph_not_used(self) -> None:
+        """Record an eager-only dispatch when the optional stage hook is present."""
+        stage = getattr(self, "denoise_stage", None)
+        record = getattr(stage, "record_cuda_graph_not_used", None)
+        if callable(record):
+            record()
+
+    def _last_cuda_graph_metrics(self) -> dict[str, float | int]:
+        """Return optional CUDA-graph facts without requiring a minimal stage stub."""
+        stage = getattr(self, "denoise_stage", None)
+        metrics = getattr(stage, "last_cuda_graph_metrics", None)
+        return dict(metrics()) if callable(metrics) else {}
 
     def suspend_interactive_session(self, session: ABotWorldInteractiveSession) -> None:
         """Move all material session tensors to CPU at a chunk boundary."""

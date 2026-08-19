@@ -193,6 +193,25 @@ export TELEFUSER_ABOT_BATCHING_WINDOW_MS=2
 export TELEFUSER_ABOT_MAX_DEADLINE_BATCH_WAIT_MS=100
 ```
 
+### Experimental execution backends
+
+Both controls below are opt-in and keep their existing defaults when unset:
+
+```bash
+# Default: auto (FlashAttention when available, otherwise PyTorch SDPA).
+# sage_sm90 requires an SM90 H100-class GPU and the matching tf-kernel wheel.
+export TELEFUSER_ABOT_ATTENTION=auto
+
+# Default: false. Enable only after the matching B=1/B=2/B=3 parity check has passed.
+export TELEFUSER_ABOT_CUDA_GRAPH_ENABLED=true
+```
+
+`TELEFUSER_ABOT_CUDA_GRAPH_ENABLED` accepts only `1/true/yes/on` and
+`0/false/no/off`; invalid values fail startup rather than silently disabling the
+optimization. CUDA Graph capture is limited to compatible full-window
+continuations and falls back to eager execution if capture cannot be established.
+It does not change the process-NCCL worker map or the four-worker launch contract.
+
 ### Offline H100 batch-time priors
 
 Before the first real B=2 dispatch, the generic scheduler would otherwise estimate
