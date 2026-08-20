@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from importlib import metadata
+from importlib import util
 
 import pytest
 import torch
@@ -11,15 +11,14 @@ from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.lingbot_vla_v2 import LingBotVlaV2Model
 from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
 
-pytestmark = pytest.mark.gpu
+pytestmark = [pytest.mark.gpu, pytest.mark.quant]
 
 
-def _package_available(distribution: str) -> bool:
+def _module_available(module_name: str) -> bool:
     try:
-        metadata.version(distribution)
-    except metadata.PackageNotFoundError:
+        return util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
         return False
-    return True
 
 
 def _quantizable_model(width: int = 64) -> LingBotVlaV2Model:
@@ -57,8 +56,8 @@ def test_online_quantization_repeated_forward_and_release(
 ) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
-    if not _package_available(distribution):
-        pytest.skip(f"{distribution} is not installed")
+    if not _module_available(distribution):
+        pytest.skip(f"{distribution} is not importable")
 
     device = torch.device("cuda:0")
     torch.cuda.empty_cache()

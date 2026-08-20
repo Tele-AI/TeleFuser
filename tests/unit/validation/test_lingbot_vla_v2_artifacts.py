@@ -138,6 +138,22 @@ def test_compare_artifacts_rejects_different_artifact_identity(tmp_path: Path) -
         compare_artifacts(reference, candidate, rtol=0.0, atol=0.0)
 
 
+def test_compare_artifacts_rejects_weak_checkpoint_hash_for_strict_profile(tmp_path: Path) -> None:
+    metadata = _metadata()
+    metadata["checkpoint_hash_mode"] = "filename_and_size"
+    reference = _write_artifact(tmp_path, "reference", _arrays(), metadata)
+    candidate = _write_artifact(tmp_path, "candidate", _arrays(), metadata)
+
+    with pytest.raises(ValueError, match="Strict parity requires full_sha256"):
+        compare_artifacts(
+            reference,
+            candidate,
+            rtol=0.0,
+            atol=0.0,
+            require_full_checkpoint_hash=True,
+        )
+
+
 def test_compare_artifacts_rejects_different_moe_backends(tmp_path: Path) -> None:
     candidate_metadata = _metadata()
     candidate_metadata["moe_backend"] = "upstream_triton"

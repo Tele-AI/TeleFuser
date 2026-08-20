@@ -127,6 +127,9 @@ Submit `POST /v1/tasks/structured` with `task="vla_action"`, `instruction`, the 
 Base64 camera fields, and an optional `seed`. Poll `GET /v1/tasks/{task_id}/status`; a completed result includes the
 action payload, `inference_time_s`, and optional `peak_memory_mb`.
 
+Each encoded camera is limited to 10 MiB and 16,777,216 decoded pixels before RGB conversion. Both limits are
+model-specific settings in `PPL_CONFIG` and apply independently to all three cameras.
+
 ```python
 from telefuser.client import TFClient
 
@@ -165,10 +168,12 @@ action head in BF16. The frozen official-base manifest covers 492 Qwen text/visi
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; compatible SM90 wheel unavailable |
 | `bnb-nf4` | bitsandbytes | NF4 weight-only, BF16 compute | H100 real forward, action comparison, lifecycle |
 
-Install optional Python backends only in `.venv-vla`:
+TeleFuser's base dependency set currently declares TorchAO and bitsandbytes, while selecting a quantized VLA profile
+remains optional. The validated VLA environment uses the exact versions below. If either module is unavailable or a
+different version was resolved, repair only `.venv-vla` without changing the system environment:
 
 ```bash
-uv pip install --python .venv-vla/bin/python --no-deps \
+uv pip install --python .venv-vla/bin/python --reinstall --no-deps \
   "torchao==0.17.0" "bitsandbytes==0.48.0"
 ```
 
@@ -233,7 +238,8 @@ git -C work_dirs/lingbot-vla-v2-upstream checkout be27333c9b5f2663b0ec33f069dd7d
 Generate the official artifact with `capture_lingbot_vla_v2_upstream.py`, the TeleFuser artifact with
 `capture_lingbot_vla_v2_telefuser.py`, and compare them with `run_lingbot_vla_v2_parity.py --profile strict`. Both
 captures must use identical checkpoints, cameras, task, state, seed, device, `--deterministic-moe`, eager attention,
-and deterministic reference MoE metadata.
+and deterministic reference MoE metadata. TeleFuser capture metadata records both the commit and whether tracked
+files were dirty; release evidence must use a clean worktree and `--full-checkpoint-hash`.
 
 | Layer | Compared | Passed | Failed | Global max abs |
 | --- | ---: | ---: | ---: | ---: |

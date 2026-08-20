@@ -22,6 +22,7 @@ PPL_CONFIG = {
     "device": "cuda:0",
     "quantization": None,
     "max_image_bytes": 10 * 1024 * 1024,
+    "max_image_pixels": 16 * 1024 * 1024,
 }
 
 PIPELINE_CONTRACT = {
@@ -115,5 +116,6 @@ def run_structured(
         pipeline,
         request,
         max_image_bytes=int(PPL_CONFIG["max_image_bytes"]),
+        max_image_pixels=int(PPL_CONFIG["max_image_pixels"]),
     )
     return response.model_dump(mode="json")

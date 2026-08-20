@@ -15,6 +15,8 @@ from .data import LingBotVlaV2Observation
 from .pipeline import LingBotVlaV2CanonicalActionChunk
 from .robot_profile import ROBOTWIN_CAMERA_KEYS
 
+DEFAULT_MAX_IMAGE_PIXELS = 16 * 1024 * 1024
+
 
 class LingBotVlaV2ActionRequest(BaseModel):
     """One RobotWin observation encoded for the HTTP boundary."""
@@ -65,9 +67,16 @@ class _Pipeline(Protocol):
     ) -> LingBotVlaV2CanonicalActionChunk: ...
 
 
-def _decode_image(value: str, *, max_image_bytes: int) -> Image.Image:
+def _decode_image(
+    value: str,
+    *,
+    max_image_bytes: int,
+    max_image_pixels: int,
+) -> Image.Image:
     if max_image_bytes <= 0:
         raise ValueError("max_image_bytes must be positive")
+    if max_image_pixels <= 0:
+        raise ValueError("max_image_pixels must be positive")
     payload = value.strip()
     if payload.startswith("data:"):
         header, separator, payload = payload.partition(",")
@@ -84,7 +93,12 @@ def _decode_image(value: str, *, max_image_bytes: int) -> Image.Image:
         raise ValueError(f"decoded image must contain 1 to {max_image_bytes} bytes")
     try:
         with Image.open(io.BytesIO(decoded)) as image:
+            pixel_count = image.width * image.height
+            if pixel_count > max_image_pixels:
+                raise ValueError(f"decoded image must not exceed {max_image_pixels} pixels")
             return image.convert("RGB").copy()
+    except Image.DecompressionBombError as error:
+        raise ValueError(f"decoded image must not exceed {max_image_pixels} pixels") from error
     except (UnidentifiedImageError, OSError) as error:
         raise ValueError("decoded payload must be a supported image") from error
 
@@ -94,11 +108,16 @@ def predict_lingbot_vla_v2_action(
     request: LingBotVlaV2ActionRequest,
     *,
     max_image_bytes: int,
+    max_image_pixels: int = DEFAULT_MAX_IMAGE_PIXELS,
 ) -> LingBotVlaV2ActionResponse:
     """Decode one request and return the canonical normalized action chunk."""
     encoded_images = (request.camera_high, request.camera_left_wrist, request.camera_right_wrist)
     images = {
-        key: _decode_image(value, max_image_bytes=max_image_bytes)
+        key: _decode_image(
+            value,
+            max_image_bytes=max_image_bytes,
+            max_image_pixels=max_image_pixels,
+        )
         for key, value in zip(ROBOTWIN_CAMERA_KEYS, encoded_images, strict=True)
     }
     observation = LingBotVlaV2Observation(task=request.task, state=request.state, images=images)

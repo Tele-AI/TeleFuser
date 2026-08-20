@@ -216,6 +216,7 @@ def compare_artifacts(
     atol: float,
     reference_metadata: Path | None = None,
     candidate_metadata: Path | None = None,
+    require_full_checkpoint_hash: bool = False,
 ) -> dict[str, object]:
     expected = _load_npz(reference)
     actual = _load_npz(candidate)
@@ -223,6 +224,15 @@ def compare_artifacts(
     actual_metadata = _load_metadata(candidate, candidate_metadata)
     _validate_contract(expected, expected_metadata, side="reference")
     _validate_contract(actual, actual_metadata, side="candidate")
+
+    if require_full_checkpoint_hash:
+        invalid_hash_modes = {
+            side: metadata.get("checkpoint_hash_mode")
+            for side, metadata in (("reference", expected_metadata), ("candidate", actual_metadata))
+            if metadata.get("checkpoint_hash_mode") != "full_sha256"
+        }
+        if invalid_hash_modes:
+            raise ValueError(f"Strict parity requires full_sha256 checkpoint manifests: {invalid_hash_modes}")
 
     metadata_mismatches = {
         key: {"reference": expected_metadata[key], "candidate": actual_metadata[key]}
@@ -359,6 +369,7 @@ def main() -> None:
         atol=atol,
         reference_metadata=args.reference_metadata,
         candidate_metadata=args.candidate_metadata,
+        require_full_checkpoint_hash=args.profile == "strict",
     )
     payload = json.dumps(report, indent=2, sort_keys=True)
     if args.output is None:

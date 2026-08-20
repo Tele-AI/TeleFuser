@@ -101,6 +101,36 @@ def test_request_adapter_rejects_non_positive_image_limit() -> None:
     assert pipeline.observations == []
 
 
+def test_request_adapter_rejects_image_over_pixel_limit() -> None:
+    pipeline = _Pipeline()
+    request = LingBotVlaV2ActionRequest.model_validate(_payload())
+
+    with pytest.raises(ValueError, match="decoded image must not exceed 63 pixels"):
+        predict_lingbot_vla_v2_action(
+            pipeline,
+            request,
+            max_image_bytes=1024 * 1024,
+            max_image_pixels=63,
+        )
+
+    assert pipeline.observations == []
+
+
+def test_request_adapter_rejects_non_positive_pixel_limit() -> None:
+    pipeline = _Pipeline()
+    request = LingBotVlaV2ActionRequest.model_validate(_payload())
+
+    with pytest.raises(ValueError, match="max_image_pixels must be positive"):
+        predict_lingbot_vla_v2_action(
+            pipeline,
+            request,
+            max_image_bytes=1024 * 1024,
+            max_image_pixels=0,
+        )
+
+    assert pipeline.observations == []
+
+
 @pytest.mark.parametrize(
     "payload",
     (

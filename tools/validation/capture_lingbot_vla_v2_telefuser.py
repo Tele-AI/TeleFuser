@@ -59,16 +59,23 @@ def _input_sha256(task: str, state: Sequence[float], image_paths: Sequence[Path]
     return digest.hexdigest()
 
 
-def _git_commit() -> str:
+def _git_identity() -> tuple[str, bool]:
     repository_root = Path(__file__).resolve().parents[2]
-    completed = subprocess.run(
+    revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
         check=True,
         capture_output=True,
         text=True,
     )
-    return completed.stdout.strip()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return revision.stdout.strip(), bool(status.stdout.strip())
 
 
 class TensorCapture:
@@ -197,10 +204,12 @@ def capture_artifact(
 
         target_device = torch.device(device)
         checkpoint_paths = [Path(path) for path in resolve_lingbot_vla_v2_shards(model_root)]
+        telefuser_commit, telefuser_worktree_dirty = _git_identity()
         metadata = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "artifact_kind": "telefuser_regression",
-            "telefuser_commit": _git_commit(),
+            "telefuser_commit": telefuser_commit,
+            "telefuser_worktree_dirty": telefuser_worktree_dirty,
             "checkpoint_manifest_sha256": _manifest_sha256(
                 checkpoint_paths,
                 include_contents=full_checkpoint_hash,
