@@ -14,6 +14,7 @@ from telefuser.models.minimax_h3_dit import (
     MiniMaxH3DiTConfig,
     _reorder_grouped_qkv_to_qkv,
 )
+from telefuser.ops.attention import SparseAttentionState
 from telefuser.ops.rotary import apply_qk_norm_rope_neox, apply_rotary_emb_neox
 
 
@@ -157,6 +158,106 @@ def test_sage_attention_runs_h3_live_prefix_and_zeros_alignment_padding() -> Non
     assert sage.call_args.args[0].shape == (1, 61, 4, 8)
     assert "sequence_lengths" not in sage.call_args.kwargs
     assert torch.count_nonzero(output[61:]) == 0
+
+
+def test_sol_attention_preserves_prefix_sink_and_dense_prefix_queries() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+    config = AttentionConfig.sol_attention(dense_timesteps=0, dense_layers=0, threshold_type="exact")
+    state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.attention", side_effect=lambda query, *_args, **_kwargs: query) as sol,
+        patch(
+            "telefuser.models.minimax_h3_dit.F.scaled_dot_product_attention",
+            side_effect=lambda query, *_args, **_kwargs: query,
+        ) as dense_prefix,
+    ):
+        output = module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=config,
+            sparse_state=state,
+            prefix_tokens=13,
+        )
+
+    assert sol.call_args.args[0].shape == (1, 61, 4, 8)
+    assert sol.call_args.kwargs["sparse_state"] is state
+    assert sol.call_args.kwargs["sink_start"] == 0
+    assert sol.call_args.kwargs["sink_tokens"] == 13
+    assert dense_prefix.call_args.args[0].shape == (1, 4, 13, 8)
+    assert dense_prefix.call_args.args[1].shape == (1, 4, 61, 8)
+    assert torch.count_nonzero(output[61:]) == 0
+
+
+def test_sol_dense_guard_uses_packed_flash_attention_4() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+    config = AttentionConfig.sol_attention(dense_timesteps=10, dense_layers=2, threshold_type="exact")
+    state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
+
+    with patch("telefuser.models.minimax_h3_dit.attention", side_effect=lambda query, *_args, **_kwargs: query) as call:
+        module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=config,
+            sparse_state=state,
+            prefix_tokens=13,
+        )
+
+    runtime_config = call.call_args.kwargs["attention_config"]
+    assert runtime_config.attn_impl == AttnImplType.FLASH_ATTN_4
+    assert call.call_args.kwargs["sparse_state"] is None
+
+
+def test_sol_fp8_passes_quantized_qkv_scales_to_attention() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+    config = AttentionConfig.sol_attention(
+        dense_timesteps=0,
+        dense_layers=0,
+        threshold_type="exact",
+        sol_fp8=True,
+    )
+    state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
+    scales = [torch.ones(1, 1, 4) * value for value in (1, 2, 3)]
+
+    def quantize(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return value.to(torch.float8_e4m3fn), scales.pop(0)
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.quantize_fp8_per_block", side_effect=quantize),
+        patch(
+            "telefuser.models.minimax_h3_dit.attention",
+            side_effect=lambda query, *_args, **_kwargs: query.float(),
+        ) as attention_call,
+    ):
+        module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=config,
+            sparse_state=state,
+        )
+
+    assert attention_call.call_args.args[0].dtype == torch.float8_e4m3fn
+    assert attention_call.call_args.kwargs["q_scale"].flatten()[0].item() == 1
+    assert attention_call.call_args.kwargs["k_scale"].flatten()[0].item() == 2
+    assert attention_call.call_args.kwargs["v_scale"].flatten()[0].item() == 3
+
+
+def test_minimax_h3_initializes_sol_runtime_state() -> None:
+    model = MiniMaxH3DiT(_small_config())
+    config = AttentionConfig.sol_attention(dense_timesteps=10, dense_layers=2, threshold_type="exact")
+
+    model.set_attention_config(config)
+
+    assert model.sparse_attention_state is not None
+    assert model.sparse_attention_state.config is config.sparse_config
+    assert model.sparse_attention_state.model_type == "minimax_h3"
+    assert model._token_refiner_attention_config().attn_impl == AttnImplType.FLASH_ATTN_4
 
 
 def test_ulysses_overlaps_strided_value_scatter_with_qk_preprocessing() -> None:

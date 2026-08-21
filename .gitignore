@@ -138,6 +138,9 @@ docs/**/modelzoo.md
 *.mp4
 *.DS_Store
 *.png
+!tests/assets/
+!tests/assets/ltx25/
+!tests/assets/ltx25/official_guitar_man.png
 *.csv
 *.json
 *.jpg

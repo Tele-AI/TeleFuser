@@ -102,6 +102,8 @@ When adding or porting a pipeline:
 
 - Select the closest maintained pipeline, public example, and tests as structural baselines. Read the relevant
   adding-new-example, adding-new-model, adding-new-stage, model-loading, configuration, and service guides.
+- Base each new model-family example README on `examples/README_TEMPLATE.md`; keep its required section order and
+  remove inapplicable optional sections and all placeholders.
 - Inventory model-specific classes and configuration fields, then map them to upstream behavior and the selected
   baseline.
 - Reuse `BasePipeline`, `BaseStage`, `ModuleManager`, existing configuration dataclasses, example contracts, and

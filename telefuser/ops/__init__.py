@@ -14,6 +14,11 @@ from .activations import silu_and_mul_reuse_input
 from .base import CustomOp, CustomOpFunction
 from .custom_op import TritonKernelWrapper, register_custom_op
 from .moe import grouped_expert_forward, route_topk
+from .neighborhood_attention import (
+    configure_neighborhood_attention_kv_parallelism,
+    natten_available,
+    neighborhood_attention_3d,
+)
 from .normalization import (
     AdaLayerNormContinuous,
     LayerNorm,
@@ -38,10 +43,14 @@ __all__ = [
     "AdaLayerNormContinuous",
     "fused_scale_shift",
     "modulate",
+    "configure_neighborhood_attention_kv_parallelism",
     "indexed_gate",
     "indexed_scale_shift",
     "route_topk",
     "grouped_expert_forward",
+    # Neighborhood attention
+    "natten_available",
+    "neighborhood_attention_3d",
     # Rotary
     "apply_rotary_emb",
     "apply_qk_norm_rope_neox",

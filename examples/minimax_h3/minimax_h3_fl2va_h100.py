@@ -35,6 +35,7 @@ PPL_CONFIG: dict[str, Any] = {
     "enable_fsdp": None,
     "online_adaln_cache": True,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "sol_fp8": False,
     "feature_cache_model_type": "MiniMax-H3-Base",
     "feature_cache_n_derivatives": 1,
     "feature_cache_taylor_threshold": 2,
@@ -85,6 +86,13 @@ def get_pipeline(
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
+    sol_fp8: bool = PPL_CONFIG["sol_fp8"],
+    sol_dense_steps: int = 10,
+    sol_dense_layers: int = 2,
+    sol_tau: float = 1.0,
+    sol_threshold_type: str = "exact",
+    sol_fp8_layer_start: int = 0,
+    sol_fp8_layer_end: int | None = None,
     enable_feature_cache: bool = False,
     feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
     feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
@@ -104,6 +112,13 @@ def get_pipeline(
         enable_fsdp=enable_fsdp,
         online_adaln_cache=online_adaln_cache,
         attn_impl=attn_impl,
+        sol_fp8=sol_fp8,
+        sol_dense_steps=sol_dense_steps,
+        sol_dense_layers=sol_dense_layers,
+        sol_tau=sol_tau,
+        sol_threshold_type=sol_threshold_type,
+        sol_fp8_layer_start=sol_fp8_layer_start,
+        sol_fp8_layer_end=sol_fp8_layer_end,
         feature_cache_config=FeatureCacheConfig(
             enabled=enable_feature_cache,
             model_type=feature_cache_model_type,
@@ -270,16 +285,23 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument(
         "--quantization",
-        choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+        choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
         default=default_quantization,
         help="Online DiT Linear quantization backend (single GPU only).",
     )
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument(
         "--attn-impl",
-        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90"),
+        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN"),
         default=PPL_CONFIG["attn_impl"].name,
     )
+    parser.add_argument("--sol-fp8", action="store_true", help="Use FP8 Q/K/V in active Sol-Attn layers.")
+    parser.add_argument("--sol-dense-steps", type=int, default=10)
+    parser.add_argument("--sol-dense-layers", type=int, default=2)
+    parser.add_argument("--sol-tau", type=float, default=1.0)
+    parser.add_argument("--sol-threshold-type", choices=("exact", "diag"), default="exact")
+    parser.add_argument("--sol-fp8-layer-start", type=int, default=0)
+    parser.add_argument("--sol-fp8-layer-end", type=int)
     parser.add_argument("--enable-feature-cache", action="store_true")
     parser.add_argument("--feature-cache-model-type", default=PPL_CONFIG["feature_cache_model_type"])
     parser.add_argument(
@@ -324,6 +346,13 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
         attn_impl=args.attn_impl,
+        sol_fp8=args.sol_fp8,
+        sol_dense_steps=args.sol_dense_steps,
+        sol_dense_layers=args.sol_dense_layers,
+        sol_tau=args.sol_tau,
+        sol_threshold_type=args.sol_threshold_type,
+        sol_fp8_layer_start=args.sol_fp8_layer_start,
+        sol_fp8_layer_end=args.sol_fp8_layer_end,
         enable_feature_cache=args.enable_feature_cache,
         feature_cache_model_type=args.feature_cache_model_type,
         feature_cache_n_derivatives=args.feature_cache_n_derivatives,

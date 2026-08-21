@@ -24,6 +24,7 @@ PPL_CONFIG: dict[str, Any] = {
     "lora_strength": 1.0,
     "num_inference_steps": 9,
     "prompt": "Steam rises from the ramen while the family talks in the background.",
+    "input_image_path": str(MINIMAX_H3_DEFAULT_FL2VA_IMAGE),
     "target_video_length": 8,
     "seed": 0,
     "flow_shift": 6.0,
@@ -89,13 +90,13 @@ def run(
     seed: int = PPL_CONFIG["seed"],
     output_path: str = "minimax_h3_turbo_lora.mp4",
     target_video_length: float = PPL_CONFIG["target_video_length"],
-    image_path: str = str(MINIMAX_H3_DEFAULT_FL2VA_IMAGE),
+    input_image_path: str = PPL_CONFIG["input_image_path"],
 ) -> MiniMaxH3Generation:
     """Generate an image-conditioned Turbo H3 clip."""
     result = pipeline(
         task="fl2va",
         prompt=prompt,
-        conditions=[{"type": "image", "role": "keyframe", "uri": image_path, "frame_index": 0}],
+        conditions=[{"type": "image", "role": "keyframe", "uri": input_image_path, "frame_index": 0}],
         target={
             "short_edge": PPL_CONFIG["short_edge"],
             "aspect_ratio": PPL_CONFIG["aspect_ratio"],
@@ -115,7 +116,8 @@ def run_with_file(
     seed: int = PPL_CONFIG["seed"],
     output_path: str = "minimax_h3_turbo_lora.mp4",
     target_video_length: float = PPL_CONFIG["target_video_length"],
-    image_path: str = str(MINIMAX_H3_DEFAULT_FL2VA_IMAGE),
+    input_image_path: str = PPL_CONFIG["input_image_path"],
+    first_image_path: str | None = None,
     **_: object,
 ) -> dict[str, str]:
     """Service-compatible wrapper that returns the generated output path."""
@@ -125,7 +127,7 @@ def run_with_file(
         seed=seed,
         output_path=output_path,
         target_video_length=target_video_length,
-        image_path=image_path,
+        input_image_path=first_image_path or input_image_path,
     )
     return {"output_path": output_path}
 
@@ -135,7 +137,7 @@ def main() -> None:
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--lora-path", default=PPL_CONFIG["lora_path"])
-    parser.add_argument("--image", default=str(MINIMAX_H3_DEFAULT_FL2VA_IMAGE))
+    parser.add_argument("--image", dest="input_image_path", default=PPL_CONFIG["input_image_path"])
     parser.add_argument("--prompt", default=PPL_CONFIG["prompt"])
     parser.add_argument("--duration", type=float, default=PPL_CONFIG["target_video_length"])
     parser.add_argument("--steps", type=int, default=PPL_CONFIG["num_inference_steps"])
@@ -168,7 +170,7 @@ def main() -> None:
             seed=args.seed,
             output_path=args.output,
             target_video_length=args.duration,
-            image_path=args.image,
+            input_image_path=args.input_image_path,
         )
     finally:
         pipeline.stop()

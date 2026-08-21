@@ -11,6 +11,10 @@ Pipeline examples are standalone Python scripts that demonstrate how to use Tele
 3. Compatible with the TeleFuser server (`telefuser serve`)
 4. Well-documented with clear naming conventions
 
+Each model-family directory must include a `README.md` based on
+[`examples/README_TEMPLATE.md`](../../examples/README_TEMPLATE.md). Keep the required section order, remove unused
+optional sections, and replace all template placeholders before submitting the example.
+
 ## File Structure and Naming
 
 ### Directory Organization

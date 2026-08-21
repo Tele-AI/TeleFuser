@@ -24,6 +24,9 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 
 ## News 📰
 
+- ✨ **2026-08-19**：新增 [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V 和 I2V 联合
+  音视频生成，采用基于 ModuleManager 的六阶段 Pipeline，支持选择密集注意力后端，并可在
+  **1、2 或 4 张 H100** 上使用 Ulysses 序列并行。
 - ✨ **2026-08-10**：新增 [**SwiftVR**](examples/swiftvr/README.md) 因果视频修复、有状态流式推理及单卡 H100 示例。
 - ✨ **2026-08-05**：新增 [**MiniMax H3**](examples/minimax_h3/README.md) T2VA、FL2VA 和 Ref2VA 联合
   音视频生成，并支持标准 `telefuser serve` 服务模式。在相同的 768p、5 秒、50 步 T2VA 请求和一次预热
@@ -233,6 +236,7 @@ telefuser/
 |----------|------|------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 主力视频生成家族，含异步和服务示例，见 [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `LTX Video` | I2V + Audio | 统一音视频生成，见 [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `LTX-2.5 Distilled` | T2V, I2V + Audio | 基于 ModuleManager 的六阶段 Pipeline，支持 1/2/4 张 H100 的 Ulysses SP，见 [examples/ltx25_distilled/README.md](examples/ltx25_distilled/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 联合音视频生成，见 [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 base-to-refiner，见 [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |

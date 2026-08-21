@@ -64,7 +64,7 @@ dependencies = [
     "torchcodec>=0.7.0",
     "torchvision>=0.21.0",
     "tqdm>=4.66.0",
-    "transformers==4.57.3",
+    "transformers==5.14.1",
     "triton",
     "uvicorn>=0.30,<1.0",
     "torchao",

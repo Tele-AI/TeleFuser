@@ -197,6 +197,55 @@ def test_call_run_supports_standard_file_entrypoint() -> None:
     ) == {"output_path": "/tmp/result.mp4"}
 
 
+def test_call_run_injects_configured_i2v_input_image_path(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"image")
+    module = ModuleType("i2v_example")
+
+    def run_with_file(
+        pipeline: object,
+        input_image_path: str,
+        prompt: str,
+        output_path: str,
+        num_frames: int,
+    ) -> tuple[object, str, str, str, int]:
+        return pipeline, input_image_path, prompt, output_path, num_frames
+
+    module.run_with_file = run_with_file
+    result = run_examples._call_run(
+        module,
+        "pipeline",
+        {
+            "input_image_path": str(image_path),
+            "prompt": "test prompt",
+            "output_path": "/tmp/result.mp4",
+            "num_frames": 121,
+        },
+        entrypoint="run_with_file",
+    )
+
+    assert result == ("pipeline", str(image_path), "test prompt", "/tmp/result.mp4", 121)
+
+
+def test_ltx25_two_gpu_regressions_are_registered() -> None:
+    config = run_examples.load_config()
+
+    t2v = config.pipelines["ltx25_distilled_t2v_2gpu"]
+    assert t2v.script == "ltx25_distilled/ltx25_distilled_t2v_h100.py"
+    assert t2v.gpu_count == 2
+    assert (t2v.width, t2v.height) == (1536, 1024)
+    assert t2v.use_run_with_file and t2v.require_audio
+    assert t2v.ppl_config_overrides["num_frames"] == 121
+
+    i2v = config.pipelines["ltx25_distilled_i2v_2gpu"]
+    assert i2v.script == "ltx25_distilled/ltx25_distilled_i2v_h100.py"
+    assert i2v.gpu_count == 2
+    assert (i2v.width, i2v.height) == (896, 512)
+    assert i2v.input_image_path == "examples/data/ltx25/official_guitar_man.png"
+    assert i2v.use_run_with_file and i2v.require_audio
+    assert i2v.ppl_config_overrides["num_frames"] == 121
+
+
 def test_video_metrics_rejects_mismatched_frame_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     from telefuser.utils import video as video_utils
 

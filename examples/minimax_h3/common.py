@@ -138,6 +138,7 @@ def minimax_h3_quant_config(quantization: str | QuantType | None) -> QuantConfig
     if isinstance(quantization, str):
         normalized = quantization.strip().lower().replace("_", "-")
         names = {
+            "fp8": QuantType.FP8,
             "torchao-fp8": QuantType.TORCHAO_FP8,
             "bnb-nf4": QuantType.BNB_NF4,
             "tf-kernel-fp8": QuantType.FP8,
@@ -145,7 +146,7 @@ def minimax_h3_quant_config(quantization: str | QuantType | None) -> QuantConfig
         try:
             quant_type = names[normalized]
         except KeyError as exc:
-            raise ValueError("quantization must be 'torchao-fp8', 'tf-kernel-fp8', 'bnb-nf4', or None") from exc
+            raise ValueError("quantization must be 'fp8', 'torchao-fp8', 'tf-kernel-fp8', 'bnb-nf4', or None") from exc
     elif isinstance(quantization, QuantType):
         quant_type = quantization
     else:
@@ -172,6 +173,13 @@ def load_minimax_h3_pipeline(
     text_encoder_tp_degree: int | None = None,
     enable_fsdp: bool | None = None,
     attn_impl: AttnImplType | str = AttnImplType.FLASH_ATTN_4,
+    sol_fp8: bool = False,
+    sol_dense_steps: int = 10,
+    sol_dense_layers: int = 2,
+    sol_tau: float = 1.0,
+    sol_threshold_type: str = "exact",
+    sol_fp8_layer_start: int = 0,
+    sol_fp8_layer_end: int | None = None,
     feature_cache_config: FeatureCacheConfig | None = None,
     adaln_cache_path: str | Path | None = None,
     online_adaln_cache: bool = False,
@@ -209,6 +217,8 @@ def load_minimax_h3_pipeline(
             attn_impl = AttnImplType[attn_impl]
         except KeyError as exc:
             raise ValueError(f"unsupported attention implementation: {attn_impl}") from exc
+    if sol_fp8 and attn_impl != AttnImplType.SOL_ATTN:
+        raise ValueError("sol_fp8 requires attn_impl=SOL_ATTN")
     component_root = Path(model_root) / partition
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
@@ -248,12 +258,25 @@ def load_minimax_h3_pipeline(
         offload_config=resident_offload,
         parallel_config=text_parallel,
     )
+    attention_config = (
+        AttentionConfig.sol_attention(
+            dense_timesteps=sol_dense_steps,
+            dense_layers=sol_dense_layers,
+            tau=sol_tau,
+            threshold_type=sol_threshold_type,
+            sol_fp8=sol_fp8,
+            sol_fp8_layer_start=sol_fp8_layer_start,
+            sol_fp8_layer_end=sol_fp8_layer_end,
+        )
+        if attn_impl == AttnImplType.SOL_ATTN
+        else AttentionConfig.dense_attention(attn_impl)
+    )
     dit_runtime = ModelRuntimeConfig(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
         offload_config=dit_offload,
-        attention_config=AttentionConfig.dense_attention(attn_impl),
+        attention_config=attention_config,
         feature_cache_config=feature_cache_config or FeatureCacheConfig(),
         quant_config=quant_config,
         lora_configs=[LoraConfig(path=str(lora_path), strength=lora_strength)] if lora_path else [],

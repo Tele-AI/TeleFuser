@@ -934,6 +934,8 @@ def _call_run(
         from PIL import Image
 
         kwargs["image"] = Image.open(config["input_image_path"]).convert("RGB")
+    if "image_path" in params and config.get("input_image_path"):
+        kwargs["image_path"] = config["input_image_path"]
     if "audio_path" in params:
         kwargs["audio_path"] = config.get("input_audio_path")
 

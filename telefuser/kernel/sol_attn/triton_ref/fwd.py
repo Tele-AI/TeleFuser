@@ -16,7 +16,6 @@ from telefuser.kernel.sol_attn.interface import (
 
 from .preprocess import prepare as prepare_ptr
 
-
 BLOCK = 64
 GROUP = 32
 
@@ -29,11 +28,7 @@ def _use_tma(device) -> bool:
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=warps, num_stages=stages)
-        for warps in (4, 8)
-        for stages in (1, 2, 3, 4)
-    ],
+    configs=[triton.Config({}, num_warps=warps, num_stages=stages) for warps in (4, 8) for stages in (1, 2, 3, 4)],
     key=["T"],
 )
 @triton.jit
@@ -80,39 +75,23 @@ def _forward_tma(
     row_max = tl.full((BLOCK_SIZE,), -float("inf"), tl.float32)
     scale_log2 = scale * 1.4426950408889634
     tail_length = T - (NT - 1) * BLOCK_SIZE
-    route_threshold = tl.load(
-        threshold + (batch * NT + q_block) * H + head
-    )
+    route_threshold = tl.load(threshold + (batch * NT + q_block) * H + head)
 
     for group_start in range(0, NT, GROUP_SIZE):
         block_indices = group_start + group_offsets
         valid = block_indices < NT
-        kc = kc_desc.load(
-            [batch, group_start, head, 0]
-        ).reshape([GROUP_SIZE, D])
-        vc = vc_desc.load(
-            [batch, group_start, head, v_tile * BV]
-        ).reshape([GROUP_SIZE, BV])
+        kc = kc_desc.load([batch, group_start, head, 0]).reshape([GROUP_SIZE, D])
+        vc = vc_desc.load([batch, group_start, head, v_tile * BV]).reshape([GROUP_SIZE, BV])
         scores = tl.dot(q, kc.T).to(tl.float32) * scale_log2
-        exact = (
-            (tl.sum(scores, axis=0) / q_len > route_threshold)
-            | (tl.abs(q_block - block_indices) <= 1)
-        )
+        exact = (tl.sum(scores, axis=0) / q_len > route_threshold) | (tl.abs(q_block - block_indices) <= 1)
         if HAS_SINK:
-            exact = exact | (
-                (block_indices >= sink_start_block)
-                & (block_indices < sink_end_block)
-            )
+            exact = exact | ((block_indices >= sink_start_block) & (block_indices < sink_end_block))
         exact = exact & valid
 
         approximate = valid & ~exact
-        approximate_scores = tl.where(
-            approximate[None, :], scores, -float("inf")
-        )
+        approximate_scores = tl.where(approximate[None, :], scores, -float("inf"))
         new_max = tl.maximum(row_max, tl.max(approximate_scores, axis=1))
-        alpha = tl.math.exp2(
-            tl.where(row_max == new_max, 0.0, row_max - new_max)
-        )
+        alpha = tl.math.exp2(tl.where(row_max == new_max, 0.0, row_max - new_max))
         approximate_probability = tl.where(
             approximate[None, :],
             tl.math.exp2(approximate_scores - new_max[:, None]),
@@ -122,9 +101,7 @@ def _forward_tma(
             approximate_probability.to(vc.dtype),
             vc,
         )
-        lengths = tl.where(
-            block_indices == NT - 1, tail_length, BLOCK_SIZE
-        ).to(tl.float32)
+        lengths = tl.where(block_indices == NT - 1, tail_length, BLOCK_SIZE).to(tl.float32)
         row_sum = row_sum * alpha + tl.sum(
             approximate_probability * lengths[None, :],
             axis=1,
@@ -141,9 +118,7 @@ def _forward_tma(
                 exact_offsets,
             )
             kv_start = block * BLOCK_SIZE
-            k = k_desc.load(
-                [batch, kv_start, head, 0]
-            ).reshape([BLOCK_SIZE, D])
+            k = k_desc.load([batch, kv_start, head, 0]).reshape([BLOCK_SIZE, D])
             exact_scores = tl.dot(q, k.T).to(tl.float32) * scale_log2
             exact_scores += tl.where(
                 (kv_start + token_offsets)[None, :] < T,
@@ -152,16 +127,12 @@ def _forward_tma(
             )
             new_max = tl.maximum(row_max, tl.max(exact_scores, axis=1))
             alpha = tl.math.exp2(row_max - new_max)
-            exact_probability = tl.math.exp2(
-                exact_scores - new_max[:, None]
-            )
+            exact_probability = tl.math.exp2(exact_scores - new_max[:, None])
             row_sum = row_sum * alpha + tl.sum(
                 exact_probability,
                 axis=1,
             )
-            v = v_desc.load(
-                [batch, kv_start, head, v_tile * BV]
-            ).reshape([BLOCK_SIZE, BV])
+            v = v_desc.load([batch, kv_start, head, v_tile * BV]).reshape([BLOCK_SIZE, BV])
             output = output * alpha[:, None] + tl.dot(
                 exact_probability.to(v.dtype),
                 v,
@@ -188,6 +159,9 @@ def _forward_ptr(
     q_ptr,
     k_ptr,
     v_ptr,
+    q_scale_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
     kc_ptr,
     vc_ptr,
     threshold_ptr,
@@ -204,6 +178,7 @@ def _forward_ptr(
     BV: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     v_tile, q_block, batch_head = (
         tl.program_id(0),
@@ -223,44 +198,35 @@ def _forward_ptr(
     value_dims = v_tile * BV + tl.arange(0, BV)
     q_tokens = q_block * BLOCK_SIZE + token_offsets
     q_valid = q_tokens < T
-    q_offsets = (
-        ((batch * T + q_tokens[:, None]).to(tl.int64) * H + head) * D
-        + dims[None, :]
-    )
+    q_offsets = ((batch * T + q_tokens[:, None]).to(tl.int64) * H + head) * D + dims[None, :]
     q = tl.load(q_ptr + q_offsets, mask=q_valid[:, None], other=0.0)
+    if FP8:
+        q_scale = tl.load(q_scale_ptr + (batch * NT + q_block) * H + head)
+        q_route = q.to(tl.float32) * q_scale
+    else:
+        q_route = q
     q_len = tl.minimum(BLOCK_SIZE, T - q_block * BLOCK_SIZE).to(tl.float32)
 
     output = tl.zeros([BLOCK_SIZE, BV], dtype=tl.float32)
     row_sum = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
     row_max = tl.full((BLOCK_SIZE,), -float("inf"), tl.float32)
     scale_log2 = scale * 1.4426950408889634
-    route_threshold = tl.load(
-        threshold_ptr + (batch * NT + q_block) * H + head
-    )
+    route_threshold = tl.load(threshold_ptr + (batch * NT + q_block) * H + head)
 
     for group_start in range(0, NT, GROUP_SIZE):
         block_indices = group_start + group_offsets
         valid = block_indices < NT
-        kc_offsets = (
-            ((batch * NPAD + block_indices[:, None]) * H + head) * D
-            + dims[None, :]
-        )
-        vc_offsets = (
-            ((batch * NPAD + block_indices[:, None]) * H + head) * D
-            + value_dims[None, :]
-        )
+        kc_offsets = ((batch * NPAD + block_indices[:, None]) * H + head) * D + dims[None, :]
+        vc_offsets = ((batch * NPAD + block_indices[:, None]) * H + head) * D + value_dims[None, :]
         kc = tl.load(kc_ptr + kc_offsets)
         vc = tl.load(vc_ptr + vc_offsets)
-        scores = tl.dot(q, kc.T).to(tl.float32) * scale_log2
-        exact = (
-            (tl.sum(scores, axis=0) / q_len > route_threshold)
-            | (tl.abs(q_block - block_indices) <= 1)
-        )
+        if FP8:
+            kc = kc.to(tl.float32)
+            vc = vc.to(tl.float32)
+        scores = tl.dot(q_route, kc.T).to(tl.float32) * scale_log2
+        exact = (tl.sum(scores, axis=0) / q_len > route_threshold) | (tl.abs(q_block - block_indices) <= 1)
         if HAS_SINK:
-            exact = exact | (
-                (block_indices >= sink_start_block)
-                & (block_indices < sink_end_block)
-            )
+            exact = exact | ((block_indices >= sink_start_block) & (block_indices < sink_end_block))
         exact = exact & valid
 
         approximate = valid & ~exact
@@ -273,13 +239,8 @@ def _forward_ptr(
         safe_scores = tl.where(has_approximate, approximate_scores, 0.0)
         candidate_max = tl.maximum(row_max, tl.max(safe_scores, axis=1))
         new_max = tl.where(has_approximate, candidate_max, row_max)
-        alpha = tl.math.exp2(
-            tl.where(has_approximate, row_max - new_max, 0.0)
-        )
-        probability = tl.math.exp2(
-            safe_scores
-            - tl.where(has_approximate, new_max, 0.0)[:, None]
-        )
+        alpha = tl.math.exp2(tl.where(has_approximate, row_max - new_max, 0.0))
+        probability = tl.math.exp2(safe_scores - tl.where(has_approximate, new_max, 0.0)[:, None])
         probability = tl.where(
             has_approximate & approximate[None, :],
             probability,
@@ -311,17 +272,17 @@ def _forward_ptr(
             )
             kv_tokens = block * BLOCK_SIZE + token_offsets
             kv_valid = kv_tokens < T
-            k_offsets = (
-                ((batch * T + kv_tokens[:, None]).to(tl.int64) * H + head)
-                * D
-                + dims[None, :]
-            )
+            k_offsets = ((batch * T + kv_tokens[:, None]).to(tl.int64) * H + head) * D + dims[None, :]
             k = tl.load(
                 k_ptr + k_offsets,
                 mask=kv_valid[:, None],
                 other=0.0,
             )
-            exact_scores = tl.dot(q, k.T).to(tl.float32) * scale_log2
+            if FP8:
+                k_scale = tl.load(k_scale_ptr + (batch * NT + block) * H + head)
+                exact_scores = tl.dot(q, k.T, out_dtype=tl.float32) * (q_scale * k_scale * scale_log2)
+            else:
+                exact_scores = tl.dot(q, k.T).to(tl.float32) * scale_log2
             exact_scores += tl.where(
                 kv_valid[None, :],
                 0.0,
@@ -329,33 +290,38 @@ def _forward_ptr(
             )
             new_max = tl.maximum(row_max, tl.max(exact_scores, axis=1))
             alpha = tl.math.exp2(row_max - new_max)
-            exact_probability = tl.math.exp2(
-                exact_scores - new_max[:, None]
-            )
+            exact_probability = tl.math.exp2(exact_scores - new_max[:, None])
             row_sum = row_sum * alpha + tl.sum(
                 exact_probability,
                 axis=1,
             )
-            v_offsets = (
-                ((batch * T + kv_tokens[:, None]).to(tl.int64) * H + head)
-                * D
-                + value_dims[None, :]
-            )
+            v_offsets = ((batch * T + kv_tokens[:, None]).to(tl.int64) * H + head) * D + value_dims[None, :]
             v = tl.load(
                 v_ptr + v_offsets,
                 mask=kv_valid[:, None],
                 other=0.0,
             )
-            output = output * alpha[:, None] + tl.dot(
-                exact_probability.to(v.dtype),
-                v,
-            )
+            if FP8:
+                v_scale = tl.load(v_scale_ptr + (batch * NT + block) * H + head)
+                probability_max = tl.maximum(
+                    1.0e-6,
+                    tl.minimum(1.0, tl.max(exact_probability, axis=1)),
+                )
+                probability_scale = probability_max / 448.0
+                probability_fp8 = (exact_probability / probability_scale[:, None]).to(tl.float8e4nv)
+                output = output * alpha[:, None] + tl.dot(
+                    probability_fp8,
+                    v,
+                    out_dtype=tl.float32,
+                ) * (probability_scale[:, None] * v_scale)
+            else:
+                output = output * alpha[:, None] + tl.dot(
+                    exact_probability.to(v.dtype),
+                    v,
+                )
             row_max = new_max
 
-    output_offsets = (
-        ((batch * T + q_tokens[:, None]).to(tl.int64) * H + head) * D
-        + value_dims[None, :]
-    )
+    output_offsets = ((batch * T + q_tokens[:, None]).to(tl.int64) * H + head) * D + value_dims[None, :]
     tl.store(
         o_ptr + output_offsets,
         (output / row_sum[:, None]).to(tl.bfloat16),
@@ -373,9 +339,18 @@ def sol_attn(
     thresh_type: str = "diag",
     sink_tokens: int = 0,
     sink_start: int | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run Triton Sol-Attn on contiguous BF16 BTHD inputs."""
+    """Run Triton Sol-Attn on contiguous BF16 or block-scaled FP8 BTHD inputs."""
 
+    fp8_inputs = q.dtype == torch.float8_e4m3fn
+    if fp8_inputs:
+        if k.dtype != q.dtype or v.dtype != q.dtype:
+            raise TypeError("FP8 Sol-Attn requires q, k, and v to share dtype")
+        if any(scale is None for scale in (q_scale, k_scale, v_scale)):
+            raise ValueError("FP8 Sol-Attn requires q_scale, k_scale, and v_scale")
     arch = _validate_inputs(
         q,
         k,
@@ -386,8 +361,7 @@ def sol_attn(
     )
     if arch[0] < 8:
         raise RuntimeError(
-            "Triton Sol-Attn requires an NVIDIA GPU with compute "
-            f"capability >= 8.0; got SM{arch[0]}{arch[1]}"
+            f"Triton Sol-Attn requires an NVIDIA GPU with compute capability >= 8.0; got SM{arch[0]}{arch[1]}"
         )
     scale = q.shape[-1] ** -0.5 if scale is None else float(scale)
     tau = float(tau)
@@ -400,7 +374,7 @@ def sol_attn(
     )
     use_tma = _use_tma(q.device)
 
-    if use_tma:
+    if use_tma and not fp8_inputs:
         # Keep the original descriptor-backed preprocessing on TMA devices.
         # The pointer preprocessing below exists only for older architectures.
         from ..preprocess import prepare as prepare_tma
@@ -446,13 +420,22 @@ def sol_attn(
         tau=tau,
         thresh_type=thresh_type,
         tokens=tokens,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
-    output = torch.empty_like(v)
-    grid = lambda meta: (head_dim // meta["BV"], blocks, batch * heads)
+    output = torch.empty(v.shape, device=v.device, dtype=torch.bfloat16)
+
+    def grid(meta):
+        return (head_dim // meta["BV"], blocks, batch * heads)
+
     _forward_ptr[grid](
         q,
         k,
         v,
+        q_scale if fp8_inputs else q.new_ones((1,), dtype=torch.float32),
+        k_scale if fp8_inputs else q.new_ones((1,), dtype=torch.float32),
+        v_scale if fp8_inputs else q.new_ones((1,), dtype=torch.float32),
         kc,
         vc,
         threshold,
@@ -468,6 +451,7 @@ def sol_attn(
         NT=blocks,
         BLOCK_SIZE=BLOCK,
         GROUP_SIZE=GROUP,
+        FP8=fp8_inputs,
     )
     return output
 

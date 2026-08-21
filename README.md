@@ -25,6 +25,9 @@ runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 
+- ✨ **2026-08-19**: Added [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V and I2V joint
+  audio-video generation with a ModuleManager-backed six-stage pipeline, selectable dense attention backends, and
+  Ulysses sequence parallelism on **1, 2, or 4 x H100** GPUs.
 - ✨ **2026-08-10**: Added [**SwiftVR**](examples/swiftvr/README.md) causal video restoration with stateful streaming
   and a single-GPU H100 example.
 - ✨ **2026-08-05**: Added [**MiniMax H3**](examples/minimax_h3/README.md) T2VA, FL2VA, and Ref2VA joint
@@ -247,6 +250,7 @@ telefuser/
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `LTX-2.5 Distilled` | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP; see [examples/ltx25_distilled/README.md](examples/ltx25_distilled/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |

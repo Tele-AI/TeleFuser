@@ -5,6 +5,7 @@ import pytest
 
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
+from examples.minimax_h3 import minimax_h3_turbo_lora_h100 as turbo_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
@@ -134,6 +135,13 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "enable_fsdp": True,
                 "online_adaln_cache": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
+                "sol_fp8": False,
+                "sol_dense_steps": 10,
+                "sol_dense_layers": 2,
+                "sol_tau": 1.0,
+                "sol_threshold_type": "exact",
+                "sol_fp8_layer_start": 0,
+                "sol_fp8_layer_end": None,
                 "feature_cache_config": FeatureCacheConfig(
                     enabled=True,
                     model_type="MiniMax-H3-Base",
@@ -166,6 +174,7 @@ def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
     [
         ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
         ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
         ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
         ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
     ],
@@ -221,6 +230,52 @@ def test_standard_example_forwards_selected_quantization(
     assert fl2va_example.PIPELINE_MANIFEST["pipeline_name"] == fl2va_example.PPL_CONFIG["name"]
 
 
+def test_standard_example_forwards_fp8_sol_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    sentinel = object()
+
+    def fake_get_pipeline(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_get_pipeline)
+    result = fl2va_example.get_pipeline(
+        1,
+        "/models/h3",
+        attn_impl="SOL_ATTN",
+        sol_fp8=True,
+        sol_dense_steps=10,
+        sol_dense_layers=2,
+        sol_tau=0.9,
+        sol_threshold_type="diag",
+        sol_fp8_layer_start=2,
+        sol_fp8_layer_end=40,
+        quantization="tf-kernel-fp8",
+    )
+
+    assert result is sentinel
+    options = calls[0][1]
+    assert options["attn_impl"] == "SOL_ATTN"
+    assert options["sol_fp8"] is True
+    assert options["sol_dense_steps"] == 10
+    assert options["sol_dense_layers"] == 2
+    assert options["sol_tau"] == 0.9
+    assert options["sol_threshold_type"] == "diag"
+    assert options["sol_fp8_layer_start"] == 2
+    assert options["sol_fp8_layer_end"] == 40
+    assert options["quantization"] == "tf-kernel-fp8"
+
+
+def test_sol_fp8_rejects_dense_attention(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sol_fp8 requires"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            attn_impl=AttnImplType.FLASH_ATTN_4,
+            sol_fp8=True,
+        )
+
+
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:
     calls = []
     marker = object()
@@ -244,6 +299,33 @@ def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:
 
     fl2va_example.run(pipeline, task="fl2v", first_image_path="first.png", last_image_path="last.png")
     assert [item["frame_index"] for item in calls[-1]["conditions"]] == [0, -1]
+
+
+def test_turbo_run_uses_input_image_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    marker = object()
+
+    class Pipeline:
+        def __call__(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return marker
+
+    monkeypatch.setattr(turbo_example, "save_generation", lambda *_: None)
+    assert turbo_example.run(Pipeline(), input_image_path="input.png") is marker
+    assert calls[0]["conditions"] == [{"type": "image", "role": "keyframe", "uri": "input.png", "frame_index": 0}]
+
+
+def test_turbo_run_with_file_accepts_service_image_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr(turbo_example, "run", fake_run)
+    turbo_example.run_with_file(object(), first_image_path="service-input.png", output_path="result.mp4")
+
+    assert calls[0][1]["input_image_path"] == "service-input.png"
 
 
 def test_ref2va_run_preserves_ordered_service_conditions() -> None:

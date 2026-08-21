@@ -95,6 +95,60 @@ def test_sol_attention_dense_guard_does_not_call_kernel() -> None:
 
 
 @pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fp8_sol_uses_triton_for_unquantized_bf16_layers() -> None:
+    q = torch.randn(1, 64, 1, 128, device="cuda", dtype=torch.bfloat16)
+    kernel = MagicMock(side_effect=lambda q, _k, _v, **_kwargs: q)
+    config = AttentionConfig.sol_attention(
+        dense_timesteps=0,
+        dense_layers=0,
+        sol_fp8=True,
+        sol_fp8_layer_start=10,
+        sol_fp8_layer_end=20,
+    )
+    assert config.sparse_config is not None
+    state = SparseAttentionState(config.sparse_config, mask_map=None)
+
+    with (
+        patch.object(attention_impl, "SOL_ATTN_AVAILABLE", True),
+        patch.object(attention_impl, "sol_attn", kernel),
+    ):
+        output = attention_impl.attention(q, q, q, attention_config=config, sparse_state=state)
+
+    assert output.shape == q.shape
+    assert kernel.call_args.kwargs["force_triton"] is True
+
+
+def test_fp8_dense_uses_sdpa_for_unquantized_bf16_layers() -> None:
+    q = torch.randn(1, 64, 1, 128, dtype=torch.bfloat16)
+    kernel = MagicMock()
+    config = AttentionConfig.sol_attention(
+        dense_timesteps=0,
+        dense_layers=0,
+        tau=-1000.0,
+        sol_fp8=True,
+        sol_fp8_layer_start=10,
+        sol_fp8_layer_end=20,
+    )
+    assert config.sparse_config is not None
+    state = SparseAttentionState(config.sparse_config, mask_map=None)
+
+    with (
+        patch.object(attention_impl, "SOL_ATTN_AVAILABLE", True),
+        patch.object(attention_impl, "sol_attn", kernel),
+    ):
+        output = attention_impl.attention(q, q, q, attention_config=config, sparse_state=state)
+
+    expected = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2),
+        q.transpose(1, 2),
+        q.transpose(1, 2),
+    ).transpose(1, 2)
+    torch.testing.assert_close(output, expected)
+    kernel.assert_not_called()
+
+
+@pytest.mark.gpu
 def test_sol_attention_public_ops_matches_sdpa_on_h100(monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Sol-Attn public ops test requires H100")

@@ -71,6 +71,9 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn 路由阈值
     sol_threshold_type: str = "diag"        # "diag" 或 "exact"
     sol_kv_splits: int | str = "auto"       # "auto"、1、2 或 4
+    sol_fp8: bool = False                    # SM90 FP8 Q/K/V Sol-Attn
+    sol_fp8_layer_start: int = 0             # 启用 FP8 Sol-Attn 的首层
+    sol_fp8_layer_end: int | None = None     # 结束层（不包含）；None 表示其余所有层
 ```
 
 ## 调用流程
@@ -163,6 +166,7 @@ else:
 | Pipeline | 密集注意力 | Radial | Sol-Attn | 说明 |
 |----------|-----------|--------|----------|------|
 | `Wan21VideoPipeline` | 支持 | 支持 | 实验性 | Sol-Attn 用于满足约束的 self-attention |
+| `MiniMaxH3Pipeline` | 支持 | 不支持 | 实验性 | FL2VA 支持 exact prefix sink 与 SM90 FP8 Q/K/V |
 | `Wan22VideoPipeline` | 支持 | 支持 | 不支持 | 尚未接入 Wan2.2 |
 | `QwenImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
 | `ZImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
@@ -197,9 +201,21 @@ config = AttentionConfig.sol_attention()
 pipe_config.dit_config.attention_config = config
 ```
 
-Sol-Attn 仅用于连续、非因果、BF16、Q/K/V 形状相同且 head dimension 为 128 的
-self-attention。其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
+Sol-Attn 用于连续、非因果、Q/K/V 形状相同且 head dimension 为 128 的
+self-attention。各架构内核支持 BF16，SM90 还支持使用 FP32 累加的 E4M3 Q/K/V。
+其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
 Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端。
+
+`sol_fp8_layer_start` 和 `sol_fp8_layer_end` 用半开区间限制使用 E4M3 Q/K/V
+的 transformer 层，区间外的稀疏层继续使用 BF16 Sol-Attn，以控制扩散模型中
+逐层累积的 FP8 路由误差。
+
+设置 `dense_timesteps=0`、`dense_layers=0` 和负数 `tau` 会强制所有 KV block
+走 exact 路径。Wan 优化示例将其暴露为 `--attention fp8-dense`；
+`--attention fp8-sol` 使用相同的 FP8 Q/K/V 与 QK/PV kernel 并启用质心路由。
+关于 kernel 数据流、精度边界与 H100 消融结果，参见
+[FP8 Sol-Attn 技术文章](blog/fp8_sol_attention.md)。
+
 
 ### QwenImagePipeline / ZImagePipeline
 

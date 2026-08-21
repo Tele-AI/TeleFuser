@@ -166,8 +166,11 @@ def _resolve_sol_kv_splits(q: Tensor, kv_splits: int | str) -> int:
     """Match the official Sol-Engine automatic split policy."""
     if kv_splits != "auto":
         return int(kv_splits)
-    if torch.cuda.get_device_capability(q.device) == (9, 0) and q.shape[1] >= 65536:
-        return 4
+    if torch.cuda.get_device_capability(q.device) == (9, 0):
+        if q.dtype == torch.float8_e4m3fn and q.shape[1] >= 16384:
+            return 2
+        if q.shape[1] >= 65536:
+            return 4
     return 1
 
 
@@ -187,6 +190,11 @@ def attention(
     return_lse: bool = False,
     sequence_lengths: list[int] | None = None,
     cu_seqlens: Tensor | None = None,
+    q_scale: Tensor | None = None,
+    k_scale: Tensor | None = None,
+    v_scale: Tensor | None = None,
+    sink_start: int | None = None,
+    sink_tokens: int = 0,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -206,6 +214,8 @@ def attention(
         return_lse: Return log-sum-exp values.
         sequence_lengths: Length of each sequence packed along the sequence axis.
         cu_seqlens: Optional precomputed cumulative sequence lengths for varlen kernels.
+        sink_start: Start of the exact KV sink used by Sol-Attn.
+        sink_tokens: Number of exact KV sink tokens used by Sol-Attn.
         **kwargs: Implementation-specific arguments.
 
     Returns:
@@ -237,6 +247,11 @@ def attention(
         elif attn_impl == AttnImplType.SOL_ATTN:
             if sparse_state.should_use_dense():
                 attn_impl = AttnImplType.FLASH_ATTN_2
+            elif sparse_state.config.sol_fp8 and sparse_state.config.sol_tau < 0.0 and q.dtype == torch.bfloat16:
+                # FP8 Dense only needs the CuTe exact mainloop in quantized
+                # layers. Unquantized layers use the faster dense backend and
+                # avoid compiling a second BF16 CuTe specialization.
+                attn_impl = AttnImplType.TORCH_SDPA
         else:
             if sparse_state.mask_map is None:
                 raise RuntimeError("Radial attention requires a mask map")
@@ -403,6 +418,9 @@ def attention(
 
     # Sol-Attn
     elif attn_impl == AttnImplType.SOL_ATTN and SOL_ATTN_AVAILABLE and sol_attn is not None:
+        sparse_config = attention_config.sparse_config
+        if sparse_config is None:
+            raise RuntimeError("Sol-Attn requires sparse attention configuration")
         eligible = (
             attn_mask is None
             and not is_causal
@@ -411,28 +429,58 @@ def attention(
             and q.shape == k.shape == v.shape
             and q.ndim == 4
             and q.shape[-1] == 128
-            and q.dtype == torch.bfloat16
+            and (q.dtype == torch.bfloat16 or (sparse_config.sol_fp8 and q.dtype == torch.float8_e4m3fn))
             and q.is_cuda
         )
         if eligible:
-            sparse_config = attention_config.sparse_config
-            if sparse_config is None:
-                raise RuntimeError("Sol-Attn requires sparse attention configuration")
+            if q.dtype == torch.float8_e4m3fn and any(scale is None for scale in (q_scale, k_scale, v_scale)):
+                raise ValueError("FP8 Sol-Attn requires q_scale, k_scale, and v_scale")
             try:
                 output = sol_attn(
                     q.contiguous(),
                     k.contiguous(),
-                    v.contiguous(),
+                    v if q.dtype == torch.float8_e4m3fn else v.contiguous(),
                     scale=scale,
                     tau=sparse_config.sol_tau,
                     thresh_type=sparse_config.sol_threshold_type,
                     kv_splits=_resolve_sol_kv_splits(q, sparse_config.sol_kv_splits),
+                    q_scale=q_scale,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                    sink_start=sink_start,
+                    sink_tokens=sink_tokens,
+                    # A partial FP8 layer range otherwise compiles both BF16
+                    # and FP8 CuTe specializations on the first sparse step.
+                    # Triton is a better cold-start tradeoff for the remaining
+                    # sparse BF16 layers; exact FP8 Dense keeps CuTe throughout.
+                    force_triton=(sparse_config.sol_fp8 and q.dtype == torch.bfloat16 and sparse_config.sol_tau >= 0.0),
                 )
             except (RuntimeError, TypeError, ValueError) as error:
                 msg = "Sol-Attn execution failed, falling back to TORCH_SDPA"
                 if msg not in _warned_attn_fallback:
                     _warned_attn_fallback.add(msg)
                     logger.warning("%s: %s", msg, error)
+                if q.dtype == torch.float8_e4m3fn:
+                    from telefuser.ops.fp8_attention import (
+                        dequantize_fp8_per_block,
+                        dequantize_fp8_per_channel,
+                        dequantize_fp8_per_token,
+                    )
+
+                    if (
+                        q_scale.shape[0] == q.shape[0]
+                        and q_scale.shape[1] >= q.shape[1]
+                        and q_scale.shape[2] == q.shape[2]
+                    ):
+                        q = dequantize_fp8_per_token(q, q_scale, torch.bfloat16)
+                        k = dequantize_fp8_per_token(k, k_scale, torch.bfloat16)
+                    else:
+                        q = dequantize_fp8_per_block(q, q_scale, torch.bfloat16)
+                        k = dequantize_fp8_per_block(k, k_scale, torch.bfloat16)
+                    if v_scale.shape == (v.shape[0], v.shape[2], v.shape[3]):
+                        v = dequantize_fp8_per_channel(v, v_scale, torch.bfloat16)
+                    else:
+                        v = dequantize_fp8_per_block(v, v_scale, torch.bfloat16)
 
     # Fallback to SDPA
     if output is None:

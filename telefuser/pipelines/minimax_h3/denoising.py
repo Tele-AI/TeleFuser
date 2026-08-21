@@ -126,6 +126,9 @@ class MiniMaxH3DenoisingStage(BaseStage):
         self.transformer = module_manager.fetch_module("minimax_h3_transformer")
         if self.transformer is None:
             raise ValueError("ModuleManager must contain 'minimax_h3_transformer'")
+        set_attention_config = getattr(self.transformer, "set_attention_config", None)
+        if callable(set_attention_config):
+            set_attention_config(model_runtime_config.attention_config)
         if model_runtime_config.lora_configs:
             MiniMaxH3LoraAdapter.apply(self.transformer, model_runtime_config.lora_configs)
         step_update = "training_euler" if model_runtime_config.lora_configs else "reference_blend"
@@ -159,7 +162,6 @@ class MiniMaxH3DenoisingStage(BaseStage):
             raise NotImplementedError(f"MiniMax H3 does not support these parallel degrees yet: {invalid}")
         device_mesh = create_device_mesh_from_config(parallel_config)
         self.transformer.device_mesh = device_mesh
-        self.transformer.set_attention_config(self.model_runtime_config.attention_config)
         if parallel_config.tp_degree > 1:
             if parallel_config.enable_fsdp:
                 raise ValueError("MiniMax H3 DiT tensor parallelism cannot be combined with FSDP")
@@ -374,6 +376,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         text_pos_cpu = packed["text_pos"]
         text_pos = text_pos_cpu.to(device)
         target_img_pos = img_pos[video_update]
+        sol_prefix_tokens = int(img_pos_cpu[video_update_cpu][0])
         target_video_row_start = int((~video_update_cpu).sum())
         target_audio_row_start = int((~audio_update_cpu).sum())
         condition_img_pos = img_pos_cpu[~video_update_cpu]
@@ -496,6 +499,8 @@ class MiniMaxH3DenoisingStage(BaseStage):
                 block_combined_indices=block_combined_indices,
                 local_embedding_layout=local_embedding_layout,
                 static_cache_key=static_cache_key,
+                sparse_step_index=step,
+                sol_prefix_tokens=sol_prefix_tokens,
                 skip_mask_out_condition=True,
             )
             audio_target_velocity = audio_velocity[audio_target_slice]

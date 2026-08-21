@@ -71,6 +71,9 @@ class SparseAttentionConfig:
     sol_tau: float = 1.0                    # Sol-Attn routing threshold
     sol_threshold_type: str = "diag"        # "diag" or "exact"
     sol_kv_splits: int | str = "auto"       # "auto", 1, 2, or 4
+    sol_fp8: bool = False                    # FP8 Q/K/V Sol-Attn on SM90
+    sol_fp8_layer_start: int = 0             # First layer using FP8 Sol-Attn
+    sol_fp8_layer_end: int | None = None     # Exclusive end; None means all remaining layers
 ```
 
 ## Calling Flow
@@ -163,6 +166,7 @@ else:
 | Pipeline | Dense Attention | Radial | Sol-Attn | Notes |
 |----------|-----------------|--------|----------|-------|
 | `Wan21VideoPipeline` | Yes | Yes | Experimental | Sol-Attn covers eligible self-attention calls |
+| `MiniMaxH3Pipeline` | Yes | No | Experimental | FL2VA supports exact prefix sinks and FP8 Q/K/V on SM90 |
 | `Wan22VideoPipeline` | Yes | Yes | No | Sol-Attn is not wired into Wan2.2 yet |
 | `QwenImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
 | `ZImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
@@ -197,10 +201,23 @@ config = AttentionConfig.sol_attention()
 pipe_config.dit_config.attention_config = config
 ```
 
-Sol-Attn is used only for contiguous, noncausal BF16 self-attention with equal Q/K/V
-shapes and head dimension 128. Unsupported calls, dense warmup layers or timesteps,
-and kernel runtime failures fall back to the existing dense attention path. Ring/USP
-also remains dense because its online merge requires log-sum-exp output.
+Sol-Attn is used for contiguous, noncausal self-attention with equal Q/K/V shapes
+and head dimension 128. BF16 is supported by the architecture-specific kernels;
+SM90 additionally supports E4M3 Q/K/V with FP32 accumulation. Unsupported calls,
+dense warmup layers or timesteps, and kernel runtime failures fall back to the
+existing dense attention path. Ring/USP remains dense because its online merge
+requires log-sum-exp output.
+
+`sol_fp8_layer_start` and `sol_fp8_layer_end` restrict E4M3 Q/K/V to a half-open
+transformer-layer range. Sparse layers outside that range continue to use BF16
+Sol-Attn. This controls accumulated FP8 routing error in diffusion models.
+Setting `dense_timesteps=0`, `dense_layers=0`, and a negative `tau` forces all
+KV blocks onto the exact route. The Wan optimized example exposes this as
+`--attention fp8-dense`; `--attention fp8-sol` enables centroid routing with the
+same FP8 Q/K/V and QK/PV kernel.
+For the kernel data flow, precision boundaries, and H100 ablations, see the
+[FP8 Sol-Attn technical article](blog/fp8_sol_attention.md).
+
 
 ### QwenImagePipeline / ZImagePipeline
 

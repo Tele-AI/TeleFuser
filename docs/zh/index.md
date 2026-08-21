@@ -71,6 +71,7 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 |------|------|------|
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
+| LTX-2.5 Distilled | T2V、I2V + Audio | 基于 ModuleManager 的六阶段流水线，支持 1/2/4 张 H100 的 Ulysses SP，见[示例文档](../../examples/ltx25_distilled/README.md) |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
 | FlashVSR | VSR | 视频超分辨率 |
 | SwiftVR | 因果视频修复 | 支持 BF16、torch.compile、FP8Linear、Ulysses SP 和 stage-parallel，见 [示例文档](../../examples/swiftvr/README.md) |

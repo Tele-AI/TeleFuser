@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
     ModelRuntimeConfig,
     OffloadConfig,
     ParallelConfig,
@@ -19,7 +21,10 @@ from telefuser.pipelines.minimax_h3.text_encoding import MiniMaxH3TextEncodingSt
 from telefuser.pipelines.minimax_h3.vae import MiniMaxH3VideoVAEStage
 
 
-def _stage(parallel_config: ParallelConfig) -> tuple[MiniMaxH3DenoisingStage, MagicMock]:
+def _stage(
+    parallel_config: ParallelConfig,
+    attention_config: AttentionConfig | None = None,
+) -> tuple[MiniMaxH3DenoisingStage, MagicMock]:
     transformer = MagicMock()
     transformer.parameters.return_value = [torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))]
     transformer.get_fsdp_module_names.return_value = ["blocks"]
@@ -31,8 +36,17 @@ def _stage(parallel_config: ParallelConfig) -> tuple[MiniMaxH3DenoisingStage, Ma
         torch_dtype=torch.bfloat16,
         parallel_config=parallel_config,
         offload_config=OffloadConfig(offload_type=WeightOffloadType.NO_CPU_OFFLOAD),
+        attention_config=attention_config or AttentionConfig.dense_attention(),
     )
     return MiniMaxH3DenoisingStage(manager, runtime), transformer
+
+
+def test_single_gpu_stage_applies_sol_attention_config() -> None:
+    config = AttentionConfig.sol_attention(dense_timesteps=10, dense_layers=2, threshold_type="exact", sol_fp8=True)
+
+    _, transformer = _stage(ParallelConfig(device_ids=[0]), config)
+
+    transformer.set_attention_config.assert_called_once_with(config)
 
 
 def test_local_embedding_layout_selects_only_rank_owned_rows() -> None:

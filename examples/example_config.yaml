@@ -102,6 +102,37 @@ pipelines:
       attn_impl: TORCH_SDPA
 
   # ============================================================
+  # ltx25_distilled - Joint Audio-Video Generation
+  # ============================================================
+
+  ltx25_distilled_t2v_2gpu:
+    script: ltx25_distilled/ltx25_distilled_t2v_h100.py
+    gpu_count: 2
+    output_type: video
+    timeout_seconds: 3600
+    height: 1024
+    width: 1536
+    use_run_with_file: true
+    require_audio: true
+    ppl_config_overrides:
+      num_frames: 121
+      frame_rate: 24.0
+
+  ltx25_distilled_i2v_2gpu:
+    script: ltx25_distilled/ltx25_distilled_i2v_h100.py
+    gpu_count: 2
+    output_type: video
+    timeout_seconds: 3600
+    height: 512
+    width: 896
+    input_image_path: examples/data/ltx25/official_guitar_man.png
+    use_run_with_file: true
+    require_audio: true
+    ppl_config_overrides:
+      num_frames: 121
+      frame_rate: 24.0
+
+  # ============================================================
   # minimax_h3 — Joint Audio-Video Generation
   # ============================================================
 

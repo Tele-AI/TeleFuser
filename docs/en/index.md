@@ -73,6 +73,7 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 |-------|-------|-------------|
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
 | LTX Video | I2V + Audio | Video generation with audio |
+| LTX-2.5 Distilled | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP; see the [example guide](../../examples/ltx25_distilled/README.md) |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
 | FlashVSR | VSR | Video super-resolution |
 | SwiftVR | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options; see the [example guide](../../examples/swiftvr/README.md) |
