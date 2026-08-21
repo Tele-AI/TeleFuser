@@ -42,3 +42,8 @@ def test_online_quantization_rejects_cpu_before_loading_models() -> None:
 def test_quantization_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match="quantization must be"):
         lingbot_vla_v2_quant_config("int8")
+
+
+def test_cuda_graph_rejects_cpu_before_loading_models() -> None:
+    with pytest.raises(ValueError, match="CUDA Graph requires a CUDA device"):
+        get_lingbot_vla_v2_pipeline("unused", "unused", device="cpu", cuda_graph=True)

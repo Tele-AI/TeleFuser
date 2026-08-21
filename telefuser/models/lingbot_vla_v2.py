@@ -32,6 +32,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 from transformers.utils import logging
 
 from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
+from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2DenoisingCudaGraph
 from telefuser.models.lingbot_vla_v2_loader import (
     LingBotVLAWeightLoader,
     LingBotVlaV2StateDictConverter,
@@ -975,6 +976,8 @@ class FlowMatchingV2(FlowMatchingBase):
     def __init__(self, config, eval):
         nn.Module.__init__(self)
         self.config = config
+        self._cuda_graph_enabled = False
+        self._cuda_graph_runner: LingBotVlaV2DenoisingCudaGraph | None = None
         qwenvl_with_export_config = QwenvlWithExpertV2Config(
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
@@ -1298,6 +1301,20 @@ class FlowMatchingV2(FlowMatchingBase):
         del args, kwargs
         raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
+    def set_cuda_graph_enabled(self, enabled: bool) -> None:
+        """Enable lazy capture of the fixed 10-step denoising loop."""
+        self._cuda_graph_enabled = bool(enabled)
+        if not self._cuda_graph_enabled:
+            self._cuda_graph_runner = None
+
+    @property
+    def cuda_graph_enabled(self) -> bool:
+        return self._cuda_graph_enabled
+
+    @property
+    def cuda_graph_ready(self) -> bool:
+        return self._cuda_graph_runner is not None and self._cuda_graph_runner.ready
+
     def sample_actions(
         self,
         images,
@@ -1349,10 +1366,26 @@ class FlowMatchingV2(FlowMatchingBase):
             deepstack_visual_embeds=deepstack_visual_embeds,
         )
 
+        if self._cuda_graph_enabled:
+            if device.type != "cuda":
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires CUDA inference")
+            if past_key_values is None:
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires the prefix KV cache")
+            if getattr(self, "_use_compile_predict_velocity", False):
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
+            if self._cuda_graph_runner is None:
+                self._cuda_graph_runner = LingBotVlaV2DenoisingCudaGraph(self)
+            return self._cuda_graph_runner.run(
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                noise,
+                prefix_position_ids,
+            )
+
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
         time = torch.tensor(1.0, dtype=dtype, device=device)
-        count = 0
         predict_velocity_fn = self.predict_velocity
         if getattr(self, "_use_compile_predict_velocity", False):
             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
@@ -1365,8 +1398,7 @@ class FlowMatchingV2(FlowMatchingBase):
                 )
                 self._compiled_predict_velocity = predict_velocity_fn
 
-        while time >= -dt / 2:
-            count += 1
+        for _ in range(int(self.config.num_steps)):
             expanded_time = time.expand(bsize)
             v_t = predict_velocity_fn(
                 state,
@@ -1379,7 +1411,10 @@ class FlowMatchingV2(FlowMatchingBase):
 
             x_t += dt * v_t
             time += dt
-        logger.debug("Denoised actions in %d steps", count)
+        logger.debug(
+            "Denoised actions in %d steps",
+            self.config.num_steps,
+        )
         return x_t
 
     def predict_velocity(
@@ -1478,6 +1513,14 @@ class LingbotVlaV2Policy(PreTrainedModel):
 
     def reset(self):
         return None
+
+    def set_cuda_graph_enabled(self, enabled: bool) -> None:
+        """Configure fixed-step CUDA Graph execution for this policy."""
+        self.model.set_cuda_graph_enabled(enabled)
+
+    @property
+    def cuda_graph_ready(self) -> bool:
+        return self.model.cuda_graph_ready
 
     def forward(self, *args, **kwargs):
         """Reject the upstream training API in the inference-only model."""

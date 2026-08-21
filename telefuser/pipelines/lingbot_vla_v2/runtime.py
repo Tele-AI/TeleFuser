@@ -52,6 +52,7 @@ def get_lingbot_vla_v2_pipeline(
     *,
     warmup: bool = False,
     quantization: str | QuantType | None = None,
+    cuda_graph: bool = False,
 ) -> LingBotVlaV2Pipeline:
     """Load one official 6B base checkpoint replica for inference."""
     target_device = torch.device(device)
@@ -68,6 +69,10 @@ def get_lingbot_vla_v2_pipeline(
     quant_config = lingbot_vla_v2_quant_config(quantization)
     if quant_config.enabled and target_device.type != "cuda":
         raise ValueError("LingBot-VLA v2 online quantization requires a CUDA device")
+    if cuda_graph and target_device.type != "cuda":
+        raise ValueError("LingBot-VLA v2 CUDA Graph requires a CUDA device")
+    if cuda_graph and quant_config.enabled:
+        raise ValueError("LingBot-VLA v2 CUDA Graph currently supports only the BF16 profile")
     processor = AutoProcessor.from_pretrained(qwen3vl_root, local_files_only=True, padding_side="right")
     manager = ModuleManager(torch_dtype=dtype, device="cpu")
     manager.add_module(processor, "lingbot_vla_v2_processor", path=qwen3vl_root)
@@ -83,6 +88,7 @@ def get_lingbot_vla_v2_pipeline(
     pipeline.init(
         manager,
         LingBotVlaV2PipelineConfig(
+            cuda_graph=cuda_graph,
             policy_config=ModelRuntimeConfig(
                 device_type=target_device.type,
                 device_id=target_device.index or 0,

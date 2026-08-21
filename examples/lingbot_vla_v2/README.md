@@ -62,6 +62,7 @@ the commands below.
 | Native structured HTTP service | Supported |
 | AIPerf structured workload | Supported |
 | Request-level replicas | Supported, one policy copy per GPU |
+| CUDA Graph action denoising | Opt-in BF16 path; H100 benchmark recorded below |
 | Online quantization | BF16 default; TorchAO FP8 and BNB NF4 smoke-validated |
 | tf-kernel FP8 | Code/unit tested; compatible SM90 wheel not validated on this host |
 | Single-policy FSDP, TP, or PP | Not enabled |
@@ -155,6 +156,32 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
 ```
 
 This creates one complete policy per GPU. It does not split one policy with tensor or pipeline parallelism.
+
+## Optional CUDA Graph Denoising
+
+The BF16 runtime can capture all 10 action-denoising steps as one CUDA Graph. Capture is lazy on the first request;
+later requests copy their current inputs and KV cache into static buffers and replay the graph. This removes the
+per-step Python loop and repeated kernel-launch dispatch from the steady-state request path.
+
+```python
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
+
+pipeline = get_lingbot_vla_v2_pipeline(
+    "/path/to/lingbot-vla-v2-6b",
+    "/path/to/Qwen3-VL-4B-Instruct",
+    device="cuda:0",
+    cuda_graph=True,
+)
+```
+
+The graph is specialized to the first request's tensor shapes, dtypes, and device. LingBot-VLA v2's public
+preprocessing contract supplies fixed shapes (`batch=1`, language length 72, and action shape `1 x 50 x 55`), so
+subsequent standard requests meet that contract while their tensor values may change. Graph replay is serialized per
+policy instance because its static buffers are shared. Call `pipeline.close()` to release the captured graph and its
+buffers.
+
+CUDA Graph mode is currently mutually exclusive with online quantization and `torch.compile`; invalid combinations
+fail explicitly. BF16 eager execution remains the default.
 
 ## Optional Online Quantization
 
@@ -449,6 +476,51 @@ and noise. `Runtime request` also includes tensor transfer, seeded-noise constru
 action delivery; both exclude image decoding and preprocessing. Peak allocated CUDA memory was 12,454.8 MiB for both.
 Mean differences below 1.5% show no material TeleFuser overhead in this matched run. The small 20-sample p99 result is
 not a tail-latency conclusion, and loader time is not compared because construction boundaries differ.
+
+### CUDA Graph Denoising
+
+Run the TeleFuser benchmark twice on the same idle GPU with the same frozen input. Omit `--cuda-graph` for the eager
+baseline and include it for the graph run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
+  tools/validation/benchmark_lingbot_vla_v2_runtime.py \
+  --implementation telefuser \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
+  --input-artifact work_dirs/vla_quantization/current_bf16_seed7.npz \
+  --seed 7 --device cuda:0 --cuda-graph --warmup 10 --runs 50 \
+  --output work_dirs/vla_cuda_graph/cuda_graph_h100_runs50.json
+```
+
+The recorded matched run used one H100 80GB, BF16, eager attention, the Robby Triton MoE, 10 warmups, and 50
+measured requests. Each core request clones the same initial noise before inference.
+
+| Scope | Metric | Eager | CUDA Graph | Change | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Core model | mean | 655.893 ms | 173.429 ms | -73.56% | 3.78x |
+| Core model | p50 | 654.503 ms | 172.893 ms | -73.58% | 3.79x |
+| Core model | p95 | 667.624 ms | 176.556 ms | -73.55% | 3.78x |
+| Core model | throughput | 1.525 req/s | 5.766 req/s | +278.19% | 3.78x |
+| Runtime request | mean | 655.529 ms | 173.631 ms | -73.51% | 3.78x |
+| Runtime request | p50 | 652.183 ms | 172.954 ms | -73.48% | 3.77x |
+| Runtime request | p95 | 676.857 ms | 174.950 ms | -74.15% | 3.87x |
+| Runtime request | throughput | 1.525 req/s | 5.759 req/s | +277.54% | 3.78x |
+| Peak allocated CUDA memory | peak | 12,454.780 MiB | 12,569.533 MiB | +0.92% | n/a |
+
+The graph report also compares full `1 x 50 x 55` action chunks inside the same loaded process. Robby Triton MoE
+atomic accumulation is not bitwise repeatable, so the relevant acceptance criterion is whether graph-vs-eager error
+exceeds the eager replay baseline:
+
+| Comparison | Max abs | Relative L2 | Cosine similarity |
+| --- | ---: | ---: | ---: |
+| Eager vs eager | 0.125000 | 0.015226 | 0.999886 |
+| CUDA Graph vs eager | 0.132812 | 0.015498 | 0.999880 |
+| CUDA Graph vs CUDA Graph | 0.085938 | 0.013414 | 0.999910 |
+
+The graph-vs-eager error stayed at the same scale as the eager replay baseline; no additional numerical degradation
+beyond the non-deterministic atomic MoE variation was observed. The deterministic unit model additionally requires
+exact equality across all 10 captured denoising steps and subsequent replays.
 
 ### Single-GPU Service Benchmark
 

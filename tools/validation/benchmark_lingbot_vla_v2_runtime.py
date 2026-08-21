@@ -133,6 +133,24 @@ def _output_summary(output: torch.Tensor) -> dict[str, Any]:
     }
 
 
+def _compare_outputs(reference: torch.Tensor, actual: torch.Tensor) -> dict[str, float]:
+    reference_f32 = reference.detach().to(device="cpu", dtype=torch.float32)
+    actual_f32 = actual.detach().to(device="cpu", dtype=torch.float32)
+    if reference_f32.shape != actual_f32.shape:
+        raise RuntimeError(f"output shape mismatch: {tuple(reference_f32.shape)} != {tuple(actual_f32.shape)}")
+    difference = actual_f32 - reference_f32
+    reference_norm = torch.linalg.vector_norm(reference_f32)
+    return {
+        "max_abs": float(difference.abs().max()),
+        "mean_abs": float(difference.abs().mean()),
+        "rmse": float(torch.sqrt(torch.mean(difference.square()))),
+        "relative_l2": float(torch.linalg.vector_norm(difference) / reference_norm),
+        "cosine_similarity": float(
+            torch.nn.functional.cosine_similarity(reference_f32.flatten(), actual_f32.flatten(), dim=0)
+        ),
+    }
+
+
 def _load_upstream(args: argparse.Namespace, device: torch.device) -> tuple[Any, dict[str, Any]]:
     import capture_lingbot_vla_v2_upstream as upstream_capture
 
@@ -163,6 +181,7 @@ def _load_telefuser(args: argparse.Namespace, device: torch.device) -> tuple[Any
         str(args.qwen3vl_root.resolve()),
         device=str(device),
         quantization=args.quantization,
+        cuda_graph=args.cuda_graph,
     )
     model = pipeline.policy_stage.policy
     config = model.config
@@ -171,6 +190,7 @@ def _load_telefuser(args: argparse.Namespace, device: torch.device) -> tuple[Any
         "implementation_commit": _git_commit(Path(__file__).resolve().parents[2]),
         "attention_backend": str(config.attention_implementation),
         "moe_backend": "robby_triton" if bool(config.use_robby_moe_kernel) else "fused_fallback",
+        "cuda_graph": args.cuda_graph,
     }
 
 
@@ -180,6 +200,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--warmup must be non-negative and --runs must be positive")
     if args.implementation == "upstream" and args.quantization is not None:
         raise ValueError("--quantization is only supported with --implementation telefuser")
+    if args.implementation == "upstream" and args.cuda_graph:
+        raise ValueError("--cuda-graph is only supported with --implementation telefuser")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("LingBot-VLA v2 runtime benchmarking requires CUDA")
@@ -215,7 +237,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     @torch.inference_mode()
     def core_model() -> torch.Tensor:
-        return model.sample_actions(**device_inputs, noise=device_noise)
+        return model.sample_actions(**device_inputs, noise=device_noise.clone())
 
     @torch.inference_mode()
     def runtime_request() -> torch.Tensor:
@@ -237,12 +259,24 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         return model.sample_actions(**request_inputs, noise=noise).detach().to(device="cpu", dtype=torch.float32)
 
     try:
+        eager_reference = None
+        eager_repeat_comparison = None
+        if args.cuda_graph:
+            model.set_cuda_graph_enabled(False)
+            eager_reference = core_model()
+            eager_repeat = core_model()
+            torch.cuda.synchronize(device)
+            eager_repeat_comparison = _compare_outputs(eager_reference, eager_repeat)
+            model.set_cuda_graph_enabled(True)
+
         core_latency, core_output = _run_samples(
             core_model,
             device=device,
             warmup=args.warmup,
             runs=args.runs,
         )
+        graph_repeat = core_model() if args.cuda_graph else None
+        torch.cuda.synchronize(device)
         runtime_latency, runtime_output = _run_samples(
             runtime_request,
             device=device,
@@ -261,6 +295,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "measured_runs": args.runs,
             "device": str(device),
             "quantization": args.quantization or "bf16",
+            "cuda_graph": args.cuda_graph,
             "quantization_runtime": quantization_runtime,
             "device_name": torch.cuda.get_device_name(device),
             "environment": {
@@ -275,10 +310,18 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "runtime_request_latency": runtime_latency,
             "core_model_output": _output_summary(core_output),
             "runtime_request_output": _output_summary(runtime_output),
+            "cuda_graph_eager_comparison": (
+                _compare_outputs(eager_reference, core_output) if eager_reference is not None else None
+            ),
+            "eager_repeat_comparison": eager_repeat_comparison,
+            "cuda_graph_repeat_comparison": (
+                _compare_outputs(core_output, graph_repeat) if graph_repeat is not None else None
+            ),
             "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 1024**2,
             "measurement_notes": [
                 "No parity capture hooks are installed.",
                 "core_model reuses device-resident parity inputs and fixed initial noise.",
+                "The fixed initial noise is cloned before each measured core-model request.",
                 (
                     "runtime_request includes CPU-to-GPU input transfer, seeded noise creation, validation, "
                     "and CPU output transfer."
@@ -304,6 +347,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
+    parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)
