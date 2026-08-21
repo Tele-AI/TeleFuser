@@ -109,3 +109,20 @@ def test_livekit_health_and_service_metadata_routes() -> None:
     assert metadata.status_code == 200
     assert metadata.json()["service_type"] == "stream"
     assert metadata.json()["transport"] == "livekit"
+
+
+def test_livekit_metrics_alias_matches_versioned_endpoint() -> None:
+    runtime = _make_runtime()
+    app = create_livekit_app(runtime)
+
+    with ASGITestClient(app) as client:
+        alias = client.get("/metrics")
+        versioned = client.get("/v1/service/metrics")
+        json_metrics = client.get("/v1/service/metrics/json")
+
+    assert alias.status_code == 200
+    assert versioned.status_code == 200
+    assert "telefuser_serving_sessions" in alias.text
+    assert "telefuser_serving_sessions" in versioned.text
+    assert json_metrics.status_code == 200
+    assert json_metrics.json()["serving"]["summary"]["sessions"]["waiting"] == 0

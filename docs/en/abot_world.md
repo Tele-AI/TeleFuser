@@ -1,7 +1,9 @@
 # ABot-World-0-5B-LF
 
-TeleFuser provides a single-GPU integration for the public ABot-World-0-5B-LF
-long-forcing checkpoint. There are two supported transport entry points:
+TeleFuser provides a concurrent integration for the public ABot-World-0-5B-LF
+long-forcing checkpoint. Each model replica remains single-GPU; a LiveKit
+deployment can run one replica per configured GPU and retain multiple compatible
+sessions per replica. There are two supported transport entry points:
 
 * Native HTTP controller for local debugging:
 
@@ -72,9 +74,10 @@ VAE and text stages plus the model-specific `ABotWorldDenoisingStage`.
 four-step x0-prediction causal sampler.
 
 `ABotWorldInteractivePipeline` retains the prompt embedding, initial image
-latent, self/cross KV caches, scheduler, RNG, and VAE temporal cache between
-control blocks. The initial integration supports one GPU and one retained
-causal session.
+latent, self/cross KV caches, scheduler, RNG, and VAE temporal cache per
+session. The serving scheduler batches compatible retained sessions through
+DiT and cached VAE decode while keeping RNG draws, cache scatter, RoPE
+positions, and chunk counters isolated.
 
 ## Controls And Idle Behavior
 
@@ -84,9 +87,10 @@ not advance the DiT with an empty action state. A non-empty control snapshot
 starts the next three-latent causal block. Releasing all keys stops new model
 execution without discarding frames already queued for playback.
 
-The browser consumes decoded frames in order at 12 FPS. The bounded FIFO
-applies producer backpressure when playback is behind, so normal playback does
-not drop generated blocks.
+The browser consumes decoded frames in order at 12 FPS. Every session has a
+bounded output queue. `latest` delivery may evict the oldest complete block
+when a slow client fills that queue; `lossless` delivery applies backpressure
+to that session without blocking other ready sessions.
 
 ## KV And RoPE
 
@@ -99,6 +103,18 @@ frame number does not grow the RoPE index past the precomputed table.
 This fixed logical position policy is an intentional difference from the
 original non-sink ABot baseline and must be evaluated as part of any future
 long-horizon quality claim.
+## Multi-GPU Serving
+
+The parent process owns LiveKit transport and admission. The process-nccl mode starts
+one model worker per assigned GPU and keeps the worker group fixed; each worker
+can continuously batch compatible retained sessions and transfer a retained
+session at a chunk boundary. Clients use only the public HTTP and LiveKit
+interfaces and do not select a GPU.
+
+For a local deployment, set the worker count and GPU map explicitly. Use plain
+process mode for independent replicas when migration is not needed. The runtime
+metadata endpoint reports effective worker capacities and routing state.
+
 
 ## Tests
 
@@ -126,7 +142,7 @@ visual quality, prompt fidelity, or parity over an unbounded session.
 
 ## Scope
 
-The integration is intentionally single-GPU and advertises one retained causal
-session per worker. Both transports use the same interactive pipeline and
-fixed six-sink/twelve-tail KV policy; LiveKit adds only the shared TeleFuser
-transport and room lifecycle.
+Both transports use the same interactive pipeline and fixed six-sink/twelve-tail
+KV policy. Every replica remains single-GPU; multi-GPU deployments use explicit
+worker groups and the shared TeleFuser admission, room lifecycle, and session
+state-management paths.

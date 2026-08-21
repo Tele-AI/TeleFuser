@@ -145,13 +145,23 @@ def create_livekit_app(runtime: LiveKitServeRuntime) -> FastAPI:
     async def service_metadata() -> dict:
         return runtime.metadata()
 
-    @app.get("/v1/service/metrics")
-    async def service_metrics() -> Response:
+    def render_prometheus_metrics() -> Response:
         service_metrics_obj = get_service_metrics()
+        generic = service_metrics_obj.get_prometheus_format().rstrip()
+        serving = runtime.prometheus_metrics().rstrip()
         return Response(
-            content=service_metrics_obj.get_prometheus_format(),
+            content="\n\n".join(part for part in (generic, serving) if part) + "\n",
             media_type="text/plain; charset=utf-8",
         )
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_alias() -> Response:
+        """Prometheus conventional alias for the LiveKit serving endpoint."""
+        return render_prometheus_metrics()
+
+    @app.get("/v1/service/metrics")
+    async def service_metrics() -> Response:
+        return render_prometheus_metrics()
 
     @app.get("/v1/service/metrics/json")
     async def service_metrics_json() -> dict:
@@ -162,6 +172,7 @@ def create_livekit_app(runtime: LiveKitServeRuntime) -> FastAPI:
             "service_type": "stream",
             "transport": "livekit",
             "livekit": health.model_dump(),
+            "serving": runtime.serving_metrics_snapshot(),
         }
 
     return app

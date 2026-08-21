@@ -3,10 +3,48 @@ from __future__ import annotations
 import pytest
 import torch
 
+from examples.abot_world._loader import _attention_backend, _env_flag
 from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.abot_world import ABotWorldPipeline
 from telefuser.pipelines.abot_world.pipeline import ABotWorldPipelineConfig
+
+
+def test_cuda_graph_configuration_is_opt_in() -> None:
+    assert ABotWorldPipelineConfig().cuda_graph_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+    ],
+)
+def test_cuda_graph_environment_flag_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("TELEFUSER_ABOT_CUDA_GRAPH_ENABLED", raw_value)
+
+    assert _env_flag("TELEFUSER_ABOT_CUDA_GRAPH_ENABLED") is expected
+
+
+def test_cuda_graph_environment_flag_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEFUSER_ABOT_CUDA_GRAPH_ENABLED", "sometimes")
+
+    with pytest.raises(ValueError, match="TELEFUSER_ABOT_CUDA_GRAPH_ENABLED must be a boolean"):
+        _env_flag("TELEFUSER_ABOT_CUDA_GRAPH_ENABLED")
+
+
+def test_attention_environment_rejects_unknown_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEFUSER_ABOT_ATTENTION", "unknown")
+
+    with pytest.raises(ValueError, match="Unsupported TELEFUSER_ABOT_ATTENTION"):
+        _attention_backend(0)
 
 
 def test_action_context_uses_official_wasd_ijkl_channel_layout() -> None:

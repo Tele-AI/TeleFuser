@@ -28,8 +28,15 @@ class _PipelineAdapter:
         self.queues: dict[str, asyncio.Queue[dict | None]] = {}
         self.capacity_profile: dict[str, object] | None = None
 
-    def start(self, pipeline_file: str, *, skip_validation: bool = False, gpu_num: int = 1) -> None:
-        del pipeline_file, skip_validation, gpu_num
+    def start(
+        self,
+        pipeline_file: str,
+        *,
+        skip_validation: bool = False,
+        gpu_num: int = 1,
+        gpu_ids: list[str] | None = None,
+    ) -> None:
+        del pipeline_file, skip_validation, gpu_num, gpu_ids
         self.start_calls += 1
 
     async def aclose(self) -> None:
