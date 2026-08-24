@@ -6,7 +6,8 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 import torch
 
 from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
-from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward
+from telefuser.ops.graph_fp8_linear import GraphFP8Linear, graph_fp8_linear_forward_many
+from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward, robby_moe_forward_fp8
 
 
 def fused_moe_forward(
@@ -122,7 +123,11 @@ class Qwen2MoeSharedExpertMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if isinstance(self.gate_proj, GraphFP8Linear) and isinstance(self.up_proj, GraphFP8Linear):
+            gate, up = graph_fp8_linear_forward_many((self.gate_proj, self.up_proj), x)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(self.act_fn(gate) * up)
 
 
 class Qwen2FusedExperts(nn.Module):
@@ -147,6 +152,12 @@ class Qwen2FusedExperts(nn.Module):
         self.up_proj = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
         self.register_buffer("_gate_up_proj_cache", None, persistent=False)
+        self.register_buffer("gate_proj_fp8", None, persistent=True)
+        self.register_buffer("gate_proj_scale", None, persistent=True)
+        self.register_buffer("up_proj_fp8", None, persistent=True)
+        self.register_buffer("up_proj_scale", None, persistent=True)
+        self.register_buffer("down_proj_fp8", None, persistent=True)
+        self.register_buffer("down_proj_scale", None, persistent=True)
         self._gate_up_proj_cache_key = None
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
@@ -164,6 +175,31 @@ class Qwen2FusedExperts(nn.Module):
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
 
+    @property
+    def graph_fp8_enabled(self) -> bool:
+        return self.gate_proj_fp8 is not None
+
+    @staticmethod
+    def _quantize_fp8_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        scale = weight.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min_(1e-12).div_(fp8_max)
+        quantized = (weight.detach() / scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn).contiguous()
+        return quantized, scale.squeeze(-1).contiguous()
+
+    def enable_graph_fp8(self) -> None:
+        """Pre-materialize FP8 expert weights and release all BF16 copies."""
+        if self.graph_fp8_enabled:
+            return
+        if not self.gate_proj.is_cuda:
+            raise RuntimeError("LingBot-VLA v2 fused FP8 experts require CUDA-resident weights")
+        self.gate_proj_fp8, self.gate_proj_scale = self._quantize_fp8_weight(self.gate_proj)
+        self.up_proj_fp8, self.up_proj_scale = self._quantize_fp8_weight(self.up_proj)
+        self.down_proj_fp8, self.down_proj_scale = self._quantize_fp8_weight(self.down_proj)
+        del self.gate_proj
+        del self.up_proj
+        del self.down_proj
+        self.clear_inference_cache()
+
     def _get_robby_moe_workspace(self, hidden_states, top_k):
         if self.training or torch.is_grad_enabled() or not hidden_states.is_cuda:
             return None
@@ -176,6 +212,7 @@ class Qwen2FusedExperts(nn.Module):
             self.intermediate_size,
             hidden_states.dtype,
             hidden_states.device,
+            self.graph_fp8_enabled,
         )
         if self._robby_moe_workspace is None or self._robby_moe_workspace_key != key:
             max_routes = num_tokens * int(top_k)
@@ -190,6 +227,23 @@ class Qwen2FusedExperts(nn.Module):
                 ),
                 "out": torch.empty((num_tokens, hidden_size), device=hidden_states.device, dtype=torch.float32),
             }
+            if self.graph_fp8_enabled:
+                self._robby_moe_workspace.update(
+                    {
+                        "qhidden": torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn),
+                        "hidden_scale": torch.empty((num_tokens,), device=hidden_states.device, dtype=torch.float32),
+                        "qinter": torch.empty(
+                            (max_routes, self.intermediate_size),
+                            device=hidden_states.device,
+                            dtype=torch.float8_e4m3fn,
+                        ),
+                        "inter_scale": torch.empty(
+                            (max_routes,),
+                            device=hidden_states.device,
+                            dtype=torch.float32,
+                        ),
+                    }
+                )
             self._robby_moe_workspace_key = key
         return self._robby_moe_workspace
 
@@ -332,7 +386,23 @@ class Qwen2TokenMoeBlock(nn.Module):
                 and not self.training
                 and not torch.is_grad_enabled()
             )
-            if use_robby_moe:
+            if use_robby_moe and self.experts.graph_fp8_enabled:
+                final_hidden_states = robby_moe_forward_fp8(
+                    hidden_flat,
+                    routing_weights,
+                    selected_experts,
+                    self.experts.gate_proj_fp8,
+                    self.experts.gate_proj_scale,
+                    self.experts.up_proj_fp8,
+                    self.experts.up_proj_scale,
+                    self.experts.down_proj_fp8,
+                    self.experts.down_proj_scale,
+                    workspace=self.experts._get_robby_moe_workspace(
+                        hidden_flat,
+                        selected_experts.shape[1],
+                    ),
+                )
+            elif use_robby_moe:
                 try:
                     final_hidden_states = robby_moe_forward(
                         hidden_flat,
@@ -428,9 +498,21 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
                 hidden_states = self.input_layernorm(hidden_states)
             hidden_shape = (*hidden_states.shape[:-1], -1, self.self_attn.head_dim)
 
-            query_state = self.self_attn.q_proj(hidden_states).view(hidden_shape)
-            key_state = self.self_attn.k_proj(hidden_states).view(hidden_shape)
-            value_state = self.self_attn.v_proj(hidden_states).view(hidden_shape)
+            q_proj = self.self_attn.q_proj
+            k_proj = self.self_attn.k_proj
+            v_proj = self.self_attn.v_proj
+            if all(isinstance(proj, GraphFP8Linear) for proj in (q_proj, k_proj, v_proj)):
+                query_state, key_state, value_state = graph_fp8_linear_forward_many(
+                    (q_proj, k_proj, v_proj),
+                    hidden_states,
+                )
+                query_state = query_state.view(hidden_shape)
+                key_state = key_state.view(hidden_shape)
+                value_state = value_state.view(hidden_shape)
+            else:
+                query_state = q_proj(hidden_states).view(hidden_shape)
+                key_state = k_proj(hidden_states).view(hidden_shape)
+                value_state = v_proj(hidden_states).view(hidden_shape)
 
             return query_state, key_state, value_state
 

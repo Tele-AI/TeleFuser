@@ -62,8 +62,10 @@ the commands below.
 | Native structured HTTP service | Supported |
 | AIPerf structured workload | Supported |
 | Request-level replicas | Supported, one policy copy per GPU |
-| CUDA Graph action denoising | Opt-in BF16 path; H100 benchmark recorded below |
-| Online quantization | BF16 default; TorchAO FP8 and BNB NF4 smoke-validated |
+| BF16 vision SDPA | Enabled when flash-attn is unavailable; H100 A/B recorded below |
+| CUDA Graph prefix and action denoising | Opt-in BF16 path; two graphs share static KV buffers |
+| Online quantization | BF16 default; capacity-oriented profiles are opt-in |
+| Fused FP8 graph | Experimental H100 path; reduces memory but does not improve batch-1 latency |
 | tf-kernel FP8 | Code/unit tested; compatible SM90 wheel not validated on this host |
 | Single-policy FSDP, TP, or PP | Not enabled |
 | Physical action mapping and safety control | Not included |
@@ -157,11 +159,12 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
 
 This creates one complete policy per GPU. It does not split one policy with tensor or pipeline parallelism.
 
-## Optional CUDA Graph Denoising
+## Optional Dual CUDA Graph
 
-The BF16 runtime can capture all 10 action-denoising steps as one CUDA Graph. Capture is lazy on the first request;
-later requests copy their current inputs and KV cache into static buffers and replay the graph. This removes the
-per-step Python loop and repeated kernel-launch dispatch from the steady-state request path.
+The BF16 runtime uses two lazily captured CUDA Graphs. The prefix graph encodes the fixed-shape visual/language prefix
+and constructs all 36 KV-cache layers. The denoising graph captures all 10 action-denoising steps. Prefix KV outputs
+are the denoising graph's static KV inputs, so steady-state replay does not perform a second per-layer KV copy. This
+removes prefix Python dispatch, the denoising Python loop, and repeated kernel-launch dispatch from the request path.
 
 ```python
 from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
@@ -174,23 +177,27 @@ pipeline = get_lingbot_vla_v2_pipeline(
 )
 ```
 
-The graph is specialized to the first request's tensor shapes, dtypes, and device. LingBot-VLA v2's public
+The graphs are specialized to the first request's tensor shapes, dtypes, device, image-grid values, camera-valid mask,
+and language-padding mask. LingBot-VLA v2's public
 preprocessing contract supplies fixed shapes (`batch=1`, language length 72, and action shape `1 x 50 x 55`), so
-subsequent standard requests meet that contract while their tensor values may change. Graph replay is serialized per
-policy instance because its static buffers are shared. Call `pipeline.close()` to release the captured graph and its
-buffers.
+subsequent standard requests meet that contract while image content, language tokens, state, and noise may change.
+Changing a static layout value requires a new policy instance. Replay is serialized per policy instance because its
+static buffers are shared. Call `pipeline.close()` to release both graphs and their buffers.
 
-CUDA Graph mode is currently mutually exclusive with online quantization and `torch.compile`; invalid combinations
-fail explicitly. BF16 eager execution remains the default.
+CUDA Graph mode is mutually exclusive with `torch.compile` and with online quantization other than the experimental
+`fused-fp8-graph` profile; invalid combinations fail explicitly. BF16 eager execution remains the default.
 
 ## Optional Online Quantization
 
-BF16 remains the default and the only profile covered by strict upstream parity. Quantization is opt-in, does not
-modify checkpoint files, and keeps the fused action MoE weights, state/action projections, AdaNorm projections, and
-action head in BF16. The frozen official-base manifest covers 492 Qwen text/vision and action-attention Linear layers.
+BF16 remains the default and the only profile covered by strict upstream parity. Quantization is opt-in and does not
+modify checkpoint files. The legacy online profiles keep the fused action MoE weights and action heads in BF16. The
+`fused-fp8-graph` profile instead targets only repeated denoising computation: 144 action-attention Linear layers, 108
+shared-expert Linear layers, two action-time MLP Linear layers, and all 36 routed-MoE expert tensors. Router gates,
+state/action input-output projections, AdaNorm projections, the visual/language prefix, and action head remain BF16.
 
 | CLI value | Backend | Path | Validation status |
 | --- | --- | --- | --- |
+| `fused-fp8-graph` | Native scaled GEMM + Triton | Pre-materialized W8A8 denoise weights; BF16 copies discarded | H100 graph, action, latency, and memory validated; experimental capacity option |
 | `torchao-fp8` | TorchAO | Dynamic FP8 activation/weight or FP8 weight-only fallback | H100 real forward, action comparison, lifecycle |
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; compatible SM90 wheel unavailable |
 | `bnb-nf4` | bitsandbytes | NF4 weight-only, BF16 compute | H100 real forward, action comparison, lifecycle |
@@ -204,9 +211,9 @@ uv pip install --python .venv-vla/bin/python --reinstall --no-deps \
   "torchao==0.17.0" "bitsandbytes==0.48.0"
 ```
 
-Add `--quantization torchao-fp8` or `--quantization bnb-nf4` to direct-inference and benchmark commands. Accepted
-values also include `tf-kernel-fp8`; that path requires an SM90 wheel built for the exact PyTorch/CUDA ABI from
-`tf-kernel/`. Do not use a wheel built for another SM family or CUDA ABI. For the native service, set
+Add `--quantization fused-fp8-graph --cuda-graph` for the experimental fused graph profile. Other accepted values are
+`torchao-fp8`, `bnb-nf4`, and `tf-kernel-fp8`; the tf-kernel path requires an SM90 wheel built for the exact
+PyTorch/CUDA ABI from `tf-kernel/`. Do not use a wheel built for another SM family or CUDA ABI. For the native service, set
 `PPL_CONFIG["quantization"]` in `lingbot_vla_v2_native_service.py`; it defaults to `None`.
 
 The public loader uses the same option:
@@ -477,7 +484,19 @@ action delivery; both exclude image decoding and preprocessing. Peak allocated C
 Mean differences below 1.5% show no material TeleFuser overhead in this matched run. The small 20-sample p99 result is
 not a tail-latency conclusion, and loader time is not compared because construction boundaries differ.
 
-### CUDA Graph Denoising
+### BF16 Vision SDPA
+
+When flash-attn is unavailable, the Qwen3-VL vision encoder now uses BF16 SDPA while the language/action attention
+backend remains eager. A fixed-input H100 A/B used the same weights and inputs for both attention implementations:
+
+| Scope | Eager | BF16 SDPA | Change |
+| --- | ---: | ---: | ---: |
+| Vision encoding | 18.595 ms | 15.005 ms | -19.3% |
+| Full model | 175.557 ms | 172.048 ms | -2.0% |
+
+The action difference did not exceed the eager replay variation from the fused Robby MoE atomic accumulation.
+
+### Dual CUDA Graph
 
 Run the TeleFuser benchmark twice on the same idle GPU with the same frozen input. Omit `--cuda-graph` for the eager
 baseline and include it for the graph run:
@@ -489,24 +508,25 @@ CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
   --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
   --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
   --input-artifact work_dirs/vla_quantization/current_bf16_seed7.npz \
-  --seed 7 --device cuda:0 --cuda-graph --warmup 10 --runs 50 \
-  --output work_dirs/vla_cuda_graph/cuda_graph_h100_runs50.json
+  --seed 7 --device cuda:0 --cuda-graph --warmup 5 --runs 20 \
+  --output work_dirs/vla_prefix_graph/bf16_sdpa_dual_graph_h100.json
 ```
 
-The recorded matched run used one H100 80GB, BF16, eager attention, the Robby Triton MoE, 10 warmups, and 50
-measured requests. Each core request clones the same initial noise before inference.
+The recorded matched run used one H100 80GB, BF16 vision SDPA, eager action attention, the Robby Triton MoE, five
+warmups, and 20 measured requests. Each core request clones the same initial noise before inference. The graph column
+captures both prefix/KV construction and all 10 denoising steps.
 
 | Scope | Metric | Eager | CUDA Graph | Change | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Core model | mean | 655.893 ms | 173.429 ms | -73.56% | 3.78x |
-| Core model | p50 | 654.503 ms | 172.893 ms | -73.58% | 3.79x |
-| Core model | p95 | 667.624 ms | 176.556 ms | -73.55% | 3.78x |
-| Core model | throughput | 1.525 req/s | 5.766 req/s | +278.19% | 3.78x |
-| Runtime request | mean | 655.529 ms | 173.631 ms | -73.51% | 3.78x |
-| Runtime request | p50 | 652.183 ms | 172.954 ms | -73.48% | 3.77x |
-| Runtime request | p95 | 676.857 ms | 174.950 ms | -74.15% | 3.87x |
-| Runtime request | throughput | 1.525 req/s | 5.759 req/s | +277.54% | 3.78x |
-| Peak allocated CUDA memory | peak | 12,454.780 MiB | 12,569.533 MiB | +0.92% | n/a |
+| Core model | mean | 631.254 ms | 131.905 ms | -79.10% | 4.79x |
+| Core model | p50 | 629.088 ms | 131.897 ms | -79.03% | 4.77x |
+| Core model | p95 | 642.094 ms | 131.966 ms | -79.45% | 4.87x |
+| Core model | throughput | 1.584 req/s | 7.581 req/s | +378.60% | 4.79x |
+| Runtime request | mean | 632.654 ms | 132.669 ms | -79.03% | 4.77x |
+| Runtime request | p50 | 629.594 ms | 132.645 ms | -78.93% | 4.75x |
+| Runtime request | p95 | 643.463 ms | 132.867 ms | -79.35% | 4.84x |
+| Runtime request | throughput | 1.581 req/s | 7.538 req/s | +376.79% | 4.77x |
+| Peak allocated CUDA memory | peak | 12,456.838 MiB | 12,487.122 MiB | +0.24% | n/a |
 
 The graph report also compares full `1 x 50 x 55` action chunks inside the same loaded process. Robby Triton MoE
 atomic accumulation is not bitwise repeatable, so the relevant acceptance criterion is whether graph-vs-eager error
@@ -514,9 +534,9 @@ exceeds the eager replay baseline:
 
 | Comparison | Max abs | Relative L2 | Cosine similarity |
 | --- | ---: | ---: | ---: |
-| Eager vs eager | 0.125000 | 0.015226 | 0.999886 |
-| CUDA Graph vs eager | 0.132812 | 0.015498 | 0.999880 |
-| CUDA Graph vs CUDA Graph | 0.085938 | 0.013414 | 0.999910 |
+| Eager vs eager | 0.081543 | 0.014549 | 0.999895 |
+| CUDA Graph vs eager | 0.148438 | 0.015322 | 0.999884 |
+| CUDA Graph vs CUDA Graph | 0.132812 | 0.014528 | 0.999896 |
 
 The graph-vs-eager error stayed at the same scale as the eager replay baseline; no additional numerical degradation
 beyond the non-deterministic atomic MoE variation was observed. The deterministic unit model additionally requires
@@ -552,6 +572,21 @@ Five fixed-input H100 requests produced this screening result. It verifies the p
 Both online formats reduced allocated memory but were slower than BF16 on this H100. Treat them as capacity options
 until longer performance and RoboTwin task-success evaluations establish deployment benefit. tf-kernel FP8 was not
 run because the available CUDA toolkit was 12.8 while `.venv-vla` used CUDA 13.0.
+
+The graph-compatible fused FP8 path was screened separately with five warmups and 10 measured dual-graph requests.
+It pre-materialized exactly 254 action-path Linear weights plus all 36 routed-MoE expert tensors as E4M3, used static
+activation/scale/workspace addresses during replay, and retained no BF16 routed-expert weight copies.
+
+| Profile | Core mean | Runtime mean | Throughput | Steady GPU allocated | Cosine vs frozen BF16 | Relative L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BF16 dual graph | 131.646 ms | 131.511 ms | 7.604 req/s | 12,454 MiB | 0.999885 | 1.52% |
+| Fused FP8 dual graph | 162.770 ms | 163.335 ms | 6.122 req/s | 10,828 MiB | 0.998643 | 5.28% |
+
+Fused FP8 reduced steady allocation by 1,626 MiB (13.1%) but increased runtime latency by 24.2%. Actual-shape H100
+microbenchmarks showed the same cause: routed MoE changed from 0.108 to 0.140 ms per layer and action QKV from 0.073
+to 0.123 ms per layer because batch-1 activation quantization overhead exceeded the FP8 tensor-core gain. This profile
+is therefore an explicit capacity experiment, not a recommended latency optimization. BF16 dual graph remains the
+default deployment path; task-success evaluation is still required before using any quantized action output.
 
 ## Notes and Limitations
 

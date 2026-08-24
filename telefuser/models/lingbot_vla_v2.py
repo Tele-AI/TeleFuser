@@ -32,7 +32,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 from transformers.utils import logging
 
 from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
-from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2DenoisingCudaGraph
+from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2CudaGraphs
 from telefuser.models.lingbot_vla_v2_loader import (
     LingBotVLAWeightLoader,
     LingBotVlaV2StateDictConverter,
@@ -667,6 +667,18 @@ class QwenvlWithExpertV2Config(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+def _resolve_qwen_attention_implementations(
+    vision_implementation: str,
+    *,
+    flash_attention_available: bool,
+) -> tuple[str, str]:
+    """Resolve Qwen text and vision backends without changing action attention semantics."""
+    base_implementation = "flash_attention_2" if flash_attention_available else "eager"
+    if vision_implementation == "flash_attention_2" and not flash_attention_available:
+        vision_implementation = "sdpa"
+    return base_implementation, vision_implementation
+
+
 class QwenvlWithExpertV2Model(PreTrainedModel):
     config_class = QwenvlWithExpertV2Config
 
@@ -676,11 +688,13 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path, local_files_only=True)
         if self.config.vocab_size not in (0, 257152):
             vlm_config.text_config.vocab_size = self.config.vocab_size
-        base_attn_implementation = "flash_attention_2" if is_flash_attn_available() else "eager"
-        vision_attn_implementation = self.config.vit_attn_implementation
-        if vision_attn_implementation == "flash_attention_2" and not is_flash_attn_available():
-            logger.warning_once("flash-attn is unavailable; using eager attention for Qwen3-VL vision")
-            vision_attn_implementation = "eager"
+        flash_attention_available = is_flash_attn_available()
+        base_attn_implementation, vision_attn_implementation = _resolve_qwen_attention_implementations(
+            self.config.vit_attn_implementation,
+            flash_attention_available=flash_attention_available,
+        )
+        if self.config.vit_attn_implementation == "flash_attention_2" and not flash_attention_available:
+            logger.warning_once("flash-attn is unavailable; using SDPA attention for Qwen3-VL vision")
         vlm_config._attn_implementation = base_attn_implementation
         vlm_config.text_config._attn_implementation = base_attn_implementation
         vlm_config.vision_config._attn_implementation = vision_attn_implementation
@@ -705,7 +719,10 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         self.cu_seqlens = None
         self.visual_split_sizes = None
         self.visual_max_seqlen = None
+        self.visual_sequence_lengths = None
         self._cached_image_grid_signature = None
+        self._cuda_graph_fixed_grid = False
+        self._cached_visual_pos_indices = None
 
         del self.qwen_expert.model.embed_tokens
         if self.config.enable_expert_vision:
@@ -769,8 +786,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         image_grid_thw: torch.LongTensor,
     ):
         precompute_grid_thw = getattr(self.config, "precompute_grid_thw", False)
-        grid_signature = tuple(image_grid_thw.detach().to(device="cpu").reshape(-1).tolist())
-        cache_miss = self.position_embeddings is None or self._cached_image_grid_signature != grid_signature
+        if getattr(self, "_cuda_graph_fixed_grid", False):
+            if self._cached_image_grid_signature is None:
+                raise RuntimeError("Qwen3-VL fixed-grid CUDA Graph cache was enabled before grid preprocessing")
+            grid_signature = self._cached_image_grid_signature
+            cache_miss = False
+        else:
+            grid_signature = tuple(image_grid_thw.detach().to(device="cpu").reshape(-1).tolist())
+            cache_miss = self.position_embeddings is None or self._cached_image_grid_signature != grid_signature
         if precompute_grid_thw and cache_miss:
             (
                 self.pos_embeds,
@@ -779,6 +802,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 self.visual_split_sizes,
                 self.visual_max_seqlen,
             ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
+            if self.pos_embeds is None:
+                self.pos_embeds = self.qwenvl.visual.fast_pos_embed_interpolate(image_grid_thw)
+            self.visual_sequence_lengths = tuple((self.cu_seqlens[1:] - self.cu_seqlens[:-1]).tolist())
             self._cached_image_grid_signature = grid_signature
         image_embeds, deepstack_image_embeds = self.qwenvl.visual(
             pixel_values,
@@ -787,6 +813,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             position_embeddings=self.position_embeddings,
             cu_seqlens=self.cu_seqlens,
             max_seqlen=self.visual_max_seqlen,
+            sequence_lengths=self.visual_sequence_lengths,
         )
         split_sizes = self.visual_split_sizes
         if split_sizes is None:
@@ -809,8 +836,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         return self.qwenvl.model.language_model.embed_tokens(tokens)
 
     def embed_special_token(self, token_id: int, batch: int, count: int, device, dtype):
-        token = torch.tensor([token_id], device=device, dtype=torch.long)
-        emb = self.embed_language_tokens(token).to(dtype=dtype)
+        weight = self.qwenvl.model.language_model.embed_tokens.weight
+        emb = weight[token_id].to(device=device, dtype=dtype)
         return emb.view(1, 1, 1, -1).expand(batch, count, 1, -1)
 
     def build_prefix_position_ids(self, input_ids, attention_mask, image_grid_thw=None, video_grid_thw=None):
@@ -851,10 +878,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             and visual_pos_masks is not None
             and layer_idx < len(deepstack_visual_embeds)
         ):
-            hidden_states = self.qwenvl.model.language_model._deepstack_process(
-                hidden_states,
-                visual_pos_masks,
-                deepstack_visual_embeds[layer_idx],
+            visual_pos_indices = self._cached_visual_pos_indices
+            if visual_pos_indices is None:
+                visual_pos_indices = torch.nonzero(visual_pos_masks.reshape(-1), as_tuple=False).flatten()
+            visual_embeds = deepstack_visual_embeds[layer_idx].to(hidden_states.device, hidden_states.dtype)
+            hidden_states.reshape(-1, hidden_states.shape[-1]).index_add_(
+                0,
+                visual_pos_indices,
+                visual_embeds,
             )
         return hidden_states
 
@@ -977,7 +1008,7 @@ class FlowMatchingV2(FlowMatchingBase):
         nn.Module.__init__(self)
         self.config = config
         self._cuda_graph_enabled = False
-        self._cuda_graph_runner: LingBotVlaV2DenoisingCudaGraph | None = None
+        self._cuda_graph_runner: LingBotVlaV2CudaGraphs | None = None
         qwenvl_with_export_config = QwenvlWithExpertV2Config(
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
@@ -1042,6 +1073,8 @@ class FlowMatchingV2(FlowMatchingBase):
             self.use_shared_future_task_proj = False
             self.future_video_share_future_depth_query = False
             self.block_future_depth_to_action = False
+        self._cached_prefix_position_ids = None
+        self._cached_deepstack_indices = None
 
     def embed_prefix(
         self,
@@ -1245,20 +1278,39 @@ class FlowMatchingV2(FlowMatchingBase):
         else:
             att_masks = torch.zeros((bsize, embs.shape[1]), device=device, dtype=torch.bool)
 
-        flat_img_masks = einops.rearrange(img_masks, "b n -> (b n)")
-        rope_grid_thw = flat_grid_thw[flat_img_masks]
-        if rope_grid_thw.numel() == 0:
-            rope_grid_thw = flat_grid_thw[:1]
-        prefix_position_ids = self.qwenvl_with_expert.build_prefix_position_ids(
-            prefix_input_ids,
-            pad_masks.long(),
-            image_grid_thw=rope_grid_thw,
-            video_grid_thw=None,
-        )
-        filtered_deepstack = []
         img_visual_only = einops.repeat(img_masks, "b n -> b n l", l=num_patch)
+        fixed_prefix_layout = getattr(self.qwenvl_with_expert, "_cuda_graph_fixed_grid", False)
+        if fixed_prefix_layout:
+            if (
+                self._cached_prefix_position_ids is None
+                or self._cached_deepstack_indices is None
+                or self.qwenvl_with_expert._cached_visual_pos_indices is None
+            ):
+                raise RuntimeError("LingBot-VLA v2 fixed prefix layout was enabled before prefix preprocessing")
+            prefix_position_ids = self._cached_prefix_position_ids
+            deepstack_indices = self._cached_deepstack_indices
+        else:
+            flat_img_masks = einops.rearrange(img_masks, "b n -> (b n)")
+            active_image_indices = torch.nonzero(flat_img_masks, as_tuple=False).flatten()
+            if active_image_indices.numel() == 0:
+                active_image_indices = torch.zeros(1, dtype=torch.long, device=flat_grid_thw.device)
+            rope_grid_thw = flat_grid_thw.index_select(0, active_image_indices)
+            prefix_position_ids = self.qwenvl_with_expert.build_prefix_position_ids(
+                prefix_input_ids,
+                pad_masks.long(),
+                image_grid_thw=rope_grid_thw,
+                video_grid_thw=None,
+            )
+            deepstack_indices = torch.nonzero(img_visual_only.reshape(-1), as_tuple=False).flatten()
+            self._cached_prefix_position_ids = prefix_position_ids
+            self._cached_deepstack_indices = deepstack_indices
+            self.qwenvl_with_expert._cached_visual_pos_indices = torch.nonzero(
+                full_visual_pos_masks.reshape(-1), as_tuple=False
+            ).flatten()
+
+        filtered_deepstack = []
         for deepstack in deepstack_embs:
-            filtered_deepstack.append(deepstack[img_visual_only])
+            filtered_deepstack.append(deepstack.reshape(-1, deepstack.shape[-1]).index_select(0, deepstack_indices))
 
         result = (
             embs,
@@ -1302,10 +1354,18 @@ class FlowMatchingV2(FlowMatchingBase):
         raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
     def set_cuda_graph_enabled(self, enabled: bool) -> None:
-        """Enable lazy capture of the fixed 10-step denoising loop."""
+        """Enable lazy capture of fixed-shape prefix encoding and denoising."""
         self._cuda_graph_enabled = bool(enabled)
         if not self._cuda_graph_enabled:
             self._cuda_graph_runner = None
+            self.set_prefix_cuda_graph_capture(False)
+            self._cached_prefix_position_ids = None
+            self._cached_deepstack_indices = None
+            self.qwenvl_with_expert._cached_visual_pos_indices = None
+
+    def set_prefix_cuda_graph_capture(self, enabled: bool) -> None:
+        """Skip host grid-signature work while replaying a validated fixed prefix graph."""
+        self.qwenvl_with_expert._cuda_graph_fixed_grid = bool(enabled)
 
     @property
     def cuda_graph_enabled(self) -> bool:
@@ -1314,6 +1374,45 @@ class FlowMatchingV2(FlowMatchingBase):
     @property
     def cuda_graph_ready(self) -> bool:
         return self._cuda_graph_runner is not None and self._cuda_graph_runner.ready
+
+    def build_prefix_cache(
+        self,
+        images: torch.Tensor,
+        img_masks: torch.Tensor,
+        lang_tokens: torch.Tensor,
+        lang_masks: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[int, dict[str, torch.Tensor]]]:
+        """Encode the multimodal prefix and construct the action expert KV cache."""
+        (
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_att_masks,
+            prefix_position_ids,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+        ) = self.embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            image_grid_thw=image_grid_thw,
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        _, past_key_values, _ = self.qwenvl_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            vlm_position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+        )
+        if past_key_values is None:
+            raise RuntimeError("LingBot-VLA v2 prefix encoding did not produce a KV cache")
+        return prefix_pad_masks, prefix_position_ids, past_key_values
 
     def sample_actions(
         self,
@@ -1338,50 +1437,32 @@ class FlowMatchingV2(FlowMatchingBase):
             )
             noise = torch.randn(actions_shape, device=device, dtype=dtype)
 
-        (
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_att_masks,
-            prefix_position_ids,
-            visual_pos_masks,
-            deepstack_visual_embeds,
-        ) = self.embed_prefix(
+        if self._cuda_graph_enabled:
+            if device.type != "cuda":
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires CUDA inference")
+            if image_grid_thw is None:
+                raise RuntimeError("LingBot-VLA v2 prefix CUDA Graph requires image_grid_thw")
+            if getattr(self, "_use_compile_predict_velocity", False):
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
+            if self._cuda_graph_runner is None:
+                self._cuda_graph_runner = LingBotVlaV2CudaGraphs(self)
+            return self._cuda_graph_runner.run(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                noise,
+                image_grid_thw,
+            )
+
+        prefix_pad_masks, prefix_position_ids, past_key_values = self.build_prefix_cache(
             images,
             img_masks,
             lang_tokens,
             lang_masks,
-            image_grid_thw=image_grid_thw,
+            image_grid_thw,
         )
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-
-        _, past_key_values, _ = self.qwenvl_with_expert.forward(
-            attention_mask=prefix_att_2d_masks,
-            position_ids=prefix_position_ids,
-            vlm_position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-        )
-
-        if self._cuda_graph_enabled:
-            if device.type != "cuda":
-                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires CUDA inference")
-            if past_key_values is None:
-                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires the prefix KV cache")
-            if getattr(self, "_use_compile_predict_velocity", False):
-                raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
-            if self._cuda_graph_runner is None:
-                self._cuda_graph_runner = LingBotVlaV2DenoisingCudaGraph(self)
-            return self._cuda_graph_runner.run(
-                state,
-                prefix_pad_masks,
-                past_key_values,
-                noise,
-                prefix_position_ids,
-            )
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
@@ -1563,12 +1644,28 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
             return
 
         existing_quant_type = getattr(self, "quant_type", None)
-        if existing_quant_type == quant_config.quant_type:
-            return
         if existing_quant_type is not None:
+            requested_backend = quant_config.kernel_backend
+            if requested_backend == QuantKernelBackend.AUTO:
+                requested_backend = {
+                    QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+                    QuantType.FP8: QuantKernelBackend.TF_KERNEL,
+                    QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+                }.get(quant_config.quant_type, requested_backend)
+            if (
+                existing_quant_type == quant_config.quant_type
+                and getattr(self, "quant_kernel_backend", None) == requested_backend
+            ):
+                return
             raise RuntimeError(
-                f"LingBot-VLA v2 is already quantized as {existing_quant_type}, cannot apply {quant_config.quant_type}"
+                "LingBot-VLA v2 is already quantized as "
+                f"{existing_quant_type}/{getattr(self, 'quant_kernel_backend', None)}, cannot apply "
+                f"{quant_config.quant_type}/{requested_backend}"
             )
+
+        if quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend == QuantKernelBackend.CUTLASS:
+            self._enable_fused_fp8_graph()
+            return
 
         profiles = {
             QuantType.TORCHAO_FP8: "torchao-fp8",
@@ -1666,6 +1763,7 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
                 f"LingBot-VLA v2 quantization selected {selected_count} Linear layers but converted {replaced}"
             )
         self.quant_type = quant_config.quant_type
+        self.quant_kernel_backend = effective_backends[quant_config.quant_type]
         finalize_lingbot_vla_v2_quantization_identity(
             self,
             profile=profiles[quant_config.quant_type],
@@ -1679,6 +1777,78 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
             quant_config.quant_type.name,
             replaced,
             manifest["manifest_sha256"],
+        )
+
+    def _enable_fused_fp8_graph(self) -> None:
+        """Quantize only the ten-step action path with graph-safe FP8 kernels."""
+        if not next(self.parameters()).is_cuda:
+            raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires CUDA-resident model weights")
+        if torch.cuda.get_device_capability(next(self.parameters()).device) < (9, 0):
+            raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires Hopper or newer CUDA hardware")
+
+        action_layers = self.model.qwenvl_with_expert.qwen_expert.model.layers
+        include_names = tuple(
+            token
+            for layer_idx in range(len(action_layers))
+            for token in (
+                f"qwenvl_with_expert.qwen_expert.model.layers.{layer_idx}.self_attn.",
+                f"qwenvl_with_expert.qwen_expert.model.layers.{layer_idx}.mlp.shared_expert.",
+            )
+        ) + ("action_time_mlp_",)
+        exclude_names: tuple[str, ...] = ()
+        manifest = build_lingbot_vla_v2_linear_manifest(
+            self,
+            include_names=include_names,
+            exclude_names=exclude_names,
+        )
+
+        from telefuser.ops.graph_fp8_linear import replace_linear_layers_with_graph_fp8
+
+        def module_filter(name: str, module: nn.Linear) -> bool:
+            selected = any(token in name for token in include_names) and not any(
+                token in name for token in exclude_names
+            )
+            return selected and module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+        replaced = replace_linear_layers_with_graph_fp8(self, module_filter=module_filter)
+        selected_count = int(manifest["selected_count"])
+        if replaced != selected_count:
+            raise RuntimeError(
+                f"LingBot-VLA v2 fused FP8 graph selected {selected_count} Linear layers but converted {replaced}"
+            )
+
+        fused_expert_layers = 0
+        for layer in action_layers:
+            mlp = getattr(layer, "mlp", None)
+            experts = getattr(mlp, "experts", None)
+            if not isinstance(experts, Qwen2FusedExperts):
+                raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires fused expert storage")
+            experts.enable_graph_fp8()
+            fused_expert_layers += 1
+
+        self.graph_fp8_replaced_linear = replaced
+        self.graph_fp8_fused_expert_layers = fused_expert_layers
+        self.quant_type = QuantType.FP8
+        self.quant_kernel_backend = QuantKernelBackend.CUTLASS
+        identity = finalize_lingbot_vla_v2_quantization_identity(
+            self,
+            profile="fused-fp8-graph",
+            quant_type=QuantType.FP8.name,
+            kernel_backend=QuantKernelBackend.CUTLASS.name,
+            manifest=manifest,
+        )
+        identity["implementation"].update(
+            {
+                "fused_expert_layers": fused_expert_layers,
+                "fused_expert_weight_dtype": "float8_e4m3fn",
+                "bf16_expert_weights_retained": False,
+            }
+        )
+        self._lingbot_vla_v2_quantization_identity = identity
+        logger.info(
+            "LingBot-VLA v2 fused FP8 graph converted %d action Linear layers and %d routed MoE layers",
+            replaced,
+            fused_expert_layers,
         )
 
 

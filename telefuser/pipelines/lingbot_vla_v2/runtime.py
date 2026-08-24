@@ -11,7 +11,7 @@ from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2
 
 from .pipeline import LingBotVlaV2Pipeline, LingBotVlaV2PipelineConfig
 
-LINGBOT_VLA_V2_QUANTIZATION_CHOICES = ("torchao-fp8", "tf-kernel-fp8", "bnb-nf4")
+LINGBOT_VLA_V2_QUANTIZATION_CHOICES = ("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4")
 
 
 def lingbot_vla_v2_quant_config(quantization: str | QuantType | None) -> QuantConfig:
@@ -21,28 +21,29 @@ def lingbot_vla_v2_quant_config(quantization: str | QuantType | None) -> QuantCo
     if isinstance(quantization, str):
         normalized = quantization.strip().lower().replace("_", "-")
         names = {
-            "torchao-fp8": QuantType.TORCHAO_FP8,
-            "tf-kernel-fp8": QuantType.FP8,
-            "bnb-nf4": QuantType.BNB_NF4,
+            "fused-fp8-graph": (QuantType.FP8, QuantKernelBackend.CUTLASS),
+            "torchao-fp8": (QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+            "tf-kernel-fp8": (QuantType.FP8, QuantKernelBackend.TF_KERNEL),
+            "bnb-nf4": (QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
         }
         try:
-            quant_type = names[normalized]
+            quant_type, backend = names[normalized]
         except KeyError as exc:
             choices = ", ".join(repr(name) for name in LINGBOT_VLA_V2_QUANTIZATION_CHOICES)
             raise ValueError(f"quantization must be one of {choices}, or None") from exc
     elif isinstance(quantization, QuantType):
         quant_type = quantization
+        backend = {
+            QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+            QuantType.FP8: QuantKernelBackend.TF_KERNEL,
+            QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+        }.get(quant_type)
     else:
         raise TypeError("quantization must be a string, QuantType, or None")
 
-    backends = {
-        QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
-        QuantType.FP8: QuantKernelBackend.TF_KERNEL,
-        QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
-    }
-    if quant_type not in backends:
+    if backend is None:
         raise ValueError(f"LingBot-VLA v2 does not support online quantization type {quant_type.name}")
-    return QuantConfig(enabled=True, quant_type=quant_type, kernel_backend=backends[quant_type])
+    return QuantConfig(enabled=True, quant_type=quant_type, kernel_backend=backend)
 
 
 def get_lingbot_vla_v2_pipeline(
@@ -71,8 +72,11 @@ def get_lingbot_vla_v2_pipeline(
         raise ValueError("LingBot-VLA v2 online quantization requires a CUDA device")
     if cuda_graph and target_device.type != "cuda":
         raise ValueError("LingBot-VLA v2 CUDA Graph requires a CUDA device")
-    if cuda_graph and quant_config.enabled:
-        raise ValueError("LingBot-VLA v2 CUDA Graph currently supports only the BF16 profile")
+    graph_fp8 = quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend == QuantKernelBackend.CUTLASS
+    if graph_fp8 and not cuda_graph:
+        raise ValueError("LingBot-VLA v2 fused-fp8-graph requires cuda_graph=True")
+    if cuda_graph and quant_config.enabled and not graph_fp8:
+        raise ValueError("LingBot-VLA v2 CUDA Graph supports only BF16 or fused-fp8-graph")
     processor = AutoProcessor.from_pretrained(qwen3vl_root, local_files_only=True, padding_side="right")
     manager = ModuleManager(torch_dtype=dtype, device="cpu")
     manager.add_module(processor, "lingbot_vla_v2_processor", path=qwen3vl_root)

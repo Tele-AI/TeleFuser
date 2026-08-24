@@ -64,7 +64,7 @@ def _git_commit(repository: Path) -> str:
     return completed.stdout.strip()
 
 
-def _load_cpu_inputs(path: Path) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+def _load_cpu_inputs(path: Path) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
     with np.load(path) as artifact:
         required = {
             "images",
@@ -74,6 +74,7 @@ def _load_cpu_inputs(path: Path) -> tuple[dict[str, torch.Tensor], torch.Tensor]
             "state",
             "image_grid_thw",
             "initial_noise",
+            "canonical_normalized_actions",
         }
         missing = sorted(required.difference(artifact.files))
         if missing:
@@ -87,7 +88,8 @@ def _load_cpu_inputs(path: Path) -> tuple[dict[str, torch.Tensor], torch.Tensor]
             "image_grid_thw": torch.from_numpy(artifact["image_grid_thw"]).to(dtype=torch.long),
         }
         noise = torch.from_numpy(artifact["initial_noise"]).to(dtype=torch.bfloat16)
-    return tensors, noise
+        reference = torch.from_numpy(artifact["canonical_normalized_actions"]).to(dtype=torch.float32).unsqueeze(0)
+    return tensors, noise, reference
 
 
 def _to_device(tensors: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
@@ -185,10 +187,12 @@ def _load_telefuser(args: argparse.Namespace, device: torch.device) -> tuple[Any
     )
     model = pipeline.policy_stage.policy
     config = model.config
+    vision_config = model.model.qwenvl_with_expert.qwenvl.config.vision_config
     return (pipeline, model), {
         "implementation": "telefuser",
         "implementation_commit": _git_commit(Path(__file__).resolve().parents[2]),
         "attention_backend": str(config.attention_implementation),
+        "vision_attention_backend": str(vision_config._attn_implementation),
         "moe_backend": "robby_triton" if bool(config.use_robby_moe_kernel) else "fused_fallback",
         "cuda_graph": args.cuda_graph,
     }
@@ -207,7 +211,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("LingBot-VLA v2 runtime benchmarking requires CUDA")
     torch.cuda.set_device(device)
     torch.empty(1, device=device)
-    cpu_inputs, cpu_noise = _load_cpu_inputs(args.input_artifact)
+    cpu_inputs, cpu_noise, artifact_reference = _load_cpu_inputs(args.input_artifact)
 
     torch.cuda.reset_peak_memory_stats(device)
     load_started_at = time.perf_counter()
@@ -216,6 +220,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     torch.cuda.synchronize(device)
     load_seconds = time.perf_counter() - load_started_at
+    load_peak_allocated_mib = torch.cuda.max_memory_allocated(device) / 1024**2
+    allocated_after_load_mib = torch.cuda.memory_allocated(device) / 1024**2
     pipeline = loaded[0] if args.implementation == "telefuser" else None
     model = loaded[1] if args.implementation == "telefuser" else loaded
     if pipeline is not None:
@@ -234,6 +240,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     device_inputs = _to_device(cpu_inputs, device)
     device_noise = cpu_noise.to(device=device)
+    torch.cuda.reset_peak_memory_stats(device)
 
     @torch.inference_mode()
     def core_model() -> torch.Tensor:
@@ -310,6 +317,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "runtime_request_latency": runtime_latency,
             "core_model_output": _output_summary(core_output),
             "runtime_request_output": _output_summary(runtime_output),
+            "artifact_reference_comparison": _compare_outputs(artifact_reference, core_output),
             "cuda_graph_eager_comparison": (
                 _compare_outputs(eager_reference, core_output) if eager_reference is not None else None
             ),
@@ -317,7 +325,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "cuda_graph_repeat_comparison": (
                 _compare_outputs(core_output, graph_repeat) if graph_repeat is not None else None
             ),
-            "gpu_peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 1024**2,
+            "gpu_peak_allocated_mib": max(
+                load_peak_allocated_mib,
+                torch.cuda.max_memory_allocated(device) / 1024**2,
+            ),
+            "gpu_load_peak_allocated_mib": load_peak_allocated_mib,
+            "gpu_allocated_after_load_mib": allocated_after_load_mib,
+            "gpu_inference_peak_allocated_mib": torch.cuda.max_memory_allocated(device) / 1024**2,
+            "gpu_allocated_after_benchmark_mib": torch.cuda.memory_allocated(device) / 1024**2,
             "measurement_notes": [
                 "No parity capture hooks are installed.",
                 "core_model reuses device-resident parity inputs and fixed initial noise.",
@@ -346,7 +361,10 @@ def main() -> None:
     parser.add_argument("--input-artifact", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
+    parser.add_argument(
+        "--quantization",
+        choices=("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+    )
     parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--runs", type=int, default=20)

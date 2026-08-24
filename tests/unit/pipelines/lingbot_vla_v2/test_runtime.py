@@ -12,6 +12,8 @@ from telefuser.pipelines.lingbot_vla_v2.runtime import (
 @pytest.mark.parametrize(
     ("name", "quant_type", "backend"),
     [
+        ("fused-fp8-graph", QuantType.FP8, QuantKernelBackend.CUTLASS),
+        ("fused_fp8_graph", QuantType.FP8, QuantKernelBackend.CUTLASS),
         ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
         ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
         ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
@@ -37,6 +39,11 @@ def test_default_runtime_quantization_keeps_bf16_path_disabled() -> None:
 def test_online_quantization_rejects_cpu_before_loading_models() -> None:
     with pytest.raises(ValueError, match="requires a CUDA device"):
         get_lingbot_vla_v2_pipeline("unused", "unused", device="cpu", quantization="bnb-nf4")
+
+
+def test_fused_fp8_graph_requires_cuda_graph_before_loading_models() -> None:
+    with pytest.raises(ValueError, match="requires cuda_graph=True"):
+        get_lingbot_vla_v2_pipeline("unused", "unused", device="cuda:0", quantization="fused-fp8-graph")
 
 
 def test_quantization_rejects_unknown_name() -> None:
