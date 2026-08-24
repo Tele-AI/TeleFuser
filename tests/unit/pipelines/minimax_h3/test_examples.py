@@ -191,12 +191,20 @@ def test_quantization_names_resolve_to_runtime_config(
 
 
 def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="single-GPU"):
+    with pytest.raises(ValueError, match="tf-kernel FP8"):
         load_minimax_h3_pipeline(
             tmp_path,
             partition="FL2VA",
             ulysses_degree=2,
             quantization="torchao-fp8",
+        )
+
+    with pytest.raises(FileNotFoundError, match="partition not found"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            ulysses_degree=2,
+            quantization="tf-kernel-fp8",
         )
 
     (tmp_path / "FL2VA").mkdir()

@@ -287,7 +287,7 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         "--quantization",
         choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
         default=default_quantization,
-        help="Online DiT Linear quantization backend (single GPU only).",
+        help="Online DiT Linear quantization backend (tf-kernel FP8 supports SP/TP; other backends are single-GPU).",
     )
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument(

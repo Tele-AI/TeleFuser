@@ -236,6 +236,13 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --tau 1.0 \
     --threshold-type diag \
     --kv-splits auto
+
+# Four-way Ulysses FP8 Sol. Use cfg-degree=2 to combine CFGP=2 and Ulysses=2.
+python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
+    --model-root /path/to/Wan2.1-T2V-1.3B \
+    --parallelism 4 --cfg-degree 1 \
+    --attention fp8-sol --quantization tf-kernel-fp8 \
+    --fp8-layer-start 10 --fp8-layer-end 20
 ```
 
 In this example, FP8 means the E4M3 attention implementation rather than a
@@ -254,8 +261,19 @@ share one dynamic activation quantization instead of quantizing the same input
 three times. With a partial FP8 layer range, FP8 Dense sends unquantized layers
 to SDPA and FP8 Sol sends unquantized sparse layers to Triton, avoiding a second
 CuTe specialization in the cold-start path.
+In Ulysses mode, BF16 Q/K/V are exchanged first. Each rank then owns the full
+sequence and its local head shard, so fused FP8 preparation computes Q/K block
+scales and V channel scales over the same complete sequence consumed by the
+local Sol kernel. The BF16 attention output is exchanged back before the output
+projection. FP8 operands and scale metadata never need a separate collective.
 The final log reports generation time, frames per second, and peak allocated and
 reserved CUDA memory.
+
+The validated H100 tuning point is `--tau 1.0 --threshold-type diag
+--kv-splits auto`. Higher `tau` is faster but more aggressive and requires
+end-to-end quality validation. `exact` adds threshold-preprocessing cost without
+changing the FP8 arithmetic. See `benchmarks/fp8_sol_sequence_parallel/` for
+the reproducible kernel measurements.
 
 ##### H100 benchmark
 

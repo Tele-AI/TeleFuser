@@ -208,8 +208,15 @@ def load_minimax_h3_pipeline(
     if (adaln_cache_path is not None or online_adaln_cache) and resolved_enable_fsdp:
         raise ValueError("AdaLN cache modes do not yet support FSDP deployment.")
     quant_config = minimax_h3_quant_config(quantization)
-    if quant_config.enabled and world_size != 1:
-        raise ValueError("MiniMax H3 online quantization currently requires a single-GPU profile")
+    supports_parallel_quantization = quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend in {
+        QuantKernelBackend.AUTO,
+        QuantKernelBackend.TF_KERNEL,
+    }
+    if quant_config.enabled and world_size != 1 and not supports_parallel_quantization:
+        raise ValueError(
+            "MiniMax H3 multi-GPU online quantization requires tf-kernel FP8; "
+            "TorchAO FP8 and bitsandbytes NF4 remain single-GPU only"
+        )
     if quant_config.enabled and resolved_enable_fsdp:
         raise ValueError("MiniMax H3 online quantization cannot be combined with FSDP")
     if isinstance(attn_impl, str):

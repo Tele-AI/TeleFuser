@@ -183,20 +183,32 @@ class SelfAttention(nn.Module):
     ) -> torch.Tensor:
         """Async Ulysses-style sequence parallel forward."""
         group = get_ulysses_group(device_mesh)
-        v = self.v(x)
+        input_dtype = x.dtype
+        x = self._prepare_sol_projection_input(x, sparse_state)
+        projection_dtype = x.dtype
+        if all(isinstance(projection, FP8Linear) for projection in (self.q, self.k, self.v)):
+            q, k, v = fp8_linear_forward_many((self.q, self.k, self.v), x)
+            q = self.norm_q(q)
+            k = self.norm_k(k)
+        else:
+            v = self.v(x)
+            q = self.norm_q(self.q(x))
+            k = self.norm_k(self.k(x))
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
         v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False, communicator=self.ulysses_communicator)
-        q = self.norm_q(self.q(x))
         q = rope_apply(q, freqs_cos, freqs_sin, self.num_heads)
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False, communicator=self.ulysses_communicator)
-        k = self.norm_k(self.k(x))
         k = rope_apply(k, freqs_cos, freqs_sin, self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         k_wait = ulysses_scatter_heads(k, group, tag="k", communicator=self.ulysses_communicator)
         v = v_wait()
         q = q_wait()
         k = k_wait()
+        # Ulysses turns local-sequence/global-head QKV into
+        # global-sequence/local-head QKV. Quantize afterwards so every rank's
+        # block and channel scales cover the complete attention sequence.
+        q, k, v, scales = self._prepare_sol_qkv(q, k, v, sparse_state)
         if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
             q = rearrange(q, "b n s d -> (b s) n d", s=seqlen, n=self.num_heads)
@@ -210,12 +222,19 @@ class SelfAttention(nn.Module):
             sparse_state=sparse_state,
             input_layout="BSND",
             output_layout="BSND",
+            q_scale=None if scales is None else scales[0],
+            k_scale=None if scales is None else scales[1],
+            v_scale=None if scales is None else scales[2],
         )
         out_wait = ulysses_gather_heads(x, group, num_heads=self.num_heads)
         out = out_wait()
         out = rearrange(out, "b s n d -> b s (n d)", n=self.num_heads)
-        out = self.o(out)
-        return out
+        if projection_dtype != input_dtype:
+            out = self.o(out)
+            return out.to(input_dtype)
+        if out.dtype != projection_dtype:
+            out = out.to(input_dtype)
+        return self.o(out)
 
     def forward(
         self,
@@ -399,7 +418,13 @@ class DiTBlock(nn.Module):
 
         input_x = modulate(self.norm1(x), shift_msa, scale_msa)
         if sparse_state is not None:
-            attn_output = self.self_attn(input_x, freqs_cos, freqs_sin, sparse_state=sparse_state)
+            attn_output = self.self_attn(
+                input_x,
+                freqs_cos,
+                freqs_sin,
+                sparse_state=sparse_state,
+                device_mesh=device_mesh,
+            )
         else:
             attn_output = self.self_attn(input_x, freqs_cos, freqs_sin, device_mesh=device_mesh)
         x = self.gate(x, gate_msa, attn_output)
@@ -602,15 +627,23 @@ class WanModel(BaseModel):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         sparse_state: SparseAttentionState | None = None,
+        *,
+        sol_tokens_preordered: bool = False,
     ) -> torch.Tensor:
-        x, t_mod, freqs_cos, freqs_sin = self._apply_sol_token_order(
-            x, t_mod, freqs_cos, freqs_sin, sparse_state, reorder_tokens=True
-        )
+        if not sol_tokens_preordered:
+            x, t_mod, freqs_cos, freqs_sin = self._apply_sol_token_order(
+                x,
+                t_mod,
+                freqs_cos,
+                freqs_sin,
+                sparse_state,
+                reorder_tokens=True,
+            )
         for block_id, block in enumerate(self.blocks):
             if sparse_state is not None:
                 sparse_state.update(layer_idx=block_id)
             x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
-        return self._restore_sol_token_order(x, sparse_state)
+        return self._restore_sol_token_order(x, sparse_state, enabled=not sol_tokens_preordered)
 
     def forward_blocks_pp(
         self,
@@ -1326,15 +1359,46 @@ class WanModel(BaseModel):
         freqs_cos = freqs.real.contiguous()
         freqs_sin = freqs.imag.contiguous()
 
+        sol_tokens_preordered = self.usp_flag and sparse_state is not None and sparse_state.config.sparse_impl == "sol"
+        if sol_tokens_preordered:
+            # Morton ordering must happen while every rank still has the global
+            # sequence. Applying the global permutation after sharding indexes
+            # past each rank's local token range.
+            x, t_mod, freqs_cos, freqs_sin = self._apply_sol_token_order(
+                x,
+                t_mod,
+                freqs_cos,
+                freqs_sin,
+                sparse_state,
+                reorder_tokens=True,
+            )
+            perm = self.sol_morton_perm.to(t.device)
+            if t.shape[1] == perm.numel():
+                t = t.index_select(1, perm)
+
         if self.usp_flag:
             # Shard t_mod and t (if per-token) along seq_len dimension (dim 1)
             # For scalar timestep, t has seq_len=1 which broadcasts with any seq_len
-            sequence_parallel_shard(self.device_mesh, [x, t_mod, t, freqs_cos, freqs_sin], seq_dims=[1, 1, 1, 0, 0])
+            # and must stay replicated instead of being padded and sharded.
+            sharded_t = t if t.shape[1] > 1 else None
+            sequence_parallel_shard(
+                self.device_mesh,
+                [x, t_mod, sharded_t, freqs_cos, freqs_sin],
+                seq_dims=[1, 1, 1, 0, 0],
+            )
 
         # Feature cache handling - step ID is managed internally
         ori_x = x
         if self.feature_cache.should_compute(cond_flag):
-            x = self.forward_blocks(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state)
+            x = self.forward_blocks(
+                x,
+                context,
+                t_mod,
+                freqs_cos,
+                freqs_sin,
+                sparse_state=sparse_state,
+                sol_tokens_preordered=sol_tokens_preordered,
+            )
             self.feature_cache.update(x, ori_x, cond_flag)
         else:
             x = self.feature_cache.approximate(x, cond_flag)
@@ -1342,6 +1406,8 @@ class WanModel(BaseModel):
         x = self.head(x, t)
         if self.usp_flag:
             (x,) = sequence_parallel_unshard(self.device_mesh, (x,), seq_dims=(1,), seq_lens=(f * h * w,))
+        if sol_tokens_preordered:
+            x = self._restore_sol_token_order(x, sparse_state)
         x = self.unpatchify(x, (f, h, w))
         return x
 
