@@ -312,7 +312,7 @@ FlashAttention 4 is unavailable.
 
 ## Online DiT Quantization
 
-MiniMax H3 supports three single-GPU online quantization backends for the DiT transformer Linear layers:
+MiniMax H3 supports three online quantization backends for the DiT transformer Linear layers:
 
 | CLI value | Backend | Weight/activation path |
 |---|---|---|
@@ -323,8 +323,10 @@ MiniMax H3 supports three single-GPU online quantization backends for the DiT tr
 All three paths convert the 258 Linear layers in the main and token-refiner transformer blocks. The FP32 video/audio
 patch projections, timestep embedding, output projections, text encoder, and VAEs retain their reference dtypes.
 The BF16 DiT is loaded from the original shards, moved to CUDA after text encoding, quantized on first denoising use,
-and then kept resident for the pipeline lifetime. This ordering avoids a simultaneous BF16 text encoder and DiT on
-one GPU and avoids unsupported CPU transfers of quantized tensor subclasses.
+and then kept resident for the pipeline lifetime. In the multi-GPU tf-kernel FP8 profile, TP shards the BF16 Linear
+weights before each rank materializes its local FP8 weights; Ulysses then redistributes Q/K/V before their FP8 Sol
+quantization. This ordering avoids unsupported transfers of quantized tensor subclasses and preserves both parallel
+contracts.
 TorchAO and tf-kernel conversion have a transient memory peak near the BF16 footprint; use the full 80 GB device without colocated workloads.
 
 Use the single FL2VA example and choose the quantization backend with `--quantization`:
@@ -361,9 +363,9 @@ pipeline = load_minimax_h3_pipeline(
 )
 ~~~
 
-Online quantization currently requires ulysses_degree=1, tp_degree=1, and FSDP disabled. Quantizing before TP/FSDP
-would invalidate those wrappers' BF16 parameter-sharding contract, so unsupported combinations fail before checkpoint
-loading.
+TorchAO FP8 and bitsandbytes NF4 require ulysses_degree=1, tp_degree=1, and FSDP disabled. tf-kernel FP8 supports
+Ulysses sequence parallelism and tensor parallelism because conversion runs after TP sharding on every rank. Online
+quantization cannot be combined with FSDP.
 
 ### FP8 Sol-Attn
 
@@ -387,13 +389,23 @@ python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
 
 # FP8 Linear + FP8 Sol attention
 python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
-  --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
+  --gpu-num 4 --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
   --output outputs/h3_fp8_sol.mp4
 ~~~
 
 Use `--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, `--sol-threshold-type`,
 `--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. The defaults
 match the released H100 MiniMax-H3 Sol profile.
+
+For a warmed four-GPU comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
+peaks, run the two profiles below. Four GPUs use Ulysses2 x TP2 for both profiles.
+
+~~~bash
+python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
+  --profile baseline --output benchmarks/minimax_h3_fp8_sol/baseline_sp2_tp2_bf16_flash.mp4
+python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
+  --profile optimized --output benchmarks/minimax_h3_fp8_sol/optimized_sp2_tp2_fp8_sol_exact.mp4
+~~~
 
 For matched BF16/TorchAO-FP8/tf-kernel-FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
 containing load time, end-to-end generation time, stage timings, and denoising allocator peaks:

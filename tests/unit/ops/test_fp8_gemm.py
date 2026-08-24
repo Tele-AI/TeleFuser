@@ -1,5 +1,8 @@
 """Tests for the tf-kernel FP8 GEMM wrapper."""
 
+import pickle
+from types import ModuleType
+
 import pytest
 import torch
 import torch.nn as nn
@@ -29,6 +32,22 @@ def test_fp8_linear_keeps_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     torch.testing.assert_close(wrapped(inputs), expected)
+
+
+def test_fp8_linear_is_pickleable_for_spawn_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fp8_gemm, "tf_kernel", ModuleType("tf_kernel_test"))
+    wrapped = fp8_gemm.FP8Linear(
+        nn.Linear(8, 4),
+        options=fp8_gemm.FP8GemmOptions(
+            fp16_weight_storage="keep",
+            materialize_fp8_on_wrap=False,
+        ),
+    )
+
+    restored = pickle.loads(pickle.dumps(wrapped))
+
+    inputs = torch.randn(2, 8)
+    torch.testing.assert_close(restored(inputs), wrapped(inputs))
 
 
 @pytest.mark.gpu

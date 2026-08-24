@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from telefuser.core.config import AttentionConfig, AttnImplType, SparseAttentionConfig
-from telefuser.models.wan_video_dit import SelfAttention, WanModel, precompute_freqs_cis_3d
+from telefuser.models.wan_video_dit import DiTBlock, GateModule, SelfAttention, WanModel, precompute_freqs_cis_3d
 from telefuser.ops.attention import SparseAttentionState, attention_impl
 from telefuser.ops.fp8_attention import (
     dequantize_fp8_per_block,
@@ -80,6 +80,81 @@ def test_wan_sol_token_order_round_trip() -> None:
     torch.testing.assert_close(ordered[2], freqs_cos.index_select(0, perm))
     torch.testing.assert_close(ordered[3], freqs_sin.index_select(0, perm))
     torch.testing.assert_close(model._restore_sol_token_order(ordered[0], state), x)
+
+
+def test_wan_sol_preordered_sequence_parallel_shard_skips_global_permutation() -> None:
+    class IdentityBlock(torch.nn.Module):
+        def forward(self, x, *_args, **_kwargs):
+            return x
+
+    model = WanModel.__new__(WanModel)
+    torch.nn.Module.__init__(model)
+    model.patch_size = (1, 2, 2)
+    model.blocks = torch.nn.ModuleList([IdentityBlock()])
+    model.device_mesh = None
+    config = AttentionConfig.sol_attention()
+    assert config.sparse_config is not None
+    model.enable_sol_attention(height=64, width=64, num_frames=5, sparse_config=config.sparse_config)
+    state = model.create_sparse_state()
+
+    local_tokens = model.sol_morton_perm.numel() // 4
+    x = torch.arange(local_tokens).reshape(1, local_tokens, 1)
+    t_mod = x.clone()
+    freqs_cos = torch.arange(local_tokens).reshape(local_tokens, 1)
+    freqs_sin = -freqs_cos
+
+    output = model.forward_blocks(
+        x,
+        torch.empty(0),
+        t_mod,
+        freqs_cos,
+        freqs_sin,
+        sparse_state=state,
+        sol_tokens_preordered=True,
+    )
+
+    torch.testing.assert_close(output, x)
+
+
+def test_wan_block_passes_device_mesh_to_sparse_self_attention() -> None:
+    captured = {}
+
+    class SelfAttentionRecorder(torch.nn.Module):
+        def forward(self, x, *_args, sparse_state=None, device_mesh=None):
+            captured.update(sparse_state=sparse_state, device_mesh=device_mesh)
+            return torch.zeros_like(x)
+
+    class ZeroCrossAttention(torch.nn.Module):
+        def forward(self, x, _context):
+            return torch.zeros_like(x)
+
+    block = DiTBlock.__new__(DiTBlock)
+    torch.nn.Module.__init__(block)
+    block.modulation = torch.nn.Parameter(torch.zeros(1, 6, 8))
+    block.norm1 = torch.nn.Identity()
+    block.norm2 = torch.nn.Identity()
+    block.norm3 = torch.nn.Identity()
+    block.self_attn = SelfAttentionRecorder()
+    block.cross_attn = ZeroCrossAttention()
+    block.ffn = torch.nn.Identity()
+    block.gate = GateModule()
+    config = SparseAttentionConfig(sparse_impl="sol")
+    state = SparseAttentionState(config, mask_map=None)
+    mesh = object()
+
+    x = torch.randn(1, 4, 8)
+    output = block(
+        x,
+        torch.empty(0),
+        torch.zeros(1, 4, 6, 8),
+        torch.empty(0),
+        torch.empty(0),
+        sparse_state=state,
+        device_mesh=mesh,
+    )
+
+    assert output.shape == x.shape
+    assert captured == {"sparse_state": state, "device_mesh": mesh}
 
 
 def test_wan_self_attention_dispatches_sol_through_public_ops() -> None:
@@ -173,6 +248,43 @@ def test_wan_self_attention_quantizes_qkv_for_fp8_sol() -> None:
     assert captured["q_scale"].shape == (1, 2, 1)
     restored = dequantize_fp8_per_block(captured["q"], captured["q_scale"], torch.bfloat16)
     assert torch.isfinite(restored).all()
+
+
+def test_wan_ulysses_quantizes_global_sequence_for_fp8_sol() -> None:
+    module = SelfAttention(dim=256, num_heads=2).to(torch.bfloat16)
+    config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=0, sol_fp8=True)
+    module.attention_config = AttentionConfig(attn_impl=AttnImplType.SOL_ATTN, sparse_config=config)
+    state = SparseAttentionState(config, mask_map=None)
+    captured = {}
+
+    def scatter(tensor: torch.Tensor, *_args, **_kwargs):
+        # Model the post-all-to-all layout: full sequence and one local head.
+        gathered = torch.cat((tensor[:, :, :1], tensor[:, :, 1:]), dim=1)
+        return lambda: gathered
+
+    def gather(tensor: torch.Tensor, *_args, **_kwargs):
+        return lambda: torch.cat((tensor[:, :65], tensor[:, 65:]), dim=2)
+
+    def fake_attention(q, k, v, **kwargs):
+        captured.update({"q": q, "k": k, "v": v, **kwargs})
+        return q.to(torch.bfloat16)
+
+    x = torch.randn(1, 65, 256, dtype=torch.bfloat16)
+    freqs = torch.zeros(65, 64, dtype=torch.bfloat16)
+    with (
+        patch("telefuser.models.wan_video_dit.get_ulysses_group", return_value=object()),
+        patch("telefuser.models.wan_video_dit.ulysses_scatter_heads", side_effect=scatter),
+        patch("telefuser.models.wan_video_dit.ulysses_gather_heads", side_effect=gather),
+        patch("telefuser.models.wan_video_dit.attn_func", side_effect=fake_attention),
+    ):
+        output = module.async_usp_forward(x, freqs, freqs, sparse_state=state, device_mesh=object())
+
+    assert output.shape == x.shape
+    assert captured["q"].shape == (1, 130, 1, 128)
+    assert captured["q"].dtype is torch.float8_e4m3fn
+    assert captured["q_scale"].shape == (1, 3, 1)
+    assert captured["k_scale"].shape == (1, 3, 1)
+    assert captured["v_scale"].shape == (1, 3, 1)
 
 
 def test_wan_self_attention_limits_fp8_sol_to_configured_layers() -> None:

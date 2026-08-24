@@ -6,7 +6,7 @@ import torch
 
 from telefuser.core.config import AttentionConfig, AttnImplType, SparseAttentionConfig
 from telefuser.ops.attention import attention_impl, backends
-from telefuser.ops.attention.attention_impl import SparseAttentionState
+from telefuser.ops.attention.attention_impl import SparseAttentionState, _resolve_sol_kv_splits
 
 
 def test_sol_attention_config_defaults_and_validation() -> None:
@@ -27,6 +27,26 @@ def test_sol_attention_config_defaults_and_validation() -> None:
         AttentionConfig.sol_attention(threshold_type="unknown")
     with pytest.raises(ValueError, match="KV splits"):
         AttentionConfig.sol_attention(kv_splits=3)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "tokens", "expected"),
+    [
+        (torch.float8_e4m3fn, 16383, 1),
+        (torch.float8_e4m3fn, 16384, 2),
+        (torch.float8_e4m3fn, 65536, 2),
+        (torch.bfloat16, 65536, 4),
+    ],
+)
+def test_sol_attention_auto_kv_splits_on_sm90(dtype: torch.dtype, tokens: int, expected: int) -> None:
+    q = MagicMock(dtype=dtype, shape=(1, tokens, 1, 128), device=torch.device("cuda"))
+
+    with patch("telefuser.ops.attention.attention_impl.torch.cuda.get_device_capability", return_value=(9, 0)):
+        assert _resolve_sol_kv_splits(q, "auto") == expected
+
+
+def test_sol_attention_explicit_kv_splits_override_auto_policy() -> None:
+    assert _resolve_sol_kv_splits(MagicMock(), 4) == 4
 
 
 def test_sol_attention_loads_from_telefuser_kernel() -> None:

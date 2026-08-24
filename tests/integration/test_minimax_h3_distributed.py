@@ -6,7 +6,15 @@ import pytest
 import torch
 
 from telefuser.core.base_stage import BaseStage
-from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig
+from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
+    ModelRuntimeConfig,
+    ParallelConfig,
+    QuantConfig,
+    QuantKernelBackend,
+    QuantType,
+)
 from telefuser.distributed.device_mesh import create_device_mesh_from_config
 from telefuser.models.minimax_h3_dit import MiniMaxH3DiT, MiniMaxH3DiTConfig
 from telefuser.worker import ParallelWorker
@@ -169,6 +177,55 @@ class _MiniMaxH3SageTPUlyssesParityStage(BaseStage):
         return dense, parallel
 
 
+class _MiniMaxH3FP8SolTPUlyssesParityStage(BaseStage):
+    def __init__(self) -> None:
+        super().__init__(
+            "minimax-h3-fp8-sol-tp-ulysses-parity",
+            ModelRuntimeConfig(
+                device_type="cuda",
+                torch_dtype=torch.bfloat16,
+                parallel_config=ParallelConfig(device_ids=[0, 1, 2, 3], sp_ulysses_degree=2, tp_degree=2),
+            ),
+        )
+        torch.manual_seed(41)
+        source = MiniMaxH3DiT(_sage_config()).eval()
+        self.dense = deepcopy(source)
+        self.parallel = deepcopy(source)
+        self.empty_cache_after_call = False
+
+    def parallel_models(self) -> None:
+        mesh = create_device_mesh_from_config(self.model_runtime_config.parallel_config)
+        self.parallel.enable_tp(mesh)
+        self.parallel = self.parallel.to(self.device)
+        self.parallel.enable_usp(mesh)
+        self.parallel.set_attention_config(
+            AttentionConfig.sol_attention(
+                dense_timesteps=0,
+                dense_layers=0,
+                tau=-1000.0,
+                threshold_type="exact",
+                sol_fp8=True,
+            )
+        )
+        self.parallel.enable_quant(
+            QuantConfig(
+                enabled=True,
+                quant_type=QuantType.FP8,
+                kernel_backend=QuantKernelBackend.TF_KERNEL,
+            )
+        )
+        if torch.distributed.get_rank() == 0:
+            self.dense = self.dense.to(self.device)
+            self.dense.set_attention_config(AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA))
+
+    def compare(self, inputs: dict[str, object]) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        parallel = tuple(tensor.cpu() for tensor in self.parallel(**inputs))
+        dense: tuple[torch.Tensor, ...] = ()
+        if torch.distributed.get_rank() == 0:
+            dense = tuple(tensor.cpu() for tensor in self.dense(**inputs))
+        return dense, parallel
+
+
 @pytest.mark.distributed
 @pytest.mark.gpu
 @pytest.mark.multi_gpu
@@ -205,3 +262,22 @@ def test_minimax_h3_sage_sm90_tp2_ulysses2_matches_dense_packed_forward() -> Non
         torch.testing.assert_close(actual, expected, rtol=0.12, atol=0.12)
         cosine = torch.nn.functional.cosine_similarity(actual.flatten(), expected.flatten(), dim=0)
         assert cosine > 0.999
+
+
+@pytest.mark.distributed
+@pytest.mark.gpu
+@pytest.mark.multi_gpu
+def test_minimax_h3_fp8_sol_tp2_ulysses2_matches_dense_packed_forward() -> None:
+    if torch.cuda.device_count() < 4:
+        pytest.skip("requires four CUDA devices")
+    torch.manual_seed(43)
+    worker = ParallelWorker(_MiniMaxH3FP8SolTPUlyssesParityStage())
+    try:
+        dense, parallel = worker.compare(_sage_inputs(), sync=True)
+    finally:
+        worker.close()
+    assert len(dense) == len(parallel) == 2
+    for actual, expected in zip(parallel, dense, strict=True):
+        assert torch.isfinite(actual).all()
+        cosine = torch.nn.functional.cosine_similarity(actual.flatten(), expected.flatten(), dim=0)
+        assert cosine > 0.98
