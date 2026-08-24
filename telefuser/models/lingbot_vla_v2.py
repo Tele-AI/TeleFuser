@@ -17,13 +17,13 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import einops
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PretrainedConfig
+from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import is_flash_attn_available
 from transformers.models.auto import CONFIG_MAPPING
@@ -32,11 +32,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 from transformers.utils import logging
 
 from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
-from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2CudaGraphs
-from telefuser.models.lingbot_vla_v2_loader import (
-    LingBotVLAWeightLoader,
-    LingBotVlaV2StateDictConverter,
-    TaskTokenDepthHead,
+from telefuser.models.lingbot_vla_v2_alignment import TaskTokenDepthHead
+from telefuser.models.lingbot_vla_v2_attention import (
     block_suffix_to_fv_,
     build_block_mask,
     create_sinusoidal_pos_embedding,
@@ -47,6 +44,8 @@ from telefuser.models.lingbot_vla_v2_loader import (
     prefix_query_segments,
     prefix_query_token_spans,
 )
+from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2CudaGraphs
+from telefuser.models.lingbot_vla_v2_loader import LingBotVlaV2StateDictConverter
 from telefuser.models.lingbot_vla_v2_moe import (
     FixQwen2RMSNorm,
     Qwen2ForCausalLM,
@@ -67,7 +66,7 @@ from telefuser.models.lingbot_vla_v2_qwen import (
 
 try:
     from dinov3.hub.backbones import dinov3_vitb16
-except Exception:
+except ImportError:
     dinov3_vitb16 = None
 
 logger = logging.get_logger(__name__)
@@ -99,9 +98,9 @@ class LingbotVLAConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vlm_repo_id: Optional[str] = None,
-        expert_vision_path: Optional[str] = None,
-        tokenizer_path: Optional[str] = None,
+        vlm_repo_id: str | None = None,
+        expert_vision_path: str | None = None,
+        tokenizer_path: str | None = None,
         post_training: bool = False,
         adanorm_time: bool = False,
         split_gate_liner: bool = False,
@@ -109,7 +108,7 @@ class LingbotVLAConfig(PretrainedConfig):
         separate_time_proj: bool = False,
         final_norm_adanorm: bool = False,
         enable_expert_vision: bool = False,
-        expert_vision_type: Optional[str] = None,
+        expert_vision_type: str | None = None,
         freeze_vision_encoder: bool = False,
         incremental_training: bool = False,
         depth_incremental_training: bool = False,
@@ -122,10 +121,10 @@ class LingbotVLAConfig(PretrainedConfig):
         tokenizer_max_length: int = 48,
         loss_type: str = "fm",
         norm_qkv: bool = False,
-        align_params: Optional[Dict[str, Any]] = None,
+        align_params: dict[str, Any] | None = None,
         use_compile: bool = False,
         use_moe: bool = False,
-        token_moe_layers: Optional[list] = None,
+        token_moe_layers: list[int] | None = None,
         token_num_experts: int = 32,
         token_top_k: int = 1,
         token_moe_intermediate_size: int = 256,
@@ -137,7 +136,7 @@ class LingbotVLAConfig(PretrainedConfig):
         router_activation: str = "softmax",
         routed_scaling_factor: float = 1.0,
         use_shared_expert_gate: bool = True,
-        moe_implementation: Optional[Literal[None, "eager", "fused"]] = None,
+        moe_implementation: Literal["eager", "fused"] | None = None,
         use_robby_moe_kernel: bool = False,
         split_fused_experts_from_decoder_fsdp: bool = False,
         expert_hidden_size: int = 768,
@@ -170,9 +169,8 @@ class LingbotVLAConfig(PretrainedConfig):
         self.num_steps = 10
         self.n_obs_steps = 1
 
-        assert not (split_gate_liner and nosplit_gate_liner), (
-            "split_gate_liner and nosplit_gate_liner can not be both True."
-        )
+        if split_gate_liner and nosplit_gate_liner:
+            raise ValueError("split_gate_liner and nosplit_gate_liner cannot both be True")
 
         self.vlm_repo_id = vlm_repo_id
         self.expert_vision_path = expert_vision_path
@@ -334,7 +332,8 @@ class FlowMatchingBase(nn.Module):
         self.use_shared_future_task_proj = False
         self.future_video_share_future_depth_query = False
         self.num_task_tokens = config["num_task_tokens"]
-        assert config["depth"]["num_backbone_tokens"] % self.num_task_tokens == 0
+        if config["depth"]["num_backbone_tokens"] % self.num_task_tokens != 0:
+            raise ValueError("depth.num_backbone_tokens must be divisible by num_task_tokens")
         self.depth_align_embs = nn.Parameter(
             torch.randn(config["depth"]["num_backbone_tokens"], config["llm"]["dim_out"])
         )
@@ -653,7 +652,7 @@ class QwenvlWithExpertV2Config(PretrainedConfig):
             sliding_window=32768,
             tie_word_embeddings=True,
             torch_dtype="bfloat16",
-            transformers_version="4.57.3",
+            transformers_version="5.14.1",
             use_cache=use_cache,
             use_sliding_window=False,
             vocab_size=151936,
@@ -858,9 +857,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         layer_idx: int,
-        past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
     ):
         if use_cache:
             if past_key_values is None:
@@ -891,26 +890,27 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
 
     def forward(
         self,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        vlm_position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
-        inputs_embeds: List[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
-        ada_cond: List[torch.FloatTensor] = None,
-        visual_pos_masks: Optional[torch.Tensor] = None,
-        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        vlm_position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
+        inputs_embeds: list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
+        ada_cond: list[torch.FloatTensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
     ):
         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
         num_layers = self.qwenvl.config.text_config.num_hidden_layers
         action_num_layers = self.config.qwen_expert_config.num_hidden_layers
         router_logits_list = []
 
-        assert action_num_layers == num_layers, (
-            "Action expert and VLM must have the same number of layers "
-            f"(got action={action_num_layers}, vlm={num_layers})."
-        )
+        if action_num_layers != num_layers:
+            raise ValueError(
+                "Action expert and VLM must have the same number of layers "
+                f"(got action={action_num_layers}, vlm={num_layers})"
+            )
 
         for layer_idx in range(num_layers):
             query_states = []
@@ -1573,16 +1573,11 @@ class LingbotVlaV2Policy(PreTrainedModel):
     name = "torch_lingbot_vla_v2"
     _no_split_modules = ["Qwen2DecoderLayer", "FixQwen2RMSNorm", "FixAdaRMSNorm"]
 
-    @classmethod
-    def get_weight_loader(cls):
-        return LingBotVLAWeightLoader()
-
     def __init__(self, config: LingbotVLAV2Config, eval: bool = True):
         if not eval:
             raise ValueError("LingBot-VLA v2 only supports inference mode")
         super().__init__(config)
         self.config = config
-        self.language_tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, local_files_only=True)
         self.model = FlowMatchingV2(config, eval)
         if not getattr(self.config, "use_lm_head", False):
             del self.model.qwenvl_with_expert.qwenvl.lm_head
@@ -1590,7 +1585,6 @@ class LingbotVlaV2Policy(PreTrainedModel):
         self.requires_grad_(False)
         self.eval()
         self.reset()
-        torch.set_float32_matmul_precision("high")
 
     def reset(self):
         return None
@@ -1621,7 +1615,6 @@ __all__ = [
     "Qwen3VLPreTrainedModel",
     "Qwen2ForCausalLM",
 ]
-# __V2_END__
 
 
 class LingBotVlaV2Model(LingbotVlaV2Policy):
@@ -1850,6 +1843,3 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
             replaced,
             fused_expert_layers,
         )
-
-
-# __WRAPPER_END__

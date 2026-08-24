@@ -21,6 +21,7 @@ PPL_CONFIG = {
     "qwen3vl_root": str(TF_MODEL_ZOO_PATH / "Qwen3-VL-4B-Instruct"),
     "device": "cuda:0",
     "quantization": None,
+    "cuda_graph": False,
     "max_image_bytes": 10 * 1024 * 1024,
     "max_image_pixels": 16 * 1024 * 1024,
 }
@@ -83,13 +84,17 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
     """Load one policy replica for the native TeleFuser service."""
     if parallelism != 1:
         raise ValueError("LingBot-VLA v2 supports parallelism=1 per replica; use --num-replicas for a pipeline pool")
-    logger.info(f"Loading LingBot-VLA v2 service profile quantization={PPL_CONFIG['quantization'] or 'bf16'}")
+    logger.info(
+        f"Loading LingBot-VLA v2 service profile quantization={PPL_CONFIG['quantization'] or 'bf16'} "
+        f"cuda_graph={PPL_CONFIG['cuda_graph']}"
+    )
     return get_lingbot_vla_v2_pipeline(
         PPL_CONFIG["model_root"],
         PPL_CONFIG["qwen3vl_root"],
         device=PPL_CONFIG["device"],
         warmup=True,
         quantization=PPL_CONFIG["quantization"],
+        cuda_graph=bool(PPL_CONFIG["cuda_graph"]),
     )
 
 

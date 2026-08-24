@@ -9,6 +9,8 @@ from telefuser.models.lingbot_vla_v2 import (
     QwenvlWithExpertV2Model,
     _resolve_qwen_attention_implementations,
 )
+from telefuser.models.lingbot_vla_v2_moe import Qwen2ForCausalLM
+from telefuser.models.lingbot_vla_v2_qwen import Qwen3VLForConditionalGeneration
 
 
 class _Visual:
@@ -92,3 +94,10 @@ def test_policy_rejects_training_entrypoints() -> None:
 def test_loader_does_not_expose_training_loss_helpers() -> None:
     assert not hasattr(lingbot_vla_v2_loader, "triton_sequence_wise_balance_loss")
     assert not hasattr(lingbot_vla_v2_loader, "triton_load_balancing_loss_func")
+
+
+def test_custom_qwen_models_use_transformers_5_tied_weight_mappings() -> None:
+    assert Qwen3VLForConditionalGeneration._tied_weights_keys == {
+        "lm_head.weight": "model.language_model.embed_tokens.weight"
+    }
+    assert Qwen2ForCausalLM._tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}

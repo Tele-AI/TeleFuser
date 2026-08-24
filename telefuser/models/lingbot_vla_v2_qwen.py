@@ -3,11 +3,11 @@
 Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 """
 
+from __future__ import annotations
 
-# Qwen3-VL implementation used by LingBot-VLA v2.
-
+from collections.abc import Callable
+from inspect import signature
 from types import MethodType
-from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -45,6 +45,7 @@ from transformers.utils import logging
 from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
 
 logger = logging.get_logger(__name__)
+_QWEN3_VL_REQUIRES_MM_TOKEN_TYPES = "mm_token_type_ids" in signature(_Qwen3VLModel.get_rope_index).parameters
 
 
 class Qwen3VLPreTrainedModel(_Qwen3VLPreTrainedModel):
@@ -70,10 +71,10 @@ class Qwen3VLVisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        max_seqlen: Optional[int] = None,
-        sequence_lengths: Optional[tuple[int, ...]] = None,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        max_seqlen: int | None = None,
+        sequence_lengths: tuple[int, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -156,8 +157,8 @@ class Qwen3VLVisionBlock(GradientCheckpointingLayer):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
@@ -183,13 +184,13 @@ class Qwen3VLTextDecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        att_output: Optional[torch.Tensor] = None,
-        start: Optional[int] = 0,
-        end: Optional[int] = 0,
+        att_output: torch.Tensor | None = None,
+        start: int | None = 0,
+        end: int | None = 0,
         compute_kqv: bool = False,
         output_atten: bool = False,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.Tensor, ...]:
         param_dtype = linear_compute_dtype(self.self_attn.q_proj, hidden_states.dtype)
         hidden_states = hidden_states.to(param_dtype)
         if att_output is not None:
@@ -264,11 +265,39 @@ class Qwen3VLModel(_Qwen3VLModel):
         self.rope_deltas = None
         self.post_init()
 
+    def get_rope_index(
+        self,
+        input_ids: torch.LongTensor,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kwargs = {
+            "input_ids": input_ids,
+            "image_grid_thw": image_grid_thw,
+            "video_grid_thw": video_grid_thw,
+            "attention_mask": attention_mask,
+        }
+        if _QWEN3_VL_REQUIRES_MM_TOKEN_TYPES:
+            mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int32)
+            mm_token_type_ids.masked_fill_(input_ids == self.config.image_token_id, 1)
+            mm_token_type_ids.masked_fill_(input_ids == self.config.video_token_id, 2)
+            kwargs["mm_token_type_ids"] = mm_token_type_ids
+        return _Qwen3VLModel.get_rope_index(self, **kwargs)
+
 
 class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
     config_class = Qwen3VLConfig
     _no_split_modules = ["Qwen3VLTextDecoderLayer", "Qwen3VLVisionBlock"]
+
+    @property
+    def language_model(self) -> Qwen3VLTextModel:
+        return self.model.language_model
+
+    @property
+    def visual(self) -> Qwen3VLVisionModel:
+        return self.model.visual
 
     def __init__(self, config):
         Qwen3VLPreTrainedModel.__init__(self, config)
@@ -299,11 +328,11 @@ def preprcess_grid_thw(self, grid_thw: torch.Tensor):
 def forward_without_grid_thw(
     self,
     hidden_states: torch.Tensor,
-    grid_thw: torch.Tensor = None,
-    pos_embeds: Optional[torch.Tensor] = None,
-    position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    max_seqlen: Optional[int] = None,
+    grid_thw: torch.Tensor | None = None,
+    pos_embeds: torch.Tensor | None = None,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
     **kwargs,
 ) -> torch.Tensor:
     hidden_states = self.patch_embed(hidden_states)
@@ -313,7 +342,7 @@ def forward_without_grid_thw(
     if pos_embeds is None:
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
 
-    hidden_states = hidden_states + pos_embeds
+    hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
     seq_len, _ = hidden_states.size()
     hidden_states = hidden_states.reshape(seq_len, -1)
 

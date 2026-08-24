@@ -20,9 +20,16 @@ def get_pipeline(
     qwen3vl_root: str,
     device: str = "cuda",
     quantization: str | None = None,
+    cuda_graph: bool = False,
 ) -> LingBotVlaV2Pipeline:
     """Load the official 6B checkpoint and Qwen3-VL processor."""
-    return get_lingbot_vla_v2_pipeline(model_root, qwen3vl_root, device=device, quantization=quantization)
+    return get_lingbot_vla_v2_pipeline(
+        model_root,
+        qwen3vl_root,
+        device=device,
+        quantization=quantization,
+        cuda_graph=cuda_graph,
+    )
 
 
 @click.command()
@@ -36,6 +43,7 @@ def get_pipeline(
 @click.option("--output", default="canonical_action_chunk.npz", type=click.Path(dir_okay=False))
 @click.option("--seed", default=None, type=int)
 @click.option("--device", default="cuda")
+@click.option("--cuda-graph", is_flag=True, help="Enable fixed-shape CUDA Graph inference")
 @click.option(
     "--quantization",
     type=click.Choice(("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4")),
@@ -52,6 +60,7 @@ def main(
     output: str,
     seed: int | None,
     device: str,
+    cuda_graph: bool,
     quantization: str | None,
 ) -> None:
     """Predict and save a normalized canonical action chunk."""
@@ -77,6 +86,7 @@ def main(
         qwen3vl_root,
         device=device,
         quantization=quantization,
+        cuda_graph=cuda_graph,
     )
     try:
         chunk = pipeline(observation, seed=seed)
