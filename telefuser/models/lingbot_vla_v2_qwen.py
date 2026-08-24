@@ -73,6 +73,7 @@ class Qwen3VLVisionAttention(nn.Module):
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         max_seqlen: Optional[int] = None,
+        sequence_lengths: Optional[tuple[int, ...]] = None,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -117,9 +118,10 @@ class Qwen3VLVisionAttention(nn.Module):
             if out_fp32_atten:
                 attn_output = attn_output.to(torch.float32)
         else:
-            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            if sequence_lengths is None:
+                sequence_lengths = tuple((cu_seqlens[1:] - cu_seqlens[:-1]).tolist())
             splits = [
-                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
+                torch.split(tensor, sequence_lengths, dim=2) for tensor in (query_states, key_states, value_states)
             ]
             attn_outputs = [
                 attention_interface(

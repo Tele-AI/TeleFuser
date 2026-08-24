@@ -4,7 +4,11 @@ import pytest
 import torch
 
 from telefuser.models import lingbot_vla_v2_loader
-from telefuser.models.lingbot_vla_v2 import LingbotVlaV2Policy, QwenvlWithExpertV2Model
+from telefuser.models.lingbot_vla_v2 import (
+    LingbotVlaV2Policy,
+    QwenvlWithExpertV2Model,
+    _resolve_qwen_attention_implementations,
+)
 
 
 class _Visual:
@@ -21,6 +25,10 @@ class _Visual:
         split_sizes = grid_thw.prod(dim=-1).tolist()
         return None, position_embeddings, cu_seqlens, split_sizes, token_count
 
+    def fast_pos_embed_interpolate(self, grid_thw: torch.Tensor):
+        token_count = int(grid_thw.prod(dim=-1).sum())
+        return torch.zeros(token_count, 3)
+
     def __call__(self, pixel_values: torch.Tensor, **kwargs):
         del kwargs
         embeddings = torch.zeros(pixel_values.shape[0], 3)
@@ -36,6 +44,7 @@ def _model(visual: _Visual) -> SimpleNamespace:
         cu_seqlens=None,
         visual_split_sizes=None,
         visual_max_seqlen=None,
+        visual_sequence_lengths=None,
         _cached_image_grid_signature=None,
     )
 
@@ -53,6 +62,21 @@ def test_image_grid_cache_is_reused_and_invalidated_by_grid_shape() -> None:
     assert visual.preprocess_calls == 2
     assert first[0].shape == repeated[0].shape == (2, 4, 3)
     assert changed[0].shape == (2, 2, 3)
+
+
+def test_qwen_vision_falls_back_to_sdpa_without_changing_text_backend() -> None:
+    assert _resolve_qwen_attention_implementations(
+        "flash_attention_2",
+        flash_attention_available=False,
+    ) == ("eager", "sdpa")
+    assert _resolve_qwen_attention_implementations(
+        "flash_attention_2",
+        flash_attention_available=True,
+    ) == ("flash_attention_2", "flash_attention_2")
+    assert _resolve_qwen_attention_implementations(
+        "eager",
+        flash_attention_available=False,
+    ) == ("eager", "eager")
 
 
 def test_policy_rejects_training_entrypoints() -> None:

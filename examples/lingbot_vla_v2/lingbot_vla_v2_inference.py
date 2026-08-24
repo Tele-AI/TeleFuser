@@ -36,7 +36,11 @@ def get_pipeline(
 @click.option("--output", default="canonical_action_chunk.npz", type=click.Path(dir_okay=False))
 @click.option("--seed", default=None, type=int)
 @click.option("--device", default="cuda")
-@click.option("--quantization", type=click.Choice(("torchao-fp8", "tf-kernel-fp8", "bnb-nf4")), default=None)
+@click.option(
+    "--quantization",
+    type=click.Choice(("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4")),
+    default=None,
+)
 def main(
     model_root: str,
     qwen3vl_root: str,
