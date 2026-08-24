@@ -32,7 +32,7 @@ Strict parity, runtime comparison, quantization screening, and structured-servic
 | TorchVision | `0.26.0+cu130` |
 | TorchAudio | `2.11.0+cu130` |
 | PyTorch CUDA runtime | `13.0` |
-| Transformers | `4.57.3` |
+| Transformers | `5.14.1` |
 | Triton | `3.6.0` |
 
 Create the model-specific environment inside this repository. Install the matching CUDA 13.0 PyTorch wheels first
@@ -211,10 +211,11 @@ uv pip install --python .venv-vla/bin/python --reinstall --no-deps \
   "torchao==0.17.0" "bitsandbytes==0.48.0"
 ```
 
-Add `--quantization fused-fp8-graph --cuda-graph` for the experimental fused graph profile. Other accepted values are
-`torchao-fp8`, `bnb-nf4`, and `tf-kernel-fp8`; the tf-kernel path requires an SM90 wheel built for the exact
-PyTorch/CUDA ABI from `tf-kernel/`. Do not use a wheel built for another SM family or CUDA ABI. For the native service, set
-`PPL_CONFIG["quantization"]` in `lingbot_vla_v2_native_service.py`; it defaults to `None`.
+Add `--quantization fused-fp8-graph --cuda-graph` to direct inference for the experimental fused graph profile. Other
+accepted values are `torchao-fp8`, `bnb-nf4`, and `tf-kernel-fp8`; the tf-kernel path requires an SM90 wheel built for
+the exact PyTorch/CUDA ABI from `tf-kernel/`. Do not use a wheel built for another SM family or CUDA ABI. For the native
+service, set `PPL_CONFIG["quantization"] = "fused-fp8-graph"` and `PPL_CONFIG["cuda_graph"] = True` in
+`lingbot_vla_v2_native_service.py`; they default to `None` and `False`.
 
 The public loader uses the same option:
 

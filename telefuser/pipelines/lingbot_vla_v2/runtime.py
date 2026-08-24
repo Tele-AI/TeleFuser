@@ -14,6 +14,11 @@ from .pipeline import LingBotVlaV2Pipeline, LingBotVlaV2PipelineConfig
 LINGBOT_VLA_V2_QUANTIZATION_CHOICES = ("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4")
 
 
+def _apply_cuda_runtime_flags(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+
+
 def lingbot_vla_v2_quant_config(quantization: str | QuantType | None) -> QuantConfig:
     """Resolve a public LingBot-VLA v2 online-quantization name."""
     if quantization is None:
@@ -67,6 +72,7 @@ def get_lingbot_vla_v2_pipeline(
             )
         target_device = torch.device("cuda", device_index)
     dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
+    _apply_cuda_runtime_flags(target_device)
     quant_config = lingbot_vla_v2_quant_config(quantization)
     if quant_config.enabled and target_device.type != "cuda":
         raise ValueError("LingBot-VLA v2 online quantization requires a CUDA device")

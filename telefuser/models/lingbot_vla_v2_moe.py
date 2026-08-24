@@ -4,6 +4,24 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 """
 
 import torch
+import torch.nn.functional as F
+from torch import nn
+from transformers.activations import ACT2FN
+from transformers.generation import GenerationMixin
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.qwen2.modeling_qwen2 import (
+    PreTrainedModel,
+    Qwen2Attention,
+    Qwen2MLP,
+    Qwen2RMSNorm,
+    Qwen2RotaryEmbedding,
+)
+from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM as _Qwen2ForCausalLM
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as _Qwen2Model
+from transformers.processing_utils import Unpack
+from transformers.utils import auto_docstring, logging
 
 from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
 from telefuser.ops.graph_fp8_linear import GraphFP8Linear, graph_fp8_linear_forward_many
@@ -11,15 +29,15 @@ from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward, robby_moe_forwar
 
 
 def fused_moe_forward(
-    module,
-    num_experts,
-    routing_weights,
-    selected_experts,
-    hidden_states,
-    fc1_1_weight,
-    fc1_2_weight,
-    fc2_weight,
-):
+    module: nn.Module,
+    num_experts: int,
+    routing_weights: torch.Tensor,
+    selected_experts: torch.Tensor,
+    hidden_states: torch.Tensor,
+    fc1_1_weight: torch.Tensor,
+    fc1_2_weight: torch.Tensor,
+    fc2_weight: torch.Tensor,
+) -> torch.Tensor:
     """Single-device PyTorch fallback for the fused 3D expert layout."""
     del module
     output = torch.zeros_like(hidden_states)
@@ -37,19 +55,6 @@ def fused_moe_forward(
         weights = routing_weights[token_ids, route_ids].unsqueeze(-1)
         output.index_add_(0, token_ids, expert_output * weights)
     return output
-
-
-from typing import Optional, Tuple
-
-import torch.nn.functional as F
-from torch import nn
-from transformers.activations import ACT2FN
-from transformers.generation import GenerationMixin
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
-from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring, logging
 
 
 def _update_moe_runtime_stats(block, routing_weights, selected_experts):
@@ -77,22 +82,7 @@ def _update_moe_runtime_stats(block, routing_weights, selected_experts):
             )
 
 
-from transformers.models.qwen2.modeling_qwen2 import (
-    PreTrainedModel,
-    Qwen2Attention,
-    Qwen2MLP,
-    Qwen2RMSNorm,
-    Qwen2RotaryEmbedding,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2ForCausalLM as _Qwen2ForCausalLM,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2Model as _Qwen2Model,
-)
-
 logger = logging.get_logger(__name__)
-# from transformers.models.mistral.modeling_mistral import MistralMLP
 
 
 # Modified from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2Moe
@@ -274,14 +264,10 @@ class FixQwen2RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        # print(f'self.weight dtype is {self.weight.dtype}')
         input_dtype = hidden_states.dtype
-        # print(f'input_dtype is {input_dtype}')
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        # print(f'hidden_states dtype is {hidden_states.dtype}')
-        # print(f'output dtype is {(self.weight * hidden_states.to(input_dtype)).dtype}')
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -474,14 +460,14 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        att_output: Optional[torch.Tensor] = None,
-        start: Optional[int] = 0,
-        end: Optional[int] = 0,
+        att_output: torch.Tensor | None = None,
+        start: int | None = 0,
+        end: int | None = 0,
         compute_kqv: bool = False,
         output_atten: bool = False,
-        ada_cond: Optional[torch.Tensor] = None,
+        ada_cond: torch.Tensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.Tensor, ...]:
         # Ensure input dtypes match weight dtype (needed for gradient checkpointing
         # recomputation where autocast context is lost)
         param_dtype = linear_compute_dtype(self.self_attn.q_proj, hidden_states.dtype)
@@ -611,7 +597,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
 
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
     get_input_embeddings = _Qwen2ForCausalLM.get_input_embeddings
