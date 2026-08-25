@@ -62,6 +62,17 @@ def get_lingbot_vla_v2_pipeline(
 ) -> LingBotVlaV2Pipeline:
     """Load one official 6B base checkpoint replica for inference."""
     target_device = torch.device(device)
+    quant_config = lingbot_vla_v2_quant_config(quantization)
+    if quant_config.enabled and target_device.type != "cuda":
+        raise ValueError("LingBot-VLA v2 online quantization requires a CUDA device")
+    if cuda_graph and target_device.type != "cuda":
+        raise ValueError("LingBot-VLA v2 CUDA Graph requires a CUDA device")
+    graph_fp8 = quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend == QuantKernelBackend.CUTLASS
+    if graph_fp8 and not cuda_graph:
+        raise ValueError("LingBot-VLA v2 fused-fp8-graph requires cuda_graph=True")
+    if cuda_graph and quant_config.enabled and not graph_fp8:
+        raise ValueError("LingBot-VLA v2 CUDA Graph supports only BF16 or fused-fp8-graph")
+
     if target_device.type == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError(f"CUDA device {device!r} was requested, but CUDA is unavailable")
@@ -73,16 +84,6 @@ def get_lingbot_vla_v2_pipeline(
         target_device = torch.device("cuda", device_index)
     dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
     _apply_cuda_runtime_flags(target_device)
-    quant_config = lingbot_vla_v2_quant_config(quantization)
-    if quant_config.enabled and target_device.type != "cuda":
-        raise ValueError("LingBot-VLA v2 online quantization requires a CUDA device")
-    if cuda_graph and target_device.type != "cuda":
-        raise ValueError("LingBot-VLA v2 CUDA Graph requires a CUDA device")
-    graph_fp8 = quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend == QuantKernelBackend.CUTLASS
-    if graph_fp8 and not cuda_graph:
-        raise ValueError("LingBot-VLA v2 fused-fp8-graph requires cuda_graph=True")
-    if cuda_graph and quant_config.enabled and not graph_fp8:
-        raise ValueError("LingBot-VLA v2 CUDA Graph supports only BF16 or fused-fp8-graph")
     processor = AutoProcessor.from_pretrained(qwen3vl_root, local_files_only=True, padding_side="right")
     manager = ModuleManager(torch_dtype=dtype, device="cpu")
     manager.add_module(processor, "lingbot_vla_v2_processor", path=qwen3vl_root)
