@@ -800,9 +800,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 self.cu_seqlens,
                 self.visual_split_sizes,
                 self.visual_max_seqlen,
-            ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
-            if self.pos_embeds is None:
-                self.pos_embeds = self.qwenvl.visual.fast_pos_embed_interpolate(image_grid_thw)
+            ) = self.qwenvl.visual.preprocess_grid_thw(grid_thw=image_grid_thw)
             self.visual_sequence_lengths = tuple((self.cu_seqlens[1:] - self.cu_seqlens[:-1]).tolist())
             self._cached_image_grid_signature = grid_signature
         image_embeds, deepstack_image_embeds = self.qwenvl.visual(
