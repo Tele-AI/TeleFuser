@@ -310,7 +310,10 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
 @torch.compiler.disable
 def preprocess_grid_thw(self, grid_thw: torch.Tensor):
     position_ids = get_vision_position_ids(grid_thw, self.spatial_merge_size)
-    rotary_pos_emb = self.rotary_pos_emb(position_ids)
+    max_hw = int(grid_thw[:, 1:].max().item())
+    inv_freq = self.rotary_pos_emb.inv_freq
+    positions = torch.arange(max_hw, device=inv_freq.device, dtype=inv_freq.dtype)
+    rotary_pos_emb = torch.outer(positions, inv_freq)[position_ids].flatten(1)
 
     seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
     rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
