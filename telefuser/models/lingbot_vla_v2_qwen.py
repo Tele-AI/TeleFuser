@@ -322,7 +322,9 @@ def preprocess_grid_thw(self, grid_thw: torch.Tensor):
         num_grid_per_side=self.num_grid_per_side,
         spatial_merge_size=self.config.spatial_merge_size,
     )
-    pos_embeds = (self.pos_embed(bilinear_indices) * bilinear_weights[:, :, None]).sum(0)
+    bilinear_weights = bilinear_weights.to(dtype=self.pos_embed.weight.dtype)
+    weighted_pos_embeds = self.pos_embed(bilinear_indices) * bilinear_weights[:, :, None]
+    pos_embeds = weighted_pos_embeds[0] + weighted_pos_embeds[1] + weighted_pos_embeds[2] + weighted_pos_embeds[3]
 
     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
         dim=0,
