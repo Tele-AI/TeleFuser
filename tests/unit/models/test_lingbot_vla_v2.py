@@ -1,3 +1,4 @@
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from telefuser.models.lingbot_vla_v2 import (
     _resolve_qwen_attention_implementations,
 )
 from telefuser.models.lingbot_vla_v2_moe import Qwen2ForCausalLM
-from telefuser.models.lingbot_vla_v2_qwen import Qwen3VLForConditionalGeneration
+from telefuser.models.lingbot_vla_v2_qwen import Qwen3VLForConditionalGeneration, preprocess_grid_thw
 
 
 class _Visual:
@@ -19,17 +20,13 @@ class _Visual:
     def __init__(self) -> None:
         self.preprocess_calls = 0
 
-    def preprcess_grid_thw(self, grid_thw: torch.Tensor):
+    def preprocess_grid_thw(self, grid_thw: torch.Tensor):
         self.preprocess_calls += 1
         token_count = int(grid_thw.prod(dim=-1).sum())
         position_embeddings = (torch.zeros(token_count, 2), torch.ones(token_count, 2))
         cu_seqlens = torch.tensor([0, token_count], dtype=torch.int32)
         split_sizes = grid_thw.prod(dim=-1).tolist()
-        return None, position_embeddings, cu_seqlens, split_sizes, token_count
-
-    def fast_pos_embed_interpolate(self, grid_thw: torch.Tensor):
-        token_count = int(grid_thw.prod(dim=-1).sum())
-        return torch.zeros(token_count, 3)
+        return torch.zeros(token_count, 3), position_embeddings, cu_seqlens, split_sizes, token_count
 
     def __call__(self, pixel_values: torch.Tensor, **kwargs):
         del kwargs
@@ -64,6 +61,28 @@ def test_image_grid_cache_is_reused_and_invalidated_by_grid_shape() -> None:
     assert visual.preprocess_calls == 2
     assert first[0].shape == repeated[0].shape == (2, 4, 3)
     assert changed[0].shape == (2, 2, 3)
+
+
+def test_vision_grid_preprocessing_uses_public_transformers_apis_without_warnings() -> None:
+    visual = SimpleNamespace(
+        spatial_merge_size=2,
+        num_grid_per_side=4,
+        config=SimpleNamespace(spatial_merge_size=2),
+        rotary_pos_emb=lambda position_ids: position_ids.to(dtype=torch.float32),
+        pos_embed=torch.nn.Embedding(16, 3),
+    )
+    grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pos_embeds, position_embeddings, cu_seqlens, split_sizes, max_seqlen = preprocess_grid_thw(visual, grid_thw)
+
+    assert not caught
+    assert pos_embeds.shape == (16, 3)
+    assert position_embeddings[0].shape == position_embeddings[1].shape == (16, 4)
+    assert cu_seqlens.tolist() == [0, 16]
+    assert split_sizes == [4]
+    assert max_seqlen == 16
 
 
 def test_qwen_vision_falls_back_to_sdpa_without_changing_text_backend() -> None:

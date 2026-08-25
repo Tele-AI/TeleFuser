@@ -41,6 +41,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import logging
+from transformers.vision_utils import get_vision_bilinear_indices_and_weights, get_vision_position_ids
 
 from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
 
@@ -260,7 +261,7 @@ class Qwen3VLModel(_Qwen3VLModel):
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.visual.blocks = nn.ModuleList([Qwen3VLVisionBlock(config.vision_config) for _ in self.visual.blocks])
         self.visual.forward = MethodType(forward_without_grid_thw, self.visual)
-        self.visual.preprcess_grid_thw = MethodType(preprcess_grid_thw, self.visual)
+        self.visual.preprocess_grid_thw = MethodType(preprocess_grid_thw, self.visual)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
         self.rope_deltas = None
         self.post_init()
@@ -307,13 +308,21 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
 
 
 @torch.compiler.disable
-def preprcess_grid_thw(self, grid_thw: torch.Tensor):
-    rotary_pos_emb = self.rot_pos_emb(grid_thw)
+def preprocess_grid_thw(self, grid_thw: torch.Tensor):
+    position_ids = get_vision_position_ids(grid_thw, self.spatial_merge_size)
+    rotary_pos_emb = self.rotary_pos_emb(position_ids)
 
     seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
     rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
     emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
     position_embeddings = (emb.cos(), emb.sin())
+
+    bilinear_indices, bilinear_weights = get_vision_bilinear_indices_and_weights(
+        grid_thw,
+        num_grid_per_side=self.num_grid_per_side,
+        spatial_merge_size=self.config.spatial_merge_size,
+    )
+    pos_embeds = (self.pos_embed(bilinear_indices) * bilinear_weights[:, :, None]).sum(0)
 
     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
         dim=0,
@@ -322,7 +331,7 @@ def preprcess_grid_thw(self, grid_thw: torch.Tensor):
     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
     split_sizes = (grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
     max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
-    return None, position_embeddings, cu_seqlens, split_sizes, max_seqlen
+    return pos_embeds, position_embeddings, cu_seqlens, split_sizes, max_seqlen
 
 
 def forward_without_grid_thw(
@@ -338,9 +347,7 @@ def forward_without_grid_thw(
     hidden_states = self.patch_embed(hidden_states)
 
     if pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None:
-        pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
-    if pos_embeds is None:
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprocess_grid_thw(grid_thw)
 
     hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
     seq_len, _ = hidden_states.size()
