@@ -69,7 +69,7 @@ def test_vision_grid_preprocessing_uses_public_transformers_apis_without_warning
         num_grid_per_side=4,
         config=SimpleNamespace(spatial_merge_size=2),
         rotary_pos_emb=lambda position_ids: position_ids.to(dtype=torch.float32),
-        pos_embed=torch.nn.Embedding(16, 3),
+        pos_embed=torch.nn.Embedding(16, 3, dtype=torch.bfloat16),
     )
     grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long)
 
@@ -79,6 +79,7 @@ def test_vision_grid_preprocessing_uses_public_transformers_apis_without_warning
 
     assert not caught
     assert pos_embeds.shape == (16, 3)
+    assert pos_embeds.dtype == torch.bfloat16
     assert position_embeddings[0].shape == position_embeddings[1].shape == (16, 4)
     assert cu_seqlens.tolist() == [0, 16]
     assert split_sizes == [4]
