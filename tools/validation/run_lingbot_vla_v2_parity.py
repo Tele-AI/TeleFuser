@@ -18,7 +18,7 @@ import numpy as np
 
 UPSTREAM_REPOSITORY = "https://github.com/Robbyant/lingbot-vla-v2"
 UPSTREAM_COMMIT = "be27333c9b5f2663b0ec33f069dd7dfd67fa32b5"
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 PREPROCESSING_KEYS = (
     "images",
     "img_masks",
@@ -38,6 +38,7 @@ IDENTITY_METADATA_KEYS = (
     "num_steps",
     "torch_dtype",
     "attention_backend",
+    "vision_attention_backend",
     "moe_backend",
 )
 _STEP_KEY = re.compile(r"^(timestep|x_t|velocity)_step_([0-9]+)$")
