@@ -68,7 +68,7 @@ def test_vision_grid_preprocessing_uses_public_transformers_apis_without_warning
         spatial_merge_size=2,
         num_grid_per_side=4,
         config=SimpleNamespace(spatial_merge_size=2),
-        rotary_pos_emb=lambda position_ids: position_ids.to(dtype=torch.float32),
+        rotary_pos_emb=SimpleNamespace(inv_freq=torch.tensor([1.0])),
         pos_embed=torch.nn.Embedding(16, 3, dtype=torch.bfloat16),
     )
     grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long)
