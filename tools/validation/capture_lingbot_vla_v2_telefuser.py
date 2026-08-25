@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import transformers
 
-from telefuser.models.lingbot_vla_v2_loader import resolve_lingbot_vla_v2_shards
+from telefuser.models.lingbot_vla_v2_loader import OFFICIAL_6B_MODEL_CONFIG, resolve_lingbot_vla_v2_shards
 from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
 from telefuser.pipelines.lingbot_vla_v2 import (
     ROBOTWIN_CAMERA_KEYS,
@@ -23,7 +23,7 @@ from telefuser.pipelines.lingbot_vla_v2 import (
 )
 from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 
 
 def _sha256_file(path: Path, digest: Any | None = None) -> str:
@@ -148,13 +148,22 @@ def _build_pipeline(
     qwen3vl_root: Path,
     device: str,
     quantization: str | None,
+    vision_attention: str,
 ) -> LingBotVlaV2Pipeline:
-    return get_lingbot_vla_v2_pipeline(
-        str(model_root),
-        str(qwen3vl_root),
-        device=device,
-        quantization=quantization,
-    )
+    previous = OFFICIAL_6B_MODEL_CONFIG.get("vit_attn_implementation")
+    OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"] = vision_attention
+    try:
+        return get_lingbot_vla_v2_pipeline(
+            str(model_root),
+            str(qwen3vl_root),
+            device=device,
+            quantization=quantization,
+        )
+    finally:
+        if previous is None:
+            del OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"]
+        else:
+            OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"] = previous
 
 
 def capture_artifact(
@@ -169,6 +178,7 @@ def capture_artifact(
     device: str,
     full_checkpoint_hash: bool,
     deterministic_moe: bool,
+    vision_attention: str,
     quantization: str | None = None,
 ) -> tuple[Path, Path]:
     if len(image_paths) != len(ROBOTWIN_CAMERA_KEYS):
@@ -177,7 +187,7 @@ def capture_artifact(
     metadata_path = output.with_suffix(".json")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    pipeline = _build_pipeline(model_root, qwen3vl_root, device, quantization)
+    pipeline = _build_pipeline(model_root, qwen3vl_root, device, quantization, vision_attention)
     if deterministic_moe:
         for module in pipeline.policy_stage.policy.modules():
             if hasattr(module, "_use_robby_moe_kernel"):
@@ -228,6 +238,7 @@ def capture_artifact(
             "num_steps": trace.step,
             "torch_dtype": str(pipeline.torch_dtype).removeprefix("torch."),
             "attention_backend": str(flow_model.config.attention_implementation),
+            "vision_attention_backend": str(flow_model.qwenvl_with_expert.qwenvl.visual.config._attn_implementation),
             "moe_backend": "deterministic_torch_reference" if deterministic_moe else "upstream_triton",
             "device": str(target_device),
             "device_name": torch.cuda.get_device_name(target_device) if target_device.type == "cuda" else "cpu",
@@ -271,6 +282,12 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument(
+        "--vision-attention",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="eager",
+        help="Qwen3-VL vision backend; strict official parity requires eager",
+    )
+    parser.add_argument(
         "--full-checkpoint-hash",
         action="store_true",
         help="Hash all checkpoint bytes instead of the faster filename-and-size manifest",
@@ -304,6 +321,7 @@ def main() -> None:
         device=args.device,
         full_checkpoint_hash=args.full_checkpoint_hash,
         deterministic_moe=args.deterministic_moe,
+        vision_attention=args.vision_attention,
         quantization=args.quantization,
     )
     print(f"Saved LingBot-VLA v2 capture: {artifact}")

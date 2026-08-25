@@ -32,7 +32,7 @@ def _arrays() -> dict[str, np.ndarray]:
 
 def _metadata() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_kind": "telefuser_regression",
         "checkpoint_manifest_sha256": "checkpoint",
         "processor_manifest_sha256": "processor",
@@ -42,6 +42,7 @@ def _metadata() -> dict[str, object]:
         "num_steps": 2,
         "torch_dtype": "bfloat16",
         "attention_backend": "eager",
+        "vision_attention_backend": "eager",
         "moe_backend": "deterministic_torch_reference",
     }
 
@@ -161,6 +162,16 @@ def test_compare_artifacts_rejects_different_moe_backends(tmp_path: Path) -> Non
     candidate = _write_artifact(tmp_path, "candidate", _arrays(), candidate_metadata)
 
     with pytest.raises(ValueError, match="moe_backend"):
+        compare_artifacts(reference, candidate, rtol=0.0, atol=0.0)
+
+
+def test_compare_artifacts_rejects_different_vision_attention_backends(tmp_path: Path) -> None:
+    candidate_metadata = _metadata()
+    candidate_metadata["vision_attention_backend"] = "sdpa"
+    reference = _write_artifact(tmp_path, "reference", _arrays())
+    candidate = _write_artifact(tmp_path, "candidate", _arrays(), candidate_metadata)
+
+    with pytest.raises(ValueError, match="vision_attention_backend"):
         compare_artifacts(reference, candidate, rtol=0.0, atol=0.0)
 
 
