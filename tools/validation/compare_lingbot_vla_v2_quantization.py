@@ -5,11 +5,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+try:
+    from tools.validation.lingbot_vla_v2_validation_common import action_error_metrics
+except ModuleNotFoundError as error:
+    if error.name != "tools":
+        raise
+    from lingbot_vla_v2_validation_common import action_error_metrics
 
 ACTION_KEY = "canonical_normalized_actions"
 IDENTITY_KEYS = (
@@ -50,52 +56,6 @@ def _load_metadata(path: Path) -> dict[str, Any] | None:
 
 def _sha256(array: np.ndarray) -> str:
     return hashlib.sha256(array.astype("<f8", copy=False).tobytes()).hexdigest()
-
-
-def _cosine(reference: np.ndarray, candidate: np.ndarray) -> float:
-    reference_flat = reference.reshape(-1)
-    candidate_flat = candidate.reshape(-1)
-    denominator = float(np.linalg.norm(reference_flat) * np.linalg.norm(candidate_flat))
-    if denominator == 0.0:
-        return 1.0 if np.array_equal(reference_flat, candidate_flat) else 0.0
-    return float(np.dot(reference_flat, candidate_flat) / denominator)
-
-
-def action_error_metrics(reference: np.ndarray, candidate: np.ndarray) -> dict[str, Any]:
-    """Return shape, finiteness, magnitude, L2, and cosine action facts."""
-    if reference.shape != candidate.shape:
-        raise ValueError(f"action shapes differ: reference={reference.shape}, candidate={candidate.shape}")
-    reference_finite = bool(np.isfinite(reference).all())
-    candidate_finite = bool(np.isfinite(candidate).all())
-    if not reference_finite or not candidate_finite:
-        return {
-            "shape": list(candidate.shape),
-            "reference_finite": reference_finite,
-            "candidate_finite": candidate_finite,
-            "max_abs": math.inf,
-            "mean_abs": math.inf,
-            "relative_l2": math.inf,
-            "cosine": 0.0,
-            "min_step_cosine": 0.0,
-            "mean_step_cosine": 0.0,
-            "exact": False,
-        }
-
-    difference = candidate - reference
-    reference_norm = float(np.linalg.norm(reference.reshape(-1)))
-    step_cosines = [_cosine(expected, actual) for expected, actual in zip(reference, candidate, strict=True)]
-    return {
-        "shape": list(candidate.shape),
-        "reference_finite": True,
-        "candidate_finite": True,
-        "max_abs": float(np.max(np.abs(difference))) if difference.size else 0.0,
-        "mean_abs": float(np.mean(np.abs(difference))) if difference.size else 0.0,
-        "relative_l2": float(np.linalg.norm(difference.reshape(-1)) / max(reference_norm, 1e-12)),
-        "cosine": _cosine(reference, candidate),
-        "min_step_cosine": min(step_cosines, default=1.0),
-        "mean_step_cosine": float(np.mean(step_cosines)) if step_cosines else 1.0,
-        "exact": bool(np.array_equal(reference, candidate)),
-    }
 
 
 def _validate_metadata_pair(reference: dict[str, Any] | None, candidate: dict[str, Any] | None) -> dict[str, Any]:

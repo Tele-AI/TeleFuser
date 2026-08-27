@@ -5,13 +5,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import platform
-import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,38 +17,12 @@ import numpy as np
 import torch
 import transformers
 
-
-def percentile(values: Sequence[float], fraction: float) -> float:
-    """Return a linearly interpolated percentile for a non-empty sample."""
-    if not values:
-        raise ValueError("percentile requires at least one value")
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
-
-def summarize(values: Sequence[float]) -> dict[str, float | int]:
-    """Summarize synchronized wall-clock latency samples in seconds."""
-    if not values:
-        raise ValueError("summary requires at least one value")
-    total = sum(values)
-    return {
-        "count": len(values),
-        "total_seconds": total,
-        "mean_seconds": statistics.fmean(values),
-        "stdev_seconds": statistics.pstdev(values),
-        "min_seconds": min(values),
-        "p50_seconds": percentile(values, 0.50),
-        "p90_seconds": percentile(values, 0.90),
-        "p95_seconds": percentile(values, 0.95),
-        "p99_seconds": percentile(values, 0.99),
-        "max_seconds": max(values),
-        "throughput_requests_per_second": len(values) / total,
-    }
+try:
+    from tools.validation.lingbot_vla_v2_validation_common import percentile, summarize_latency
+except ModuleNotFoundError as error:
+    if error.name != "tools":
+        raise
+    from lingbot_vla_v2_validation_common import percentile, summarize_latency
 
 
 def _git_commit(repository: Path) -> str:
@@ -115,7 +87,7 @@ def _run_samples(
         torch.cuda.synchronize(device)
         samples.append(time.perf_counter() - started_at)
     assert output is not None
-    return summarize(samples), output
+    return summarize_latency(samples), output
 
 
 def _output_summary(output: torch.Tensor) -> dict[str, Any]:

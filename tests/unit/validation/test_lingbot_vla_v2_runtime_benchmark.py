@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from tools.validation.benchmark_lingbot_vla_v2_runtime import percentile, summarize
 from tools.validation.compare_lingbot_vla_v2_runtime_benchmarks import compare_reports, render_markdown
+from tools.validation.lingbot_vla_v2_validation_common import percentile, summarize_latency
 
 
 def _report(implementation: str, latency: float) -> dict:
@@ -44,7 +44,7 @@ def _report(implementation: str, latency: float) -> dict:
 def test_summary_includes_p99_and_throughput() -> None:
     values = [1.0, 2.0, 3.0, 4.0]
 
-    result = summarize(values)
+    result = summarize_latency(values)
 
     assert percentile(values, 0.5) == 2.5
     assert result["p99_seconds"] == pytest.approx(3.97)

@@ -141,25 +141,6 @@ TELEFUSER_AIPERF_CONCURRENCY=2 \
   bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
 ```
 
-## VLA GPU Parallelism Assessment
-
-The current VLA policy validates `world_size == 1`, so this assessment is deliberately read-only and does not enable
-FSDP, tensor parallelism, or pipeline parallelism. It reports visible GPU capacity, current free memory, checkpoint
-size, and how many complete replicas fit using a measured resident-memory estimate:
-
-```bash
-.venv-vla/bin/python tools/validation/inspect_lingbot_vla_v2_gpu_plan.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --replica-memory-mib 13302 \
-  --output work_dirs/vla_gpu_plan.json
-```
-
-On the validated four-H100 host, the report showed four visible 80 GB GPUs and four estimated complete replicas at
-the 13,302 MiB measured process-memory baseline. This supports request-level multi-replica service capacity; it is
-not evidence that one model replica can be split across GPUs. Any future FSDP or tensor-parallel implementation must
-be introduced behind the VLA pipeline boundary and re-run the frozen preprocessing, velocity, action, and HTTP
-contract tests before it is considered equivalent.
-
 ## LingBot-World v2 Streaming
 
 The v2 pipeline expects the following files below `TF_MODEL_ZOO_PATH`:

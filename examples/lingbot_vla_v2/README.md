@@ -126,9 +126,9 @@ does not modify checkpoint files.
 
 | CLI value | Backend | Scope | Validation status |
 | --- | --- | --- | --- |
-| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | Code support; hardware unverified until the current release gate passes |
-| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 forward, action, replay, and lifecycle validated |
-| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 forward, action, replay, and lifecycle validated |
+| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; hardware unverified |
 
 Use the direct example with one of the following variants:
@@ -145,6 +145,10 @@ Use the direct example with one of the following variants:
 
 The tf-kernel path requires an SM90 wheel built for the exact PyTorch/CUDA ABI. It remains "code support, hardware
 unverified" until that real-model run succeeds on a compatible installation.
+
+The complete H100 release suite passed BF16 eager and BF16 Graph. The three runnable quantized profiles passed
+direct/HTTP numerical thresholds, AIPerf, dynamic-instruction, fault, and shutdown checks, but did not produce
+bit-exact HTTP replays. They therefore remain code-supported capacity profiles rather than release-validated profiles.
 
 The public loader accepts the same options:
 
@@ -274,8 +278,8 @@ The following measurements used one H100 80 GB, Python 3.10.12, PyTorch 2.11.0+c
 | BF16 eager | 636.107 ms | 12,299.5 MiB | Strict upstream parity 38/38; max abs `0.0` | Supported |
 | BF16 dual CUDA Graph (historical) | 132.081 ms | 12,454.3 MiB | Cosine `0.999913`; relative L2 `0.013195` | Superseded; rerun denoising-only graph |
 | Fused FP8 dual graph (historical) | 163.194 ms | 10,828.0 MiB | Cosine `0.999040`; relative L2 `0.044357` | Superseded; current release gate pending |
-| TorchAO FP8 | 1,321.630 ms | 8,266.4 MiB | Cosine `0.999714`; relative L2 `0.024001`; exact replay | Experimental capacity profile |
-| BNB NF4 | 915.299 ms | 6,297.4 MiB | Cosine `0.998031`; relative L2 `0.063843`; exact replay | Experimental capacity profile |
+| TorchAO FP8 | 1,321.630 ms | 8,266.4 MiB | Cosine `0.999714`; relative L2 `0.024001`; historical direct exact replay | Experimental capacity profile |
+| BNB NF4 | 915.299 ms | 6,297.4 MiB | Cosine `0.998031`; relative L2 `0.063843`; historical direct exact replay | Experimental capacity profile |
 | tf-kernel FP8 | Not measured | Not measured | No compatible CUDA 13/SM90 wheel installed | Code support; hardware unverified |
 
 Reproduce a measured profile from a frozen input artifact by changing `--quantization` and the output name. Add
