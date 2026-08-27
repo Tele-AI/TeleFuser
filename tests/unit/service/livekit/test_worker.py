@@ -31,6 +31,9 @@ class FakePipelineAdapter:
         self.closed_service = False
         self.created = asyncio.Event()
         self.output_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        self.publisher_tracking_enabled = False
+        self.publisher_tracking_sessions: list[str] = []
+        self.publisher_progress: list[dict[str, object]] = []
 
     def start(self, pipeline_file: str, *, skip_validation: bool = False, gpu_num: int = 1) -> None:
         self.started.append({"pipeline_file": pipeline_file, "skip_validation": skip_validation, "gpu_num": gpu_num})
@@ -63,6 +66,14 @@ class FakePipelineAdapter:
 
     def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
+
+    def enable_publisher_frame_tracking(self, session_id: str) -> bool:
+        self.publisher_tracking_sessions.append(session_id)
+        return self.publisher_tracking_enabled
+
+    def report_publisher_frame_progress(self, session_id: str, **payload: object) -> bool:
+        self.publisher_progress.append({"session_id": session_id, **payload})
+        return self.publisher_tracking_enabled
 
 
 class FakeRoomClient:
@@ -121,6 +132,9 @@ class FakeSink:
         self.session_statuses: list[tuple[str, str, str | None]] = []
         self.pipeline_sessions: list[tuple[str, str]] = []
         self.finished: list[tuple[str, str, str | None]] = []
+        self.controls: list[tuple[str, str]] = []
+        self.published: list[tuple[str, str, int, float | None]] = []
+        self.model_outputs: list[tuple[str, str, dict]] = []
 
     def on_worker_status(self, worker_id: str, status: str) -> None:
         self.worker_statuses.append((worker_id, status))
@@ -133,6 +147,25 @@ class FakeSink:
 
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
         self.finished.append((worker_id, session_id, error))
+
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        self.controls.append((worker_id, session_id))
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        self.published.append((worker_id, session_id, frames, first_frame_at))
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        del runtime_metrics, session_runtime_metrics
+        self.model_outputs.append((worker_id, session_id, payload))
 
 
 def _jpeg_chunk() -> dict:
@@ -241,6 +274,13 @@ def test_livekit_worker_runs_pipeline_and_forwards_control() -> None:
         assert room.statuses[-1]["type"] == "done"
         assert room.disconnected is True
         assert sink.pipeline_sessions == [("session-1", "pipeline-session-1")]
+        assert sink.controls == [("worker-0", "session-1")]
+        assert [output[2]["frame_count"] for output in sink.model_outputs] == [0, 1, 1, 0]
+        assert [(item[0], item[1], item[2]) for item in sink.published] == [
+            ("worker-0", "session-1", 1),
+            ("worker-0", "session-1", 1),
+        ]
+        assert all(item[3] is not None for item in sink.published)
         assert room.statuses[-1]["total_chunks"] == 2
         assert room.statuses[-1]["published_frames"] == 2
         assert sink.finished == [("worker-0", "session-1", None)]
@@ -360,3 +400,88 @@ def test_livekit_worker_bounds_room_disconnect(monkeypatch) -> None:
         assert room.disconnected is False
 
     asyncio.run(_run())
+
+
+def test_livekit_worker_reports_each_successfully_captured_video_frame(monkeypatch) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(worker_module, "_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS", 0)
+        monkeypatch.setattr(worker_module, "_VIDEO_DRAIN_GRACE_SECONDS", 0)
+        adapter = FakePipelineAdapter()
+        adapter.publisher_tracking_enabled = True
+        room = FakeRoomClient()
+        worker = LiveKitWorker(
+            worker_id="worker-0",
+            config=LiveKitServeConfig(
+                livekit_url="wss://livekit.example", livekit_api_key="key", livekit_api_secret="secret"
+            ),
+            pipeline_file="pipeline.py",
+            token_service=FakeTokenService(),
+            event_sink=FakeSink(),
+            pipeline_adapter=adapter,
+            room_client=room,
+        )
+        worker._pipeline_session_id = "pipeline-session-1"
+        worker._publisher_frame_tracking_enabled = worker._enable_publisher_frame_tracking()
+
+        async def chunks():
+            yield {"type": "chunk", "fps": 12, "frames": [Image.new("RGB", (8, 8)) for _ in range(3)]}
+
+        await worker._publish_pipeline_chunks("public-session", chunks(), wait_for_delivery_ack=False)
+        assert adapter.publisher_tracking_sessions == ["pipeline-session-1"]
+        assert [event["event"] for event in adapter.publisher_progress] == ["submitted"] * 3
+        assert [event["frames_delta"] for event in adapter.publisher_progress] == [-1, -1, -1]
+        assert [event["sequence"] for event in adapter.publisher_progress] == [1, 2, 3]
+        assert len(room.video_frames) == 3
+
+    asyncio.run(run())
+
+
+def test_livekit_worker_releases_unpublished_frame_credit_on_publish_failure_or_cancellation(monkeypatch) -> None:
+    class FailingRoomClient(FakeRoomClient):
+        def __init__(self, failure: BaseException) -> None:
+            super().__init__()
+            self.failure = failure
+
+        async def publish_video_frame(self, frame_rgb: np.ndarray, *, fps: float = 16.0) -> None:
+            del frame_rgb, fps
+            raise self.failure
+
+    async def run(failure: BaseException) -> None:
+        monkeypatch.setattr(worker_module, "_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS", 0)
+        monkeypatch.setattr(worker_module, "_VIDEO_DRAIN_GRACE_SECONDS", 0)
+        adapter = FakePipelineAdapter()
+        adapter.publisher_tracking_enabled = True
+        room = FailingRoomClient(failure)
+        worker = LiveKitWorker(
+            worker_id="worker-0",
+            config=LiveKitServeConfig(
+                livekit_url="wss://livekit.example", livekit_api_key="key", livekit_api_secret="secret"
+            ),
+            pipeline_file="pipeline.py",
+            token_service=FakeTokenService(),
+            event_sink=FakeSink(),
+            pipeline_adapter=adapter,
+            room_client=room,
+        )
+        worker._pipeline_session_id = "pipeline-session-1"
+        worker._publisher_frame_tracking_enabled = worker._enable_publisher_frame_tracking()
+
+        async def chunks():
+            yield {"type": "chunk", "fps": 12, "frames": [Image.new("RGB", (8, 8)) for _ in range(3)]}
+
+        try:
+            await worker._publish_pipeline_chunks("public-session", chunks(), wait_for_delivery_ack=False)
+        except BaseException as caught:
+            assert caught is failure
+        else:  # pragma: no cover - protects the assertion below from a false positive
+            raise AssertionError("publisher failure must propagate")
+
+        # A frame is accounted as submitted only after LiveKit accepts it.
+        # Failed/cancelled first-frame publication must rebate the entire chunk.
+        assert room.video_frames == []
+        assert [(event["event"], event["frames_delta"], event["sequence"]) for event in adapter.publisher_progress] == [
+            ("abandoned", -3, 1)
+        ]
+
+    asyncio.run(run(RuntimeError("publish failed")))
+    asyncio.run(run(asyncio.CancelledError()))

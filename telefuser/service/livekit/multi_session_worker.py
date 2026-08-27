@@ -36,6 +36,36 @@ class _SessionWorkerEventSink:
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None:
         self._owner.event_sink.on_session_finished(worker_id, session_id, error)
 
+    def on_control_received(self, worker_id: str, session_id: str) -> None:
+        callback = getattr(self._owner.event_sink, "on_control_received", None)
+        if callable(callback):
+            callback(worker_id, session_id)
+
+    def on_chunk_published(
+        self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
+    ) -> None:
+        callback = getattr(self._owner.event_sink, "on_chunk_published", None)
+        if callable(callback):
+            callback(worker_id, session_id, frames, first_frame_at)
+
+    def on_model_output(
+        self,
+        worker_id: str,
+        session_id: str,
+        payload: dict,
+        runtime_metrics: dict | None = None,
+        session_runtime_metrics: dict | None = None,
+    ) -> None:
+        callback = getattr(self._owner.event_sink, "on_model_output", None)
+        if callable(callback):
+            callback(
+                worker_id,
+                session_id,
+                payload,
+                runtime_metrics=runtime_metrics,
+                session_runtime_metrics=session_runtime_metrics,
+            )
+
 
 class MultiSessionLiveKitWorker:
     """Load one model pipeline and retain multiple independent room sessions."""
@@ -51,6 +81,7 @@ class MultiSessionLiveKitWorker:
         pipeline_adapter: LiveKitPipelineAdapter | None = None,
         room_client_factory: Callable[[], RoomClient] | None = None,
         gpu_num: int = 1,
+        gpu_ids: list[str] | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.config = config
@@ -59,7 +90,8 @@ class MultiSessionLiveKitWorker:
         self.event_sink = event_sink or NullWorkerEventSink()
         self.pipeline_adapter = pipeline_adapter or LiveKitPipelineAdapter()
         self.room_client_factory = room_client_factory or LiveKitRoomClient
-        self.gpu_num = gpu_num
+        self.gpu_ids = list(gpu_ids) if gpu_ids is not None else None
+        self.gpu_num = len(self.gpu_ids) if self.gpu_ids else gpu_num
         self._sessions: dict[str, LiveKitSessionRunner] = {}
         self._session_worker_statuses: dict[str, str] = {}
         self._started = False
@@ -73,6 +105,7 @@ class MultiSessionLiveKitWorker:
             self.pipeline_file,
             skip_validation=skip_validation,
             gpu_num=self.gpu_num,
+            gpu_ids=self.gpu_ids,
         )
         profile = None
         configure_capacity = getattr(self.pipeline_adapter, "configure_session_capacity", None)

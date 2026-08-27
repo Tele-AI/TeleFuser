@@ -81,3 +81,45 @@ def test_worker_pool_cancels_session_after_cleanup_timeout(monkeypatch) -> None:
         assert worker.cancelled is True
 
     asyncio.run(_run())
+
+
+class _ScaleSink:
+    def __init__(self) -> None:
+        self.statuses: list[tuple[str, str]] = []
+
+    def on_worker_status(self, worker_id: str, status: str) -> None:
+        self.statuses.append((worker_id, status))
+
+
+class _ScalableWorker(_CooperativeWorker):
+    def __init__(self, worker_id: str) -> None:
+        super().__init__(complete_on_stop=True)
+        self.worker_id = worker_id
+        self.event_sink = _ScaleSink()
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    async def start(self, *, skip_validation: bool = False) -> None:
+        del skip_validation
+        self.start_calls += 1
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+def test_worker_pool_scales_configured_idle_replicas() -> None:
+    async def _run() -> None:
+        workers = {worker_id: _ScalableWorker(worker_id) for worker_id in ("worker-0", "worker-1")}
+        pool = InProcessLiveKitWorkerPool(workers, initial_workers=1)
+        await pool.start(skip_validation=True)
+
+        assert pool.active_worker_count() == 1
+        assert workers["worker-0"].start_calls == 1
+        assert workers["worker-1"].start_calls == 0
+
+        assert await pool.scale_to(2) == 2
+        assert workers["worker-1"].start_calls == 1
+        assert await pool.scale_to(1) == 1
+        assert workers["worker-1"].stop_calls == 1
+
+    asyncio.run(_run())

@@ -48,6 +48,17 @@ def test_connect_with_empty_controls_does_not_advance_dit(tmp_path: Path) -> Non
         runtime.stop()
 
 
+def test_runtime_accepts_two_latent_experimental_chunk(tmp_path: Path) -> None:
+    image_path = tmp_path / "initial.png"
+    _write_image(image_path)
+    runtime = InteractiveRuntime(_FakePipeline(), fps=8, control_latent_frames=2, output_queue_size=2)
+    try:
+        assert runtime.control_latent_frames == 2
+        assert runtime.fps == 8
+    finally:
+        runtime.stop()
+
+
 def test_full_fifo_applies_backpressure_without_reordering() -> None:
     pipeline = _FakePipeline()
     runtime = InteractiveRuntime(pipeline, fps=12, control_latent_frames=3, output_queue_size=1)

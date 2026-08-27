@@ -15,6 +15,7 @@ from telefuser.pipelines.wan_video.text_encoding import TextEncodingStage
 from telefuser.pipelines.wan_video.vae import VAEStage
 
 from .denoising import ABotWorldDenoisingStage
+from .taew_vae import ABotWorldTAEWDecodeStage
 
 
 @dataclass
@@ -30,6 +31,10 @@ class ABotWorldPipelineConfig:
     # Match LingBot-World v2: six fixed sink latents plus a twelve-latent rolling tail.
     local_attn_size: int = 18
     sink_size: int = 6
+    # Opt-in only: capture the fixed-shape, steady-state Relative-RoPE DiT
+    # continuation path. Dynamic first chunks, cache warmup, VAE and output
+    # postprocessing remain eager.
+    cuda_graph_enabled: bool = False
 
 
 class ABotWorldPipeline(BasePipeline):
@@ -50,7 +55,7 @@ class ABotWorldPipeline(BasePipeline):
         self.width_division_factor = 32
 
     def _get_stages(self) -> list:
-        return [self.vae_stage, self.text_encoding_stage, self.denoise_stage]
+        return [self.vae_stage, self.text_encoding_stage, self.denoise_stage, self.taew_decode_stage]
 
     def init(self, module_manager: ModuleManager, config: ABotWorldPipelineConfig) -> None:
         if config.dit_config.parallel_config.world_size != 1:
@@ -67,11 +72,13 @@ class ABotWorldPipeline(BasePipeline):
         self._model_info = module_manager.get_model_info()
         self.config = config
         self.vae_stage = VAEStage("abot_world_vae", module_manager, config.vae_config)
+        self.taew_decode_stage = ABotWorldTAEWDecodeStage("abot_world_taew_decode", module_manager, config.vae_config)
         self.text_encoding_stage = TextEncodingStage(
             "abot_world_text_encoding", module_manager, config.text_encoding_config
         )
         self.denoise_stage = ABotWorldDenoisingStage("abot_world_denoise", module_manager, config.dit_config)
         self.denoise_stage.parallel_models()
+        self.denoise_stage.configure_cuda_graph(config.cuda_graph_enabled)
         self.denoise_stage.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
     @classmethod
