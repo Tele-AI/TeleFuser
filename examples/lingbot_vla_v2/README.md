@@ -22,8 +22,8 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | RobotWin preprocessing | Supported | Three RGB cameras, task text, and a raw 14-dimensional state |
 | Canonical action output | Supported | Normally `50 x 55` normalized actions |
 | BF16 inference | Supported | Default path; strict 38-tensor upstream parity passed |
-| CUDA Graph | Supported | Opt-in prefix and action-denoising graphs with fixed layouts |
-| Quantization | Partial | H100-validated capacity profiles; see Configuration and Performance |
+| CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
+| Quantization | Partial | Profile-specific release status; see Configuration and Performance |
 | Native server API | Supported | Asynchronous structured task API and `TFClient` |
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
@@ -97,7 +97,7 @@ Key options:
 | --- | --- | --- |
 | `--device` | `cuda` | Inference device |
 | `--seed` | None | Optional deterministic noise seed |
-| `--cuda-graph` | Disabled | Enable fixed-layout prefix and denoising graphs |
+| `--cuda-graph` | Disabled | Keep the dynamic prefix eager and graph the fixed-shape denoising loop |
 | `--quantization` | None | Select an optional quantization profile |
 | `--output` | `canonical_action_chunk.npz` | Output NPZ path |
 
@@ -108,12 +108,13 @@ returns `policy_verified=False` and `verification_status="unverified_official_6b
 
 ### CUDA Graph
 
-`--cuda-graph` enables two lazily captured graphs. The prefix graph encodes the vision-language prefix and builds the
-36-layer KV cache; the denoising graph captures all 10 action-denoising steps and reuses the static KV buffers.
+`--cuda-graph` keeps vision-language prefix encoding and 36-layer KV-cache construction eager for every request, then
+lazily captures all 10 fixed-shape action-denoising steps. Different instructions and language padding masks therefore
+reuse the same denoising graph without being tied to the warmup instruction.
 
-Graphs are specialized to the first request's shapes, dtypes, device, image grid, camera-valid mask, and language
-padding mask. Standard preprocessing keeps these layouts fixed at batch 1, language length 72, and action shape
-`1 x 50 x 55`. Replay is serialized per policy instance. Close the pipeline to release graph buffers.
+The denoising graph remains specialized to its tensor shapes, dtypes, and device. Standard preprocessing keeps these
+layouts fixed at batch 1, language length 72, and action shape `1 x 50 x 55`. Prefix and graph execution are serialized
+per policy instance. Close the pipeline to release graph buffers.
 
 CUDA Graph cannot be combined with `torch.compile` or online quantization other than `fused-fp8-graph`. Invalid
 combinations fail before model loading.
@@ -125,7 +126,7 @@ does not modify checkpoint files.
 
 | CLI value | Backend | Scope | Validation status |
 | --- | --- | --- | --- |
-| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 validated; experimental capacity profile |
+| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | Code support; hardware unverified until the current release gate passes |
 | `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 forward, action, replay, and lifecycle validated |
 | `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 forward, action, replay, and lifecycle validated |
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; hardware unverified |
@@ -243,6 +244,22 @@ bash scripts/setup_aiperf.sh
 bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
 ```
 
+Run the complete real-GPU release suite after installing AIPerf. It executes every runtime profile in an isolated
+process, compares direct and HTTP actions, changes instruction layout under CUDA Graph, runs bounded load and fault
+checks, verifies shutdown/restart, and records full checkpoint, processor, software, CUDA, and GPU identity:
+
+```bash
+.venv-vla/bin/python tools/validation/run_lingbot_vla_v2_release_suite.py suite \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --gpu-index 0 \
+  --output-dir work_dirs/lingbot_vla_v2_release
+```
+
+Use `--profiles bf16-eager,bf16-graph` for an intermediate run. Such a partial run is useful for development but is
+not a complete quantization support-matrix release result.
+
 These checks establish framework parity and serving contracts, not physical robot task success.
 
 ## Performance
@@ -255,8 +272,8 @@ The following measurements used one H100 80 GB, Python 3.10.12, PyTorch 2.11.0+c
 | Profile | Runtime mean | Steady GPU allocated | Action comparison | Status |
 | --- | ---: | ---: | --- | --- |
 | BF16 eager | 636.107 ms | 12,299.5 MiB | Strict upstream parity 38/38; max abs `0.0` | Supported |
-| BF16 dual CUDA Graph | 132.081 ms | 12,454.3 MiB | Cosine `0.999913`; relative L2 `0.013195` | Supported, opt-in |
-| Fused FP8 dual graph | 163.194 ms | 10,828.0 MiB | Cosine `0.999040`; relative L2 `0.044357` | Experimental capacity profile |
+| BF16 dual CUDA Graph (historical) | 132.081 ms | 12,454.3 MiB | Cosine `0.999913`; relative L2 `0.013195` | Superseded; rerun denoising-only graph |
+| Fused FP8 dual graph (historical) | 163.194 ms | 10,828.0 MiB | Cosine `0.999040`; relative L2 `0.044357` | Superseded; current release gate pending |
 | TorchAO FP8 | 1,321.630 ms | 8,266.4 MiB | Cosine `0.999714`; relative L2 `0.024001`; exact replay | Experimental capacity profile |
 | BNB NF4 | 915.299 ms | 6,297.4 MiB | Cosine `0.998031`; relative L2 `0.063843`; exact replay | Experimental capacity profile |
 | tf-kernel FP8 | Not measured | Not measured | No compatible CUDA 13/SM90 wheel installed | Code support; hardware unverified |
@@ -276,9 +293,10 @@ CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
   --output work_dirs/vla_quantization/torchao_runtime.json
 ```
 
-BF16 dual graph was 4.79x faster than BF16 eager in the matched 20-request core benchmark. Fused FP8 reduced steady
-allocation by about 1,626 MiB relative to BF16 graph but was about 24% slower. TorchAO FP8 and BNB NF4 reduced memory
-but were slower than BF16 eager at batch 1, so they remain capacity options rather than latency recommendations.
+The two dual-graph rows preserve the previous implementation's timing comparison; they are not measurements of the
+current dynamic-prefix implementation. Rerun the release suite and fixed-input runtime benchmark before publishing new
+graph numbers. TorchAO FP8 and BNB NF4 reduced memory but were slower than BF16 eager at batch 1, so they remain
+capacity options rather than latency recommendations.
 
 The quantization gate requires finite `50 x 55` actions, cosine similarity at least `0.995`, relative L2 at most
 `0.10`, max absolute error at most `0.5`, and exact deterministic replay. It does not establish robot task success.
