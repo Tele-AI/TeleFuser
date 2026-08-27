@@ -117,6 +117,23 @@ def test_compare_actions_can_require_exact_quantized_replay() -> None:
     assert report["passed"] is False
 
 
+def test_compare_actions_preserves_zero_reference_relative_l2() -> None:
+    reference = [[0.0] * 55 for _ in range(50)]
+    candidate = [row.copy() for row in reference]
+    candidate[0][0] = 1e-6
+
+    report = compare_actions(
+        reference,
+        candidate,
+        min_cosine=0.0,
+        max_relative_l2=0.5,
+        max_absolute_error=0.5,
+    )
+
+    assert report["relative_l2"] == 1.0
+    assert report["checks"]["relative_l2"] is False
+
+
 def test_compare_actions_rejects_wrong_shape() -> None:
     with pytest.raises(ValueError, match="50x55"):
         compare_actions(

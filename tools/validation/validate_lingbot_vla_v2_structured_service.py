@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +25,17 @@ from typing import Any
 
 import psutil
 import requests
+
+try:
+    from tools.validation.lingbot_vla_v2_validation_common import (
+        compare_windows,
+        percentile,
+        summarize_samples,
+    )
+except ModuleNotFoundError as error:
+    if error.name != "tools":
+        raise
+    from lingbot_vla_v2_validation_common import compare_windows, percentile, summarize_samples
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MIB = 1024**2
@@ -80,53 +91,6 @@ def parse_state_json(value: str) -> list[float]:
             raise argparse.ArgumentTypeError("state values must be finite numbers")
         state.append(float(item))
     return state
-
-
-def percentile(values: Sequence[float], fraction: float) -> float:
-    """Return a linearly interpolated percentile for a non-empty sample."""
-    if not values:
-        raise ValueError("percentile requires at least one value")
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
-
-def summarize(values: Sequence[float]) -> dict[str, float | int] | None:
-    """Summarize a possibly empty sample in seconds."""
-    if not values:
-        return None
-    return {
-        "count": len(values),
-        "mean": statistics.fmean(values),
-        "min": min(values),
-        "p50": percentile(values, 0.50),
-        "p90": percentile(values, 0.90),
-        "p95": percentile(values, 0.95),
-        "p99": percentile(values, 0.99),
-        "max": max(values),
-    }
-
-
-def compare_windows(values: Sequence[float], fraction: float = 0.1) -> dict[str, float | int] | None:
-    """Compare the first and last windows of an ordered measurement series."""
-    if not values:
-        return None
-    window_count = max(1, math.ceil(len(values) * fraction))
-    first_mean = statistics.fmean(values[:window_count])
-    last_mean = statistics.fmean(values[-window_count:])
-    delta = last_mean - first_mean
-    return {
-        "sample_count": len(values),
-        "window_count": window_count,
-        "first_mean": first_mean,
-        "last_mean": last_mean,
-        "delta": delta,
-        "change_percent": delta / first_mean * 100.0 if first_mean else 0.0,
-    }
 
 
 def validate_service_metadata(metadata: Any) -> None:
@@ -571,12 +535,12 @@ class ResourceSampler:
             "observed_process_ids": sorted(self._process_ids),
             "errors": list(self._errors),
             "cpu_rss_mib": {
-                "distribution": summarize(self._cpu_rss),
+                "distribution": summarize_samples(self._cpu_rss),
                 "trend": compare_windows(self._cpu_rss),
             },
             "gpu_memory_mib": {
                 index: {
-                    "distribution": summarize(values),
+                    "distribution": summarize_samples(values),
                     "trend": compare_windows(values),
                 }
                 for index, values in sorted(self._gpu_memory.items())
@@ -658,17 +622,17 @@ class RunAccumulator:
             "elapsed_seconds": elapsed_seconds,
             "throughput_requests_per_second": self.succeeded / elapsed_seconds if elapsed_seconds > 0 else 0.0,
             "latency_seconds": {
-                "end_to_end": summarize(self.end_to_end),
-                "submission": summarize(self.submit),
-                "accepted_to_terminal": summarize(self.accepted_to_terminal),
-                "target_inference": summarize(self.inference),
+                "end_to_end": summarize_samples(self.end_to_end),
+                "submission": summarize_samples(self.submit),
+                "accepted_to_terminal": summarize_samples(self.accepted_to_terminal),
+                "target_inference": summarize_samples(self.inference),
             },
             "latency_trend": {
                 "end_to_end": compare_windows(self.end_to_end),
                 "target_inference": compare_windows(self.inference),
             },
-            "poll_count": summarize(self.poll_counts),
-            "peak_memory_mb": summarize(self.peak_memory),
+            "poll_count": summarize_samples(self.poll_counts),
+            "peak_memory_mb": summarize_samples(self.peak_memory),
             "retained_records": {
                 "limit_per_outcome": self.max_records,
                 "successful": retained_successes,

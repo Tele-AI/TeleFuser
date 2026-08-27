@@ -7,7 +7,6 @@ import ast
 import base64
 import hashlib
 import json
-import math
 import os
 import signal
 import subprocess
@@ -19,17 +18,20 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import psutil
 import requests
 
 try:
     from tools.validation import validate_lingbot_vla_v2_service_faults as fault_validator
     from tools.validation import validate_lingbot_vla_v2_structured_service as structured_validator
+    from tools.validation.lingbot_vla_v2_validation_common import action_error_metrics
 except ModuleNotFoundError as error:
     if error.name != "tools":
         raise
     import validate_lingbot_vla_v2_service_faults as fault_validator
     import validate_lingbot_vla_v2_structured_service as structured_validator
+    from lingbot_vla_v2_validation_common import action_error_metrics
 
 
 @dataclass(frozen=True)
@@ -175,32 +177,29 @@ def compare_actions(
         raise ValueError("action parity requires two 50x55 chunks")
     if any(len(row) != 55 for row in reference) or any(len(row) != 55 for row in candidate):
         raise ValueError("action parity requires two 50x55 chunks")
-    left = [float(value) for row in reference for value in row]
-    right = [float(value) for row in candidate for value in row]
-    if not all(math.isfinite(value) for value in (*left, *right)):
+    left = np.asarray(reference, dtype=np.float64)
+    right = np.asarray(candidate, dtype=np.float64)
+    metrics = action_error_metrics(left, right)
+    if not metrics["reference_finite"] or not metrics["candidate_finite"]:
         raise ValueError("action parity inputs must be finite")
-    dot = math.fsum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(math.fsum(value * value for value in left))
-    right_norm = math.sqrt(math.fsum(value * value for value in right))
-    difference_norm = math.sqrt(math.fsum((a - b) ** 2 for a, b in zip(left, right, strict=True)))
-    cosine = dot / (left_norm * right_norm) if left_norm and right_norm else float(left == right)
-    relative_l2 = difference_norm / left_norm if left_norm else float(difference_norm != 0)
-    max_abs = max(abs(a - b) for a, b in zip(left, right, strict=True))
+    reference_norm = float(np.linalg.norm(left.reshape(-1)))
+    difference_norm = float(np.linalg.norm((right - left).reshape(-1)))
+    relative_l2 = float(metrics["relative_l2"]) if reference_norm else float(difference_norm != 0)
     checks = {
         "finite": True,
-        "cosine": cosine >= min_cosine,
+        "cosine": float(metrics["cosine"]) >= min_cosine,
         "relative_l2": relative_l2 <= max_relative_l2,
-        "max_absolute_error": max_abs <= max_absolute_error,
+        "max_absolute_error": float(metrics["max_abs"]) <= max_absolute_error,
     }
-    exact = left == right
+    exact = bool(metrics["exact"])
     if require_exact:
         checks["exact_replay"] = exact
     return {
         "passed": all(checks.values()),
         "checks": checks,
-        "cosine_similarity": cosine,
+        "cosine_similarity": metrics["cosine"],
         "relative_l2": relative_l2,
-        "max_absolute_error": max_abs,
+        "max_absolute_error": metrics["max_abs"],
         "exact": exact,
         "exact_required": require_exact,
         "thresholds": {
