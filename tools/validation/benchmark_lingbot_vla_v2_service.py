@@ -205,6 +205,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             str(args.qwen3vl_root),
             device=str(device),
             quantization=args.quantization,
+            cuda_graph=args.cuda_graph,
         ),
         device=device,
         process=process,
@@ -320,6 +321,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "qwen3vl_root": str(args.qwen3vl_root.resolve()),
             "device": str(device),
             "quantization": args.quantization or "bf16",
+            "cuda_graph": args.cuda_graph,
             "quantization_runtime": quantization_runtime,
             "seed": args.seed,
             "instruction": args.instruction,
@@ -364,7 +366,11 @@ def main() -> None:
     parser.add_argument("--instruction", default="pick up the red block")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
+    parser.add_argument(
+        "--quantization",
+        choices=("fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+    )
+    parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--execution-mode", choices=("service-thread", "direct"), default="service-thread")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--runs", type=int, default=20)

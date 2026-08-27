@@ -958,7 +958,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-action-dim", type=int, default=55)
     parser.add_argument(
         "--quantization-profile",
-        choices=("bf16", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+        choices=("bf16", "fused-fp8-graph", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
         default="bf16",
         help="Operator-declared profile recorded in the report; it does not change the running service.",
     )

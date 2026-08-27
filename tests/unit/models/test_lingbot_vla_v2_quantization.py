@@ -300,12 +300,10 @@ class _CudaGraphVelocityModel:
     config = SimpleNamespace(num_steps=10)
 
     def __init__(self) -> None:
-        self.prefix_capture_enabled = False
-
-    def set_prefix_cuda_graph_capture(self, enabled: bool) -> None:
-        self.prefix_capture_enabled = enabled
+        self.prefix_builds = 0
 
     def build_prefix_cache(self, images, _img_masks, lang_tokens, lang_masks, _image_grid_thw):
+        self.prefix_builds += 1
         scale = images.mean() + lang_tokens.float().mean()
         positions = lang_tokens.clone()
         cache = {
@@ -362,7 +360,7 @@ def test_denoising_cuda_graph_replays_all_steps_with_new_inputs() -> None:
 
 @pytest.mark.gpu
 @torch.inference_mode()
-def test_prefix_and_denoising_cuda_graphs_share_kv_buffers_and_replay_new_inputs() -> None:
+def test_cuda_graph_rebuilds_dynamic_prefix_and_replays_denoising() -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA Graph test requires CUDA")
 
@@ -393,21 +391,14 @@ def test_prefix_and_denoising_cuda_graphs_share_kv_buffers_and_replay_new_inputs
     actual = runner.run(images, img_masks, lang_tokens, lang_masks, state, noise, grid)
     torch.cuda.synchronize(device)
     assert torch.equal(actual, expected)
-    assert runner.denoising.past_key_values is runner.prefix.past_key_values
-    assert model.prefix_capture_enabled
+    assert model.prefix_builds == 2
 
     images.fill_(0.5)
     lang_tokens.add_(1)
+    lang_masks[:, :2] = False
     state.fill_(-0.1)
     expected_replay = eager()
     actual_replay = runner.run(images, img_masks, lang_tokens, lang_masks, state, noise, grid)
     torch.cuda.synchronize(device)
     assert torch.equal(actual_replay, expected_replay)
-
-    changed_grid = torch.tensor([[1, 1, 4]], device=device)
-    with pytest.raises(ValueError, match="image_grid_thw values changed"):
-        runner.run(images, img_masks, lang_tokens, lang_masks, state, noise, changed_grid)
-
-    img_masks.zero_()
-    with pytest.raises(ValueError, match="img_masks values changed"):
-        runner.run(images, img_masks, lang_tokens, lang_masks, state, noise, grid)
+    assert model.prefix_builds == 4

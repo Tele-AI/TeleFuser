@@ -720,7 +720,6 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         self.visual_max_seqlen = None
         self.visual_sequence_lengths = None
         self._cached_image_grid_signature = None
-        self._cuda_graph_fixed_grid = False
         self._cached_visual_pos_indices = None
 
         del self.qwen_expert.model.embed_tokens
@@ -785,14 +784,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         image_grid_thw: torch.LongTensor,
     ):
         precompute_grid_thw = getattr(self.config, "precompute_grid_thw", False)
-        if getattr(self, "_cuda_graph_fixed_grid", False):
-            if self._cached_image_grid_signature is None:
-                raise RuntimeError("Qwen3-VL fixed-grid CUDA Graph cache was enabled before grid preprocessing")
-            grid_signature = self._cached_image_grid_signature
-            cache_miss = False
-        else:
-            grid_signature = tuple(image_grid_thw.detach().to(device="cpu").reshape(-1).tolist())
-            cache_miss = self.position_embeddings is None or self._cached_image_grid_signature != grid_signature
+        grid_signature = tuple(image_grid_thw.detach().to(device="cpu").reshape(-1).tolist())
+        cache_miss = self.position_embeddings is None or self._cached_image_grid_signature != grid_signature
         if precompute_grid_thw and cache_miss:
             (
                 self.pos_embeds,
@@ -1071,8 +1064,6 @@ class FlowMatchingV2(FlowMatchingBase):
             self.use_shared_future_task_proj = False
             self.future_video_share_future_depth_query = False
             self.block_future_depth_to_action = False
-        self._cached_prefix_position_ids = None
-        self._cached_deepstack_indices = None
 
     def embed_prefix(
         self,
@@ -1277,34 +1268,21 @@ class FlowMatchingV2(FlowMatchingBase):
             att_masks = torch.zeros((bsize, embs.shape[1]), device=device, dtype=torch.bool)
 
         img_visual_only = einops.repeat(img_masks, "b n -> b n l", l=num_patch)
-        fixed_prefix_layout = getattr(self.qwenvl_with_expert, "_cuda_graph_fixed_grid", False)
-        if fixed_prefix_layout:
-            if (
-                self._cached_prefix_position_ids is None
-                or self._cached_deepstack_indices is None
-                or self.qwenvl_with_expert._cached_visual_pos_indices is None
-            ):
-                raise RuntimeError("LingBot-VLA v2 fixed prefix layout was enabled before prefix preprocessing")
-            prefix_position_ids = self._cached_prefix_position_ids
-            deepstack_indices = self._cached_deepstack_indices
-        else:
-            flat_img_masks = einops.rearrange(img_masks, "b n -> (b n)")
-            active_image_indices = torch.nonzero(flat_img_masks, as_tuple=False).flatten()
-            if active_image_indices.numel() == 0:
-                active_image_indices = torch.zeros(1, dtype=torch.long, device=flat_grid_thw.device)
-            rope_grid_thw = flat_grid_thw.index_select(0, active_image_indices)
-            prefix_position_ids = self.qwenvl_with_expert.build_prefix_position_ids(
-                prefix_input_ids,
-                pad_masks.long(),
-                image_grid_thw=rope_grid_thw,
-                video_grid_thw=None,
-            )
-            deepstack_indices = torch.nonzero(img_visual_only.reshape(-1), as_tuple=False).flatten()
-            self._cached_prefix_position_ids = prefix_position_ids
-            self._cached_deepstack_indices = deepstack_indices
-            self.qwenvl_with_expert._cached_visual_pos_indices = torch.nonzero(
-                full_visual_pos_masks.reshape(-1), as_tuple=False
-            ).flatten()
+        flat_img_masks = einops.rearrange(img_masks, "b n -> (b n)")
+        active_image_indices = torch.nonzero(flat_img_masks, as_tuple=False).flatten()
+        if active_image_indices.numel() == 0:
+            active_image_indices = torch.zeros(1, dtype=torch.long, device=flat_grid_thw.device)
+        rope_grid_thw = flat_grid_thw.index_select(0, active_image_indices)
+        prefix_position_ids = self.qwenvl_with_expert.build_prefix_position_ids(
+            prefix_input_ids,
+            pad_masks.long(),
+            image_grid_thw=rope_grid_thw,
+            video_grid_thw=None,
+        )
+        deepstack_indices = torch.nonzero(img_visual_only.reshape(-1), as_tuple=False).flatten()
+        self.qwenvl_with_expert._cached_visual_pos_indices = torch.nonzero(
+            full_visual_pos_masks.reshape(-1), as_tuple=False
+        ).flatten()
 
         filtered_deepstack = []
         for deepstack in deepstack_embs:
@@ -1352,18 +1330,10 @@ class FlowMatchingV2(FlowMatchingBase):
         raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
     def set_cuda_graph_enabled(self, enabled: bool) -> None:
-        """Enable lazy capture of fixed-shape prefix encoding and denoising."""
+        """Enable lazy capture of fixed-shape action denoising."""
         self._cuda_graph_enabled = bool(enabled)
         if not self._cuda_graph_enabled:
             self._cuda_graph_runner = None
-            self.set_prefix_cuda_graph_capture(False)
-            self._cached_prefix_position_ids = None
-            self._cached_deepstack_indices = None
-            self.qwenvl_with_expert._cached_visual_pos_indices = None
-
-    def set_prefix_cuda_graph_capture(self, enabled: bool) -> None:
-        """Skip host grid-signature work while replaying a validated fixed prefix graph."""
-        self.qwenvl_with_expert._cuda_graph_fixed_grid = bool(enabled)
 
     @property
     def cuda_graph_enabled(self) -> bool:
@@ -1439,7 +1409,7 @@ class FlowMatchingV2(FlowMatchingBase):
             if device.type != "cuda":
                 raise RuntimeError("LingBot-VLA v2 CUDA Graph requires CUDA inference")
             if image_grid_thw is None:
-                raise RuntimeError("LingBot-VLA v2 prefix CUDA Graph requires image_grid_thw")
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires image_grid_thw")
             if getattr(self, "_use_compile_predict_velocity", False):
                 raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
             if self._cuda_graph_runner is None:
