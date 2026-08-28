@@ -373,7 +373,11 @@ The same FL2VA example exposes dense/Sol and BF16/FP8 as independent switches. `
 tf-kernel W8A8 Linear GEMMs to the transformer blocks. `--attn-impl SOL_ATTN` enables the MiniMax-H3 Sol policy:
 the first 10 denoising steps and first 2 DiT layers remain dense, the full condition prefix is an exact KV sink, and
 prefix queries are recomputed with BF16 dense attention. Adding `--sol-fp8` quantizes post-RoPE Q/K/V in active sparse
-layers and dispatches the SM90 CuTe FP8 Sol mainloop.
+layers and dispatches the SM90 CuTe FP8 Sol mainloop. The MiniMax-H3 quality profile also centers K and V over the live
+sequence before E4M3 conversion, adds the V mean back after attention, and corrects the residual V mean bias caused by
+E4M3 rounding. These are attention-equivalent transforms rather than Linear SmoothQuant. K/V statistics use one exact
+fused reduction, and dense-prefix replacement is fused with the sparse-output correction; the optimized output is
+bitwise identical to the original exact smoothing path.
 
 ~~~bash
 # BF16 dense
@@ -389,22 +393,23 @@ python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
 
 # FP8 Linear + FP8 Sol attention
 python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
-  --gpu-num 4 --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
+  --gpu-num 1 --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
   --output outputs/h3_fp8_sol.mp4
 ~~~
 
 Use `--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, `--sol-threshold-type`,
-`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. The defaults
-match the released H100 MiniMax-H3 Sol profile.
+`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. Use
+`--sol-fp8-smoothing none|k|kv` and `--no-sol-fp8-v-bias-correction` to isolate the quality protections. The defaults
+use K+V smoothing and V bias correction for the H100 MiniMax-H3 Sol profile.
 
-For a warmed four-GPU comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
-peaks, run the two profiles below. Four GPUs use Ulysses2 x TP2 for both profiles.
+For a warmed matched comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
+peaks, run the two single-GPU profiles below. Pass `--gpu-num 4` to retain the earlier Ulysses2 x TP2 benchmark mode.
 
 ~~~bash
 python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
-  --profile baseline --output benchmarks/minimax_h3_fp8_sol/baseline_sp2_tp2_bf16_flash.mp4
+  --gpu-num 1 --profile baseline --output benchmarks/minimax_h3_fp8_sol/baseline_bf16_flash.mp4
 python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
-  --profile optimized --output benchmarks/minimax_h3_fp8_sol/optimized_sp2_tp2_fp8_sol_exact.mp4
+  --gpu-num 1 --profile optimized --output benchmarks/minimax_h3_fp8_sol/optimized_fp8_sol_exact.mp4
 ~~~
 
 For matched BF16/TorchAO-FP8/tf-kernel-FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report

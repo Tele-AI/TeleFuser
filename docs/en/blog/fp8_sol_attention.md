@@ -224,6 +224,23 @@ MiniMax-H3 has a packed multimodal sequence, so it needs two additional protecti
 prefix is registered as an exact KV sink, and prefix queries are recomputed with BF16 dense attention. The first ten
 steps and first two DiT layers also use matched packed FlashAttention-4. Token-refiner attention remains dense.
 
+MiniMax-H3 FP8 Sol also defaults to attention-specific sequence-mean smoothing. This is not Linear SmoothQuant and
+does not migrate scale between a Linear activation and its weights. For one head, TeleFuser applies
+
+$$K' = K - \operatorname{mean}_{T}(K), \qquad V' = V - \operatorname{mean}_{T}(V).$$
+
+The K shift adds the same scalar to every logit in a query row, so softmax is unchanged. Since every softmax row sums
+to one, the original result is recovered by adding `mean_T(V)` to the attention output. TeleFuser computes both means
+in FP32, fuses their subtraction into SM90 E4M3 preparation, and corrects the residual mean bias measured after V is
+rounded to E4M3. `sol_fp8_smoothing=none|k|kv` controls the two equivalent transforms, while
+`sol_fp8_v_bias_correction` controls the post-quantization V correction for ablation.
+The exact K/V statistics share one fused reduction, and a second Triton kernel merges the BF16 dense prefix with the
+corrected sparse suffix in one output pass. At the H3 attention shape this reduces the measured smoothing boundary by
+24.5% while remaining bitwise identical to the unfused implementation. Two matched 50-step runs leave a 0.96%
+throughput difference versus unsmoothed FP8 Sol, with unchanged 37.11 GiB peak allocated memory.
+The matched single-H100 quality and performance ablation is recorded in
+[`benchmarks/fp8_sol_attention_quality`](../../../benchmarks/fp8_sol_attention_quality/README.md).
+
 Unsupported shapes, dtypes, devices, or runtime kernel failures retain the public attention fallback. FP8 operands
 are dequantized before the BF16 fallback. Pure Ulysses sequence parallelism is supported: its all-to-all first
 produces full-sequence, local-head Q/K/V, then each rank computes FP8 scales and runs Sol independently. Ring and
@@ -328,13 +345,16 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
   128. BF16 Sol has broader architecture fallbacks, but the performance result does not transfer to them.
 - MiniMax-H3 online `tf-kernel` FP8 Linear quantization is currently single-GPU only. Its TP/FSDP loading contract
   remains BF16.
-- QKV quantization and centroid preprocessing are separate kernels. Further fusion may reduce launch and memory-traffic overhead, but would increase specialization and register pressure.
+- Exact sequence statistics still precede QKV quantization. Fusing the K/V reduction and output merge reduces the
+  boundary overhead, but the remaining global reduction leaves about a 1% measured throughput difference versus
+  unsmoothed FP8 Sol. Sampled statistics were rejected because they changed Sol routing quality.
 - CuTe compilation is shape- and dtype-specific. Cold-start latency includes compilation; persistent services should
   evaluate warm steady state separately.
 - The best FP8 layer range is model- and checkpoint-dependent. An all-layer setting should not be treated as the
   default quality/performance point.
-- Peak allocated memory is a CUDA allocator metric, not total process or device memory. The experiments report one
-  run per configuration and do not establish variance bounds.
+- Peak allocated memory is a CUDA allocator metric, not total process or device memory. The matched unsmoothed and
+  final fused profiles report two runs; the other ablation points report one run, so these results do not establish
+  broad variance bounds.
 
 ## Related Work
 

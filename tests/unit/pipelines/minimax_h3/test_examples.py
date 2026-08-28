@@ -142,6 +142,8 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "sol_threshold_type": "exact",
                 "sol_fp8_layer_start": 0,
                 "sol_fp8_layer_end": None,
+                "sol_fp8_smoothing": "kv",
+                "sol_fp8_v_bias_correction": True,
                 "feature_cache_config": FeatureCacheConfig(
                     enabled=True,
                     model_type="MiniMax-H3-Base",
@@ -258,6 +260,8 @@ def test_standard_example_forwards_fp8_sol_configuration(monkeypatch: pytest.Mon
         sol_threshold_type="diag",
         sol_fp8_layer_start=2,
         sol_fp8_layer_end=40,
+        sol_fp8_smoothing="k",
+        sol_fp8_v_bias_correction=False,
         quantization="tf-kernel-fp8",
     )
 
@@ -271,6 +275,8 @@ def test_standard_example_forwards_fp8_sol_configuration(monkeypatch: pytest.Mon
     assert options["sol_threshold_type"] == "diag"
     assert options["sol_fp8_layer_start"] == 2
     assert options["sol_fp8_layer_end"] == 40
+    assert options["sol_fp8_smoothing"] == "k"
+    assert options["sol_fp8_v_bias_correction"] is False
     assert options["quantization"] == "tf-kernel-fp8"
 
 

@@ -154,6 +154,8 @@ class SparseAttentionConfig:
     sol_fp8: bool = False  # Quantize post-RoPE Q/K/V activations for FP8 Sol-Attn
     sol_fp8_layer_start: int = 0  # First transformer layer using FP8 Sol-Attn
     sol_fp8_layer_end: int | None = None  # Exclusive end; None enables all remaining layers
+    sol_fp8_smoothing: str = "none"  # Sequence-mean smoothing: "none", "k", or "kv"
+    sol_fp8_v_bias_correction: bool = False  # Correct residual V mean after E4M3 rounding
 
     def __post_init__(self) -> None:
         if self.sparse_impl != "sol":
@@ -166,6 +168,10 @@ class SparseAttentionConfig:
             raise ValueError("Sol-Attn FP8 layer start must be non-negative")
         if self.sol_fp8_layer_end is not None and self.sol_fp8_layer_end <= self.sol_fp8_layer_start:
             raise ValueError("Sol-Attn FP8 layer end must be greater than its start")
+        if self.sol_fp8_smoothing not in ("none", "k", "kv"):
+            raise ValueError("Sol-Attn FP8 smoothing must be 'none', 'k', or 'kv'")
+        if self.sol_fp8_v_bias_correction and self.sol_fp8_smoothing != "kv":
+            raise ValueError("Sol-Attn FP8 V bias correction requires smoothing='kv'")
 
     def should_use_dense(self, numeral_timestep: int, layer_idx: int) -> bool:
         """Check if dense attention should be used for current step/layer.
@@ -239,6 +245,8 @@ class AttentionConfig:
         sol_fp8: bool = False,
         sol_fp8_layer_start: int = 0,
         sol_fp8_layer_end: int | None = None,
+        sol_fp8_smoothing: str = "none",
+        sol_fp8_v_bias_correction: bool = False,
         **kwargs: any,
     ) -> AttentionConfig:
         """Create a Sol-Attn config for dynamic sparse video self-attention."""
@@ -254,6 +262,8 @@ class AttentionConfig:
                 sol_fp8=sol_fp8,
                 sol_fp8_layer_start=sol_fp8_layer_start,
                 sol_fp8_layer_end=sol_fp8_layer_end,
+                sol_fp8_smoothing=sol_fp8_smoothing,
+                sol_fp8_v_bias_correction=sol_fp8_v_bias_correction,
             ),
             **kwargs,
         )
