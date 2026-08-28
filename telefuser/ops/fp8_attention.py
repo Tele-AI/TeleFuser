@@ -52,6 +52,59 @@ def _sequence_mean_kernel(
 
 
 @triton.jit
+def _sequence_mean_kv_kernel(
+    k,
+    v,
+    k_output,
+    v_output,
+    tokens: tl.constexpr,
+    heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    k_stride_batch,
+    k_stride_token,
+    k_stride_head,
+    k_stride_dim,
+    v_stride_batch,
+    v_stride_token,
+    v_stride_head,
+    v_stride_dim,
+    block_tokens: tl.constexpr,
+    block_dim: tl.constexpr,
+):
+    batch_head = tl.program_id(0)
+    dim_block = tl.program_id(1)
+    batch = batch_head // heads
+    head = batch_head % heads
+    dims = dim_block * block_dim + tl.arange(0, block_dim)
+    valid_dims = dims < head_dim
+    k_total = tl.zeros((block_dim,), dtype=tl.float32)
+    v_total = tl.zeros((block_dim,), dtype=tl.float32)
+    for start in range(0, tokens, block_tokens):
+        token_offsets = start + tl.arange(0, block_tokens)
+        valid_tokens = token_offsets < tokens
+        k_offsets = (
+            batch * k_stride_batch
+            + token_offsets[:, None] * k_stride_token
+            + head * k_stride_head
+            + dims[None, :] * k_stride_dim
+        )
+        v_offsets = (
+            batch * v_stride_batch
+            + token_offsets[:, None] * v_stride_token
+            + head * v_stride_head
+            + dims[None, :] * v_stride_dim
+        )
+        mask = valid_tokens[:, None] & valid_dims[None, :]
+        k_values = tl.load(k + k_offsets, mask=mask, other=0.0).to(tl.float32)
+        v_values = tl.load(v + v_offsets, mask=mask, other=0.0).to(tl.float32)
+        k_total += tl.sum(k_values, axis=0)
+        v_total += tl.sum(v_values, axis=0)
+    output_offsets = batch_head * head_dim + dims
+    tl.store(k_output + output_offsets, k_total / tokens, mask=valid_dims)
+    tl.store(v_output + output_offsets, v_total / tokens, mask=valid_dims)
+
+
+@triton.jit
 def _add_output_correction_kernel(
     output,
     correction,
@@ -70,6 +123,34 @@ def _add_output_correction_kernel(
     values = tl.load(output + offsets, mask=valid).to(tl.float32)
     shift = tl.load(correction + correction_offsets, mask=valid)
     tl.store(output + offsets, values + shift, mask=valid)
+
+
+@triton.jit
+def _merge_prefix_output_correction_kernel(
+    prefix,
+    output,
+    correction,
+    merged,
+    elements,
+    prefix_tokens: tl.constexpr,
+    tokens: tl.constexpr,
+    heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block + tl.arange(0, block)
+    valid = offsets < elements
+    batch = offsets // (tokens * heads * head_dim)
+    token = (offsets // (heads * head_dim)) % tokens
+    head = (offsets // head_dim) % heads
+    dim = offsets % head_dim
+    prefix_offsets = ((batch * prefix_tokens + token) * heads + head) * head_dim + dim
+    correction_offsets = (batch * heads + head) * head_dim + dim
+    prefix_values = tl.load(prefix + prefix_offsets, mask=valid & (token < prefix_tokens), other=0.0)
+    output_values = tl.load(output + offsets, mask=valid & (token >= prefix_tokens), other=0.0).to(tl.float32)
+    shift = tl.load(correction + correction_offsets, mask=valid & (token >= prefix_tokens), other=0.0)
+    values = tl.where(token < prefix_tokens, prefix_values, output_values + shift)
+    tl.store(merged + offsets, values, mask=valid)
 
 
 @triton.jit
@@ -182,6 +263,38 @@ def _sequence_mean(x: torch.Tensor) -> torch.Tensor:
         num_stages=1,
     )
     return output
+
+
+def _sequence_means(k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce matching K/V sequence means in one GPU kernel launch."""
+
+    if k.shape != v.shape or k.ndim != 4 or not (k.is_floating_point() and v.is_floating_point()):
+        raise ValueError("K/V attention smoothing expects matching floating-point [B, T, H, D] tensors")
+    if k.device != v.device:
+        raise ValueError("K and V must be on the same device")
+    if not k.is_cuda:
+        return k.float().mean(dim=1), v.float().mean(dim=1)
+    batch, tokens, heads, head_dim = k.shape
+    k_output = torch.empty((batch, heads, head_dim), device=k.device, dtype=torch.float32)
+    v_output = torch.empty_like(k_output)
+    block_tokens = 128
+    block_dim = 32
+    _sequence_mean_kv_kernel[(batch * heads, triton.cdiv(head_dim, block_dim))](
+        k,
+        v,
+        k_output,
+        v_output,
+        tokens,
+        heads,
+        head_dim,
+        *k.stride(),
+        *v.stride(),
+        block_tokens,
+        block_dim,
+        num_warps=4,
+        num_stages=1,
+    )
+    return k_output, v_output
 
 
 def _quantize_fp8_qkv_sm90(
@@ -366,8 +479,11 @@ def quantize_fp8_qkv_smoothed(
     if q.shape != k.shape or q.shape != v.shape or q.ndim != 4:
         raise ValueError("q, k, and v must share shape [B, T, H, D]")
 
-    k_mean = _sequence_mean(k) if smoothing in ("k", "kv") else None
-    v_mean = _sequence_mean(v) if smoothing == "kv" else None
+    if smoothing == "kv":
+        k_mean, v_mean = _sequence_means(k, v)
+    else:
+        k_mean = _sequence_mean(k) if smoothing == "k" else None
+        v_mean = None
     native_sm90 = q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0)
     if native_sm90:
         quantized = _quantize_fp8_qkv_sm90(q, k, v, k_mean=k_mean, v_mean=v_mean)
@@ -422,6 +538,54 @@ def apply_fp8_attention_output_correction(output: torch.Tensor, correction: torc
     return output
 
 
+def merge_fp8_attention_prefix(
+    dense_prefix: torch.Tensor,
+    output: torch.Tensor,
+    correction: torch.Tensor,
+) -> torch.Tensor:
+    """Merge a dense prefix with a corrected sparse suffix in one output pass."""
+
+    if dense_prefix.ndim != 4 or output.ndim != 4:
+        raise ValueError("attention prefix merge expects [B, T, H, D] tensors")
+    if dense_prefix.shape[0] != output.shape[0] or dense_prefix.shape[2:] != output.shape[2:]:
+        raise ValueError("dense prefix and sparse output must share batch, head, and head-dimension shapes")
+    prefix_tokens = dense_prefix.shape[1]
+    if not 0 < prefix_tokens <= output.shape[1]:
+        raise ValueError("dense attention prefix must be non-empty and no longer than the sparse output")
+    expected_correction = (output.shape[0], 1, output.shape[2], output.shape[3])
+    if correction.shape != expected_correction or correction.dtype != torch.float32:
+        raise ValueError("FP8 attention correction must be FP32 with shape [B, 1, H, D]")
+    if dense_prefix.device != output.device or correction.device != output.device:
+        raise ValueError("dense prefix, sparse output, and correction must be on the same device")
+    if dense_prefix.dtype != output.dtype:
+        raise ValueError("dense prefix and sparse output must have the same dtype")
+    if not output.is_cuda:
+        corrected_suffix = (output[:, prefix_tokens:].float() + correction).to(output.dtype)
+        return torch.cat((dense_prefix, corrected_suffix), dim=1)
+    if not (dense_prefix.is_contiguous() and output.is_contiguous() and correction.is_contiguous()):
+        raise ValueError("FP8 attention prefix merge inputs must be contiguous")
+
+    merged = torch.empty_like(output)
+    batch, tokens, heads, head_dim = output.shape
+    elements = output.numel()
+    block = 256
+    _merge_prefix_output_correction_kernel[(triton.cdiv(elements, block),)](
+        dense_prefix,
+        output,
+        correction,
+        merged,
+        elements,
+        prefix_tokens,
+        tokens,
+        heads,
+        head_dim,
+        block,
+        num_warps=4,
+        num_stages=1,
+    )
+    return merged
+
+
 __all__ = [
     "FP8_ATTENTION_BLOCK_SIZE",
     "apply_fp8_attention_output_correction",
@@ -430,6 +594,7 @@ __all__ = [
     "dequantize_fp8_per_token",
     "quantize_fp8_qkv",
     "quantize_fp8_qkv_smoothed",
+    "merge_fp8_attention_prefix",
     "quantize_fp8_per_block",
     "quantize_fp8_per_channel",
 ]
