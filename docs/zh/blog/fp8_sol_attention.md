@@ -226,6 +226,10 @@ K 平移对同一 query row 的每个 logit 增加相同常数，因此 softmax 
 attention output 加回 `mean_T(V)` 即恢复原始结果。TeleFuser 使用 FP32 统计均值，把中心化融合进 SM90
 E4M3 preparation，并补偿 V 舍入到 E4M3 后实测到的残余均值偏差。`sol_fp8_smoothing=none|k|kv` 用于
 分别消融两个等价变换，`sol_fp8_v_bias_correction` 控制量化后 V 偏差补偿。
+exact K/V 统计共享一个 fused reduction，另一个 Triton kernel 在一次写出中合并 BF16 dense prefix 与完成
+correction 的 sparse suffix。在 H3 attention shape 上，这将 smoothing boundary 耗时降低 24.5%，并与融合前
+实现保持 bitwise 一致。两轮匹配的 50-step 实验中，相比 unsmoothed FP8 Sol 的吞吐差为 0.96%，peak
+allocated 显存均为 37.11 GiB。
 匹配的单卡 H100 画质与性能消融记录在
 [`benchmarks/fp8_sol_attention_quality`](../../../benchmarks/fp8_sol_attention_quality/README.md)。
 
@@ -327,12 +331,12 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
 - 已验证的 FP8 attention mainloop 面向 SM90、noncausal self-attention、相同 Q/K/V shape 和 128 维 head。
   BF16 Sol 有更广的 architecture fallback，但本文性能数据不能直接迁移到这些路径。
 - MiniMax-H3 在线 `tf-kernel` FP8 Linear 目前只支持单 GPU；其 TP/FSDP loading contract 仍为 BF16。
-- QKV quantization 与 centroid preprocessing 是独立 kernel。进一步融合可能减少 launch 与访存开销，
-  但也会提高 specialization 数量和 register pressure。
+- exact sequence statistics 仍必须先于 QKV quantization。融合 K/V reduction 与 output merge 后，剩余的
+  全局 reduction 使吞吐相比 unsmoothed FP8 Sol 仍约低 1%；采样统计会改变 Sol routing 质量，因此未采用。
 - CuTe 编译与 shape、dtype 绑定。冷启动结果包含编译，常驻服务还应单独评估 warm steady state。
 - 最佳 FP8 layer range 依赖模型与 checkpoint，不能把全层 FP8 当作默认质量/性能点。
-- Peak allocated 是 CUDA allocator 指标，不是进程或整张 GPU 的总显存。每个配置只有一次测量，尚未给出
-  方差范围。
+- Peak allocated 是 CUDA allocator 指标，不是进程或整张 GPU 的总显存。匹配的 unsmoothed 与最终 fused
+  profile 各测了两轮，其他消融点各测一轮，因此这些结果尚不能建立完整的方差范围。
 
 ## 相关工作
 
