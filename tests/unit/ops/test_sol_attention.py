@@ -27,6 +27,22 @@ def test_sol_attention_config_defaults_and_validation() -> None:
         AttentionConfig.sol_attention(threshold_type="unknown")
     with pytest.raises(ValueError, match="KV splits"):
         AttentionConfig.sol_attention(kv_splits=3)
+    with pytest.raises(ValueError, match="smoothing"):
+        AttentionConfig.sol_attention(sol_fp8_smoothing="q")
+    with pytest.raises(ValueError, match="V bias correction"):
+        AttentionConfig.sol_attention(sol_fp8_smoothing="k", sol_fp8_v_bias_correction=True)
+
+
+def test_sol_attention_config_accepts_fp8_quality_profile() -> None:
+    config = AttentionConfig.sol_attention(
+        sol_fp8=True,
+        sol_fp8_smoothing="kv",
+        sol_fp8_v_bias_correction=True,
+    )
+
+    assert config.sparse_config is not None
+    assert config.sparse_config.sol_fp8_smoothing == "kv"
+    assert config.sparse_config.sol_fp8_v_bias_correction is True
 
 
 @pytest.mark.parametrize(

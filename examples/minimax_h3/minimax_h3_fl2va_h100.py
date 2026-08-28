@@ -36,6 +36,8 @@ PPL_CONFIG: dict[str, Any] = {
     "online_adaln_cache": True,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
     "sol_fp8": False,
+    "sol_fp8_smoothing": "kv",
+    "sol_fp8_v_bias_correction": True,
     "feature_cache_model_type": "MiniMax-H3-Base",
     "feature_cache_n_derivatives": 1,
     "feature_cache_taylor_threshold": 2,
@@ -93,6 +95,8 @@ def get_pipeline(
     sol_threshold_type: str = "exact",
     sol_fp8_layer_start: int = 0,
     sol_fp8_layer_end: int | None = None,
+    sol_fp8_smoothing: str = PPL_CONFIG["sol_fp8_smoothing"],
+    sol_fp8_v_bias_correction: bool = PPL_CONFIG["sol_fp8_v_bias_correction"],
     enable_feature_cache: bool = False,
     feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
     feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
@@ -119,6 +123,8 @@ def get_pipeline(
         sol_threshold_type=sol_threshold_type,
         sol_fp8_layer_start=sol_fp8_layer_start,
         sol_fp8_layer_end=sol_fp8_layer_end,
+        sol_fp8_smoothing=sol_fp8_smoothing,
+        sol_fp8_v_bias_correction=sol_fp8_v_bias_correction,
         feature_cache_config=FeatureCacheConfig(
             enabled=enable_feature_cache,
             model_type=feature_cache_model_type,
@@ -302,6 +308,18 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
     parser.add_argument("--sol-threshold-type", choices=("exact", "diag"), default="exact")
     parser.add_argument("--sol-fp8-layer-start", type=int, default=0)
     parser.add_argument("--sol-fp8-layer-end", type=int)
+    parser.add_argument(
+        "--sol-fp8-smoothing",
+        choices=("none", "k", "kv"),
+        default=PPL_CONFIG["sol_fp8_smoothing"],
+        help="Sequence-mean smoothing applied before FP8 QKV quantization.",
+    )
+    parser.add_argument(
+        "--sol-fp8-v-bias-correction",
+        action=argparse.BooleanOptionalAction,
+        default=PPL_CONFIG["sol_fp8_v_bias_correction"],
+        help="Correct the residual centered-V mean introduced by E4M3 rounding.",
+    )
     parser.add_argument("--enable-feature-cache", action="store_true")
     parser.add_argument("--feature-cache-model-type", default=PPL_CONFIG["feature_cache_model_type"])
     parser.add_argument(
@@ -353,6 +371,8 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         sol_threshold_type=args.sol_threshold_type,
         sol_fp8_layer_start=args.sol_fp8_layer_start,
         sol_fp8_layer_end=args.sol_fp8_layer_end,
+        sol_fp8_smoothing=args.sol_fp8_smoothing,
+        sol_fp8_v_bias_correction=args.sol_fp8_v_bias_correction,
         enable_feature_cache=args.enable_feature_cache,
         feature_cache_model_type=args.feature_cache_model_type,
         feature_cache_n_derivatives=args.feature_cache_n_derivatives,

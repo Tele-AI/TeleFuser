@@ -31,7 +31,7 @@ from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_
 from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import SparseAttentionState, attention
-from telefuser.ops.fp8_attention import quantize_fp8_per_block, quantize_fp8_qkv
+from telefuser.ops.fp8_attention import apply_fp8_attention_output_correction, quantize_fp8_qkv_smoothed
 from telefuser.ops.rotary import apply_rotary_emb_neox
 from telefuser.utils.logging import logger
 
@@ -477,6 +477,7 @@ class MiniMaxH3Attention(nn.Module):
         torch.Tensor,
         torch.Tensor,
         tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
+        torch.Tensor | None,
     ]:
         config = sparse_state.config
         layer_end = config.sol_fp8_layer_end
@@ -487,14 +488,15 @@ class MiniMaxH3Attention(nn.Module):
             and (layer_end is None or sparse_state.layer_idx < layer_end)
         )
         if not fp8_layer_active:
-            return query, key, value, None
-        if query.is_cuda and torch.cuda.get_device_capability(query.device) == (9, 0):
-            query, key, value, q_scale, k_scale, v_scale = quantize_fp8_qkv(query, key, value)
-        else:
-            query, q_scale = quantize_fp8_per_block(query)
-            key, k_scale = quantize_fp8_per_block(key)
-            value, v_scale = quantize_fp8_per_block(value)
-        return query, key, value, (q_scale, k_scale, v_scale)
+            return query, key, value, None, None
+        query, key, value, q_scale, k_scale, v_scale, output_correction = quantize_fp8_qkv_smoothed(
+            query,
+            key,
+            value,
+            smoothing=config.sol_fp8_smoothing,
+            correct_v_bias=config.sol_fp8_v_bias_correction,
+        )
+        return query, key, value, (q_scale, k_scale, v_scale), output_correction
 
     def forward(
         self,
@@ -547,6 +549,7 @@ class MiniMaxH3Attention(nn.Module):
             live_key = key[:, :live_tokens].contiguous()
             live_value = value[:, :live_tokens].contiguous()
             scales = None
+            output_correction = None
             runtime_attention_config = attention_config
             runtime_sparse_state = sparse_state
             if attention_config.attn_impl == AttnImplType.SOL_ATTN:
@@ -554,7 +557,7 @@ class MiniMaxH3Attention(nn.Module):
                     raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
                 if not 0 <= prefix_tokens <= live_tokens:
                     raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
-                sol_query, sol_key, sol_value, scales = self._prepare_sol_qkv(
+                sol_query, sol_key, sol_value, scales, output_correction = self._prepare_sol_qkv(
                     live_query,
                     live_key,
                     live_value,
@@ -578,6 +581,8 @@ class MiniMaxH3Attention(nn.Module):
                 sink_start=0,
                 sink_tokens=prefix_tokens,
             )
+            if output_correction is not None:
+                live_output = apply_fp8_attention_output_correction(live_output, output_correction)
             if self._is_sol_active(sparse_state) and prefix_tokens:
                 dense_prefix = F.scaled_dot_product_attention(
                     live_query[:, :prefix_tokens].transpose(1, 2),

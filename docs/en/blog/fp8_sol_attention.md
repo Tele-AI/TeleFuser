@@ -224,6 +224,19 @@ MiniMax-H3 has a packed multimodal sequence, so it needs two additional protecti
 prefix is registered as an exact KV sink, and prefix queries are recomputed with BF16 dense attention. The first ten
 steps and first two DiT layers also use matched packed FlashAttention-4. Token-refiner attention remains dense.
 
+MiniMax-H3 FP8 Sol also defaults to attention-specific sequence-mean smoothing. This is not Linear SmoothQuant and
+does not migrate scale between a Linear activation and its weights. For one head, TeleFuser applies
+
+$$K' = K - \operatorname{mean}_{T}(K), \qquad V' = V - \operatorname{mean}_{T}(V).$$
+
+The K shift adds the same scalar to every logit in a query row, so softmax is unchanged. Since every softmax row sums
+to one, the original result is recovered by adding `mean_T(V)` to the attention output. TeleFuser computes both means
+in FP32, fuses their subtraction into SM90 E4M3 preparation, and corrects the residual mean bias measured after V is
+rounded to E4M3. `sol_fp8_smoothing=none|k|kv` controls the two equivalent transforms, while
+`sol_fp8_v_bias_correction` controls the post-quantization V correction for ablation.
+The matched single-H100 quality and performance ablation is recorded in
+[`benchmarks/fp8_sol_attention_quality`](../../../benchmarks/fp8_sol_attention_quality/README.md).
+
 Unsupported shapes, dtypes, devices, or runtime kernel failures retain the public attention fallback. FP8 operands
 are dequantized before the BF16 fallback. Pure Ulysses sequence parallelism is supported: its all-to-all first
 produces full-sequence, local-head Q/K/V, then each rank computes FP8 scales and runs Sol independently. Ring and
