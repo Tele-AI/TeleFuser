@@ -3,8 +3,11 @@ import torch
 import torch.nn.functional as F
 
 from telefuser.ops.fp8_attention import (
+    _quantize_fp8_qkv_sm90,
+    _sequence_mean,
     apply_fp8_attention_output_correction,
     dequantize_fp8_per_channel,
+    merge_fp8_attention_prefix,
     quantize_fp8_qkv_smoothed,
 )
 
@@ -52,6 +55,32 @@ def test_fp8_value_bias_correction_restores_original_sequence_mean_on_h100() -> 
 
 
 @pytest.mark.gpu
+def test_fused_kv_statistics_match_separate_reductions_on_h100() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("FP8 attention smoothing kernel test requires H100")
+    torch.manual_seed(1)
+    shape = (1, 130, 2, 128)
+    query = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    key_mean = _sequence_mean(key)
+    value_mean = _sequence_mean(value)
+    expected = _quantize_fp8_qkv_sm90(query, key, value, k_mean=key_mean, v_mean=value_mean)
+    expected_correction = (value_mean - _sequence_mean(expected[2]) * expected[5]).unsqueeze(1).contiguous()
+
+    *actual, actual_correction = quantize_fp8_qkv_smoothed(
+        query,
+        key,
+        value,
+        smoothing="kv",
+        correct_v_bias=True,
+    )
+
+    assert all(torch.equal(before, after) for before, after in zip(expected, actual, strict=True))
+    assert torch.equal(expected_correction, actual_correction)
+
+
+@pytest.mark.gpu
 def test_fp8_output_correction_matches_fp32_add_without_allocation_on_h100() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("FP8 attention correction kernel test requires H100")
@@ -64,6 +93,22 @@ def test_fp8_output_correction_matches_fp32_add_without_allocation_on_h100() -> 
     actual = apply_fp8_attention_output_correction(output, correction)
 
     assert actual.data_ptr() == pointer
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.gpu
+def test_fused_prefix_merge_matches_correction_then_cat_on_h100() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("FP8 attention prefix merge kernel test requires H100")
+    torch.manual_seed(2)
+    output = torch.randn((1, 130, 2, 128), device="cuda", dtype=torch.bfloat16)
+    prefix = torch.randn((1, 17, 2, 128), device="cuda", dtype=torch.bfloat16)
+    correction = torch.randn((1, 1, 2, 128), device="cuda", dtype=torch.float32)
+    corrected_suffix = (output[:, prefix.shape[1] :].float() + correction).to(output.dtype)
+    expected = torch.cat((prefix, corrected_suffix), dim=1)
+
+    actual = merge_fp8_attention_prefix(prefix, output, correction)
+
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 

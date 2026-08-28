@@ -375,7 +375,9 @@ the first 10 denoising steps and first 2 DiT layers remain dense, the full condi
 prefix queries are recomputed with BF16 dense attention. Adding `--sol-fp8` quantizes post-RoPE Q/K/V in active sparse
 layers and dispatches the SM90 CuTe FP8 Sol mainloop. The MiniMax-H3 quality profile also centers K and V over the live
 sequence before E4M3 conversion, adds the V mean back after attention, and corrects the residual V mean bias caused by
-E4M3 rounding. These are attention-equivalent transforms rather than Linear SmoothQuant.
+E4M3 rounding. These are attention-equivalent transforms rather than Linear SmoothQuant. K/V statistics use one exact
+fused reduction, and dense-prefix replacement is fused with the sparse-output correction; the optimized output is
+bitwise identical to the original exact smoothing path.
 
 ~~~bash
 # BF16 dense

@@ -31,7 +31,11 @@ from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_
 from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import SparseAttentionState, attention
-from telefuser.ops.fp8_attention import apply_fp8_attention_output_correction, quantize_fp8_qkv_smoothed
+from telefuser.ops.fp8_attention import (
+    apply_fp8_attention_output_correction,
+    merge_fp8_attention_prefix,
+    quantize_fp8_qkv_smoothed,
+)
 from telefuser.ops.rotary import apply_rotary_emb_neox
 from telefuser.utils.logging import logger
 
@@ -581,8 +585,6 @@ class MiniMaxH3Attention(nn.Module):
                 sink_start=0,
                 sink_tokens=prefix_tokens,
             )
-            if output_correction is not None:
-                live_output = apply_fp8_attention_output_correction(live_output, output_correction)
             if self._is_sol_active(sparse_state) and prefix_tokens:
                 dense_prefix = F.scaled_dot_product_attention(
                     live_query[:, :prefix_tokens].transpose(1, 2),
@@ -590,7 +592,12 @@ class MiniMaxH3Attention(nn.Module):
                     live_value.transpose(1, 2),
                     scale=self.head_dim**-0.5,
                 ).transpose(1, 2)
-                live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
+                if output_correction is None:
+                    live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
+                else:
+                    live_output = merge_fp8_attention_prefix(dense_prefix, live_output, output_correction)
+            elif output_correction is not None:
+                live_output = apply_fp8_attention_output_correction(live_output, output_correction)
             if live_tokens == total_tokens:
                 output = live_output
             else:
