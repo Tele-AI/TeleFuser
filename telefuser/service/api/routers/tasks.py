@@ -7,6 +7,7 @@ Routes are defined as class methods for better testability.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -110,6 +111,7 @@ class TaskRoutes:
             return await self.api.task_app_service.submit_structured(
                 message,
                 explicit_fields=set(getattr(message, "model_fields_set", set())),
+                validate_inputs=self._validate_structured_message_inputs,
             )
         except HTTPException:
             raise
@@ -403,6 +405,41 @@ class TaskRoutes:
             last_image_path=message.last_image_path,
             ref_video_path=message.ref_video_path,
         )
+
+    async def _validate_structured_message_inputs(
+        self,
+        message: StructuredTaskRequest,
+        contract: dict[str, Any] | None,
+    ) -> None:
+        if message.task != "vla_action":
+            return
+
+        from telefuser.pipelines.lingbot_vla_v2.service import (
+            DEFAULT_MAX_IMAGE_BYTES,
+            DEFAULT_MAX_IMAGE_PIXELS,
+            LingBotVlaV2ActionRequest,
+            validate_lingbot_vla_v2_action_request,
+        )
+
+        try:
+            request = LingBotVlaV2ActionRequest(
+                task=getattr(message, "instruction", None),
+                state=getattr(message, "state", None),
+                camera_high=getattr(message, "camera_high", None),
+                camera_left_wrist=getattr(message, "camera_left_wrist", None),
+                camera_right_wrist=getattr(message, "camera_right_wrist", None),
+                seed=getattr(message, "seed", None),
+            )
+            await asyncio.to_thread(
+                validate_lingbot_vla_v2_action_request,
+                request,
+                max_image_bytes=DEFAULT_MAX_IMAGE_BYTES,
+                max_image_pixels=DEFAULT_MAX_IMAGE_PIXELS,
+            )
+        except ValidationError as error:
+            raise HTTPException(status_code=422, detail=error.errors(include_url=False)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     def _collect_available_inputs(
         self,
