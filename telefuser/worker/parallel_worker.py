@@ -158,6 +158,9 @@ def _worker_loop(
                 y = tensor_output_channel.send(y)
             # Always output results when world_size=1
             if world_size == 1 or rank == 0:
+                if current_platform.device_type != "cuda":
+                    # Queue transport without reliable device IPC: marshal results through CPU.
+                    y = to_device(y, "cpu")
                 queue_out.put(y)
     except Exception as e:
         import traceback
@@ -206,7 +209,8 @@ class ParallelWorker:
             self.device_ids = list(range(self.world_size))
 
         self.name: str = f"Parallel Worker {stage.name}"
-        self.queue_with_cpu: bool = parallel_config.queue_with_cpu
+        # Queue transport requires CPU marshalling on platforms without reliable device IPC (e.g. NPU).
+        self.queue_with_cpu: bool = parallel_config.queue_with_cpu or current_platform.device_type != "cuda"
         self.timeout: int = parallel_config.timeout
         self._lifecycle_lock = threading.Lock()
         self._failed = False
@@ -319,6 +323,9 @@ class ParallelWorker:
             reason = f"{method_name} failed: {result}"
             self._mark_failed(reason)
             raise RuntimeError(f"ParallelWorker:{self.name} {reason}") from result
+        if current_platform.device_type != "cuda":
+            # CPU-marshalled queue results move back to the stage device for downstream consumers.
+            result = to_device(result, self._stage.device)
         return result
 
     def enable_metrics(self, registry: Any | None = None) -> None:
