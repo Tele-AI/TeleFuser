@@ -255,3 +255,69 @@ def test_pipeline_runner_closes_close_only_pipeline() -> None:
 
     asyncio.run(scenario())
     assert pipeline.closed is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_detail"),
+    (
+        ("state", [0.0] * 13, "state"),
+        ("camera_high", "not-base64", "valid base64"),
+    ),
+)
+def test_structured_route_rejects_invalid_vla_payload_before_enqueue(
+    tmp_path: Path,
+    field: str,
+    value,
+    expected_detail: str,
+) -> None:
+    task_manager = TaskManager()
+    server = ApiServer(task_manager=task_manager, enable_openai_api=False)
+    server.initialize_services(tmp_path, _StructuredPipelineService())
+    payload = _payload()
+    payload[field] = value
+
+    with TestClient(server.get_app()) as client:
+        response = client.post("/v1/tasks/structured", json=payload)
+
+    assert response.status_code == 422
+    assert expected_detail in str(response.json()["detail"])
+    assert task_manager.get_all_tasks() == {}
+
+
+def test_pipeline_runner_timeout_signals_stop_and_isolates_late_inference() -> None:
+    from telefuser.service.core.pipeline_runner import PipelineRunner
+    from telefuser.service_types import PipelineRunStatus
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    received_stop_events: list[threading.Event] = []
+
+    def run_structured(pipeline, request: str, stop_event=None):
+        calls.append(request)
+        received_stop_events.append(stop_event)
+        if request == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        return {"request": request}
+
+    async def scenario() -> None:
+        runner = PipelineRunner(pipeline=object(), run_with_file=run_structured)
+        first = await runner.run(task_data={"request": "first"}, timeout_s=0.05)
+
+        assert first.status == PipelineRunStatus.ERROR
+        assert first.message == "Task processing timeout"
+        assert first_started.is_set()
+        assert received_stop_events[0].is_set()
+
+        second_task = asyncio.create_task(runner.run(task_data={"request": "second"}, timeout_s=1.0))
+        await asyncio.sleep(0.05)
+        assert calls == ["first"]
+
+        release_first.set()
+        second = await asyncio.wait_for(second_task, timeout=1.0)
+        assert second.status == PipelineRunStatus.SUCCESS
+        assert second.raw == {"request": "second"}
+        assert calls == ["first", "second"]
+
+    asyncio.run(scenario())
