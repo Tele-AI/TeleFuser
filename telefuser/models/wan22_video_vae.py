@@ -1393,7 +1393,11 @@ class Wan22VideoVAE(BaseModel):
         if self.parallelism > 1 and dist.is_initialized():
             # tiled=True → tile_dist, tiled=False → 2d_split
             method = "tile_dist" if tiled else "2d_split"
-            hidden_states_tensor = torch.stack(hidden_states)
+            # The stage passes a batched [B, C, T, H, W] tensor; lists of per-video tensors are stacked.
+            if isinstance(hidden_states, torch.Tensor):
+                hidden_states_tensor = hidden_states
+            else:
+                hidden_states_tensor = torch.stack(hidden_states)
             return self.decode_parallel(hidden_states_tensor, device, method=method)
 
         # Single GPU processing
