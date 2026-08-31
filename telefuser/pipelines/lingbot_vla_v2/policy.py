@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
@@ -31,8 +33,15 @@ class LingBotVlaV2PolicyStage(BaseStage):
     @with_model_offload(["policy"])
     @torch.inference_mode()
     @with_metrics
-    def process(self, inputs: LingBotVlaV2Inputs, seed: int | None = None) -> torch.Tensor:
+    def process(
+        self,
+        inputs: LingBotVlaV2Inputs,
+        seed: int | None = None,
+        stop_event: Any | None = None,
+    ) -> torch.Tensor:
         """Return a CPU float32 normalized action chunk with shape ``[1, H, 55]``."""
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
         device = self.device
         dtype = self.torch_dtype
         tensors = {
@@ -55,7 +64,9 @@ class LingBotVlaV2PolicyStage(BaseStage):
                 dtype=dtype,
                 generator=generator,
             )
-        actions = self.policy.sample_actions(**tensors, noise=noise)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
+        actions = self.policy.sample_actions(**tensors, noise=noise, stop_event=stop_event)
         if not isinstance(actions, torch.Tensor) or actions.ndim != 3:
             raise RuntimeError(f"LingBot-VLA v2 policy returned an invalid action tensor: {type(actions)!r}")
         config = self.policy.config

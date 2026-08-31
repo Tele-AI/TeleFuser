@@ -133,6 +133,7 @@ class AsyncTaskProcessor:
             if not task_info:
                 logger.warning(f"Task {task_id} disappeared before processing")
                 return
+            message = task_info.message
 
             logger.info(f"Processing task {task_id}")
 
@@ -145,16 +146,12 @@ class AsyncTaskProcessor:
                 return
 
             try:
-                if isinstance(task_info.message, StructuredTaskRequest):
+                if isinstance(message, StructuredTaskRequest):
                     if self.structured_service is None:
                         raise RuntimeError("Structured inference service is not initialized")
-                    result = await self.structured_service.execute_with_stop_event(
-                        task_info.message, task_info.stop_event
-                    )
+                    result = await self.structured_service.execute_with_stop_event(message, task_info.stop_event)
                 else:
-                    result = await self.media_service.generate_media_with_stop_event(
-                        task_info.message, task_info.stop_event
-                    )
+                    result = await self.media_service.generate_media_with_stop_event(message, task_info.stop_event)
 
                 if result:
                     self.task_manager.complete_task(
@@ -166,14 +163,14 @@ class AsyncTaskProcessor:
                     )
                     logger.info(f"Task {task_id} completed successfully")
                 else:
-                    if task_info.stop_event.is_set():
+                    if task_info.status == TaskStatus.CANCELLED:
                         logger.info(f"Task {task_id} cancelled during processing")
                     else:
                         self.task_manager.fail_task(task_id, "Generation failed")
                         logger.error(f"Task {task_id} generation failed")
 
             except Exception as e:
-                if task_info.stop_event.is_set():
+                if task_info.status == TaskStatus.CANCELLED:
                     logger.info(f"Task {task_id} exited after cancellation")
                     return
                 logger.exception(f"Task {task_id} processing failed")

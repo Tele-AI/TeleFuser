@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -52,6 +53,7 @@ def _select_kwargs(
     *,
     task_data: dict[str, Any],
     module: ModuleType | None,
+    stop_event: Any | None = None,
 ) -> dict[str, Any]:
     """Build kwargs for calling run_with_file based on signature inspection.
 
@@ -65,8 +67,12 @@ def _select_kwargs(
 
     params = list(sig.parameters.values())
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+    call_data = dict(task_data)
+    if stop_event is not None and "stop_event" in sig.parameters:
+        call_data["stop_event"] = stop_event
+
     if accepts_var_kw:
-        return dict(task_data)
+        return call_data
 
     kwargs: dict[str, Any] = {}
     for p in params:
@@ -74,8 +80,8 @@ def _select_kwargs(
             continue
 
         name = p.name
-        if name in task_data:
-            kwargs[name] = task_data[name]
+        if name in call_data:
+            kwargs[name] = call_data[name]
             continue
 
         # Common aliases used in examples/orchestrator runners.
@@ -117,6 +123,7 @@ class PipelineRunner:
 
         self._started = False
         self._start_lock = asyncio.Lock()
+        self._run_lock = asyncio.Lock()
 
     async def ensure_started(self) -> None:
         """Best-effort pipeline startup (once)."""
@@ -140,14 +147,24 @@ class PipelineRunner:
         if not self._started:
             return
 
-        if hasattr(self._pipeline, "astop"):
-            await self._pipeline.astop()
-        elif hasattr(self._pipeline, "stop"):
-            await asyncio.to_thread(self._pipeline.stop)
-        elif hasattr(self._pipeline, "close"):
-            await asyncio.to_thread(self._pipeline.close)
+        async with self._run_lock:
+            if hasattr(self._pipeline, "astop"):
+                await self._pipeline.astop()
+            elif hasattr(self._pipeline, "stop"):
+                await asyncio.to_thread(self._pipeline.stop)
+            elif hasattr(self._pipeline, "close"):
+                await asyncio.to_thread(self._pipeline.close)
 
-        self._started = False
+            self._started = False
+
+    def _release_run_lock(self, task: asyncio.Task[Any]) -> None:
+        """Release a timed-out invocation only after its underlying work exits."""
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        if self._run_lock.locked():
+            self._run_lock.release()
 
     async def run(
         self,
@@ -173,7 +190,13 @@ class PipelineRunner:
         if output_root and self._output_root_env:
             os.environ[self._output_root_env] = str(output_root)
 
-        kwargs = _select_kwargs(self._run_with_file, task_data=task_data, module=self._module)
+        inference_stop_event = stop_event if stop_event is not None else threading.Event()
+        kwargs = _select_kwargs(
+            self._run_with_file,
+            task_data=task_data,
+            module=self._module,
+            stop_event=inference_stop_event,
+        )
 
         async def _invoke() -> Any:
             if inspect.iscoroutinefunction(self._run_with_file):
@@ -184,8 +207,36 @@ class PipelineRunner:
                 return await result
             return result
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s if timeout_s else None
+
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - loop.time())
+
         try:
-            raw = await asyncio.wait_for(_invoke(), timeout=timeout_s) if timeout_s else await _invoke()
+            if deadline is None:
+                await self._run_lock.acquire()
+            else:
+                await asyncio.wait_for(self._run_lock.acquire(), timeout=remaining_timeout())
+        except asyncio.TimeoutError:
+            inference_stop_event.set()
+            return PipelineRunResult(
+                status=PipelineRunStatus.ERROR, output_path=None, message="Task processing timeout"
+            )
+
+        if inference_stop_event.is_set():
+            self._run_lock.release()
+            return PipelineRunResult(status=PipelineRunStatus.CANCELLED, message="Task cancelled before inference")
+
+        invocation = asyncio.create_task(_invoke())
+        release_on_completion = False
+        try:
+            if deadline is None:
+                raw = await asyncio.shield(invocation)
+            else:
+                raw = await asyncio.wait_for(asyncio.shield(invocation), timeout=remaining_timeout())
 
             output_path = None
             if isinstance(raw, dict):
@@ -199,9 +250,20 @@ class PipelineRunner:
             )
 
         except asyncio.TimeoutError:
+            inference_stop_event.set()
+            release_on_completion = True
+            invocation.add_done_callback(self._release_run_lock)
             return PipelineRunResult(
                 status=PipelineRunStatus.ERROR, output_path=None, message="Task processing timeout"
             )
+        except asyncio.CancelledError:
+            inference_stop_event.set()
+            release_on_completion = True
+            invocation.add_done_callback(self._release_run_lock)
+            raise
         except Exception as e:
             logger.exception(f"Pipeline run failed: {e}")
             return PipelineRunResult(status=PipelineRunStatus.ERROR, output_path=None, message=str(e))
+        finally:
+            if not release_on_completion:
+                self._run_lock.release()

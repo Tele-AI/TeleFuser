@@ -106,6 +106,7 @@ def run_structured(
     camera_left_wrist: str,
     camera_right_wrist: str,
     seed: int | None = None,
+    stop_event: Any | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Return one JSON-serializable canonical normalized action chunk."""
@@ -122,5 +123,6 @@ def run_structured(
         request,
         max_image_bytes=int(PPL_CONFIG["max_image_bytes"]),
         max_image_pixels=int(PPL_CONFIG["max_image_pixels"]),
+        stop_event=stop_event,
     )
     return response.model_dump(mode="json")
