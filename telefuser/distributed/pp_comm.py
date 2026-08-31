@@ -24,6 +24,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
+from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
 
@@ -107,7 +108,7 @@ class PipelineP2PComm:
         if buffer is None:
             if shape is None:
                 raise ValueError("Either buffer or shape must be provided")
-            buffer = torch.empty(shape, dtype=torch.float16, device="cuda")
+            buffer = torch.empty(shape, dtype=torch.float16, device=current_platform.device_type)
 
         buffer = buffer.contiguous()
         if async_op:
@@ -266,7 +267,7 @@ class PipelineP2PComm:
         if shape is None:
             raise ValueError("recv_latent: shape must be provided")
 
-        buffer = torch.empty(shape, dtype=dtype, device="cuda")
+        buffer = torch.empty(shape, dtype=dtype, device=current_platform.device_type)
         buffer = buffer.contiguous()
         work = dist.irecv(buffer, self.recv_src, group=self._process_group)
         work.wait()
@@ -300,7 +301,7 @@ class PipelineP2PComm:
         if self.is_first_stage:
             raise RuntimeError("recv_latent_async: First stage has no previous stage to receive from")
 
-        buffer = torch.empty(shape, dtype=dtype, device="cuda")
+        buffer = torch.empty(shape, dtype=dtype, device=current_platform.device_type)
         buffer = buffer.contiguous()
         work = dist.irecv(buffer, self.recv_src, group=self._process_group)
         return buffer, work
