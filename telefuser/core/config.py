@@ -127,6 +127,7 @@ class AttnImplType(Enum):
     FLASH_ATTN_2 = auto()
     FLASH_ATTN_3 = auto()
     FLASH_ATTN_4 = auto()
+    MINDIE_ATTN = auto()
     # Sparse attention implementations
     RADIAL_ATTN = auto()  # Radial attention for video generation
     LOCAL_SPARSE_ATTN = auto()  # Local window sparse attention

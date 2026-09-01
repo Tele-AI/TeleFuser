@@ -269,3 +269,19 @@ def test_ring_config_converts_fallback_name() -> None:
     assert result.attn_impl is AttnImplType.SAGE_ATTN_2_8_8_SM90
     assert result.scale == 0.125
     assert result.is_causal is True
+
+
+def test_mindie_attn_dispatch_converts_to_bnsd_and_back() -> None:
+    q = torch.randn(1, 3, 2, 4)
+    forward = MagicMock(side_effect=lambda q_, k_, v_, **kwargs: q_)
+
+    with (
+        patch.object(attention_impl, "MINDIE_ATTN_AVAILABLE", True),
+        patch.object(backends, "mindiesd_attention_forward", forward),
+    ):
+        output = attention_impl.attention(q, q, q, attn_impl=attention_impl.AttnImplType.MINDIE_ATTN)
+
+    assert output.shape == q.shape
+    called_q = forward.call_args.args[0]
+    assert called_q.shape == (1, 2, 3, 4)
+    assert forward.call_args.kwargs == {"attn_mask": None, "scale": None, "head_first": True}
