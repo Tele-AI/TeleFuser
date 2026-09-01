@@ -13,6 +13,7 @@ from typing import Callable
 import torch
 from torch import Tensor
 
+from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
 # Availability flags
@@ -24,6 +25,7 @@ SAGE_ATTN_AVAILABLE = False
 SPARGE_ATTN_AVAILABLE = False
 FLASHINFER_AVAILABLE = False
 SOL_ATTN_AVAILABLE = False
+MINDIE_ATTN_AVAILABLE = False
 
 # Backend function references (populated on successful import)
 flash_attn2: Callable | None = None
@@ -34,6 +36,7 @@ sageattention: object | None = None
 spas_sage2_attn_meansim_cuda: Callable | None = None
 flashinfer: object | None = None
 sol_attn: Callable | None = None
+mindiesd_attention_forward: Callable | None = None
 
 
 def _try_import_flash_attn() -> None:
@@ -162,12 +165,48 @@ def _try_import_sol_attn() -> None:
 
 
 # Initialize all backends
+def _try_import_mindie_attn() -> None:
+    """Import the optional MindIE-SD attention backend (Ascend NPU only)."""
+    global MINDIE_ATTN_AVAILABLE, mindiesd_attention_forward
+
+    MINDIE_ATTN_AVAILABLE = False
+    mindiesd_attention_forward = None
+    if current_platform.device_type != "npu":
+        return
+    try:
+        if importlib.util.find_spec("mindiesd") is None:
+            return
+        from mindiesd import attention_forward
+    except (ModuleNotFoundError, ImportError) as error:
+        logger.debug("MindIE-SD attention backend unavailable: %s", error)
+        return
+    mindiesd_attention_forward = attention_forward
+    MINDIE_ATTN_AVAILABLE = True
+    logger.debug("MindIE-SD attention available")
+
+
+def mindie_attn(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    attn_mask: Tensor | None = None,
+    scale: float | None = None,
+    is_causal: bool = False,
+) -> Tensor:
+    """MindIE-SD attention wrapper for BNSD inputs on Ascend NPU."""
+    if is_causal:
+        raise ValueError("MINDIE_ATTN does not support causal attention")
+    return mindiesd_attention_forward(q, k, v, attn_mask=attn_mask, scale=scale, head_first=True)
+
+
 _try_import_flash_attn()
 _try_import_sdpa()
 _try_import_sage_attn()
 _try_import_sparge_attn()
 _try_import_flashinfer()
 _try_import_sol_attn()
+_try_import_mindie_attn()
 
 
 def supports_return_lse(attn_impl: str) -> bool:
@@ -234,6 +273,7 @@ __all__ = [
     "SPARGE_ATTN_AVAILABLE",
     "FLASHINFER_AVAILABLE",
     "SOL_ATTN_AVAILABLE",
+    "MINDIE_ATTN_AVAILABLE",
     "flash_attn2",
     "flash_attn3",
     "flash_attn4",
@@ -245,4 +285,5 @@ __all__ = [
     "get_lse_fallback_impl",
     "sdpa_attn_cudnn",
     "sparge_attn",
+    "mindie_attn",
 ]
