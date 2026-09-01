@@ -24,6 +24,7 @@ class AttnImplType(Enum):
     FLASH_ATTN_2 = auto()
     FLASH_ATTN_3 = auto()
     FLASH_ATTN_4 = auto()  # For Hopper (SM90) and Blackwell (SM100+) GPUs
+    MINDIE_ATTN = auto()  # Ascend NPU, requires the optional mindiesd package
     SAGE_ATTN_2_8_8 = auto()
     SAGE_ATTN_2_8_16 = auto()
     SAGE_ATTN_2_8_8_SM90 = auto()
