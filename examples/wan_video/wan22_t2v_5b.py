@@ -17,6 +17,7 @@ from telefuser.pipelines.wan_video.wan22_ti2v import (
     Wan22TI2VPipeline,
     Wan22TI2VPipelineConfig,
 )
+from telefuser.platforms import current_platform
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
@@ -80,7 +81,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     )
 
     # Create pipeline
-    pipe = Wan22TI2VPipeline(device="cuda", torch_dtype=torch.bfloat16)
+    pipe = Wan22TI2VPipeline(device=current_platform.device_type, torch_dtype=torch.bfloat16)
 
     # Configure pipeline
     pipe_config = Wan22TI2VPipelineConfig()
