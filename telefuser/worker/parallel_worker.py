@@ -323,9 +323,6 @@ class ParallelWorker:
             reason = f"{method_name} failed: {result}"
             self._mark_failed(reason)
             raise RuntimeError(f"ParallelWorker:{self.name} {reason}") from result
-        if current_platform.device_type != "cuda":
-            # CPU-marshalled queue results move back to the stage device for downstream consumers.
-            result = to_device(result, self._stage.device)
         return result
 
     def enable_metrics(self, registry: Any | None = None) -> None:
