@@ -226,11 +226,18 @@ class MiniMaxH3Encoder(BaseModel):
         host_image_grid = None if image_grid_thw is None else image_grid_thw.to(device="cpu", dtype=torch.long)
         host_video_grid = None if video_grid_thw is None else video_grid_thw.to(device="cpu", dtype=torch.long)
         position_ids = None
+        mm_token_type_ids = None
         if host_image_grid is not None or host_video_grid is not None:
+            mm_token_type_ids = torch.zeros_like(host_ids)
+            if host_image_grid is not None:
+                mm_token_type_ids[host_ids == self.model.config.image_token_id] = 1
+            if host_video_grid is not None:
+                mm_token_type_ids[host_ids == self.model.config.video_token_id] = 2
             position_ids, _ = self.model.get_rope_index(
-                host_ids,
-                host_image_grid,
-                host_video_grid,
+                input_ids=host_ids,
+                mm_token_type_ids=mm_token_type_ids,
+                image_grid_thw=host_image_grid,
+                video_grid_thw=host_video_grid,
                 attention_mask=torch.ones_like(host_ids),
             )
         call_kwargs: dict[str, Any] = {
@@ -238,13 +245,17 @@ class MiniMaxH3Encoder(BaseModel):
             "attention_mask": torch.ones_like(host_ids).to(self.device),
         }
         if position_ids is not None:
+            assert mm_token_type_ids is not None
             call_kwargs["position_ids"] = position_ids.to(self.device)
+            call_kwargs["mm_token_type_ids"] = mm_token_type_ids.to(self.device)
         if pixel_values is not None:
+            assert host_image_grid is not None
             call_kwargs["pixel_values"] = pixel_values.to(self.device, torch.bfloat16)
-            call_kwargs["image_grid_thw"] = host_image_grid
+            call_kwargs["image_grid_thw"] = host_image_grid.to(self.device)
         if pixel_values_videos is not None:
+            assert host_video_grid is not None
             call_kwargs["pixel_values_videos"] = pixel_values_videos.to(self.device, torch.bfloat16)
-            call_kwargs["video_grid_thw"] = host_video_grid
+            call_kwargs["video_grid_thw"] = host_video_grid.to(self.device)
         hidden = self(**call_kwargs)[0].to(torch.bfloat16)
         expected = (input_ids.numel(), self.hidden_dim)
         if tuple(hidden.shape) != expected:

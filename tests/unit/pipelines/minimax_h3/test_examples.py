@@ -327,6 +327,46 @@ def test_turbo_run_uses_input_image_path(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls[0]["conditions"] == [{"type": "image", "role": "keyframe", "uri": "input.png", "frame_index": 0}]
 
 
+def test_turbo_example_forwards_fp8_sol_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    sentinel = object()
+
+    def fake_loader(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(turbo_example, "load_minimax_h3_pipeline", fake_loader)
+    result = turbo_example.get_pipeline(
+        1,
+        "/models/h3",
+        lora_path="turbo.safetensors",
+        attn_impl="SOL_ATTN",
+        sol_fp8=True,
+        sol_dense_steps=2,
+        sol_dense_layers=1,
+        sol_tau=0.9,
+        sol_threshold_type="diag",
+        sol_fp8_layer_start=3,
+        sol_fp8_layer_end=40,
+        quantization="tf-kernel-fp8",
+    )
+
+    assert result is sentinel
+    assert calls[0][0] == ("/models/h3",)
+    options = calls[0][1]
+    assert options["lora_path"] == "turbo.safetensors"
+    assert options["online_adaln_cache"] is True
+    assert options["attn_impl"] == "SOL_ATTN"
+    assert options["sol_fp8"] is True
+    assert options["sol_dense_steps"] == 2
+    assert options["sol_dense_layers"] == 1
+    assert options["sol_tau"] == 0.9
+    assert options["sol_threshold_type"] == "diag"
+    assert options["sol_fp8_layer_start"] == 3
+    assert options["sol_fp8_layer_end"] == 40
+    assert options["quantization"] == "tf-kernel-fp8"
+
+
 def test_turbo_run_with_file_accepts_service_image_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 

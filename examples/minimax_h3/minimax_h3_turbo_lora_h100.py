@@ -34,7 +34,10 @@ PPL_CONFIG: dict[str, Any] = {
     "aspect_ratio": "16:9",
     "device": "cuda:0",
     "enable_fsdp": False,
+    "online_adaln_cache": True,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "sol_fp8": False,
+    "quantization": None,
 }
 
 PIPELINE_MANIFEST = build_pipeline_manifest(
@@ -63,7 +66,16 @@ def get_pipeline(
     lora_strength: float = PPL_CONFIG["lora_strength"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
+    online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
+    sol_fp8: bool = PPL_CONFIG["sol_fp8"],
+    sol_dense_steps: int = 2,
+    sol_dense_layers: int = 2,
+    sol_tau: float = 1.0,
+    sol_threshold_type: str = "exact",
+    sol_fp8_layer_start: int = 0,
+    sol_fp8_layer_end: int | None = None,
+    quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load FL2VA and merge Turbo LoRA with the requested GPU parallelism."""
     if parallelism not in {1, 2, 4}:
@@ -78,7 +90,16 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
+        online_adaln_cache=online_adaln_cache,
         attn_impl=attn_impl,
+        sol_fp8=sol_fp8,
+        sol_dense_steps=sol_dense_steps,
+        sol_dense_layers=sol_dense_layers,
+        sol_tau=sol_tau,
+        sol_threshold_type=sol_threshold_type,
+        sol_fp8_layer_start=sol_fp8_layer_start,
+        sol_fp8_layer_end=sol_fp8_layer_end,
+        quantization=quantization,
         lora_path=lora_path,
         lora_strength=lora_strength,
     )
@@ -145,9 +166,22 @@ def main() -> None:
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument(
         "--attn-impl",
-        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90"),
+        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN"),
         default=PPL_CONFIG["attn_impl"].name,
     )
+    parser.add_argument(
+        "--quantization",
+        choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
+        default=PPL_CONFIG["quantization"],
+        help="Online DiT Linear quantization backend.",
+    )
+    parser.add_argument("--sol-fp8", action="store_true", help="Use FP8 Q/K/V in active Sol-Attn layers.")
+    parser.add_argument("--sol-dense-steps", type=int, default=2)
+    parser.add_argument("--sol-dense-layers", type=int, default=2)
+    parser.add_argument("--sol-tau", type=float, default=1.0)
+    parser.add_argument("--sol-threshold-type", choices=("exact", "diag"), default="exact")
+    parser.add_argument("--sol-fp8-layer-start", type=int, default=0)
+    parser.add_argument("--sol-fp8-layer-end", type=int)
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
     fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
@@ -162,6 +196,14 @@ def main() -> None:
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
         attn_impl=args.attn_impl,
+        sol_fp8=args.sol_fp8,
+        sol_dense_steps=args.sol_dense_steps,
+        sol_dense_layers=args.sol_dense_layers,
+        sol_tau=args.sol_tau,
+        sol_threshold_type=args.sol_threshold_type,
+        sol_fp8_layer_start=args.sol_fp8_layer_start,
+        sol_fp8_layer_end=args.sol_fp8_layer_end,
+        quantization=args.quantization,
     )
     try:
         run(
