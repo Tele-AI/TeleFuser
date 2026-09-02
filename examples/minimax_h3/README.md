@@ -76,15 +76,54 @@ unless overridden.
 
 ```bash
 python examples/minimax_h3/minimax_h3_turbo_lora_h100.py \
-  --gpu-num 4 \
+  --gpu-num 1 \
   --model-root /hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3 \
   --lora-path /data/zuoxin/workspace/TeleFuser/work_dirs/models/lightx2v/Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors \
+  --quantization fp8 \
+  --attn-impl SOL_ATTN \
+  --sol-fp8 \
+  --sol-dense-steps 1 \
+  --sol-dense-layers 0 \
+  --sol-tau 1.0 \
+  --sol-threshold-type exact \
   --duration 5 \
-  --output outputs/minimax_h3_turbo_lora.mp4
+  --output outputs/minimax_h3_turbo_lora_fp8_sol.mp4
 ```
 
 The example supports one, two, or four GPUs. Four GPUs use tensor plus Ulysses parallelism; LoRA is merged before
-parallel sharding.
+parallel sharding. Online AdaLN caching is enabled by default, matching the standard H100 FL2VA entrypoint.
+
+### FastH3 hybrid adapter
+
+The standard FL2VA entrypoint also accepts FastVideo's `fastvideo-lora-v2` hybrid adapters. These checkpoints mix
+ordinary low-rank `B @ A` updates with exact weight and bias deltas. TeleFuser applies both to the BF16 source weights
+before optional online FP8 Linear conversion:
+
+```bash
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --mode t2va \
+  --adapter-path /path/to/dense-datafree/adapter_model.safetensors \
+  --adapter-strength 1.0 \
+  --quantization fp8 \
+  --attn-impl SOL_ATTN \
+  --sol-fp8 \
+  --sol-dense-steps 1 \
+  --sol-dense-layers 0 \
+  --sol-tau 1.0 \
+  --sol-threshold-type exact \
+  --steps 5 \
+  --duration 5 \
+  --seed 1000 \
+  --prompt "integrated_multimodal_description: A red fox runs through fresh snow at dawn. overall_soundscape: Fast pawsteps in snow, winter wind, and distant birds." \
+  --output outputs/minimax_h3_fasth3_fp8_sol.mp4
+```
+
+The commands combine the merged adapter with FP8 Linear and FP8 Sol attention. The shown `1/0` dense
+step/layer profile is the fastest quality-valid single-H100 profile from the 5-second benchmark; adjust
+`--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, and `--sol-threshold-type` for other workloads.
+The `vsa-*` FastH3 adapters contain trained attention compression-gate replacement tensors. TeleFuser does not
+implement that VSA-H3 backend and rejects those files instead of silently dropping the gates; use the dense adapter
+variant unless a VSA backend is available.
 
 ## Feature Cache
 

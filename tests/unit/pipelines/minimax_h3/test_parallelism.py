@@ -6,6 +6,7 @@ import torch
 from telefuser.core.config import (
     AttentionConfig,
     AttnImplType,
+    LoraConfig,
     ModelRuntimeConfig,
     OffloadConfig,
     ParallelConfig,
@@ -152,6 +153,36 @@ def test_online_quantization_is_applied_once_after_stage_onload() -> None:
 
     transformer.enable_quant.assert_called_once_with(stage.model_runtime_config.quant_config)
     empty_cache.assert_called_once_with()
+
+
+def test_adapter_is_merged_before_online_fp8_quantization() -> None:
+    transformer = MagicMock()
+    transformer.quant_type = None
+    manager = MagicMock()
+    manager.fetch_module.return_value = transformer
+    runtime = ModelRuntimeConfig(
+        device_type="cuda",
+        lora_configs=[LoraConfig(path="adapter.safetensors")],
+        quant_config=QuantConfig(enabled=True, quant_type=QuantType.FP8),
+    )
+    calls: list[str] = []
+
+    def enable_quant(config: QuantConfig) -> None:
+        calls.append("quantize")
+        transformer.quant_type = config.quant_type
+
+    transformer.enable_quant.side_effect = enable_quant
+    with (
+        patch(
+            "telefuser.pipelines.minimax_h3.denoising.MiniMaxH3LoraAdapter.apply",
+            side_effect=lambda *_: calls.append("merge_adapter"),
+        ),
+        patch("telefuser.pipelines.minimax_h3.denoising.current_platform.empty_cache"),
+    ):
+        stage = MiniMaxH3DenoisingStage(manager, runtime)
+        stage._ensure_online_quantized()
+
+    assert calls == ["merge_adapter", "quantize"]
 
 
 def test_text_encoder_direct_handoff_keeps_token_tags_on_cpu() -> None:
