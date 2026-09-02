@@ -86,6 +86,29 @@ python examples/minimax_h3/minimax_h3_turbo_lora_h100.py \
 The example supports one, two, or four GPUs. Four GPUs use tensor plus Ulysses parallelism; LoRA is merged before
 parallel sharding.
 
+### FastH3 hybrid adapter
+
+The standard FL2VA entrypoint also accepts FastVideo's `fastvideo-lora-v2` hybrid adapters. These checkpoints mix
+ordinary low-rank `B @ A` updates with exact weight and bias deltas. TeleFuser applies both to the BF16 source weights
+before optional online FP8 Linear conversion:
+
+```bash
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --mode t2va \
+  --adapter-path /path/to/dense-datafree/adapter_model.safetensors \
+  --adapter-strength 1.0 \
+  --steps 5 \
+  --duration 5 \
+  --seed 1000 \
+  --prompt "integrated_multimodal_description: A red fox runs through fresh snow at dawn. overall_soundscape: Fast pawsteps in snow, winter wind, and distant birds." \
+  --output outputs/minimax_h3_fasth3_bf16_fa4.mp4
+```
+
+Add `--quantization fp8` to run the merged adapter with the existing FP8 Linear path while keeping FA4 attention.
+The `vsa-*` FastH3 adapters contain trained attention compression-gate replacement tensors. TeleFuser does not
+implement that VSA-H3 backend and rejects those files instead of silently dropping the gates; use the dense adapter
+variant unless a VSA backend is available.
+
 ## Feature Cache
 
 MiniMax H3 uses AdaTaylorCache around the complete joint audio-video DiT block stack. Calibrate once on one H100

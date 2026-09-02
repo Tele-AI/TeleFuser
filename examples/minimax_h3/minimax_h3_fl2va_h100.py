@@ -40,6 +40,8 @@ PPL_CONFIG: dict[str, Any] = {
     "feature_cache_n_derivatives": 1,
     "feature_cache_taylor_threshold": 2,
     "quantization": None,
+    "adapter_path": None,
+    "adapter_strength": 1.0,
 }
 
 
@@ -98,6 +100,8 @@ def get_pipeline(
     feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
     feature_cache_taylor_threshold: int = PPL_CONFIG["feature_cache_taylor_threshold"],
     quantization: str | None = PPL_CONFIG["quantization"],
+    adapter_path: str | None = PPL_CONFIG["adapter_path"],
+    adapter_strength: float = PPL_CONFIG["adapter_strength"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -126,6 +130,8 @@ def get_pipeline(
             taylor_threshold=feature_cache_taylor_threshold,
         ),
         quantization=quantization,
+        lora_path=adapter_path,
+        lora_strength=adapter_strength,
     )
 
 
@@ -284,6 +290,14 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument(
+        "--adapter-path",
+        "--lora-path",
+        dest="adapter_path",
+        default=PPL_CONFIG["adapter_path"],
+        help="MiniMax H3 Turbo LoRA or dense FastVideo FastH3 hybrid adapter.",
+    )
+    parser.add_argument("--adapter-strength", type=float, default=PPL_CONFIG["adapter_strength"])
+    parser.add_argument(
         "--quantization",
         choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"),
         default=default_quantization,
@@ -358,6 +372,8 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         feature_cache_n_derivatives=args.feature_cache_n_derivatives,
         feature_cache_taylor_threshold=args.feature_cache_taylor_threshold,
         quantization=args.quantization,
+        adapter_path=args.adapter_path,
+        adapter_strength=args.adapter_strength,
     )
     try:
         result = run_with_file(

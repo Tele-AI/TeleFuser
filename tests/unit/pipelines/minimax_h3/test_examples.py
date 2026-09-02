@@ -119,6 +119,8 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
         num_inference_steps=20,
         enable_fsdp=True,
         enable_feature_cache=True,
+        adapter_path="/models/fast-h3/adapter_model.safetensors",
+        adapter_strength=0.75,
     )
 
     assert result is sentinel
@@ -149,6 +151,8 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                     taylor_threshold=2,
                 ),
                 "quantization": None,
+                "lora_path": "/models/fast-h3/adapter_model.safetensors",
+                "lora_strength": 0.75,
             },
         )
     ]
