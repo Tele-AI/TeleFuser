@@ -25,9 +25,10 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
 | Quantization | Partial | Profile-specific release status; see Configuration and Performance |
 | Native server API | Supported | Asynchronous structured task API and `TFClient` |
+| RoboTwin policy protocol | Supported | Standalone persistent MessagePack WebSocket service |
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
-| Physical robot action mapping | Unsupported | Output remains in normalized canonical space |
+| RoboTwin action mapping | Supported | Unnormalizes canonical output to absolute-position `50 x 14` chunks |
 
 ## Requirements
 
@@ -214,6 +215,76 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 ```
 
 This creates one complete policy per GPU; it does not enable tensor or pipeline parallelism within a policy.
+
+### RoboTwin Policy Server
+
+The standalone policy server implements the persistent MessagePack WebSocket protocol used by the upstream
+`WebsocketClientPolicy`. It is isolated from `telefuser serve`: no TeleFuser API routes, service schemas, or other
+model integrations are changed.
+
+Install the protocol dependency in the TeleFuser inference environment:
+
+```bash
+.venv-vla/bin/python -m pip install -r examples/lingbot_vla_v2/requirements-robotwin.txt
+```
+
+Start one resident policy process:
+
+```bash
+.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_robotwin_server.py \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
+  --device cuda:0 --host 0.0.0.0 --port 9330 --use-length 50
+```
+
+The server exposes `GET /healthz` and the policy WebSocket at `/`. On connection it sends a MessagePack metadata
+frame, then accepts multiple binary MessagePack requests on the same connection. This matches the upstream client
+contract:
+
+```python
+from deploy.websocket_client_policy import WebsocketClientPolicy
+
+policy = WebsocketClientPolicy(host="127.0.0.1", port=9330)
+policy.reset("robotwin")
+result = policy.infer(
+    {
+        "observation.images.cam_high": camera_high,
+        "observation.images.cam_left_wrist": camera_left_wrist,
+        "observation.images.cam_right_wrist": camera_right_wrist,
+        "observation.state": state,
+        "task": instruction,
+    }
+)
+actions = result["action"]  # float32 [50, 14] when --use-length=50
+```
+
+On the simulation side, place the upstream `experiment/robotwin/eval_policy_client_lingbotvla.py` at
+`<RoboTwin>/script/eval_policy_client_lingbotvla.py`, together with its `script/deploy/websocket_client_policy.py` and
+`msgpack_numpy.py` helpers, then run one smoke episode configuration against the same port:
+
+```bash
+cd /path/to/RoboTwin
+python -u script/eval_policy_client_lingbotvla.py --config policy/ACT/deploy_policy.yml \
+  --overrides \
+  --task_name lift_pot \
+  --task_config demo_clean \
+  --train_config_name 0 \
+  --seed 0 \
+  --policy_name ACT \
+  --port 9330 \
+  --robo_name robotwin \
+  --eval_video_log False \
+  --output_dir ./eval_results
+```
+
+Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
+profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
+start with 50 for upstream-equivalent open-loop execution. The adapter accepts episode reset messages but deliberately
+rejects runtime checkpoint switching.
+
+The base checkpoint remains marked `unverified_official_6b_base`. This endpoint establishes preprocessing, inference,
+action mapping, transport, and simulator execution continuity; it does not establish RoboTwin task success without
+an embodiment-validated checkpoint.
 
 ## Validation
 
