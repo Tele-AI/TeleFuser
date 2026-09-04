@@ -13,10 +13,11 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.config import ParallelConfig
+from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
 
-def create_device_mesh_from_config(parallel_config: ParallelConfig, device_type: str = "cuda") -> DeviceMesh:
+def create_device_mesh_from_config(parallel_config: ParallelConfig, device_type: str | None = None) -> DeviceMesh:
     """Create PyTorch DeviceMesh from ParallelConfig.
 
     Mesh dimensions are built in order: DP -> CFG -> SP (ring, ulysses) -> PP -> TP
@@ -24,11 +25,13 @@ def create_device_mesh_from_config(parallel_config: ParallelConfig, device_type:
 
     Args:
         parallel_config: Parallel configuration with degrees for each dimension
-        device_type: Device type ("cuda" or "cpu")
+        device_type: Device type ("cuda", "npu", or "cpu"); defaults to the current platform's device type
 
     Returns:
         PyTorch DeviceMesh instance with named dimensions
     """
+    if device_type is None:
+        device_type = current_platform.device_type
     _validate_parallel_config(parallel_config)
 
     sp_degree = parallel_config.sp_ulysses_degree * parallel_config.sp_ring_degree

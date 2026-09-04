@@ -128,7 +128,11 @@ def _spatial_causal_conv3d_forward(
     if any(padding):
         tensor = F.pad(tensor, padding)
     tensor = _exchange_height_halo(module, tensor, module._height_halo_size)
-    tensor = tensor.contiguous(memory_format=torch.channels_last_3d)
+    if tensor.device.type == "cuda":
+        tensor = tensor.contiguous(memory_format=torch.channels_last_3d)
+    else:
+        # channels_last_3d activations are only supported by cuDNN; NPU/CPU require standard contiguous.
+        tensor = tensor.contiguous()
     return F.conv3d(
         tensor,
         module.weight,
