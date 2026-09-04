@@ -135,6 +135,8 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "enable_fsdp": True,
                 "online_adaln_cache": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
+                "attention_chunks": 2,
+                "ulysses_sequence_mode": "valid_only",
                 "sol_fp8": False,
                 "sol_dense_steps": 10,
                 "sol_dense_layers": 2,

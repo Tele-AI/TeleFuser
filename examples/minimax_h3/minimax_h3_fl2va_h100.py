@@ -35,6 +35,8 @@ PPL_CONFIG: dict[str, Any] = {
     "enable_fsdp": None,
     "online_adaln_cache": True,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "attention_chunks": 2,
+    "ulysses_sequence_mode": "valid_only",
     "sol_fp8": False,
     "feature_cache_model_type": "MiniMax-H3-Base",
     "feature_cache_n_derivatives": 1,
@@ -86,6 +88,8 @@ def get_pipeline(
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
+    attention_chunks: int = PPL_CONFIG["attention_chunks"],
+    ulysses_sequence_mode: str = PPL_CONFIG["ulysses_sequence_mode"],
     sol_fp8: bool = PPL_CONFIG["sol_fp8"],
     sol_dense_steps: int = 10,
     sol_dense_layers: int = 2,
@@ -112,6 +116,8 @@ def get_pipeline(
         enable_fsdp=enable_fsdp,
         online_adaln_cache=online_adaln_cache,
         attn_impl=attn_impl,
+        attention_chunks=attention_chunks,
+        ulysses_sequence_mode=ulysses_sequence_mode,
         sol_fp8=sol_fp8,
         sol_dense_steps=sol_dense_steps,
         sol_dense_layers=sol_dense_layers,
@@ -290,6 +296,12 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         help="Online DiT Linear quantization backend (tf-kernel FP8 supports SP/TP; other backends are single-GPU).",
     )
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--attention-chunks", type=int, choices=(1, 2), default=PPL_CONFIG["attention_chunks"])
+    parser.add_argument(
+        "--ulysses-sequence-mode",
+        choices=("padded", "valid_only"),
+        default=PPL_CONFIG["ulysses_sequence_mode"],
+    )
     parser.add_argument(
         "--attn-impl",
         choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN"),
@@ -346,6 +358,8 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
         attn_impl=args.attn_impl,
+        attention_chunks=args.attention_chunks,
+        ulysses_sequence_mode=args.ulysses_sequence_mode,
         sol_fp8=args.sol_fp8,
         sol_dense_steps=args.sol_dense_steps,
         sol_dense_layers=args.sol_dense_layers,

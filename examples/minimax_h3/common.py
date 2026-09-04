@@ -173,6 +173,8 @@ def load_minimax_h3_pipeline(
     text_encoder_tp_degree: int | None = None,
     enable_fsdp: bool | None = None,
     attn_impl: AttnImplType | str = AttnImplType.FLASH_ATTN_4,
+    attention_chunks: int = 1,
+    ulysses_sequence_mode: str = "padded",
     sol_fp8: bool = False,
     sol_dense_steps: int = 10,
     sol_dense_layers: int = 2,
@@ -274,9 +276,15 @@ def load_minimax_h3_pipeline(
             sol_fp8=sol_fp8,
             sol_fp8_layer_start=sol_fp8_layer_start,
             sol_fp8_layer_end=sol_fp8_layer_end,
+            attention_chunks=attention_chunks,
+            ulysses_sequence_mode=ulysses_sequence_mode,
         )
         if attn_impl == AttnImplType.SOL_ATTN
-        else AttentionConfig.dense_attention(attn_impl)
+        else AttentionConfig.dense_attention(
+            attn_impl,
+            attention_chunks=attention_chunks,
+            ulysses_sequence_mode=ulysses_sequence_mode,
+        )
     )
     dit_runtime = ModelRuntimeConfig(
         device_type=runtime_device.type,

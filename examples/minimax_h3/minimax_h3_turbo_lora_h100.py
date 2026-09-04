@@ -35,6 +35,8 @@ PPL_CONFIG: dict[str, Any] = {
     "device": "cuda:0",
     "enable_fsdp": False,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "attention_chunks": 2,
+    "ulysses_sequence_mode": "valid_only",
 }
 
 PIPELINE_MANIFEST = build_pipeline_manifest(
@@ -64,6 +66,8 @@ def get_pipeline(
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
+    attention_chunks: int = PPL_CONFIG["attention_chunks"],
+    ulysses_sequence_mode: str = PPL_CONFIG["ulysses_sequence_mode"],
 ) -> MiniMaxH3Pipeline:
     """Load FL2VA and merge Turbo LoRA with the requested GPU parallelism."""
     if parallelism not in {1, 2, 4}:
@@ -79,6 +83,8 @@ def get_pipeline(
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
         attn_impl=attn_impl,
+        attention_chunks=attention_chunks,
+        ulysses_sequence_mode=ulysses_sequence_mode,
         lora_path=lora_path,
         lora_strength=lora_strength,
     )
@@ -135,6 +141,12 @@ def run_with_file(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate MiniMax H3 Turbo LoRA FL2VA on H100 GPUs")
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--attention-chunks", type=int, choices=(1, 2), default=PPL_CONFIG["attention_chunks"])
+    parser.add_argument(
+        "--ulysses-sequence-mode",
+        choices=("padded", "valid_only"),
+        default=PPL_CONFIG["ulysses_sequence_mode"],
+    )
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--lora-path", default=PPL_CONFIG["lora_path"])
     parser.add_argument("--image", dest="input_image_path", default=PPL_CONFIG["input_image_path"])
@@ -162,6 +174,8 @@ def main() -> None:
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
         attn_impl=args.attn_impl,
+        attention_chunks=args.attention_chunks,
+        ulysses_sequence_mode=args.ulysses_sequence_mode,
     )
     try:
         run(

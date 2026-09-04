@@ -97,6 +97,30 @@ def test_flash_attn4_varlen_dispatch_reuses_cumulative_lengths() -> None:
     }
 
 
+@torch.no_grad()
+def test_flash_attn4_fixed_valid_can_return_only_live_tokens() -> None:
+    q = torch.randn(1, 5, 2, 4)
+    flash_attn4 = MagicMock(side_effect=lambda query, *_args, **_kwargs: (query.clone(), None))
+
+    with (
+        patch.object(attention_impl, "FLASH_ATTN_4_AVAILABLE", True),
+        patch.object(attention_impl, "flash_attn4", flash_attn4),
+    ):
+        output = attention_impl.attention(
+            q,
+            q,
+            q,
+            attn_impl=attention_impl.AttnImplType.FLASH_ATTN_4,
+            sequence_lengths=[3, 2],
+            fixed_valid=True,
+            pad_fixed_valid_output=False,
+        )
+
+    assert output.shape == (1, 3, 2, 4)
+    torch.testing.assert_close(output, q[:, :3])
+    assert flash_attn4.call_args.args[0].shape == (1, 3, 2, 4)
+
+
 def test_flash_attn4_packed_falls_back_to_sdpa_without_varlen_backend() -> None:
     q = torch.randn(1, 5, 2, 4)
 

@@ -310,6 +310,13 @@ The Ulysses degree must divide 56 attention heads. Scripts must run from their g
 processes can spawn safely. H100 examples request packed FlashAttention 4 and fall back to packed PyTorch SDPA when
 FlashAttention 4 is unavailable.
 
+The H100 examples also enable the lossless MiniMax-H3 Ulysses optimizations with
+`--attention-chunks 2 --ulysses-sequence-mode valid_only`. Two balanced head chunks overlap Ulysses communication
+with FlashAttention 4, while `valid_only` skips trailing alignment padding in attention and output communication.
+Use `--attention-chunks 1` to disable the overlap, or `--ulysses-sequence-mode padded` to retain padded output
+communication. The fused Q/K RMSNorm + RoPE pack, zero-tail merge, and fused RMSNorm + AdaLN modulation kernels are
+selected automatically only for supported CUDA BF16 layouts; all other inputs retain their original paths.
+
 ## Online DiT Quantization
 
 MiniMax H3 supports three online quantization backends for the DiT transformer Linear layers:
