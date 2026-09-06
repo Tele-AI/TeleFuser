@@ -395,6 +395,8 @@ Room runner 尚未进入 pipeline startup 前，`livekit_connected=false` 是正
 Pipeline 性能指标应与客户端交付指标分开解释，参见[监控指标](metrics.md)和
 [TeleFuser 与 AIPerf](benchmark_aiperf.md)。
 
+<a id="production-deployment"></a>
+
 ## 生产部署与故障排查
 
 - 使用 LiveKit Cloud 或官方自托管部署方式，不要暴露 `livekit-server --dev`；

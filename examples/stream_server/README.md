@@ -7,7 +7,16 @@ TeleFuser has one streaming backend: LiveKit. The examples cover both service co
 - `livekit_bidirectional_demo.py`: browser UI for LingBot camera control.
 - `_control_demo_ui.py`: private shared HTML/CSS/control asset used by the LiveKit demo.
 
-The checked-in browser demo forces TCP TURN relay, so the complete interactive stack has four services. Install the
+## Requirements
+
+Install the [TeleFuser development environment](../../CONTRIBUTING.md#development-setup), then prepare the weights
+and GPU environment in the [LingBot-World guide](../lingbot/README.md). The command below uses four H100 GPUs.
+Model-free replay and overlay scripts are separate service examples; they do not validate model inference speed.
+
+## Quick Start
+
+Run all commands from the repository root. The checked-in browser demo forces TCP TURN relay, so the complete
+interactive stack has four services. Install the
 LiveKit Server once with `curl -sSL https://get.livekit.io | bash`, install your platform's `coturn` package, then
 run these commands in four terminals:
 
@@ -47,6 +56,14 @@ Open `http://127.0.0.1:8092`, choose an image, and click **Start**. For VS Code 
 `7880`, and `3478` to the same local ports; the API proxy means `8088` does not need forwarding. Stop the browser
 session first, then stop terminals 4 through 1 in reverse order.
 
+## Expected Output
+
+The browser shows an initial preview followed by camera-controlled video while movement keys are held. Check that
+frames advance in order and that releasing the keys returns generation to idle. A connected room alone does not
+establish that the model is producing frames.
+
+## Configuration and Troubleshooting
+
 This command starts one process, one in-process model worker, and one shared LingBot service instance. It exposes four
 physical GPUs as process-local devices 0-3, declares one four-device logical worker group, and retains up to two
 independent sessions. The LingBot execution lease serializes their model chunks; it is not a generic replication
@@ -55,3 +72,6 @@ option.
 The LiveKit Python SDK is part of TeleFuser's base dependencies; the LiveKit Server is installed and operated
 separately. See the [Stream Server guide](../../docs/en/stream_server.md) for room roles and viewer fan-out, the exact
 GPU-map boundary, session API, queues, lifecycle, observability, remote development, and production deployment.
+
+Documentation builds do not start LiveKit or load model weights. For measured first-frame latency, control response,
+target compute FPS, and client delivery FPS, use the [AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md).

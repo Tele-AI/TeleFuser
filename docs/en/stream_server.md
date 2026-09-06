@@ -404,6 +404,8 @@ This exposes physical GPUs 4-7 as local devices 0-3 and passes `gpu_num=4`; it s
 failed. For pipeline performance, keep target compute metrics distinct from client delivery metrics; see
 [Metrics](metrics.md) and [TeleFuser and AIPerf](benchmark_aiperf.md).
 
+<a id="production-deployment"></a>
+
 ## Production and troubleshooting
 
 - Use LiveKit Cloud or the official self-hosted deployment guidance; do not expose `livekit-server --dev`.

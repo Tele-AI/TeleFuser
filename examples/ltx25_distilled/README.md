@@ -239,6 +239,9 @@ recorded 61.90 dB PSNR and 0.999685 SSIM; the frozen 896x512, 121-frame I2V comp
 
 The timings below are synchronized end-to-end p50 seconds from five cold and five warm samples:
 
+These are historical runtime measurements. Their exact run date and TeleFuser revision were not recorded in this
+README; do not interpret the documentation publication date as the benchmark date or as a fresh GPU validation.
+
 | Workload | Mode | Upstream cold / warm | TeleFuser cold / warm |
 | --- | --- | ---: | ---: |
 | T2V 1536x1024 / 121 | `offload=cpu` | 76.78 / 77.29 | 64.44 / 60.09 |

@@ -95,7 +95,7 @@ dev = [
 
 
 docs = [
-    "mkdocs>=1.5.0",
+    "mkdocs>=1.6,<2",
     "mkdocs-api-autonav",
     "mkdocs-material",
     "mkdocstrings-python",
@@ -105,6 +105,8 @@ docs = [
     "mkdocs-git-revision-date-localized-plugin",
     "mkdocs-minify-plugin",
     "mkdocs-static-i18n",
+    "mdformat==0.7.22",
+    "mdformat-tables==1.0.0",
     "regex",
     "ruff==0.9.4",
 ]

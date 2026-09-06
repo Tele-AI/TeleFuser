@@ -105,6 +105,22 @@ See [AGENTS.md](AGENTS.md) for more detailed technical information.
 
 ## Coding Standards
 
+### Cookbook Documentation
+
+Maintain model usage instructions in `examples/<model>/README.md` and optional `README_zh.md`, then register
+publication in `docs/cookbook.yml`. Shared guides remain in `docs/`. See the
+[Cookbook authoring guide](docs/en/cookbook_authoring.md) for source conventions, resource limits, and validation.
+
+```bash
+python -m pip install -r docs/requirements.txt
+python -m unittest discover -s tests/docs -v
+python scripts/docs/prepare_cookbook.py build
+python scripts/docs/prepare_cookbook.py serve --dev-addr 127.0.0.1:8000
+```
+
+Generated `.build/` and `site/` files are disposable and must not be edited or committed. A documentation build
+does not validate GPU execution; report example runtime verification separately.
+
 ### Python Code
 
 We adopt PEP8 as our code style with the following configurations:
