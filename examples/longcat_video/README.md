@@ -31,7 +31,7 @@ Long-form video generation using LongCat-Video model with extended context suppo
 | Model | Purpose | Link |
 |-------|---------|------|
 | Wan2.1 VAE | Video decoder | [Wan-AI/Wan2.1-T2V-14B](https://modelscope.cn/models/Wan-AI/Wan2___1-T2V-14B) |
-| RIFE v4.26 | Video Frame Interpolation | [RIFEv4.26]("https://huggingface.co/hzwer/RIFE/resolve/main/RIFEv4.26_0921.zip") |
+| RIFE v4.26 | Video Frame Interpolation | [RIFEv4.26](https://huggingface.co/hzwer/RIFE/resolve/main/RIFEv4.26_0921.zip) |
 
 ## Files
 

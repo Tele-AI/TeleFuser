@@ -3,12 +3,27 @@ categories:
   world-models:
     en: World Models
     zh: 世界模型
+  image-generation:
+    en: Image Generation
+    zh: 图像生成
+  video-generation:
+    en: Video Generation
+    zh: 视频生成
   audio-video:
     en: Audio and Video
     zh: 音视频生成
+  video-restoration:
+    en: Video Restoration
+    zh: 视频修复
+  robotics:
+    en: Vision-Language-Action
+    zh: 视觉语言动作
   services:
     en: Streaming Services
     zh: 流式服务
+  example-tools:
+    en: Example Tools and Inputs
+    zh: 示例工具与输入
 pages:
   - slug: lingbot-world
     category: world-models
@@ -38,6 +53,97 @@ pages:
       zh: LiveKit 流式交互
     sources:
       en: examples/stream_server/README.md
+  - slug: flux2-klein
+    category: image-generation
+    title:
+      en: Flux2 Klein
+      zh: Flux2 Klein
+    sources:
+      en: examples/flux2_klein/README.md
+  - slug: qwen-image
+    category: image-generation
+    title:
+      en: Qwen-Image
+      zh: Qwen-Image
+    sources:
+      en: examples/qwen_image/README.md
+  - slug: z-image
+    category: image-generation
+    title:
+      en: Z-Image
+      zh: Z-Image
+    sources:
+      en: examples/z_image/README.md
+  - slug: wan-video
+    category: video-generation
+    title:
+      en: WanVideo
+      zh: WanVideo
+    sources:
+      en: examples/wan_video/README.md
+  - slug: longcat-video
+    category: video-generation
+    title:
+      en: LongCat Video
+      zh: LongCat Video
+    sources:
+      en: examples/longcat_video/README.md
+  - slug: lingbot-video
+    category: video-generation
+    title:
+      en: LingBot-Video
+      zh: LingBot-Video
+    sources:
+      en: examples/lingbot_video/README.md
+  - slug: ltx23
+    category: audio-video
+    title:
+      en: LTX-2.3 Audio and Video
+      zh: LTX-2.3 音视频生成
+    sources:
+      en: examples/ltx_video/README.md
+  - slug: minimax-h3
+    category: audio-video
+    title:
+      en: MiniMax H3
+      zh: MiniMax H3
+    sources:
+      en: examples/minimax_h3/README.md
+  - slug: flashvsr
+    category: video-restoration
+    title:
+      en: FlashVSR
+      zh: FlashVSR
+    sources:
+      en: examples/flashvsr/README.md
+  - slug: swiftvr
+    category: video-restoration
+    title:
+      en: SwiftVR
+      zh: SwiftVR
+    sources:
+      en: examples/swiftvr/README.md
+  - slug: lingbot-vla-v2
+    category: robotics
+    title:
+      en: LingBot-VLA v2
+      zh: LingBot-VLA v2
+    sources:
+      en: examples/lingbot_vla_v2/README.md
+  - slug: example-runner
+    category: example-tools
+    title:
+      en: Example Runner
+      zh: 示例运行器
+    sources:
+      en: examples/README.md
+  - slug: ltx25-reference-input
+    category: example-tools
+    title:
+      en: LTX-2.5 Reference Input
+      zh: LTX-2.5 参考输入
+    sources:
+      en: examples/data/ltx25/README.md
 guides:
   - category: services
     title:
