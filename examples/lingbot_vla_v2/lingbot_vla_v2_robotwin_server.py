@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import operator
 import threading
 import time
 from typing import Any, Mapping, Protocol
@@ -25,11 +26,32 @@ from telefuser.pipelines.lingbot_vla_v2.runtime import (
 )
 from telefuser.utils.logging import logger
 
+ROBOTWIN_PROTOCOL_VERSION = "1.0"
+ROBOTWIN_ACTION_TYPE = "absolute_qpos"
+ROBOTWIN_ACTION_DTYPE = "float32"
+ROBOTWIN_ACTION_ORDER = (
+    "left_arm_joint_0",
+    "left_arm_joint_1",
+    "left_arm_joint_2",
+    "left_arm_joint_3",
+    "left_arm_joint_4",
+    "left_arm_joint_5",
+    "left_gripper",
+    "right_arm_joint_0",
+    "right_arm_joint_1",
+    "right_arm_joint_2",
+    "right_arm_joint_3",
+    "right_arm_joint_4",
+    "right_arm_joint_5",
+    "right_gripper",
+)
+_TRACE_ID_FIELDS = ("request_id", "episode_id")
+
 
 class _Pipeline(Protocol):
     config: Any
 
-    def __call__(self, observation: LingBotVlaV2Observation) -> Any: ...
+    def __call__(self, observation: LingBotVlaV2Observation, seed: int | None = None) -> Any: ...
 
     def close(self) -> None: ...
 
@@ -80,6 +102,30 @@ def unpack_message(payload: bytes) -> dict[str, Any]:
     return decoded
 
 
+def _optional_seed(request: Mapping[str, Any]) -> int | None:
+    value = request.get("seed")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("seed must be an integer")
+    try:
+        return operator.index(value)
+    except TypeError as error:
+        raise ValueError("seed must be an integer") from error
+
+
+def _trace_fields(request: Mapping[str, Any]) -> dict[str, str | int]:
+    fields: dict[str, str | int] = {}
+    for name in _TRACE_ID_FIELDS:
+        value = request.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, str | int) or isinstance(value, str) and not value:
+            raise ValueError(f"{name} must be a non-empty string or integer")
+        fields[name] = value
+    return fields
+
+
 class RobotWinPolicyAdapter:
     """Translate upstream RoboTwin observations to the TeleFuser VLA SDK."""
 
@@ -101,17 +147,22 @@ class RobotWinPolicyAdapter:
     def metadata(self) -> dict[str, Any]:
         """Describe the action contract sent when a client connects."""
         return {
+            "protocol_version": ROBOTWIN_PROTOCOL_VERSION,
             "robot_profile": self.profile.name,
+            "action_type": ROBOTWIN_ACTION_TYPE,
             "action_horizon": self.use_length,
             "action_dim": self.profile.raw_state_dim,
+            "action_dtype": ROBOTWIN_ACTION_DTYPE,
+            "action_order": list(ROBOTWIN_ACTION_ORDER),
             "policy_verified": False,
             "verification_status": "unverified_official_6b_base",
         }
 
     def infer(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Return one absolute-position RoboTwin action chunk."""
+        trace_fields = _trace_fields(request)
         if request.get("reset", False):
-            return self._reset(request)
+            return {**self._reset(request), **trace_fields}
 
         missing = [key for key in (*ROBOTWIN_CAMERA_KEYS, "observation.state", "task") if key not in request]
         if missing:
@@ -122,21 +173,43 @@ class RobotWinPolicyAdapter:
             state=request["observation.state"],
             images={key: request[key] for key in ROBOTWIN_CAMERA_KEYS},
         )
+        seed = _optional_seed(request)
+        adapter_started_at = time.monotonic()
         with self._lock:
-            canonical_chunk = self.pipeline(observation)
+            lock_wait_ms = (time.monotonic() - adapter_started_at) * 1000.0
+            pipeline_started_at = time.monotonic()
+            canonical_chunk = self.pipeline(observation, seed=seed)
+            pipeline_ms = (time.monotonic() - pipeline_started_at) * 1000.0
+            mapping_started_at = time.monotonic()
             action_chunk = self.profile.structure_actions(
                 canonical_chunk.canonical_normalized_actions,
             )
+            action_mapping_ms = (time.monotonic() - mapping_started_at) * 1000.0
         if action_chunk.horizon < self.use_length:
             raise RuntimeError(
                 f"policy returned horizon {action_chunk.horizon}, shorter than use_length={self.use_length}"
             )
-        actions = action_chunk.raw_actions[: self.use_length].numpy()
-        return {
+        actions = np.ascontiguousarray(action_chunk.raw_actions[: self.use_length].numpy(), dtype=np.float32)
+        expected_shape = (self.use_length, self.profile.raw_state_dim)
+        if actions.shape != expected_shape:
+            raise RuntimeError(f"mapped actions must have shape {expected_shape}, got {actions.shape}")
+        if not np.isfinite(actions).all():
+            raise RuntimeError("mapped actions must contain only finite values")
+        response: dict[str, Any] = {
             "action": actions,
             "policy_verified": canonical_chunk.policy_verified,
             "verification_status": canonical_chunk.verification_status,
+            "server_timing": {
+                "lock_wait_ms": lock_wait_ms,
+                "pipeline_ms": pipeline_ms,
+                "action_mapping_ms": action_mapping_ms,
+                "adapter_total_ms": (time.monotonic() - adapter_started_at) * 1000.0,
+            },
+            **trace_fields,
         }
+        if seed is not None:
+            response["seed"] = seed
+        return response
 
     def _reset(self, request: Mapping[str, Any]) -> dict[str, Any]:
         robot_name = request.get("robo_name", self.profile.name)
@@ -174,14 +247,18 @@ def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
                     raise ValueError("RoboTwin requests must use binary MessagePack frames")
 
                 round_started_at = time.monotonic()
+                decode_started_at = time.monotonic()
                 request = unpack_message(payload)
+                decode_ms = (time.monotonic() - decode_started_at) * 1000.0
                 inference_started_at = time.monotonic()
                 response = await asyncio.to_thread(adapter.infer, request)
                 inference_ms = (time.monotonic() - inference_started_at) * 1000.0
                 response = dict(response)
-                response["server_timing"] = {"infer_ms": inference_ms}
+                server_timing = dict(response.get("server_timing", {}))
+                server_timing.update(decode_ms=decode_ms, infer_ms=inference_ms)
                 if previous_total_ms is not None:
-                    response["server_timing"]["prev_total_ms"] = previous_total_ms
+                    server_timing["prev_total_ms"] = previous_total_ms
+                response["server_timing"] = server_timing
                 await websocket.send_bytes(pack_message(response))
                 previous_total_ms = (time.monotonic() - round_started_at) * 1000.0
         except WebSocketDisconnect:
