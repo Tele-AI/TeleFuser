@@ -17,11 +17,12 @@ from telefuser.pipelines.lingbot_vla_v2.robot_profile import ROBOTWIN_CAMERA_KEY
 
 
 class _ImageProcessor:
-    def __call__(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
-        assert image.shape == (3, 8, 8)
+    def __call__(self, images: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        assert len(images) == 3
+        assert all(image.shape == (3, 8, 8) for image in images)
         return {
-            "pixel_values": torch.zeros(4, 6),
-            "image_grid_thw": torch.tensor([[1, 4, 4]]),
+            "pixel_values": torch.zeros(12, 6),
+            "image_grid_thw": torch.tensor([[1, 2, 2]] * len(images)),
         }
 
 

@@ -185,6 +185,14 @@ class AttentionConfig:
     scale: float | None = None  # Optional attention scale factor
     dropout: float = 0.0
     is_causal: bool = False
+    attention_chunks: int = 1  # Ulysses/attention overlap chunks; 1 disables overlap
+    ulysses_sequence_mode: str = "padded"  # "valid_only" skips trailing alignment padding
+
+    def __post_init__(self) -> None:
+        if self.attention_chunks not in {1, 2}:
+            raise ValueError("attention_chunks must be 1 or 2")
+        if self.ulysses_sequence_mode not in {"padded", "valid_only"}:
+            raise ValueError("ulysses_sequence_mode must be 'padded' or 'valid_only'")
 
     @classmethod
     def radial_attention(

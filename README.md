@@ -244,6 +244,12 @@ telefuser/
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 | `SwiftVR` | Causal video restoration | Single-GPU BF16 offline and direct streaming restoration via [examples/swiftvr/README.md](examples/swiftvr/README.md) |
 
+### Robotics and Action Models
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `LingBot-VLA v2` | Vision-language-action inference | RobotWin observations to normalized canonical action chunks via the direct SDK or native structured service; see [examples/lingbot_vla_v2/README.md](examples/lingbot_vla_v2/README.md) |
+
 ### Video Generation
 
 | Pipeline | Task | Notes |
@@ -281,6 +287,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
 - [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
 - [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
+- [examples/lingbot_vla_v2/README.md](examples/lingbot_vla_v2/README.md): LingBot-VLA v2 inference, structured service, parity, and validation boundaries
 - [examples/swiftvr/README.md](examples/swiftvr/README.md): SwiftVR checkpoint loading, streaming usage, performance, and acceleration options
 
 ## Known Limitations

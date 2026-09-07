@@ -17,13 +17,13 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import einops
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PretrainedConfig
+from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import is_flash_attn_available
 from transformers.models.auto import CONFIG_MAPPING
@@ -31,10 +31,9 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 from transformers.utils import logging
 
-from telefuser.models.lingbot_vla_v2_loader import (
-    LingBotVLAWeightLoader,
-    LingBotVlaV2StateDictConverter,
-    TaskTokenDepthHead,
+from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
+from telefuser.models.lingbot_vla_v2_alignment import TaskTokenDepthHead
+from telefuser.models.lingbot_vla_v2_attention import (
     block_suffix_to_fv_,
     build_block_mask,
     create_sinusoidal_pos_embedding,
@@ -45,11 +44,19 @@ from telefuser.models.lingbot_vla_v2_loader import (
     prefix_query_segments,
     prefix_query_token_spans,
 )
+from telefuser.models.lingbot_vla_v2_cuda_graph import LingBotVlaV2CudaGraphs
+from telefuser.models.lingbot_vla_v2_loader import LingBotVlaV2StateDictConverter
 from telefuser.models.lingbot_vla_v2_moe import (
     FixQwen2RMSNorm,
     Qwen2ForCausalLM,
     Qwen2FusedExperts,
     Qwen2TokenMoeBlock,
+)
+from telefuser.models.lingbot_vla_v2_quantization import (
+    LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256,
+    LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT,
+    build_lingbot_vla_v2_linear_manifest,
+    finalize_lingbot_vla_v2_quantization_identity,
 )
 from telefuser.models.lingbot_vla_v2_qwen import (
     Qwen3VLForConditionalGeneration,
@@ -59,10 +66,26 @@ from telefuser.models.lingbot_vla_v2_qwen import (
 
 try:
     from dinov3.hub.backbones import dinov3_vitb16
-except Exception:
+except ImportError:
     dinov3_vitb16 = None
 
 logger = logging.get_logger(__name__)
+
+
+# Quantize the standard Qwen text/vision blocks and action-expert attention.
+# The fused 3-D MoE weights and action/state heads intentionally remain BF16.
+LINGBOT_VLA_V2_DEFAULT_QUANTIZE_MODULES = (
+    "qwenvl.model.language_model.layers.",
+    "qwenvl.model.visual.blocks.",
+    "self_attn.",
+)
+LINGBOT_VLA_V2_REQUIRED_SKIP_MODULES = (
+    "action_in_proj",
+    "action_out_proj",
+    "action_time_mlp",
+    "state_proj",
+    "lm_head",
+)
 
 
 class LingbotVLAConfig(PretrainedConfig):
@@ -75,9 +98,9 @@ class LingbotVLAConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vlm_repo_id: Optional[str] = None,
-        expert_vision_path: Optional[str] = None,
-        tokenizer_path: Optional[str] = None,
+        vlm_repo_id: str | None = None,
+        expert_vision_path: str | None = None,
+        tokenizer_path: str | None = None,
         post_training: bool = False,
         adanorm_time: bool = False,
         split_gate_liner: bool = False,
@@ -85,7 +108,7 @@ class LingbotVLAConfig(PretrainedConfig):
         separate_time_proj: bool = False,
         final_norm_adanorm: bool = False,
         enable_expert_vision: bool = False,
-        expert_vision_type: Optional[str] = None,
+        expert_vision_type: str | None = None,
         freeze_vision_encoder: bool = False,
         incremental_training: bool = False,
         depth_incremental_training: bool = False,
@@ -98,10 +121,10 @@ class LingbotVLAConfig(PretrainedConfig):
         tokenizer_max_length: int = 48,
         loss_type: str = "fm",
         norm_qkv: bool = False,
-        align_params: Optional[Dict[str, Any]] = None,
+        align_params: dict[str, Any] | None = None,
         use_compile: bool = False,
         use_moe: bool = False,
-        token_moe_layers: Optional[list] = None,
+        token_moe_layers: list[int] | None = None,
         token_num_experts: int = 32,
         token_top_k: int = 1,
         token_moe_intermediate_size: int = 256,
@@ -113,7 +136,7 @@ class LingbotVLAConfig(PretrainedConfig):
         router_activation: str = "softmax",
         routed_scaling_factor: float = 1.0,
         use_shared_expert_gate: bool = True,
-        moe_implementation: Optional[Literal[None, "eager", "fused"]] = None,
+        moe_implementation: Literal["eager", "fused"] | None = None,
         use_robby_moe_kernel: bool = False,
         split_fused_experts_from_decoder_fsdp: bool = False,
         expert_hidden_size: int = 768,
@@ -146,9 +169,8 @@ class LingbotVLAConfig(PretrainedConfig):
         self.num_steps = 10
         self.n_obs_steps = 1
 
-        assert not (split_gate_liner and nosplit_gate_liner), (
-            "split_gate_liner and nosplit_gate_liner can not be both True."
-        )
+        if split_gate_liner and nosplit_gate_liner:
+            raise ValueError("split_gate_liner and nosplit_gate_liner cannot both be True")
 
         self.vlm_repo_id = vlm_repo_id
         self.expert_vision_path = expert_vision_path
@@ -310,7 +332,8 @@ class FlowMatchingBase(nn.Module):
         self.use_shared_future_task_proj = False
         self.future_video_share_future_depth_query = False
         self.num_task_tokens = config["num_task_tokens"]
-        assert config["depth"]["num_backbone_tokens"] % self.num_task_tokens == 0
+        if config["depth"]["num_backbone_tokens"] % self.num_task_tokens != 0:
+            raise ValueError("depth.num_backbone_tokens must be divisible by num_task_tokens")
         self.depth_align_embs = nn.Parameter(
             torch.randn(config["depth"]["num_backbone_tokens"], config["llm"]["dim_out"])
         )
@@ -629,7 +652,7 @@ class QwenvlWithExpertV2Config(PretrainedConfig):
             sliding_window=32768,
             tie_word_embeddings=True,
             torch_dtype="bfloat16",
-            transformers_version="4.57.3",
+            transformers_version="5.14.1",
             use_cache=use_cache,
             use_sliding_window=False,
             vocab_size=151936,
@@ -643,6 +666,18 @@ class QwenvlWithExpertV2Config(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+def _resolve_qwen_attention_implementations(
+    vision_implementation: str,
+    *,
+    flash_attention_available: bool,
+) -> tuple[str, str]:
+    """Resolve Qwen text and vision backends without changing action attention semantics."""
+    base_implementation = "flash_attention_2" if flash_attention_available else "eager"
+    if vision_implementation == "flash_attention_2" and not flash_attention_available:
+        vision_implementation = "sdpa"
+    return base_implementation, vision_implementation
+
+
 class QwenvlWithExpertV2Model(PreTrainedModel):
     config_class = QwenvlWithExpertV2Config
 
@@ -652,11 +687,13 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path, local_files_only=True)
         if self.config.vocab_size not in (0, 257152):
             vlm_config.text_config.vocab_size = self.config.vocab_size
-        base_attn_implementation = "flash_attention_2" if is_flash_attn_available() else "eager"
-        vision_attn_implementation = self.config.vit_attn_implementation
-        if vision_attn_implementation == "flash_attention_2" and not is_flash_attn_available():
-            logger.warning_once("flash-attn is unavailable; using eager attention for Qwen3-VL vision")
-            vision_attn_implementation = "eager"
+        flash_attention_available = is_flash_attn_available()
+        base_attn_implementation, vision_attn_implementation = _resolve_qwen_attention_implementations(
+            self.config.vit_attn_implementation,
+            flash_attention_available=flash_attention_available,
+        )
+        if self.config.vit_attn_implementation == "flash_attention_2" and not flash_attention_available:
+            logger.warning_once("flash-attn is unavailable; using SDPA attention for Qwen3-VL vision")
         vlm_config._attn_implementation = base_attn_implementation
         vlm_config.text_config._attn_implementation = base_attn_implementation
         vlm_config.vision_config._attn_implementation = vision_attn_implementation
@@ -681,7 +718,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         self.cu_seqlens = None
         self.visual_split_sizes = None
         self.visual_max_seqlen = None
+        self.visual_sequence_lengths = None
         self._cached_image_grid_signature = None
+        self._cached_visual_pos_indices = None
 
         del self.qwen_expert.model.embed_tokens
         if self.config.enable_expert_vision:
@@ -754,7 +793,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 self.cu_seqlens,
                 self.visual_split_sizes,
                 self.visual_max_seqlen,
-            ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
+            ) = self.qwenvl.visual.preprocess_grid_thw(grid_thw=image_grid_thw)
+            self.visual_sequence_lengths = tuple((self.cu_seqlens[1:] - self.cu_seqlens[:-1]).tolist())
             self._cached_image_grid_signature = grid_signature
         image_embeds, deepstack_image_embeds = self.qwenvl.visual(
             pixel_values,
@@ -763,6 +803,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             position_embeddings=self.position_embeddings,
             cu_seqlens=self.cu_seqlens,
             max_seqlen=self.visual_max_seqlen,
+            sequence_lengths=self.visual_sequence_lengths,
         )
         split_sizes = self.visual_split_sizes
         if split_sizes is None:
@@ -785,8 +826,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         return self.qwenvl.model.language_model.embed_tokens(tokens)
 
     def embed_special_token(self, token_id: int, batch: int, count: int, device, dtype):
-        token = torch.tensor([token_id], device=device, dtype=torch.long)
-        emb = self.embed_language_tokens(token).to(dtype=dtype)
+        weight = self.qwenvl.model.language_model.embed_tokens.weight
+        emb = weight[token_id].to(device=device, dtype=dtype)
         return emb.view(1, 1, 1, -1).expand(batch, count, 1, -1)
 
     def build_prefix_position_ids(self, input_ids, attention_mask, image_grid_thw=None, video_grid_thw=None):
@@ -807,9 +848,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         layer_idx: int,
-        past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
     ):
         if use_cache:
             if past_key_values is None:
@@ -827,35 +868,40 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             and visual_pos_masks is not None
             and layer_idx < len(deepstack_visual_embeds)
         ):
-            hidden_states = self.qwenvl.model.language_model._deepstack_process(
-                hidden_states,
-                visual_pos_masks,
-                deepstack_visual_embeds[layer_idx],
+            visual_pos_indices = self._cached_visual_pos_indices
+            if visual_pos_indices is None:
+                visual_pos_indices = torch.nonzero(visual_pos_masks.reshape(-1), as_tuple=False).flatten()
+            visual_embeds = deepstack_visual_embeds[layer_idx].to(hidden_states.device, hidden_states.dtype)
+            hidden_states.reshape(-1, hidden_states.shape[-1]).index_add_(
+                0,
+                visual_pos_indices,
+                visual_embeds,
             )
         return hidden_states
 
     def forward(
         self,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        vlm_position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
-        inputs_embeds: List[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        fill_kv_cache: Optional[bool] = None,
-        ada_cond: List[torch.FloatTensor] = None,
-        visual_pos_masks: Optional[torch.Tensor] = None,
-        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        vlm_position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
+        inputs_embeds: list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
+        ada_cond: list[torch.FloatTensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
     ):
         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
         num_layers = self.qwenvl.config.text_config.num_hidden_layers
         action_num_layers = self.config.qwen_expert_config.num_hidden_layers
         router_logits_list = []
 
-        assert action_num_layers == num_layers, (
-            "Action expert and VLM must have the same number of layers "
-            f"(got action={action_num_layers}, vlm={num_layers})."
-        )
+        if action_num_layers != num_layers:
+            raise ValueError(
+                "Action expert and VLM must have the same number of layers "
+                f"(got action={action_num_layers}, vlm={num_layers})"
+            )
 
         for layer_idx in range(num_layers):
             query_states = []
@@ -952,6 +998,8 @@ class FlowMatchingV2(FlowMatchingBase):
     def __init__(self, config, eval):
         nn.Module.__init__(self)
         self.config = config
+        self._cuda_graph_enabled = False
+        self._cuda_graph_runner: LingBotVlaV2CudaGraphs | None = None
         qwenvl_with_export_config = QwenvlWithExpertV2Config(
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
@@ -1219,20 +1267,26 @@ class FlowMatchingV2(FlowMatchingBase):
         else:
             att_masks = torch.zeros((bsize, embs.shape[1]), device=device, dtype=torch.bool)
 
+        img_visual_only = einops.repeat(img_masks, "b n -> b n l", l=num_patch)
         flat_img_masks = einops.rearrange(img_masks, "b n -> (b n)")
-        rope_grid_thw = flat_grid_thw[flat_img_masks]
-        if rope_grid_thw.numel() == 0:
-            rope_grid_thw = flat_grid_thw[:1]
+        active_image_indices = torch.nonzero(flat_img_masks, as_tuple=False).flatten()
+        if active_image_indices.numel() == 0:
+            active_image_indices = torch.zeros(1, dtype=torch.long, device=flat_grid_thw.device)
+        rope_grid_thw = flat_grid_thw.index_select(0, active_image_indices)
         prefix_position_ids = self.qwenvl_with_expert.build_prefix_position_ids(
             prefix_input_ids,
             pad_masks.long(),
             image_grid_thw=rope_grid_thw,
             video_grid_thw=None,
         )
+        deepstack_indices = torch.nonzero(img_visual_only.reshape(-1), as_tuple=False).flatten()
+        self.qwenvl_with_expert._cached_visual_pos_indices = torch.nonzero(
+            full_visual_pos_masks.reshape(-1), as_tuple=False
+        ).flatten()
+
         filtered_deepstack = []
-        img_visual_only = einops.repeat(img_masks, "b n -> b n l", l=num_patch)
         for deepstack in deepstack_embs:
-            filtered_deepstack.append(deepstack[img_visual_only])
+            filtered_deepstack.append(deepstack.reshape(-1, deepstack.shape[-1]).index_select(0, deepstack_indices))
 
         result = (
             embs,
@@ -1275,6 +1329,59 @@ class FlowMatchingV2(FlowMatchingBase):
         del args, kwargs
         raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
+    def set_cuda_graph_enabled(self, enabled: bool) -> None:
+        """Enable lazy capture of fixed-shape action denoising."""
+        self._cuda_graph_enabled = bool(enabled)
+        if not self._cuda_graph_enabled:
+            self._cuda_graph_runner = None
+
+    @property
+    def cuda_graph_enabled(self) -> bool:
+        return self._cuda_graph_enabled
+
+    @property
+    def cuda_graph_ready(self) -> bool:
+        return self._cuda_graph_runner is not None and self._cuda_graph_runner.ready
+
+    def build_prefix_cache(
+        self,
+        images: torch.Tensor,
+        img_masks: torch.Tensor,
+        lang_tokens: torch.Tensor,
+        lang_masks: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[int, dict[str, torch.Tensor]]]:
+        """Encode the multimodal prefix and construct the action expert KV cache."""
+        (
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_att_masks,
+            prefix_position_ids,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+        ) = self.embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            image_grid_thw=image_grid_thw,
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        _, past_key_values, _ = self.qwenvl_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            vlm_position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+        )
+        if past_key_values is None:
+            raise RuntimeError("LingBot-VLA v2 prefix encoding did not produce a KV cache")
+        return prefix_pad_masks, prefix_position_ids, past_key_values
+
     def sample_actions(
         self,
         images,
@@ -1298,38 +1405,36 @@ class FlowMatchingV2(FlowMatchingBase):
             )
             noise = torch.randn(actions_shape, device=device, dtype=dtype)
 
-        (
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_att_masks,
-            prefix_position_ids,
-            visual_pos_masks,
-            deepstack_visual_embeds,
-        ) = self.embed_prefix(
+        if self._cuda_graph_enabled:
+            if device.type != "cuda":
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires CUDA inference")
+            if image_grid_thw is None:
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph requires image_grid_thw")
+            if getattr(self, "_use_compile_predict_velocity", False):
+                raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
+            if self._cuda_graph_runner is None:
+                self._cuda_graph_runner = LingBotVlaV2CudaGraphs(self)
+            return self._cuda_graph_runner.run(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                noise,
+                image_grid_thw,
+            )
+
+        prefix_pad_masks, prefix_position_ids, past_key_values = self.build_prefix_cache(
             images,
             img_masks,
             lang_tokens,
             lang_masks,
-            image_grid_thw=image_grid_thw,
-        )
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-
-        _, past_key_values, _ = self.qwenvl_with_expert.forward(
-            attention_mask=prefix_att_2d_masks,
-            position_ids=prefix_position_ids,
-            vlm_position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
+            image_grid_thw,
         )
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
         time = torch.tensor(1.0, dtype=dtype, device=device)
-        count = 0
         predict_velocity_fn = self.predict_velocity
         if getattr(self, "_use_compile_predict_velocity", False):
             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
@@ -1342,8 +1447,7 @@ class FlowMatchingV2(FlowMatchingBase):
                 )
                 self._compiled_predict_velocity = predict_velocity_fn
 
-        while time >= -dt / 2:
-            count += 1
+        for _ in range(int(self.config.num_steps)):
             expanded_time = time.expand(bsize)
             v_t = predict_velocity_fn(
                 state,
@@ -1356,7 +1460,10 @@ class FlowMatchingV2(FlowMatchingBase):
 
             x_t += dt * v_t
             time += dt
-        logger.debug("Denoised actions in %d steps", count)
+        logger.debug(
+            "Denoised actions in %d steps",
+            self.config.num_steps,
+        )
         return x_t
 
     def predict_velocity(
@@ -1434,16 +1541,11 @@ class LingbotVlaV2Policy(PreTrainedModel):
     name = "torch_lingbot_vla_v2"
     _no_split_modules = ["Qwen2DecoderLayer", "FixQwen2RMSNorm", "FixAdaRMSNorm"]
 
-    @classmethod
-    def get_weight_loader(cls):
-        return LingBotVLAWeightLoader()
-
     def __init__(self, config: LingbotVLAV2Config, eval: bool = True):
         if not eval:
             raise ValueError("LingBot-VLA v2 only supports inference mode")
         super().__init__(config)
         self.config = config
-        self.language_tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, local_files_only=True)
         self.model = FlowMatchingV2(config, eval)
         if not getattr(self.config, "use_lm_head", False):
             del self.model.qwenvl_with_expert.qwenvl.lm_head
@@ -1451,10 +1553,17 @@ class LingbotVlaV2Policy(PreTrainedModel):
         self.requires_grad_(False)
         self.eval()
         self.reset()
-        torch.set_float32_matmul_precision("high")
 
     def reset(self):
         return None
+
+    def set_cuda_graph_enabled(self, enabled: bool) -> None:
+        """Configure fixed-step CUDA Graph execution for this policy."""
+        self.model.set_cuda_graph_enabled(enabled)
+
+    @property
+    def cuda_graph_ready(self) -> bool:
+        return self.model.cuda_graph_ready
 
     def forward(self, *args, **kwargs):
         """Reject the upstream training API in the inference-only model."""
@@ -1474,7 +1583,6 @@ __all__ = [
     "Qwen3VLPreTrainedModel",
     "Qwen2ForCausalLM",
 ]
-# __V2_END__
 
 
 class LingBotVlaV2Model(LingbotVlaV2Policy):
@@ -1489,5 +1597,217 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
     def state_dict_converter(**kwargs):
         return LingBotVlaV2StateDictConverter(**kwargs)
 
+    def enable_quant(self, quant_config: QuantConfig) -> None:
+        """Apply supported online quantization without changing action or MoE heads."""
+        if not isinstance(quant_config, QuantConfig):
+            raise TypeError("LingBot-VLA v2 online quantization requires QuantConfig")
+        if not quant_config.enabled:
+            return
 
-# __WRAPPER_END__
+        existing_quant_type = getattr(self, "quant_type", None)
+        if existing_quant_type is not None:
+            requested_backend = quant_config.kernel_backend
+            if requested_backend == QuantKernelBackend.AUTO:
+                requested_backend = {
+                    QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+                    QuantType.FP8: QuantKernelBackend.TF_KERNEL,
+                    QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+                }.get(quant_config.quant_type, requested_backend)
+            if (
+                existing_quant_type == quant_config.quant_type
+                and getattr(self, "quant_kernel_backend", None) == requested_backend
+            ):
+                return
+            raise RuntimeError(
+                "LingBot-VLA v2 is already quantized as "
+                f"{existing_quant_type}/{getattr(self, 'quant_kernel_backend', None)}, cannot apply "
+                f"{quant_config.quant_type}/{requested_backend}"
+            )
+
+        if quant_config.quant_type == QuantType.FP8 and quant_config.kernel_backend == QuantKernelBackend.CUTLASS:
+            self._enable_fused_fp8_graph()
+            return
+
+        profiles = {
+            QuantType.TORCHAO_FP8: "torchao-fp8",
+            QuantType.FP8: "tf-kernel-fp8",
+            QuantType.BNB_NF4: "bnb-nf4",
+        }
+        effective_backends = {
+            QuantType.TORCHAO_FP8: QuantKernelBackend.TORCHAO,
+            QuantType.FP8: QuantKernelBackend.TF_KERNEL,
+            QuantType.BNB_NF4: QuantKernelBackend.BITSANDBYTES,
+        }
+        if quant_config.quant_type not in profiles:
+            raise ValueError(f"LingBot-VLA v2 does not support online quantization type {quant_config.quant_type.name}")
+
+        include_names = quant_config.quantize_modules or LINGBOT_VLA_V2_DEFAULT_QUANTIZE_MODULES
+        exclude_names = tuple(dict.fromkeys((*quant_config.skip_modules, *LINGBOT_VLA_V2_REQUIRED_SKIP_MODULES)))
+        manifest = build_lingbot_vla_v2_linear_manifest(
+            self,
+            include_names=include_names,
+            exclude_names=exclude_names,
+        )
+        selected_count = int(manifest["selected_count"])
+        if selected_count == 0:
+            raise RuntimeError("LingBot-VLA v2 online quantization did not select any Linear layers")
+        frozen_official_profile = (
+            getattr(getattr(self, "config", None), "checkpoint_variant", None) == "base"
+            and quant_config.quantize_modules is None
+            and quant_config.skip_modules == QuantConfig().skip_modules
+        )
+        if frozen_official_profile:
+            manifest_sha256 = str(manifest["manifest_sha256"])
+            if (
+                selected_count != LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT
+                or manifest_sha256 != LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256
+            ):
+                raise RuntimeError(
+                    "LingBot-VLA v2 official 6B quantization manifest changed: "
+                    f"expected count={LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZED_LINEAR_COUNT} "
+                    f"sha256={LINGBOT_VLA_V2_OFFICIAL_6B_QUANTIZATION_MANIFEST_SHA256}, "
+                    f"got count={selected_count} sha256={manifest_sha256}"
+                )
+
+        if quant_config.quant_type == QuantType.TORCHAO_FP8:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TORCHAO):
+                raise ValueError(
+                    f"LingBot-VLA v2 TorchAO FP8 requires the TorchAO backend; got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self,
+                include_names=include_names,
+                exclude_names=exclude_names,
+            )
+            self.torchao_fp8_replaced_linear = replaced
+        elif quant_config.quant_type == QuantType.BNB_NF4:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.BITSANDBYTES):
+                raise ValueError(
+                    f"LingBot-VLA v2 BNB NF4 requires the bitsandbytes backend; got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.bnb_nf4_linear import replace_linear_layers_with_bnb_nf4
+
+            replaced = replace_linear_layers_with_bnb_nf4(
+                self,
+                compute_dtype=torch.bfloat16,
+                include_names=include_names,
+                exclude_names=exclude_names,
+            )
+            self.bnb_nf4_replaced_linear = replaced
+        elif quant_config.quant_type == QuantType.FP8:
+            if quant_config.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                raise ValueError(
+                    "LingBot-VLA v2 FP8 online quantization requires the tf-kernel backend; "
+                    f"got {quant_config.kernel_backend.name}"
+                )
+            from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+            def module_filter(name: str, _module: nn.Module) -> bool:
+                return any(token in name for token in include_names) and not any(
+                    token and token in name for token in exclude_names
+                )
+
+            replaced = count_linear_layers(self, module_filter=module_filter)
+            enable_fp8_gemm(
+                self,
+                options=FP8GemmOptions(
+                    fp16_weight_storage="keep" if quant_config.keep_fp16_weight else "discard",
+                    materialize_fp8_on_wrap=True,
+                ),
+                module_filter=module_filter,
+            )
+            self.tf_kernel_fp8_replaced_linear = replaced
+        if replaced != selected_count:
+            raise RuntimeError(
+                f"LingBot-VLA v2 quantization selected {selected_count} Linear layers but converted {replaced}"
+            )
+        self.quant_type = quant_config.quant_type
+        self.quant_kernel_backend = effective_backends[quant_config.quant_type]
+        finalize_lingbot_vla_v2_quantization_identity(
+            self,
+            profile=profiles[quant_config.quant_type],
+            quant_type=quant_config.quant_type.name,
+            kernel_backend=effective_backends[quant_config.quant_type].name,
+            manifest=manifest,
+        )
+        logger.info(
+            "LingBot-VLA v2 %s converted %d selected Linear layers (manifest %s); "
+            "fused MoE and action heads remain BF16",
+            quant_config.quant_type.name,
+            replaced,
+            manifest["manifest_sha256"],
+        )
+
+    def _enable_fused_fp8_graph(self) -> None:
+        """Quantize only the ten-step action path with graph-safe FP8 kernels."""
+        if not next(self.parameters()).is_cuda:
+            raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires CUDA-resident model weights")
+        if torch.cuda.get_device_capability(next(self.parameters()).device) < (9, 0):
+            raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires Hopper or newer CUDA hardware")
+
+        action_layers = self.model.qwenvl_with_expert.qwen_expert.model.layers
+        include_names = tuple(
+            token
+            for layer_idx in range(len(action_layers))
+            for token in (
+                f"qwenvl_with_expert.qwen_expert.model.layers.{layer_idx}.self_attn.",
+                f"qwenvl_with_expert.qwen_expert.model.layers.{layer_idx}.mlp.shared_expert.",
+            )
+        ) + ("action_time_mlp_",)
+        exclude_names: tuple[str, ...] = ()
+        manifest = build_lingbot_vla_v2_linear_manifest(
+            self,
+            include_names=include_names,
+            exclude_names=exclude_names,
+        )
+
+        from telefuser.ops.graph_fp8_linear import replace_linear_layers_with_graph_fp8
+
+        def module_filter(name: str, module: nn.Linear) -> bool:
+            selected = any(token in name for token in include_names) and not any(
+                token in name for token in exclude_names
+            )
+            return selected and module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+        replaced = replace_linear_layers_with_graph_fp8(self, module_filter=module_filter)
+        selected_count = int(manifest["selected_count"])
+        if replaced != selected_count:
+            raise RuntimeError(
+                f"LingBot-VLA v2 fused FP8 graph selected {selected_count} Linear layers but converted {replaced}"
+            )
+
+        fused_expert_layers = 0
+        for layer in action_layers:
+            mlp = getattr(layer, "mlp", None)
+            experts = getattr(mlp, "experts", None)
+            if not isinstance(experts, Qwen2FusedExperts):
+                raise RuntimeError("LingBot-VLA v2 fused FP8 graph requires fused expert storage")
+            experts.enable_graph_fp8()
+            fused_expert_layers += 1
+
+        self.graph_fp8_replaced_linear = replaced
+        self.graph_fp8_fused_expert_layers = fused_expert_layers
+        self.quant_type = QuantType.FP8
+        self.quant_kernel_backend = QuantKernelBackend.CUTLASS
+        identity = finalize_lingbot_vla_v2_quantization_identity(
+            self,
+            profile="fused-fp8-graph",
+            quant_type=QuantType.FP8.name,
+            kernel_backend=QuantKernelBackend.CUTLASS.name,
+            manifest=manifest,
+        )
+        identity["implementation"].update(
+            {
+                "fused_expert_layers": fused_expert_layers,
+                "fused_expert_weight_dtype": "float8_e4m3fn",
+                "bf16_expert_weights_retained": False,
+            }
+        )
+        self._lingbot_vla_v2_quantization_identity = identity
+        logger.info(
+            "LingBot-VLA v2 fused FP8 graph converted %d action Linear layers and %d routed MoE layers",
+            replaced,
+            fused_expert_layers,
+        )

@@ -182,8 +182,9 @@ WGMMA Tensor Core instructions. Its FP8 path adds the following work to the upst
    channel scale is applied to the FP32 output accumulator after all PV contributions.
 6. **One online-softmax merge.** Exact and summary routes update the same row maxima, row sums, and output
    accumulator. The full attention matrix is never written to HBM.
-7. **Split-KV for long sequences.** On SM90, `auto` selects two splits for FP8 sequences at or above 16,384 tokens
-   and four splits at or above 65,536 tokens. A final log-sum-exp reduction merges the partial outputs.
+7. **Split-KV for long sequences.** On SM90, `auto` selects two splits for FP8 sequences at or above 16,384 tokens.
+   H100 measurements through 65,536 tokens show that four splits do not recover their additional workspace and
+   reduction cost. A final log-sum-exp reduction merges the two partial outputs.
 
 ```mermaid
 flowchart TB
@@ -224,8 +225,10 @@ prefix is registered as an exact KV sink, and prefix queries are recomputed with
 steps and first two DiT layers also use matched packed FlashAttention-4. Token-refiner attention remains dense.
 
 Unsupported shapes, dtypes, devices, or runtime kernel failures retain the public attention fallback. FP8 operands
-are dequantized before the BF16 fallback. Ring/USP attention remains dense because its online distributed merge needs
-log-sum-exp behavior outside the current Sol contract.
+are dequantized before the BF16 fallback. Pure Ulysses sequence parallelism is supported: its all-to-all first
+produces full-sequence, local-head Q/K/V, then each rank computes FP8 scales and runs Sol independently. Ring and
+combined Ulysses-ring attention remain dense because their distributed online merge needs log-sum-exp behavior
+outside the current Sol contract.
 
 ## Performance Results
 

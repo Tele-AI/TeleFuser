@@ -127,6 +127,9 @@ def make_attention_config(
 def get_pipeline(
     *,
     model_root: str = PPL_CONFIG["model_root"],
+    parallelism: int = 1,
+    cfg_degree: int | str = "auto",
+    cfg_scale: float = PPL_CONFIG["cfg_scale"],
     attention: str = "dense",
     quantization: str = "none",
     fp8_linear_scope: str = "auto",
@@ -140,13 +143,24 @@ def get_pipeline(
     sample_solver: str = "euler",
 ) -> Wan21VideoPipeline:
     """Load Wan2.1 with independently selectable attention and quantization."""
+    if parallelism < 1:
+        raise ValueError("parallelism must be positive")
+    if cfg_degree == "auto":
+        cfg_degree = 2 if cfg_scale > 1.0 and parallelism % 2 == 0 else 1
+    cfg_degree = int(cfg_degree)
+    if cfg_degree not in (1, 2) or parallelism % cfg_degree:
+        raise ValueError("cfg_degree must be 1 or 2 and divide parallelism")
+    if parallelism > 1 and quantization not in ("none", "tf-kernel-fp8"):
+        raise ValueError("multi-GPU optimized Wan currently supports no quantization or tf-kernel-fp8")
     fp8_linear_scope = resolve_fp8_linear_scope(attention, fp8_linear_scope)
     quant_config = make_quant_config(quantization, fp8_linear_scope=fp8_linear_scope)
     module_manager = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
     module_manager.load_model(f"{model_root}/Wan2.1_VAE.pth", device="cpu", torch_dtype=torch.bfloat16)
     module_manager.load_model(
         f"{model_root}/diffusion_pytorch_model.safetensors",
-        device="cuda",
+        # Spawned workers cannot inherit CUDA tensors. FP8Linear keeps a CPU
+        # weight source and materializes its per-device FP8 cache lazily.
+        device="cpu" if parallelism > 1 else "cuda",
         torch_dtype=torch.bfloat16,
         quant_config=quant_config,
     )
@@ -166,6 +180,11 @@ def get_pipeline(
     )
     config.dit_config.quant_config = quant_config
     config.dit_config.offload_config.offload_type = WeightOffloadType.NO_CPU_OFFLOAD
+    if parallelism > 1:
+        config.dit_config.parallel_config.device_ids = list(range(parallelism))
+        config.dit_config.parallel_config.cfg_degree = cfg_degree
+        config.dit_config.parallel_config.sp_ulysses_degree = parallelism // cfg_degree
+        config.enable_denoising_parallel = True
     config.sample_solver = sample_solver
     config.enable_metrics = True
     pipeline.init(module_manager, config)
@@ -218,6 +237,8 @@ def run(
 @click.option("--sigma-shift", default=PPL_CONFIG["sigma_shift"], type=float)
 @click.option("--sample-solver", default="euler", type=click.Choice(["euler", "unipc"]))
 @click.option("--model-root", default=PPL_CONFIG["model_root"])
+@click.option("--parallelism", default=1, type=click.IntRange(min=1))
+@click.option("--cfg-degree", default="auto", type=click.Choice(["auto", "1", "2"]))
 @click.option(
     "--attention",
     default="dense",
@@ -249,6 +270,8 @@ def main(
     sigma_shift: float,
     sample_solver: str,
     model_root: str,
+    parallelism: int,
+    cfg_degree: str,
     attention: str,
     quantization: str,
     fp8_linear_scope: str,
@@ -265,6 +288,9 @@ def main(
     configure_attention_backends()
     pipeline = get_pipeline(
         model_root=model_root,
+        parallelism=parallelism,
+        cfg_degree=cfg_degree,
+        cfg_scale=cfg_scale,
         attention=attention,
         quantization=quantization,
         fp8_linear_scope=fp8_linear_scope,

@@ -27,7 +27,12 @@ from telefuser.distributed.device_mesh import (
     get_ulysses_world_size,
 )
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
-from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_heads
+from telefuser.distributed.ulysses_comm import (
+    ulysses_gather_heads_chunk_async,
+    ulysses_gather_heads_destination_major,
+    ulysses_scatter_heads,
+    ulysses_scatter_qkv_qknorm_rope_chunk_async,
+)
 from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import SparseAttentionState, attention
@@ -53,6 +58,60 @@ MINIMAX_H3_FP32_PARAM_NAMES = frozenset(
     }
 )
 MINIMAX_H3_FP32_BUFFER_NAMES = frozenset({"rope.inv_freq"})
+
+
+def _ulysses_head_chunk_ranges(local_heads: int, chunks: int = 2) -> tuple[tuple[int, int], ...]:
+    """Return balanced, non-empty destination-local head ranges."""
+    if local_heads <= 0 or chunks <= 0 or chunks > local_heads:
+        raise ValueError("invalid Ulysses attention head chunks")
+    base, remainder = divmod(local_heads, chunks)
+    ranges = []
+    start = 0
+    for index in range(chunks):
+        count = base + (1 if index < remainder else 0)
+        ranges.append((start, count))
+        start += count
+    return tuple(ranges)
+
+
+def _can_run_fused_ulysses_attention(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    attention_config: AttentionConfig | None,
+    sequence_lengths: list[int],
+    rope_cos_sin_cache: torch.Tensor | None,
+    use_ulysses: bool,
+    ulysses_world_size: int,
+) -> bool:
+    """Check whether the lossless fused MiniMax-H3 Ulysses path is supported."""
+    return (
+        use_ulysses
+        and not torch.compiler.is_compiling()
+        and qkv.is_cuda
+        and qkv.dtype == torch.bfloat16
+        and qkv.ndim == 4
+        and qkv.shape[1] == 3
+        and qkv.stride(-1) == 1
+        and q_weight.is_cuda
+        and k_weight.is_cuda
+        and q_weight.dtype == k_weight.dtype == qkv.dtype
+        and q_weight.is_contiguous()
+        and k_weight.is_contiguous()
+        and rope_cos_sin_cache is not None
+        and rope_cos_sin_cache.is_cuda
+        and rope_cos_sin_cache.ndim == 2
+        and rope_cos_sin_cache.shape[0] == qkv.shape[0]
+        and rope_cos_sin_cache.stride(-1) == 1
+        and attention_config is not None
+        and attention_config.attn_impl == AttnImplType.FLASH_ATTN_4
+        and len(sequence_lengths) == 2
+        and sum(sequence_lengths) == qkv.shape[0] * ulysses_world_size
+        and sequence_lengths[0] > 0
+        and 0 < sequence_lengths[1] < 64
+        and sequence_lengths[0] > sequence_lengths[1]
+        and qkv.shape[0] % 64 == 0
+    )
 
 
 @dataclass(frozen=True)
@@ -512,97 +571,163 @@ class MiniMaxH3Attention(nn.Module):
         query, key, value = qkv.unbind(dim=1)
         group = self.ulysses_group
         use_ulysses = group is not None and dist.get_world_size(group) > 1
-        if use_ulysses:
-            value_wait = ulysses_scatter_heads(
-                value.unsqueeze(0), group, tag="v", barrier=False, communicator=self.ulysses_communicator
+        world_size = dist.get_world_size(group) if use_ulysses else 1
+        local_heads = self.num_heads // world_size
+        use_fused_ulysses = _can_run_fused_ulysses_attention(
+            qkv,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            attention_config,
+            sequence_lengths,
+            rope_cos_sin_cache,
+            use_ulysses,
+            world_size,
+        )
+        use_fused_ulysses = (
+            use_fused_ulysses and attention_config is not None and attention_config.attention_chunks <= local_heads
+        )
+        if use_fused_ulysses:
+            chunks = attention_config.attention_chunks
+            head_ranges = _ulysses_head_chunk_ranges(local_heads, chunks=chunks)
+            valid_only = attention_config.ulysses_sequence_mode == "valid_only"
+            destination = torch.empty(
+                1,
+                sequence,
+                world_size,
+                local_heads,
+                self.head_dim,
+                dtype=value.dtype,
+                device=value.device,
             )
-        if rope_cos_sin_cache is not None:
-            query, key = apply_qk_norm_rope_neox(
-                query,
-                key,
-                self.q_norm.weight,
-                self.k_norm.weight,
-                rope_cos_sin_cache,
-                eps=self.q_norm.eps,
-            )
-        else:
-            query = self.q_norm(query)
-            key = self.k_norm(key)
-        query = query.unsqueeze(0)
-        key = key.unsqueeze(0)
-        value = value.unsqueeze(0)
-        if use_ulysses:
-            query_wait = ulysses_scatter_heads(
-                query, group, tag="q", barrier=False, communicator=self.ulysses_communicator
-            )
-            key_wait = ulysses_scatter_heads(key, group, tag="k", communicator=self.ulysses_communicator)
-            query = query_wait()
-            key = key_wait()
-            value = value_wait()
-        optimized_impls = {AttnImplType.SAGE_ATTN_2_8_8_SM90, AttnImplType.SOL_ATTN}
-        if attention_config is not None and attention_config.attn_impl in optimized_impls:
-            total_tokens = query.shape[1]
-            live_tokens = self._live_tokens(sequence_lengths, total_tokens)
-            live_query = query[:, :live_tokens].contiguous()
-            live_key = key[:, :live_tokens].contiguous()
-            live_value = value[:, :live_tokens].contiguous()
-            scales = None
-            runtime_attention_config = attention_config
-            runtime_sparse_state = sparse_state
-            if attention_config.attn_impl == AttnImplType.SOL_ATTN:
-                if sparse_state is None:
-                    raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
-                if not 0 <= prefix_tokens <= live_tokens:
-                    raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
-                sol_query, sol_key, sol_value, scales = self._prepare_sol_qkv(
-                    live_query,
-                    live_key,
-                    live_value,
-                    sparse_state,
+            scatter_waiters = [
+                ulysses_scatter_qkv_qknorm_rope_chunk_async(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    rope_cos_sin_cache,
+                    self.q_norm.eps,
+                    group,
+                    local_head_start=start,
+                    local_head_count=count,
                 )
-                if sparse_state.should_use_dense():
-                    runtime_attention_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
-                    runtime_sparse_state = None
-            else:
-                sol_query, sol_key, sol_value = live_query, live_key, live_value
-            live_output = attention(
-                sol_query,
-                sol_key,
-                sol_value,
-                attention_config=runtime_attention_config,
-                sparse_state=runtime_sparse_state,
-                scale=self.head_dim**-0.5,
-                q_scale=None if scales is None else scales[0],
-                k_scale=None if scales is None else scales[1],
-                v_scale=None if scales is None else scales[2],
-                sink_start=0,
-                sink_tokens=prefix_tokens,
-            )
-            if self._is_sol_active(sparse_state) and prefix_tokens:
-                dense_prefix = F.scaled_dot_product_attention(
-                    live_query[:, :prefix_tokens].transpose(1, 2),
-                    live_key.transpose(1, 2),
-                    live_value.transpose(1, 2),
+                for start, count in head_ranges
+            ]
+            gather_waiters = []
+            for (start, _), scatter_wait in zip(head_ranges, scatter_waiters, strict=True):
+                query_chunk, key_chunk, value_chunk = scatter_wait()
+                output_chunk = attention(
+                    query_chunk,
+                    key_chunk,
+                    value_chunk,
+                    attention_config=attention_config,
                     scale=self.head_dim**-0.5,
-                ).transpose(1, 2)
-                live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
-            if live_tokens == total_tokens:
-                output = live_output
-            else:
-                output = torch.zeros_like(query)
-                output[:, :live_tokens].copy_(live_output)
+                    sequence_lengths=sequence_lengths,
+                    cu_seqlens=cu_seqlens,
+                    fixed_valid=True,
+                    pad_fixed_valid_output=not valid_only,
+                )
+                gather_waiters.append(
+                    ulysses_gather_heads_chunk_async(
+                        output_chunk,
+                        group,
+                        num_heads=self.num_heads,
+                        local_head_start=start,
+                        destination=destination,
+                        zero_tail=valid_only,
+                    )
+                )
+            for gather_wait in gather_waiters:
+                gather_wait()
+            output = destination.flatten(2, 3)
         else:
-            output = attention(
-                query,
-                key,
-                value,
-                attention_config=attention_config,
-                scale=self.head_dim**-0.5,
-                sequence_lengths=sequence_lengths,
-                cu_seqlens=cu_seqlens,
-            )
-        if use_ulysses:
-            output = ulysses_gather_heads_destination_major(output, group, num_heads=self.num_heads)()
+            if use_ulysses:
+                value_wait = ulysses_scatter_heads(
+                    value.unsqueeze(0), group, tag="v", barrier=False, communicator=self.ulysses_communicator
+                )
+            if rope_cos_sin_cache is not None:
+                query, key = apply_qk_norm_rope_neox(
+                    query,
+                    key,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    rope_cos_sin_cache,
+                    eps=self.q_norm.eps,
+                )
+            else:
+                query = self.q_norm(query)
+                key = self.k_norm(key)
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+            if use_ulysses:
+                query_wait = ulysses_scatter_heads(
+                    query, group, tag="q", barrier=False, communicator=self.ulysses_communicator
+                )
+                key_wait = ulysses_scatter_heads(key, group, tag="k", communicator=self.ulysses_communicator)
+                query = query_wait()
+                key = key_wait()
+                value = value_wait()
+            optimized_impls = {AttnImplType.SAGE_ATTN_2_8_8_SM90, AttnImplType.SOL_ATTN}
+            if attention_config is not None and attention_config.attn_impl in optimized_impls:
+                total_tokens = query.shape[1]
+                live_tokens = self._live_tokens(sequence_lengths, total_tokens)
+                live_query = query[:, :live_tokens].contiguous()
+                live_key = key[:, :live_tokens].contiguous()
+                live_value = value[:, :live_tokens].contiguous()
+                scales = None
+                runtime_attention_config = attention_config
+                runtime_sparse_state = sparse_state
+                if attention_config.attn_impl == AttnImplType.SOL_ATTN:
+                    if sparse_state is None:
+                        raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
+                    if not 0 <= prefix_tokens <= live_tokens:
+                        raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
+                    sol_query, sol_key, sol_value, scales = self._prepare_sol_qkv(
+                        live_query, live_key, live_value, sparse_state
+                    )
+                    if sparse_state.should_use_dense():
+                        runtime_attention_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
+                        runtime_sparse_state = None
+                else:
+                    sol_query, sol_key, sol_value = live_query, live_key, live_value
+                live_output = attention(
+                    sol_query,
+                    sol_key,
+                    sol_value,
+                    attention_config=runtime_attention_config,
+                    sparse_state=runtime_sparse_state,
+                    scale=self.head_dim**-0.5,
+                    q_scale=None if scales is None else scales[0],
+                    k_scale=None if scales is None else scales[1],
+                    v_scale=None if scales is None else scales[2],
+                    sink_start=0,
+                    sink_tokens=prefix_tokens,
+                )
+                if self._is_sol_active(sparse_state) and prefix_tokens:
+                    dense_prefix = F.scaled_dot_product_attention(
+                        live_query[:, :prefix_tokens].transpose(1, 2),
+                        live_key.transpose(1, 2),
+                        live_value.transpose(1, 2),
+                        scale=self.head_dim**-0.5,
+                    ).transpose(1, 2)
+                    live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
+                if live_tokens == total_tokens:
+                    output = live_output
+                else:
+                    output = torch.zeros_like(query)
+                    output[:, :live_tokens].copy_(live_output)
+            else:
+                output = attention(
+                    query,
+                    key,
+                    value,
+                    attention_config=attention_config,
+                    scale=self.head_dim**-0.5,
+                    sequence_lengths=sequence_lengths,
+                    cu_seqlens=cu_seqlens,
+                )
+            if use_ulysses:
+                output = ulysses_gather_heads_destination_major(output, group, num_heads=self.num_heads)()
         output = self.out_proj(output[0].reshape(sequence, self.inner_dim))
         if self.tp_group is not None:
             all_reduce_sum_((output,), group=self.tp_group)
@@ -689,6 +814,45 @@ def _modulate(
     return indexed_scale_shift(hidden, shift, scale, indices)
 
 
+def _norm_modulate(
+    norm: RMSNorm,
+    hidden: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Run the bit-compatible RMSNorm + indexed AdaLN fusion when supported."""
+    weight = norm.weight
+    use_fused = (
+        not torch.compiler.is_compiling()
+        and hidden.device.type == "cuda"
+        and hidden.dtype == torch.bfloat16
+        and hidden.ndim == 2
+        and hidden.is_contiguous()
+        and weight is not None
+        and weight.dtype == shift.dtype == scale.dtype == hidden.dtype
+        and weight.is_contiguous()
+        and shift.ndim == scale.ndim == 2
+        and shift.stride(-1) == scale.stride(-1) == 1
+        and indices.ndim == 1
+        and indices.device == hidden.device
+    )
+    if use_fused:
+        from telefuser.kernel.triton.indexed_rmsnorm_modulation import (
+            indexed_rmsnorm_scale_shift_bf16,
+        )
+
+        return indexed_rmsnorm_scale_shift_bf16(
+            hidden,
+            weight,
+            shift,
+            scale,
+            indices.contiguous(),
+            norm.eps,
+        )
+    return _modulate(norm(hidden), shift, scale, indices)
+
+
 class MiniMaxH3TokenRefinerBlock(nn.Module):
     def __init__(self, config: MiniMaxH3DiTConfig) -> None:
         super().__init__()
@@ -767,7 +931,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             adaln_params = self.adaln_proj(adaln_input)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_params
         residual = hidden
-        value = _modulate(self.norm1(hidden), shift_msa, scale_msa, combined_indices)
+        value = _norm_modulate(self.norm1, hidden, shift_msa, scale_msa, combined_indices)
         value = self.attn(
             value,
             sequence_lengths=sequence_lengths,
@@ -779,7 +943,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         )
         hidden = indexed_gate(residual, gate_msa, value, combined_indices)
         residual = hidden
-        value = _modulate(self.norm2(hidden), shift_mlp, scale_mlp, combined_indices)
+        value = _norm_modulate(self.norm2, hidden, shift_mlp, scale_mlp, combined_indices)
         value = self.mlp(value)
         return indexed_gate(residual, gate_mlp, value, combined_indices)
 
@@ -805,7 +969,7 @@ class MiniMaxH3FinalLayer(nn.Module):
                 raise ValueError("adaln_input is required when no cached AdaLN parameters are supplied.")
             adaln_params = self.adaln_proj(adaln_input)
         shift, scale = adaln_params
-        hidden = _modulate(self.norm(hidden), shift, scale, inverse_indices).float()
+        hidden = _norm_modulate(self.norm, hidden, shift, scale, inverse_indices).float()
         return self.video_out(hidden), self.audio_out(hidden)
 
 

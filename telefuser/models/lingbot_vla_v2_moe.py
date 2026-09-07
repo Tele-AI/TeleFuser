@@ -4,20 +4,40 @@ Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 """
 
 import torch
+import torch.nn.functional as F
+from torch import nn
+from transformers.activations import ACT2FN
+from transformers.generation import GenerationMixin
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.qwen2.modeling_qwen2 import (
+    PreTrainedModel,
+    Qwen2Attention,
+    Qwen2MLP,
+    Qwen2RMSNorm,
+    Qwen2RotaryEmbedding,
+)
+from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM as _Qwen2ForCausalLM
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as _Qwen2Model
+from transformers.processing_utils import Unpack
+from transformers.utils import auto_docstring, logging
 
-from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward
+from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
+from telefuser.ops.graph_fp8_linear import GraphFP8Linear, graph_fp8_linear_forward_many
+from telefuser.ops.lingbot_vla_v2_moe import robby_moe_forward, robby_moe_forward_fp8
 
 
 def fused_moe_forward(
-    module,
-    num_experts,
-    routing_weights,
-    selected_experts,
-    hidden_states,
-    fc1_1_weight,
-    fc1_2_weight,
-    fc2_weight,
-):
+    module: nn.Module,
+    num_experts: int,
+    routing_weights: torch.Tensor,
+    selected_experts: torch.Tensor,
+    hidden_states: torch.Tensor,
+    fc1_1_weight: torch.Tensor,
+    fc1_2_weight: torch.Tensor,
+    fc2_weight: torch.Tensor,
+) -> torch.Tensor:
     """Single-device PyTorch fallback for the fused 3D expert layout."""
     del module
     output = torch.zeros_like(hidden_states)
@@ -35,19 +55,6 @@ def fused_moe_forward(
         weights = routing_weights[token_ids, route_ids].unsqueeze(-1)
         output.index_add_(0, token_ids, expert_output * weights)
     return output
-
-
-from typing import Optional, Tuple
-
-import torch.nn.functional as F
-from torch import nn
-from transformers.activations import ACT2FN
-from transformers.generation import GenerationMixin
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
-from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring, logging
 
 
 def _update_moe_runtime_stats(block, routing_weights, selected_experts):
@@ -75,22 +82,7 @@ def _update_moe_runtime_stats(block, routing_weights, selected_experts):
             )
 
 
-from transformers.models.qwen2.modeling_qwen2 import (
-    PreTrainedModel,
-    Qwen2Attention,
-    Qwen2MLP,
-    Qwen2RMSNorm,
-    Qwen2RotaryEmbedding,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2ForCausalLM as _Qwen2ForCausalLM,
-)
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2Model as _Qwen2Model,
-)
-
 logger = logging.get_logger(__name__)
-# from transformers.models.mistral.modeling_mistral import MistralMLP
 
 
 # Modified from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2Moe
@@ -121,7 +113,11 @@ class Qwen2MoeSharedExpertMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if isinstance(self.gate_proj, GraphFP8Linear) and isinstance(self.up_proj, GraphFP8Linear):
+            gate, up = graph_fp8_linear_forward_many((self.gate_proj, self.up_proj), x)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(self.act_fn(gate) * up)
 
 
 class Qwen2FusedExperts(nn.Module):
@@ -146,6 +142,12 @@ class Qwen2FusedExperts(nn.Module):
         self.up_proj = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
         self.register_buffer("_gate_up_proj_cache", None, persistent=False)
+        self.register_buffer("gate_proj_fp8", None, persistent=True)
+        self.register_buffer("gate_proj_scale", None, persistent=True)
+        self.register_buffer("up_proj_fp8", None, persistent=True)
+        self.register_buffer("up_proj_scale", None, persistent=True)
+        self.register_buffer("down_proj_fp8", None, persistent=True)
+        self.register_buffer("down_proj_scale", None, persistent=True)
         self._gate_up_proj_cache_key = None
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
@@ -163,6 +165,31 @@ class Qwen2FusedExperts(nn.Module):
         self._robby_moe_workspace = None
         self._robby_moe_workspace_key = None
 
+    @property
+    def graph_fp8_enabled(self) -> bool:
+        return self.gate_proj_fp8 is not None
+
+    @staticmethod
+    def _quantize_fp8_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        scale = weight.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min_(1e-12).div_(fp8_max)
+        quantized = (weight.detach() / scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn).contiguous()
+        return quantized, scale.squeeze(-1).contiguous()
+
+    def enable_graph_fp8(self) -> None:
+        """Pre-materialize FP8 expert weights and release all BF16 copies."""
+        if self.graph_fp8_enabled:
+            return
+        if not self.gate_proj.is_cuda:
+            raise RuntimeError("LingBot-VLA v2 fused FP8 experts require CUDA-resident weights")
+        self.gate_proj_fp8, self.gate_proj_scale = self._quantize_fp8_weight(self.gate_proj)
+        self.up_proj_fp8, self.up_proj_scale = self._quantize_fp8_weight(self.up_proj)
+        self.down_proj_fp8, self.down_proj_scale = self._quantize_fp8_weight(self.down_proj)
+        del self.gate_proj
+        del self.up_proj
+        del self.down_proj
+        self.clear_inference_cache()
+
     def _get_robby_moe_workspace(self, hidden_states, top_k):
         if self.training or torch.is_grad_enabled() or not hidden_states.is_cuda:
             return None
@@ -175,6 +202,7 @@ class Qwen2FusedExperts(nn.Module):
             self.intermediate_size,
             hidden_states.dtype,
             hidden_states.device,
+            self.graph_fp8_enabled,
         )
         if self._robby_moe_workspace is None or self._robby_moe_workspace_key != key:
             max_routes = num_tokens * int(top_k)
@@ -189,6 +217,23 @@ class Qwen2FusedExperts(nn.Module):
                 ),
                 "out": torch.empty((num_tokens, hidden_size), device=hidden_states.device, dtype=torch.float32),
             }
+            if self.graph_fp8_enabled:
+                self._robby_moe_workspace.update(
+                    {
+                        "qhidden": torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn),
+                        "hidden_scale": torch.empty((num_tokens,), device=hidden_states.device, dtype=torch.float32),
+                        "qinter": torch.empty(
+                            (max_routes, self.intermediate_size),
+                            device=hidden_states.device,
+                            dtype=torch.float8_e4m3fn,
+                        ),
+                        "inter_scale": torch.empty(
+                            (max_routes,),
+                            device=hidden_states.device,
+                            dtype=torch.float32,
+                        ),
+                    }
+                )
             self._robby_moe_workspace_key = key
         return self._robby_moe_workspace
 
@@ -219,14 +264,10 @@ class FixQwen2RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        # print(f'self.weight dtype is {self.weight.dtype}')
         input_dtype = hidden_states.dtype
-        # print(f'input_dtype is {input_dtype}')
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        # print(f'hidden_states dtype is {hidden_states.dtype}')
-        # print(f'output dtype is {(self.weight * hidden_states.to(input_dtype)).dtype}')
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -331,7 +372,23 @@ class Qwen2TokenMoeBlock(nn.Module):
                 and not self.training
                 and not torch.is_grad_enabled()
             )
-            if use_robby_moe:
+            if use_robby_moe and self.experts.graph_fp8_enabled:
+                final_hidden_states = robby_moe_forward_fp8(
+                    hidden_flat,
+                    routing_weights,
+                    selected_experts,
+                    self.experts.gate_proj_fp8,
+                    self.experts.gate_proj_scale,
+                    self.experts.up_proj_fp8,
+                    self.experts.up_proj_scale,
+                    self.experts.down_proj_fp8,
+                    self.experts.down_proj_scale,
+                    workspace=self.experts._get_robby_moe_workspace(
+                        hidden_flat,
+                        selected_experts.shape[1],
+                    ),
+                )
+            elif use_robby_moe:
                 try:
                     final_hidden_states = robby_moe_forward(
                         hidden_flat,
@@ -403,17 +460,17 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        att_output: Optional[torch.Tensor] = None,
-        start: Optional[int] = 0,
-        end: Optional[int] = 0,
+        att_output: torch.Tensor | None = None,
+        start: int | None = 0,
+        end: int | None = 0,
         compute_kqv: bool = False,
         output_atten: bool = False,
-        ada_cond: Optional[torch.Tensor] = None,
+        ada_cond: torch.Tensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.Tensor, ...]:
         # Ensure input dtypes match weight dtype (needed for gradient checkpointing
         # recomputation where autocast context is lost)
-        param_dtype = self.self_attn.q_proj.weight.dtype
+        param_dtype = linear_compute_dtype(self.self_attn.q_proj, hidden_states.dtype)
         hidden_states = hidden_states.to(param_dtype)
         if att_output is not None:
             att_output = att_output.to(param_dtype)
@@ -427,15 +484,28 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
                 hidden_states = self.input_layernorm(hidden_states)
             hidden_shape = (*hidden_states.shape[:-1], -1, self.self_attn.head_dim)
 
-            query_state = self.self_attn.q_proj(hidden_states).view(hidden_shape)
-            key_state = self.self_attn.k_proj(hidden_states).view(hidden_shape)
-            value_state = self.self_attn.v_proj(hidden_states).view(hidden_shape)
+            q_proj = self.self_attn.q_proj
+            k_proj = self.self_attn.k_proj
+            v_proj = self.self_attn.v_proj
+            if all(isinstance(proj, GraphFP8Linear) for proj in (q_proj, k_proj, v_proj)):
+                query_state, key_state, value_state = graph_fp8_linear_forward_many(
+                    (q_proj, k_proj, v_proj),
+                    hidden_states,
+                )
+                query_state = query_state.view(hidden_shape)
+                key_state = key_state.view(hidden_shape)
+                value_state = value_state.view(hidden_shape)
+            else:
+                query_state = q_proj(hidden_states).view(hidden_shape)
+                key_state = k_proj(hidden_states).view(hidden_shape)
+                value_state = v_proj(hidden_states).view(hidden_shape)
 
             return query_state, key_state, value_state
 
         elif output_atten:
-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+            output_dtype = linear_compute_dtype(self.self_attn.o_proj, att_output.dtype)
+            if att_output.dtype != output_dtype:
+                att_output = att_output.to(output_dtype)
             out_emb = self.self_attn.o_proj(att_output[:, start:end])
 
             # first residual
@@ -527,7 +597,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
 
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
     get_input_embeddings = _Qwen2ForCausalLM.get_input_embeddings

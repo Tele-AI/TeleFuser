@@ -167,25 +167,14 @@ class Wan21VideoPipeline(BasePipeline):
             sparse_config = attention_config.sparse_config
             if sparse_config is None:
                 raise ValueError("Sparse attention requires sparse configuration")
-            if sparse_config.sparse_impl == "radial":
-                self.denoise_stage.dit.enable_radial_attention(
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    dense_layers=sparse_config.dense_layers,
-                    dense_timesteps=sparse_config.dense_timesteps,
-                    decay_factor=sparse_config.decay_factor,
-                    use_sage_attention=sparse_config.use_sage_attention,
-                )
-            elif sparse_config.sparse_impl == "sol":
-                self.denoise_stage.dit.enable_sol_attention(
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    sparse_config=sparse_config,
-                )
-            else:
-                raise ValueError(f"Unsupported Wan sparse attention: {sparse_config.sparse_impl}")
+            enable_sparse_attention_handler = auto_async_call(
+                self.denoise_stage.enable_sparse_attention,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                sparse_config=sparse_config,
+            )
+            enable_sparse_attention_handler()
             logger.info(
                 f"Sparse attention enabled ({sparse_config.sparse_impl}): "
                 f"dense_layers={sparse_config.dense_layers}, "

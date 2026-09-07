@@ -10,9 +10,9 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from telefuser.utils.logging import logger
@@ -126,9 +126,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 message="Too many requests",
             )
 
-            raise HTTPException(
+            return JSONResponse(
                 status_code=429,
-                detail=error_response.to_dict(),
+                content=error_response.to_dict(),
                 headers={
                     "Retry-After": str(self.window_size),
                     "X-RateLimit-Limit": str(self.requests_per_minute),

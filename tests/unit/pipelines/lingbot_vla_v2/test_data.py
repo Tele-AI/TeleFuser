@@ -13,15 +13,19 @@ from telefuser.pipelines.lingbot_vla_v2.robot_profile import ROBOTWIN_CAMERA_KEY
 class _ImageProcessor:
     def __init__(self) -> None:
         self.values: list[float] = []
+        self.call_count = 0
 
-    def __call__(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
-        assert image.dtype == torch.float32
-        assert image.shape == (3, 8, 8)
-        value = float(image[0, 0, 0])
-        self.values.append(value)
+    def __call__(self, images: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        self.call_count += 1
+        assert len(images) == 3
+        for image in images:
+            assert image.dtype == torch.float32
+            assert image.shape == (3, 8, 8)
+        values = [float(image[0, 0, 0]) for image in images]
+        self.values.extend(values)
         return {
-            "pixel_values": torch.full((4, 6), float(value)),
-            "image_grid_thw": torch.tensor([[1, 4, 4]]),
+            "pixel_values": torch.cat([torch.full((4, 6), value) for value in values], dim=0),
+            "image_grid_thw": torch.tensor([[1, 2, 2]] * len(images)),
         }
 
 
@@ -73,10 +77,12 @@ def test_prepare_preserves_robotwin_camera_order_and_tensor_contract() -> None:
 
     inputs = processor.prepare(observation)
 
+    assert image_processor.call_count == 1
     assert image_processor.values == pytest.approx([10.0, 20.0, 30.0], abs=1e-5)
     assert tokenizer.rendered_task == observation.task
     assert tokenizer.padding_side == "right"
     assert inputs.images.shape == (1, 3, 4, 6)
+    assert inputs.images[0, :, 0, 0].tolist() == pytest.approx([10.0, 20.0, 30.0], abs=1e-5)
     assert inputs.img_masks.tolist() == [[True, True, True]]
     assert inputs.image_grid_thw.shape == (1, 3, 3)
     assert inputs.lang_tokens.shape == (1, 6)
@@ -108,11 +114,13 @@ def test_prepare_scales_unit_float_images_to_uint8() -> None:
 def test_prepare_resizes_each_camera_before_qwen_processing() -> None:
     processor, image_processor, _ = _processor()
     observation = _observation()
+    shapes = ((12, 16, 3), (9, 13, 3), (18, 11, 3))
     images = {
-        key: np.full((12, 16, 3), value, dtype=np.uint8)
-        for key, value in zip(ROBOTWIN_CAMERA_KEYS, (10, 20, 30), strict=True)
+        key: np.full(shape, value, dtype=np.uint8)
+        for key, shape, value in zip(ROBOTWIN_CAMERA_KEYS, shapes, (10, 20, 30), strict=True)
     }
 
     processor.prepare(LingBotVlaV2Observation(observation.task, observation.state, images))
 
+    assert image_processor.call_count == 1
     assert image_processor.values == pytest.approx([10.0, 20.0, 30.0], abs=1e-5)

@@ -3,25 +3,6 @@
 Offline image-to-video and interactive WebRTC streaming generation for LingBot-World-Fast (v1) and LingBot-World
 v2. Both variants use the shared causal-fast streaming engine; their checkpoint layout and PPL defaults differ.
 
-## Model Directory
-
-Both offline examples require the Wan2.2 I2V base model. v1 and v2 use separate LingBot checkpoint directories:
-
-```text
-${TF_MODEL_ZOO_PATH}/
-├── Wan2.2-I2V-A14B/
-└── lingbot/
-    ├── lingbot-world-fast/
-    └── lingbot-world-v2-14b-causal-fast/
-        └── transformers/
-```
-
-Set the model root before running the example:
-
-```bash
-export TF_MODEL_ZOO_PATH=/path/to/model_zoo
-```
-
 ## Validated H100 Development Environment
 
 The four-H100 LingBot-World v2 AIPerf test used the following environment. TeleFuser supports broader
@@ -78,6 +59,48 @@ print("TeleFuser FA4 available:", FLASH_ATTN_4_AVAILABLE)
 assert FLASH_ATTN_4_AVAILABLE
 PY
 ```
+
+## Model Directory
+
+Both offline examples require the Wan2.2 I2V base model. v1 and v2 use separate LingBot checkpoint directories:
+
+```text
+${TF_MODEL_ZOO_PATH}/
+├── Wan2.2-I2V-A14B/
+└── lingbot/
+    ├── lingbot-world-fast/
+    └── lingbot-world-v2-14b-causal-fast/
+        └── transformers/
+```
+
+Set the model root before running the example. All commands in this README run from the repository root:
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+The repository provides the initial image, camera poses, and intrinsics under
+`examples/data/lingbot_world_fast/`. Keep these files together when using the default inputs.
+
+![Initial image for the LingBot example](../data/lingbot_world_fast/image.jpg)
+
+## Quick Start
+
+Run the v2 offline example on four H100 GPUs after preparing the weights and environment above:
+
+```bash
+python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --gpu_num 4 \
+    --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers" \
+    --output work_dirs/lingbot_world_v2_i2v_4gpu.mp4
+```
+
+The expected output is an H.264 MP4 with 77 frames at 832x480 and 16 FPS. Open
+`work_dirs/lingbot_world_v2_i2v_4gpu.mp4` and check that it contains the full camera-controlled sequence.
+For the browser client, continue with [Real-Time Streaming](#real-time-streaming) or the
+[shared LiveKit example](../stream_server/README.md). The measurements below describe prior runtime validation;
+publishing this README does not rerun those GPU workloads.
 
 ## Feature Support
 

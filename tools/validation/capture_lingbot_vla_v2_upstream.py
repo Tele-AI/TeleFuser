@@ -28,7 +28,7 @@ from safetensors.torch import load_file
 from torchvision.transforms.v2 import Resize
 from transformers import AutoConfig, AutoProcessor, PreTrainedModel
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 UPSTREAM_COMMIT = "be27333c9b5f2663b0ec33f069dd7dfd67fa32b5"
 CAMERA_KEYS = (
     "observation.images.cam_high",
@@ -461,6 +461,7 @@ def capture_artifact(
         "num_steps": trace.step,
         "torch_dtype": "bfloat16",
         "attention_backend": "eager",
+        "vision_attention_backend": "eager",
         "moe_backend": "deterministic_torch_reference" if deterministic_moe else "upstream_triton",
         "device": str(target_device),
         "device_name": torch.cuda.get_device_name(target_device),

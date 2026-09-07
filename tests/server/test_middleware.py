@@ -8,10 +8,13 @@ Tests rate limiting, logging, and other middleware functionality.
 import asyncio
 import json
 import os
+from collections import Counter
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -203,6 +206,93 @@ class TestRateLimitMiddleware:
 
         # Different client should have its own counter
         assert middleware._allow_request("client2") is True
+
+    def test_rate_limit_window_expiration_restores_access(self):
+        """Test that requests are allowed again after the rate-limit window expires."""
+        middleware = RateLimitMiddleware(
+            FastAPI(),
+            requests_per_minute=1,
+            window_size=60,
+            limited_paths=["/v1/tasks/create"],
+        )
+
+        with patch("telefuser.service.api.middleware.time.time", side_effect=[100.0, 100.0, 161.0]):
+            assert middleware._allow_request("client1") is True
+            assert middleware._allow_request("client1") is False
+            assert middleware._allow_request("client1") is True
+
+    def test_rate_limit_returns_structured_429_without_calling_handler(self):
+        """Test the complete ASGI stack returns the rate-limit response directly."""
+        app = FastAPI()
+        handler_calls = 0
+
+        @app.post("/v1/tasks/create")
+        async def create_task():
+            nonlocal handler_calls
+            handler_calls += 1
+            return JSONResponse(status_code=422, content={"detail": "invalid request"})
+
+        @app.get("/v1/service/health")
+        async def health():
+            return {"status": "healthy"}
+
+        app.add_middleware(
+            RateLimitMiddleware,
+            requests_per_minute=60,
+            window_size=60,
+            limited_paths=["/v1/tasks/create"],
+        )
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            for _ in range(60):
+                assert client.post("/v1/tasks/create").status_code == 422
+
+            response = client.post("/v1/tasks/create")
+            health_response = client.get("/v1/service/health")
+
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "60"
+        assert response.headers["X-RateLimit-Limit"] == "60"
+        assert response.headers["X-RateLimit-Window"] == "60"
+        assert response.headers["X-Request-ID"]
+        assert response.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+        assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+        assert handler_calls == 60
+        assert health_response.status_code == 200
+        assert health_response.json() == {"status": "healthy"}
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_concurrent_requests_return_429_not_500(self):
+        """Test concurrent requests receive business responses or rate-limit responses."""
+        app = FastAPI()
+        handler_calls = 0
+
+        @app.post("/v1/tasks/create")
+        async def create_task():
+            nonlocal handler_calls
+            handler_calls += 1
+            return JSONResponse(status_code=422, content={"detail": "invalid request"})
+
+        app.add_middleware(
+            RateLimitMiddleware,
+            requests_per_minute=60,
+            window_size=60,
+            limited_paths=["/v1/tasks/create"],
+        )
+
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            responses = await asyncio.gather(*[client.post("/v1/tasks/create") for _ in range(70)])
+
+        assert Counter(response.status_code for response in responses) == {422: 60, 429: 10}
+        assert handler_calls == 60
+        for response in responses:
+            if response.status_code == 429:
+                assert response.headers["Retry-After"] == "60"
+                assert response.headers["X-RateLimit-Limit"] == "60"
+                assert response.headers["X-RateLimit-Window"] == "60"
+                assert response.headers["X-Request-ID"]
+                assert response.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
 
     def test_rate_limit_prefix_match(self):
         """Test that limited_paths is matched as a prefix, not an exact path."""

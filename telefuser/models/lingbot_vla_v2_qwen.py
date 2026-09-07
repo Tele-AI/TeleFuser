@@ -3,11 +3,11 @@
 Adapted from the Apache-2.0 licensed LingBot-VLA v2 implementation.
 """
 
+from __future__ import annotations
 
-# Qwen3-VL implementation used by LingBot-VLA v2.
-
+from collections.abc import Callable
+from inspect import signature
 from types import MethodType
-from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -41,8 +41,12 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import logging
+from transformers.vision_utils import get_vision_bilinear_indices_and_weights, get_vision_position_ids
+
+from telefuser.models.lingbot_vla_v2_quantization import linear_compute_dtype
 
 logger = logging.get_logger(__name__)
+_QWEN3_VL_REQUIRES_MM_TOKEN_TYPES = "mm_token_type_ids" in signature(_Qwen3VLModel.get_rope_index).parameters
 
 
 class Qwen3VLPreTrainedModel(_Qwen3VLPreTrainedModel):
@@ -68,9 +72,10 @@ class Qwen3VLVisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        max_seqlen: Optional[int] = None,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        max_seqlen: int | None = None,
+        sequence_lengths: tuple[int, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -115,9 +120,10 @@ class Qwen3VLVisionAttention(nn.Module):
             if out_fp32_atten:
                 attn_output = attn_output.to(torch.float32)
         else:
-            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            if sequence_lengths is None:
+                sequence_lengths = tuple((cu_seqlens[1:] - cu_seqlens[:-1]).tolist())
             splits = [
-                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
+                torch.split(tensor, sequence_lengths, dim=2) for tensor in (query_states, key_states, value_states)
             ]
             attn_outputs = [
                 attention_interface(
@@ -152,8 +158,8 @@ class Qwen3VLVisionBlock(GradientCheckpointingLayer):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
@@ -179,14 +185,14 @@ class Qwen3VLTextDecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        att_output: Optional[torch.Tensor] = None,
-        start: Optional[int] = 0,
-        end: Optional[int] = 0,
+        att_output: torch.Tensor | None = None,
+        start: int | None = 0,
+        end: int | None = 0,
         compute_kqv: bool = False,
         output_atten: bool = False,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        param_dtype = self.self_attn.q_proj.weight.dtype
+    ) -> tuple[torch.Tensor, ...]:
+        param_dtype = linear_compute_dtype(self.self_attn.q_proj, hidden_states.dtype)
         hidden_states = hidden_states.to(param_dtype)
         if att_output is not None:
             att_output = att_output.to(param_dtype)
@@ -200,8 +206,9 @@ class Qwen3VLTextDecoderLayer(GradientCheckpointingLayer):
             return query_state, key_state, value_state
 
         if output_atten:
-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+            output_dtype = linear_compute_dtype(self.self_attn.o_proj, att_output.dtype)
+            if att_output.dtype != output_dtype:
+                att_output = att_output.to(output_dtype)
             out_emb = self.self_attn.o_proj(att_output[:, start:end])
             out_emb += hidden_states
             after_first_residual = out_emb.clone()
@@ -254,16 +261,44 @@ class Qwen3VLModel(_Qwen3VLModel):
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.visual.blocks = nn.ModuleList([Qwen3VLVisionBlock(config.vision_config) for _ in self.visual.blocks])
         self.visual.forward = MethodType(forward_without_grid_thw, self.visual)
-        self.visual.preprcess_grid_thw = MethodType(preprcess_grid_thw, self.visual)
+        self.visual.preprocess_grid_thw = MethodType(preprocess_grid_thw, self.visual)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
         self.rope_deltas = None
         self.post_init()
 
+    def get_rope_index(
+        self,
+        input_ids: torch.LongTensor,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kwargs = {
+            "input_ids": input_ids,
+            "image_grid_thw": image_grid_thw,
+            "video_grid_thw": video_grid_thw,
+            "attention_mask": attention_mask,
+        }
+        if _QWEN3_VL_REQUIRES_MM_TOKEN_TYPES:
+            mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int32)
+            mm_token_type_ids.masked_fill_(input_ids == self.config.image_token_id, 1)
+            mm_token_type_ids.masked_fill_(input_ids == self.config.video_token_id, 2)
+            kwargs["mm_token_type_ids"] = mm_token_type_ids
+        return _Qwen3VLModel.get_rope_index(self, **kwargs)
+
 
 class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
     config_class = Qwen3VLConfig
     _no_split_modules = ["Qwen3VLTextDecoderLayer", "Qwen3VLVisionBlock"]
+
+    @property
+    def language_model(self) -> Qwen3VLTextModel:
+        return self.model.language_model
+
+    @property
+    def visual(self) -> Qwen3VLVisionModel:
+        return self.model.visual
 
     def __init__(self, config):
         Qwen3VLPreTrainedModel.__init__(self, config)
@@ -273,13 +308,26 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
 
 
 @torch.compiler.disable
-def preprcess_grid_thw(self, grid_thw: torch.Tensor):
-    rotary_pos_emb = self.rot_pos_emb(grid_thw)
+def preprocess_grid_thw(self, grid_thw: torch.Tensor):
+    position_ids = get_vision_position_ids(grid_thw, self.spatial_merge_size)
+    max_hw = int(grid_thw[:, 1:].max().item())
+    inv_freq = self.rotary_pos_emb.inv_freq
+    positions = torch.arange(max_hw, device=inv_freq.device, dtype=inv_freq.dtype)
+    rotary_pos_emb = torch.outer(positions, inv_freq)[position_ids].flatten(1)
 
     seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
     rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
     emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
     position_embeddings = (emb.cos(), emb.sin())
+
+    bilinear_indices, bilinear_weights = get_vision_bilinear_indices_and_weights(
+        grid_thw,
+        num_grid_per_side=self.num_grid_per_side,
+        spatial_merge_size=self.config.spatial_merge_size,
+    )
+    bilinear_weights = bilinear_weights.to(dtype=self.pos_embed.weight.dtype)
+    weighted_pos_embeds = self.pos_embed(bilinear_indices) * bilinear_weights[:, :, None]
+    pos_embeds = weighted_pos_embeds[0] + weighted_pos_embeds[1] + weighted_pos_embeds[2] + weighted_pos_embeds[3]
 
     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
         dim=0,
@@ -288,27 +336,25 @@ def preprcess_grid_thw(self, grid_thw: torch.Tensor):
     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
     split_sizes = (grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
     max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
-    return None, position_embeddings, cu_seqlens, split_sizes, max_seqlen
+    return pos_embeds, position_embeddings, cu_seqlens, split_sizes, max_seqlen
 
 
 def forward_without_grid_thw(
     self,
     hidden_states: torch.Tensor,
-    grid_thw: torch.Tensor = None,
-    pos_embeds: Optional[torch.Tensor] = None,
-    position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    max_seqlen: Optional[int] = None,
+    grid_thw: torch.Tensor | None = None,
+    pos_embeds: torch.Tensor | None = None,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: int | None = None,
     **kwargs,
 ) -> torch.Tensor:
     hidden_states = self.patch_embed(hidden_states)
 
     if pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None:
-        pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
-    if pos_embeds is None:
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprocess_grid_thw(grid_thw)
 
-    hidden_states = hidden_states + pos_embeds
+    hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
     seq_len, _ = hidden_states.size()
     hidden_states = hidden_states.reshape(seq_len, -1)
 

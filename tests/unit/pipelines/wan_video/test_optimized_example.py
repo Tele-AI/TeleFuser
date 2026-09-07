@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from examples.wan_video.wan21_1_3b_text_to_video_optimized_h100 import (
+    get_pipeline,
     make_attention_config,
     make_quant_config,
     resolve_fp8_linear_scope,
@@ -101,6 +102,56 @@ def test_wan_optimized_example_uses_all_linear_layers_for_auto_fp8_scope() -> No
 def test_wan_optimized_example_rejects_unknown_fp8_linear_scope() -> None:
     with pytest.raises(ValueError, match="fp8_linear_scope must be"):
         resolve_fp8_linear_scope("fp8-sol", "attention")
+
+
+def test_wan_optimized_pipeline_configures_fp8_sol_ulysses(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class Manager:
+        def __init__(self, **_kwargs):
+            pass
+
+        def load_model(self, path, **kwargs):
+            if path.endswith("diffusion_pytorch_model.safetensors"):
+                captured["dit_load"] = kwargs
+
+    class Pipeline:
+        def __init__(self, **_kwargs):
+            pass
+
+        def init(self, _manager, config):
+            captured["config"] = config
+
+    monkeypatch.setattr(
+        "examples.wan_video.wan21_1_3b_text_to_video_optimized_h100.ModuleManager",
+        Manager,
+    )
+    monkeypatch.setattr(
+        "examples.wan_video.wan21_1_3b_text_to_video_optimized_h100.Wan21VideoPipeline",
+        Pipeline,
+    )
+
+    get_pipeline(
+        model_root="/models/wan",
+        parallelism=4,
+        cfg_degree=1,
+        cfg_scale=5.0,
+        attention="fp8-sol",
+        quantization="tf-kernel-fp8",
+    )
+
+    config = captured["config"]
+    assert captured["dit_load"]["device"] == "cpu"
+    assert config.enable_denoising_parallel
+    assert config.dit_config.parallel_config.device_ids == [0, 1, 2, 3]
+    assert config.dit_config.parallel_config.cfg_degree == 1
+    assert config.dit_config.parallel_config.sp_ulysses_degree == 4
+    assert config.dit_config.attention_config.sparse_config.sol_fp8
+
+
+def test_wan_optimized_pipeline_rejects_non_divisible_parallelism() -> None:
+    with pytest.raises(ValueError, match="divide parallelism"):
+        get_pipeline(parallelism=3, cfg_degree=2)
 
 
 def test_wan_model_enables_tf_kernel_fp8_on_transformer_blocks(monkeypatch: pytest.MonkeyPatch) -> None:

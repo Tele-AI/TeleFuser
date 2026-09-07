@@ -86,13 +86,33 @@ def _packed_flash_attention4(
     scale: float | None,
     is_causal: bool,
     return_lse: bool,
+    fixed_valid: bool,
+    pad_fixed_valid_output: bool,
     kwargs: dict[str, Any],
 ) -> Tensor | tuple[Tensor, Tensor]:
-    """Run FlashAttention 4 varlen over sequences packed on the BSND axis."""
+    """Run FlashAttention 4 over packed input, optionally skipping trailing padding."""
     if q.shape != k.shape or q.shape != v.shape or q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("packed FlashAttention requires matching Q/K/V tensors with shape [1, sequence, heads, dim]")
     if any(length <= 0 for length in sequence_lengths) or sum(sequence_lengths) != q.shape[1]:
         raise ValueError("packed FlashAttention lengths must be positive and sum to the packed sequence dimension")
+    if fixed_valid:
+        if return_lse:
+            raise ValueError("fixed-valid packed FlashAttention does not support return_lse")
+        valid_length = sequence_lengths[0]
+        result = flash_attn4(
+            q[:, :valid_length],
+            k[:, :valid_length],
+            v[:, :valid_length],
+            softmax_scale=scale,
+            causal=is_causal,
+            return_lse=False,
+            **kwargs,
+        )
+        valid_output = result[0] if isinstance(result, tuple) else result
+        if not pad_fixed_valid_output:
+            return valid_output
+        padding = q.shape[1] - valid_length
+        return F.pad(valid_output, (0, 0, 0, 0, 0, padding)) if padding else valid_output
     if cu_seqlens is None:
         cumulative = [0]
         for length in sequence_lengths:
@@ -195,6 +215,8 @@ def attention(
     v_scale: Tensor | None = None,
     sink_start: int | None = None,
     sink_tokens: int = 0,
+    fixed_valid: bool = False,
+    pad_fixed_valid_output: bool = True,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -214,6 +236,8 @@ def attention(
         return_lse: Return log-sum-exp values.
         sequence_lengths: Length of each sequence packed along the sequence axis.
         cu_seqlens: Optional precomputed cumulative sequence lengths for varlen kernels.
+        fixed_valid: Run fixed-shape FA4 only on the first valid packed sequence.
+        pad_fixed_valid_output: Restore trailing padding after fixed-valid FA4.
         sink_start: Start of the exact KV sink used by Sol-Attn.
         sink_tokens: Number of exact KV sink tokens used by Sol-Attn.
         **kwargs: Implementation-specific arguments.
@@ -304,7 +328,7 @@ def attention(
     if attn_impl == AttnImplType.FLASH_ATTN_4 and FLASH_ATTN_4_AVAILABLE and flash_attn4 is not None:
         if sequence_lengths is None:
             result = flash_attn4(q, k, v, softmax_scale=scale, causal=is_causal, return_lse=return_lse, **kwargs)
-        elif flash_attn4_varlen is not None:
+        elif fixed_valid or flash_attn4_varlen is not None:
             if attn_mask is not None or current_layout != "BSND":
                 raise ValueError("packed FlashAttention requires BSND layout without an attention mask")
             result = _packed_flash_attention4(
@@ -316,6 +340,8 @@ def attention(
                 scale=scale,
                 is_causal=is_causal,
                 return_lse=return_lse,
+                fixed_valid=fixed_valid,
+                pad_fixed_valid_output=pad_fixed_valid_output,
                 kwargs=kwargs,
             )
         else:

@@ -7,6 +7,18 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "docs/requirements.txt"
+      - "examples/**"
+      - "scripts/docs/**"
+      - "tests/docs/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "mkdocs.yml"
+      - "scripts/docs/**"
+      - "tests/docs/**"
+      - ".github/workflows/docs.yml"
   # Allow manual trigger
   workflow_dispatch:
 
@@ -19,8 +31,8 @@ permissions:
 # Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
-  group: "pages"
-  cancel-in-progress: false
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Build job
@@ -43,18 +55,24 @@ jobs:
           pip install -r docs/requirements.txt
 
       - name: Setup Pages
+        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v6
 
+      - name: Test Cookbook generation
+        run: python -m unittest discover -s tests/docs -v
+
       - name: Build MkDocs site
-        run: mkdocs build
+        run: python scripts/docs/prepare_cookbook.py build
 
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
 
   # Deployment job
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

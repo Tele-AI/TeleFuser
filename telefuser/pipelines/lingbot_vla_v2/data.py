@@ -99,23 +99,39 @@ class LingBotVlaV2InputProcessor:
         if missing:
             raise ValueError(f"RobotWin observation is missing camera keys: {missing}")
 
-        processed_images: list[torch.Tensor] = []
-        grids: list[torch.Tensor] = []
-        for key in self.robot_profile.camera_keys:
-            image = self.image_resize(_image_to_chw_uint8(images[key]).to(dtype=torch.float32))
-            output = self.processor.image_processor(image)
-            pixels = output["pixel_values"] if isinstance(output, dict) else output.pixel_values
-            grid = output.get("image_grid_thw") if isinstance(output, dict) else getattr(output, "image_grid_thw", None)
-            pixels = torch.as_tensor(pixels)
-            grid = None if grid is None else torch.as_tensor(grid)
-            if pixels.ndim == 3 and pixels.shape[0] == 1:
-                pixels = pixels.squeeze(0)
-            if pixels.ndim != 2:
-                raise ValueError(f"Qwen3-VL image processor must return [patches, features], got {tuple(pixels.shape)}")
-            if grid is None or grid.numel() < 3:
-                raise ValueError("Qwen3-VL image processor must return image_grid_thw")
-            processed_images.append(pixels)
-            grids.append(grid.reshape(-1, 3)[0].to(dtype=torch.long))
+        resized_images = [
+            self.image_resize(_image_to_chw_uint8(images[key]).to(dtype=torch.float32))
+            for key in self.robot_profile.camera_keys
+        ]
+        output = self.processor.image_processor(resized_images)
+        pixels = output["pixel_values"] if isinstance(output, dict) else output.pixel_values
+        grid = output.get("image_grid_thw") if isinstance(output, dict) else getattr(output, "image_grid_thw", None)
+        pixels = torch.as_tensor(pixels)
+        grid = None if grid is None else torch.as_tensor(grid)
+        num_images = len(resized_images)
+        if grid is None or grid.numel() != num_images * 3:
+            raise ValueError(f"Qwen3-VL image processor must return one image_grid_thw row per camera, got {grid}")
+        grids = grid.reshape(num_images, 3).to(dtype=torch.long)
+
+        if pixels.ndim == 3:
+            if pixels.shape[0] != num_images:
+                raise ValueError(
+                    f"Qwen3-VL image processor returned {pixels.shape[0]} image batches for {num_images} cameras"
+                )
+            processed_images = list(pixels.unbind(0))
+        elif pixels.ndim == 2:
+            patch_counts = grids.prod(dim=-1).tolist()
+            if sum(patch_counts) != pixels.shape[0]:
+                raise ValueError(
+                    "Qwen3-VL image processor pixel count does not match image_grid_thw: "
+                    f"pixels={pixels.shape[0]}, expected={sum(patch_counts)}"
+                )
+            processed_images = list(pixels.split(patch_counts, dim=0))
+        else:
+            raise ValueError(
+                "Qwen3-VL image processor must return packed [patches, features] or "
+                f"batched [images, patches, features], got {tuple(pixels.shape)}"
+            )
 
         first_shape = processed_images[0].shape
         if any(image.shape != first_shape for image in processed_images[1:]):
@@ -124,7 +140,7 @@ class LingBotVlaV2InputProcessor:
         return (
             torch.stack(processed_images, dim=0).unsqueeze(0),
             torch.ones(1, len(processed_images), dtype=torch.bool),
-            torch.stack(grids, dim=0).unsqueeze(0),
+            grids.unsqueeze(0),
         )
 
     def _process_language(self, task: str) -> tuple[torch.Tensor, torch.Tensor]:

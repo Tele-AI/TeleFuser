@@ -99,8 +99,6 @@ class FP8Linear(nn.Module):
             if linear.bias is not None:
                 self._fp16_bias_cpu = linear.bias.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
 
-        self._tf_kernel = tf_kernel
-
         # Lazy weight cache (per-device). Register these as non-persistent
         # buffers so module.to()/cpu()/cuda() also migrates the FP8 cache.
         self.register_buffer("_fp8_weight", None, persistent=False)  # [K, N] view
@@ -110,6 +108,15 @@ class FP8Linear(nn.Module):
         # Track when weights change (best-effort) in "keep" mode.
         # Users can also call invalidate_weight_cache() explicitly after weight updates.
         self._last_weight_version: Optional[int] = None
+
+    @property
+    def _tf_kernel(self):
+        # Resolve the extension from module state instead of storing a Python
+        # module on every layer. Module objects are not pickleable, while Wan
+        # sequence-parallel workers use the multiprocessing spawn context.
+        if tf_kernel is None:
+            raise ImportError("tf-kernel is required to run FP8 GEMM")
+        return tf_kernel
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, *, options: FP8GemmOptions) -> "FP8Linear":

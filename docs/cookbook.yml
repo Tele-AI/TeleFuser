@@ -1,0 +1,46 @@
+version: 1
+categories:
+  world-models:
+    en: World Models
+    zh: 世界模型
+  audio-video:
+    en: Audio and Video
+    zh: 音视频生成
+  services:
+    en: Streaming Services
+    zh: 流式服务
+pages:
+  - slug: lingbot-world
+    category: world-models
+    title:
+      en: LingBot-World
+      zh: LingBot-World
+    sources:
+      en: examples/lingbot/README.md
+  - slug: abot-world
+    category: world-models
+    title:
+      en: ABot-World
+      zh: ABot-World
+    sources:
+      en: examples/abot_world/README.md
+  - slug: ltx25-distilled
+    category: audio-video
+    title:
+      en: LTX-2.5 Audio and Video
+      zh: LTX-2.5 音视频生成
+    sources:
+      en: examples/ltx25_distilled/README.md
+  - slug: livekit-streaming
+    category: services
+    title:
+      en: LiveKit Streaming
+      zh: LiveKit 流式交互
+    sources:
+      en: examples/stream_server/README.md
+guides:
+  - category: services
+    title:
+      en: Stream Server Guide
+      zh: 流式服务指南
+    path: stream_server.md

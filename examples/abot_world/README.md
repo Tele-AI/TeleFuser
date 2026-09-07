@@ -10,13 +10,24 @@ python examples/abot_world/abot_world_interactive_web.py \
   --port 7860
 ```
 
-The browser controls WASD/arrow movement and IJKL camera rotation. Connecting
+Open `http://127.0.0.1:7860`, provide an image path, and connect. The browser controls WASD/arrow movement and IJKL
+camera rotation. Confirm that the preview appears, then hold a movement key and check that new frames arrive;
+release the keys and confirm that generation becomes idle. Disconnect before stopping the server with Ctrl+C.
+
+Connecting
 creates the image-conditioned causal session but does not advance the DiT
 until a non-empty control state is received. Generated blocks remain ordered in a bounded per-session queue. The default
 `latest` mode drops the oldest complete block, with metrics, only when a slow
 browser fills the queue; `lossless` mode applies scheduling backpressure instead.
 The six sink latents and rolling tail use fixed logical RoPE positions, so the
 global session frame number does not index beyond the trained local window.
+
+## Configuration
+
+The HTTP entry point exposes `--height` (480), `--width` (832), `--fps` (12), and `--control-latent-frames` (3).
+Three causal latents per control update match the official streaming checkpoint; the one-latent mode is experimental.
+The playback FPS is not a measured compute throughput. See the [pipeline architecture](../../docs/en/abot_world.md)
+for model and cache behavior.
 
 ## LiveKit
 
@@ -69,8 +80,11 @@ python examples/abot_world/abot_world_livekit.py \
   --server-url http://127.0.0.1:8088 --port 8092 --no-open
 ```
 
+Open `http://127.0.0.1:8092`, upload an image, and click **Start**. Hold a movement key to receive generated video.
+Stop the browser session before stopping the browser proxy, model worker, LiveKit, and TURN relay in that order.
+
 The SSH connection must also forward relay port `49160` in addition to
-`8092`, `7880`, and `3478`. The page defaults to the checked-in ABot sample image, but an uploaded image
+`8092`, `7880`, and `3478`. The default image requires the upstream checkout described above, but an uploaded image
 is sent as a data URL in the session request. It sends the existing `tf.control`
 `control_state` and press/release messages; the ABot service emits a preview
 first and then ordered 12 FPS chunks only while controls are held.

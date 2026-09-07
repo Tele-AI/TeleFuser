@@ -36,6 +36,8 @@ PPL_CONFIG: dict[str, Any] = {
     "device": "cuda:0",
     "enable_fsdp": None,
     "online_adaln_cache": True,
+    "attention_chunks": 2,
+    "ulysses_sequence_mode": "valid_only",
     "quantization": None,
 }
 
@@ -92,6 +94,8 @@ def get_pipeline(
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
+    attention_chunks: int = PPL_CONFIG["attention_chunks"],
+    ulysses_sequence_mode: str = PPL_CONFIG["ulysses_sequence_mode"],
     quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load the Ref2VA checkpoint partition for one, two, or four GPUs."""
@@ -106,6 +110,8 @@ def get_pipeline(
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
         online_adaln_cache=online_adaln_cache,
+        attention_chunks=attention_chunks,
+        ulysses_sequence_mode=ulysses_sequence_mode,
         quantization=quantization,
     )
 
@@ -265,6 +271,12 @@ def main() -> None:
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--quantization", choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--attention-chunks", type=int, choices=(1, 2), default=PPL_CONFIG["attention_chunks"])
+    parser.add_argument(
+        "--ulysses-sequence-mode",
+        choices=("padded", "valid_only"),
+        default=PPL_CONFIG["ulysses_sequence_mode"],
+    )
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
     fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
@@ -303,6 +315,8 @@ def main() -> None:
         num_inference_steps=request_steps,
         enable_fsdp=args.enable_fsdp,
         online_adaln_cache=online_adaln_cache,
+        attention_chunks=args.attention_chunks,
+        ulysses_sequence_mode=args.ulysses_sequence_mode,
         quantization=args.quantization,
     )
     try:

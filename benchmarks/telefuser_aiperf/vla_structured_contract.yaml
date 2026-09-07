@@ -33,7 +33,10 @@ metrics:
   - request_latency
   - request_throughput
   - success_rate
+  - vla_inference_time
+  - vla_peak_memory
   - server_metrics
 artifacts:
   config: benchmarks/telefuser_aiperf/configs/vla_structured_e2e.yaml
   dataset: benchmarks/telefuser_aiperf/data/vla_structured.jsonl
+  resource_summary: artifacts/telefuser_aiperf/vla_structured/resource_summary.json

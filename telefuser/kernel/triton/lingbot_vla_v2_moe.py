@@ -23,6 +23,19 @@ def _zero_fp32_kernel(out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
 
 
 @triton.jit
+def _quantize_fp8_rows_kernel(input_ptr, output_ptr, scale_ptr, M: tl.constexpr, N: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < N
+    values = tl.load(input_ptr + row * N + offsets, mask=mask, other=0.0).to(tl.float32)
+    absmax = tl.max(tl.abs(values), axis=0)
+    scale = tl.maximum(absmax / 448.0, 1.0e-12)
+    quantized = tl.maximum(tl.minimum(values / scale, 448.0), -448.0).to(tl.float8e4nv)
+    tl.store(output_ptr + row * N + offsets, quantized, mask=mask)
+    tl.store(scale_ptr + row, scale)
+
+
+@triton.jit
 def _moe_pack_selected_kernel(
     selected_ptr,
     route_ptr,
@@ -161,6 +174,137 @@ def _moe_down_grouped_kernel(
     )
 
 
+@triton.jit
+def _moe_gate_up_grouped_fp8_kernel(
+    x_ptr,
+    x_scale_ptr,
+    gate_ptr,
+    gate_scale_ptr,
+    up_ptr,
+    up_scale_ptr,
+    counts_ptr,
+    rows_ptr,
+    slots_ptr,
+    route_ptr,
+    inter_ptr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    E: tl.constexpr,
+    TOPK: tl.constexpr,
+    I: tl.constexpr,
+    MAX_ROUTES: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_I: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    bid_m = tl.program_id(1)
+    bid_i = tl.program_id(2)
+    count = tl.load(counts_ptr + expert).to(tl.int32)
+    start_m = bid_m * BLOCK_M
+    if start_m >= count:
+        return
+    route_idx = start_m + tl.arange(0, BLOCK_M)
+    offs_i = bid_i * BLOCK_I + tl.arange(0, BLOCK_I)
+    offs_d = tl.arange(0, BLOCK_D)
+    valid_m = route_idx < count
+    rows = tl.load(rows_ptr + expert * MAX_ROUTES + route_idx, mask=valid_m, other=0).to(tl.int32)
+    slots = tl.load(slots_ptr + expert * MAX_ROUTES + route_idx, mask=valid_m, other=0).to(tl.int32)
+    acc_g = tl.zeros((BLOCK_M, BLOCK_I), dtype=tl.float32)
+    acc_u = tl.zeros((BLOCK_M, BLOCK_I), dtype=tl.float32)
+    for d0 in range(0, D, BLOCK_D):
+        ds = d0 + offs_d
+        x = tl.load(
+            x_ptr + rows[:, None] * D + ds[None, :],
+            mask=valid_m[:, None] & (ds[None, :] < D),
+            other=0.0,
+        )
+        gw = tl.load(
+            gate_ptr + (expert * I + offs_i[None, :]) * D + ds[:, None],
+            mask=(offs_i[None, :] < I) & (ds[:, None] < D),
+            other=0.0,
+        )
+        uw = tl.load(
+            up_ptr + (expert * I + offs_i[None, :]) * D + ds[:, None],
+            mask=(offs_i[None, :] < I) & (ds[:, None] < D),
+            other=0.0,
+        )
+        acc_g += tl.dot(x, gw)
+        acc_u += tl.dot(x, uw)
+    x_scale = tl.load(x_scale_ptr + rows, mask=valid_m, other=0.0)
+    gate_scale = tl.load(gate_scale_ptr + expert * I + offs_i, mask=offs_i < I, other=0.0)
+    up_scale = tl.load(up_scale_ptr + expert * I + offs_i, mask=offs_i < I, other=0.0)
+    acc_g *= x_scale[:, None] * gate_scale[None, :]
+    acc_u *= x_scale[:, None] * up_scale[None, :]
+    route = tl.load(route_ptr + rows * TOPK + slots, mask=valid_m, other=0.0).to(tl.float32)
+    silu = acc_g * (1.0 / (1.0 + tl.exp(-acc_g)))
+    value = silu * acc_u * route[:, None]
+    tl.store(
+        inter_ptr + ((rows[:, None] * TOPK + slots[:, None]) * I + offs_i[None, :]),
+        value.to(inter_ptr.dtype.element_ty),
+        mask=valid_m[:, None] & (offs_i[None, :] < I),
+    )
+
+
+@triton.jit
+def _moe_down_grouped_fp8_kernel(
+    inter_ptr,
+    inter_scale_ptr,
+    down_ptr,
+    down_scale_ptr,
+    counts_ptr,
+    rows_ptr,
+    slots_ptr,
+    out_ptr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    E: tl.constexpr,
+    TOPK: tl.constexpr,
+    I: tl.constexpr,
+    MAX_ROUTES: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_I: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    bid_m = tl.program_id(1)
+    bid_d = tl.program_id(2)
+    count = tl.load(counts_ptr + expert).to(tl.int32)
+    start_m = bid_m * BLOCK_M
+    if start_m >= count:
+        return
+    route_idx = start_m + tl.arange(0, BLOCK_M)
+    offs_d = bid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    offs_i = tl.arange(0, BLOCK_I)
+    valid_m = route_idx < count
+    rows = tl.load(rows_ptr + expert * MAX_ROUTES + route_idx, mask=valid_m, other=0).to(tl.int32)
+    slots = tl.load(slots_ptr + expert * MAX_ROUTES + route_idx, mask=valid_m, other=0).to(tl.int32)
+    inter_rows = rows * TOPK + slots
+    acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+    for i0 in range(0, I, BLOCK_I):
+        is_ = i0 + offs_i
+        x = tl.load(
+            inter_ptr + inter_rows[:, None] * I + is_[None, :],
+            mask=valid_m[:, None] & (is_[None, :] < I),
+            other=0.0,
+        )
+        weight = tl.load(
+            down_ptr + (expert * D + offs_d[None, :]) * I + is_[:, None],
+            mask=(offs_d[None, :] < D) & (is_[:, None] < I),
+            other=0.0,
+        )
+        acc += tl.dot(x, weight)
+    inter_scale = tl.load(inter_scale_ptr + inter_rows, mask=valid_m, other=0.0)
+    down_scale = tl.load(down_scale_ptr + expert * D + offs_d, mask=offs_d < D, other=0.0)
+    acc *= inter_scale[:, None] * down_scale[None, :]
+    tl.atomic_add(
+        out_ptr + rows[:, None] * D + offs_d[None, :],
+        acc,
+        sem="relaxed",
+        mask=valid_m[:, None] & (offs_d[None, :] < D),
+    )
+
+
 def robby_moe_forward(
     hidden_states: torch.Tensor,
     routing_weights: torch.Tensor,
@@ -247,6 +391,125 @@ def robby_moe_forward(
     _moe_down_grouped_kernel[(E, triton.cdiv(max_routes, 16), triton.cdiv(D, 64))](
         inter,
         down_weight,
+        counts,
+        rows,
+        slots,
+        out,
+        T,
+        D,
+        E,
+        top_k,
+        I,
+        max_routes,
+        BLOCK_M=16,
+        BLOCK_D=64,
+        BLOCK_I=64,
+        num_warps=4,
+    )
+    return out.reshape_as(hidden_states)
+
+
+def robby_moe_forward_fp8(
+    hidden_states: torch.Tensor,
+    routing_weights: torch.Tensor,
+    selected_experts: torch.Tensor,
+    gate_weight: torch.Tensor,
+    gate_scale: torch.Tensor,
+    up_weight: torch.Tensor,
+    up_scale: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_scale: torch.Tensor,
+    workspace: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Run graph-safe W8A8 grouped MoE with pre-materialized FP8 expert weights."""
+    if hidden_states.ndim != 2 or not hidden_states.is_cuda:
+        raise ValueError("robby_moe_forward_fp8 requires a 2D CUDA hidden_states tensor")
+    if gate_weight.dtype != torch.float8_e4m3fn or up_weight.dtype != torch.float8_e4m3fn:
+        raise ValueError("robby_moe_forward_fp8 gate/up weights must be float8_e4m3fn")
+    if down_weight.dtype != torch.float8_e4m3fn:
+        raise ValueError("robby_moe_forward_fp8 down weights must be float8_e4m3fn")
+
+    T, D = hidden_states.shape
+    E, I, weight_d = gate_weight.shape
+    top_k = selected_experts.shape[1]
+    if weight_d != D or up_weight.shape != gate_weight.shape or down_weight.shape != (E, D, I):
+        raise ValueError("Unexpected FP8 MoE weight shapes")
+    if gate_scale.shape != (E, I) or up_scale.shape != (E, I) or down_scale.shape != (E, D):
+        raise ValueError("Unexpected FP8 MoE scale shapes")
+
+    max_routes = T * top_k
+    counts = workspace["counts"]
+    rows = workspace["rows"]
+    slots = workspace["slots"]
+    inter = workspace["inter"]
+    out = workspace["out"]
+    qhidden = workspace["qhidden"]
+    hidden_scale = workspace["hidden_scale"]
+    qinter = workspace["qinter"]
+    inter_scale = workspace["inter_scale"]
+    selected_i32 = selected_experts.to(torch.int32).contiguous()
+    route = routing_weights.contiguous()
+
+    _quantize_fp8_rows_kernel[(T,)](
+        hidden_states,
+        qhidden,
+        hidden_scale,
+        T,
+        D,
+        BLOCK=triton.next_power_of_2(D),
+        num_warps=8,
+    )
+    _zero_i32_kernel[(1,)](counts, E, BLOCK=triton.next_power_of_2(E), num_warps=1)
+    _moe_pack_selected_kernel[(T,)](
+        selected_i32,
+        route,
+        counts,
+        rows,
+        slots,
+        T,
+        top_k,
+        max_routes,
+        BLOCK_K=triton.next_power_of_2(top_k),
+        num_warps=1,
+    )
+    _moe_gate_up_grouped_fp8_kernel[(E, triton.cdiv(max_routes, 16), triton.cdiv(I, 32))](
+        qhidden,
+        hidden_scale,
+        gate_weight,
+        gate_scale,
+        up_weight,
+        up_scale,
+        counts,
+        rows,
+        slots,
+        route,
+        inter,
+        T,
+        D,
+        E,
+        top_k,
+        I,
+        max_routes,
+        BLOCK_M=16,
+        BLOCK_I=32,
+        BLOCK_D=64,
+        num_warps=4,
+    )
+    _quantize_fp8_rows_kernel[(max_routes,)](
+        inter,
+        qinter,
+        inter_scale,
+        max_routes,
+        I,
+        BLOCK=triton.next_power_of_2(I),
+        num_warps=8,
+    )
+    _zero_fp32_kernel[(triton.cdiv(out.numel(), 1024),)](out, out.numel(), BLOCK=1024, num_warps=4)
+    _moe_down_grouped_fp8_kernel[(E, triton.cdiv(max_routes, 16), triton.cdiv(D, 64))](
+        qinter,
+        inter_scale,
+        down_weight,
+        down_scale,
         counts,
         rows,
         slots,

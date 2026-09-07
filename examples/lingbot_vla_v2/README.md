@@ -1,141 +1,200 @@
-# LingBot-VLA v2 Base Model SDK
+# LingBot-VLA v2 Examples
 
-This example loads the official LingBot-VLA v2 6B base checkpoint through TeleFuser and returns its normalized
-55-dimensional canonical action chunk. The RobotWin profile is used only to prepare the example observation; the
-result is not converted to physical RobotWin actions.
+This example runs the official LingBot-VLA v2 6B base checkpoint through TeleFuser. It accepts a RobotWin
+observation and returns a normalized `50 x 55` canonical action chunk through direct Python inference or the native
+structured service.
 
-## Inputs
+## Model Source
 
-- Three RGB cameras in the upstream RobotWin order: high, left wrist, right wrist.
-- A raw 14-dimensional RobotWin state.
-- A non-empty task string.
+| Model | Hugging Face | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| LingBot-VLA v2 6B base | N/A | N/A | Vision-language-action policy checkpoint supplied as local shards |
+| Qwen3-VL-4B-Instruct | [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) | N/A | Backbone configuration and processor |
 
-The SDK applies the bundled upstream RobotWin `bounds_99_woclip` statistics and maps the observation into
-LingBot's 55-dimensional canonical state.
+The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/lingbot-vla-v2) at commit
+`be27333c9b5f2663b0ec33f069dd7dfd67fa32b5`.
 
-## Output
+## Feature Support
 
-The pipeline returns `LingBotVlaV2CanonicalActionChunk` with:
+| Feature | Support | Notes |
+| --- | --- | --- |
+| Official 6B base checkpoint | Supported | Local sharded safetensors checkpoint |
+| RobotWin preprocessing | Supported | Three RGB cameras, task text, and a raw 14-dimensional state |
+| Canonical action output | Supported | Normally `50 x 55` normalized actions |
+| BF16 inference | Supported | Default path; strict 38-tensor upstream parity passed |
+| CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
+| Quantization | Partial | Profile-specific release status; see Configuration and Performance |
+| Native server API | Supported | Asynchronous structured task API and `TFClient` |
+| Request replicas | Supported | One complete policy copy per GPU |
+| Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
+| Physical robot action mapping | Unsupported | Output remains in normalized canonical space |
 
-- `canonical_normalized_actions`: `[H, 55]` base-model output.
-- `horizon`: action chunk length, normally 50 for the official base config.
-- `action_dim`: canonical action dimension, normally 55.
-- `checkpoint_variant`: `base`.
-- `policy_verified=False` and `verification_status="unverified_official_6b_base"`.
+## Requirements
 
-## Checkpoints
+- GPU: one H100 80 GB was used for parity, performance, quantization, and service validation.
+- Software: Python 3.10.12, PyTorch 2.11.0+cu130, CUDA 13.0, Transformers 5.14.1, and Triton 3.6.0.
+- Quantization: TorchAO 0.17.0 and bitsandbytes 0.48.0 are pinned; tf-kernel FP8 needs a compatible SM90 wheel.
+- Input assets: three RGB camera images, a non-empty instruction, and a finite 14-dimensional RobotWin state.
 
-The VLA directory must contain `model.safetensors.index.json` and every referenced shard. The Qwen3-VL directory
-supplies the visual-language backbone configuration and processor.
-
-## Example
+Install TeleFuser after installing the PyTorch build that matches the target CUDA runtime:
 
 ```bash
-python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+python3.10 -m venv .venv-vla
+source .venv-vla/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[dev]"
+```
+
+## Model Directory
+
+```text
+${TF_MODEL_ZOO_PATH}/
+|-- lingbot/
+|   `-- lingbot-vla-v2-6b/
+|       |-- model.safetensors.index.json
+|       `-- model-*.safetensors
+`-- Qwen3-VL-4B-Instruct/
+```
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+The VLA directory must contain every shard referenced by `model.safetensors.index.json`.
+
+## Quick Start
+
+```bash
+mkdir -p work_dirs/lingbot_vla_v2
+.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
   --camera-high /data/cam_high.png \
   --camera-left-wrist /data/cam_left_wrist.png \
   --camera-right-wrist /data/cam_right_wrist.png \
   --task "pick up the red block" \
-  --state-json '[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]' \
-  --output canonical_action_chunk.npz
+  --state-json '[0,0,0,0,0,0,0,0,0,0,0,0,0,0]' \
+  --seed 7 \
+  --output work_dirs/lingbot_vla_v2/action_chunk.npz
 ```
 
-The example saves canonical actions and checkpoint metadata in an `.npz` file. The base output must not be sent to
-a robot without an embodiment-specific post-training checkpoint, action mapping, and policy validation.
+The output NPZ contains the normalized canonical action chunk, shape metadata, checkpoint variant, and policy
+verification status.
 
-## Minimal Single-GPU HTTP Service
+## Examples
 
-The VLA-specific server loads one policy replica and serializes all inference calls on the selected GPU. It does not
-use the shared media service, Ray, multi-GPU execution, dynamic batching, or robot control. Start it from the repository
-with the isolated VLA environment:
+### RobotWin Action Inference
+
+#### `lingbot_vla_v2_inference.py`
+
+This is the smallest in-process entry point. The input processor loads images in high, left-wrist, right-wrist order,
+applies the bundled `bounds_99_woclip` statistics, and maps the raw 14-dimensional state into the 55-dimensional
+canonical space.
+
+Key options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--device` | `cuda` | Inference device |
+| `--seed` | None | Optional deterministic noise seed |
+| `--cuda-graph` | Disabled | Keep the dynamic prefix eager and graph the fixed-shape denoising loop |
+| `--quantization` | None | Select an optional quantization profile |
+| `--output` | `canonical_action_chunk.npz` | Output NPZ path |
+
+The returned action chunk normally has horizon 50 and action dimension 55. The official base checkpoint intentionally
+returns `policy_verified=False` and `verification_status="unverified_official_6b_base"`.
+
+## Configuration
+
+### CUDA Graph
+
+`--cuda-graph` keeps vision-language prefix encoding and 36-layer KV-cache construction eager for every request, then
+lazily captures all 10 fixed-shape action-denoising steps. Different instructions and language padding masks therefore
+reuse the same denoising graph without being tied to the warmup instruction.
+
+The denoising graph remains specialized to its tensor shapes, dtypes, and device. Standard preprocessing keeps these
+layouts fixed at batch 1, language length 72, and action shape `1 x 50 x 55`. Prefix and graph execution are serialized
+per policy instance. Close the pipeline to release graph buffers.
+
+CUDA Graph cannot be combined with `torch.compile` or online quantization other than `fused-fp8-graph`. Invalid
+combinations fail before model loading.
+
+### Online Quantization
+
+BF16 remains the default and the only profile covered by strict upstream parity. Quantization is applied in memory and
+does not modify checkpoint files.
+
+| CLI value | Backend | Scope | Validation status |
+| --- | --- | --- | --- |
+| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; hardware unverified |
+
+Use the direct example with one of the following variants:
 
 ```bash
-.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_server.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
-  --device cuda:0 \
-  --host 127.0.0.1 \
-  --port 8000
+# Fused FP8 requires CUDA Graph.
+--quantization fused-fp8-graph --cuda-graph
+
+# Online capacity profiles without CUDA Graph.
+--quantization torchao-fp8
+--quantization bnb-nf4
+--quantization tf-kernel-fp8
 ```
 
-The process reports ready only after both the processor and policy have loaded:
+The tf-kernel path requires an SM90 wheel built for the exact PyTorch/CUDA ABI. It remains "code support, hardware
+unverified" until that real-model run succeeds on a compatible installation.
 
-```bash
-curl http://127.0.0.1:8000/health
-```
+The complete H100 release suite passed BF16 eager and BF16 Graph. The three runnable quantized profiles passed
+direct/HTTP numerical thresholds, AIPerf, dynamic-instruction, fault, and shutdown checks, but did not produce
+bit-exact HTTP replays. They therefore remain code-supported capacity profiles rather than release-validated profiles.
 
-`POST /v1/vla/actions` accepts raw Base64 or a Base64 data URL for each camera. The state must contain exactly 14
-finite values. For example:
+The public loader accepts the same options:
 
-```bash
-.venv-vla/bin/python - <<'PY'
-import base64
-from pathlib import Path
+```python
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 
-import httpx
-
-
-def encode(path: str) -> str:
-    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
-
-
-response = httpx.post(
-    "http://127.0.0.1:8000/v1/vla/actions",
-    json={
-        "task": "pick up the red block",
-        "state": [0.0] * 14,
-        "camera_high": encode("/data/cam_high.png"),
-        "camera_left_wrist": encode("/data/cam_left_wrist.png"),
-        "camera_right_wrist": encode("/data/cam_right_wrist.png"),
-        "seed": 7,
-    },
-    timeout=300.0,
+pipeline = get_lingbot_vla_v2_pipeline(
+    "/path/to/lingbot-vla-v2-6b",
+    "/path/to/Qwen3-VL-4B-Instruct",
+    device="cuda:0",
+    quantization="torchao-fp8",
 )
-response.raise_for_status()
-print(response.json())
-PY
 ```
 
-The response contains `canonical_normalized_actions`, `horizon`, `action_dim`, `checkpoint_variant`,
-`policy_verified`, and `verification_status`. A successful HTTP response confirms service and model execution only;
-the normalized base-model output is not a physical robot command.
-
-## Native TeleFuser Service
-
-The native service uses the shared `PIPELINE_CONTRACT`, asynchronous task scheduler, pipeline pool, status API, runtime
-metrics, and `TFClient`. It keeps the standalone endpoint above as a small debugging path.
-
-The example resolves checkpoints under the existing `TF_MODEL_ZOO_PATH` layout:
-
-- `lingbot/lingbot-vla-v2-6b`
-- `Qwen3-VL-4B-Instruct`
-
-Start one replica on one visible GPU:
+Compare a deterministic quantized capture with the corresponding TeleFuser BF16 capture:
 
 ```bash
-TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
+.venv-vla/bin/python tools/validation/compare_lingbot_vla_v2_quantization.py \
+  --reference work_dirs/vla_quantization/bf16_seed7.npz \
+  --candidate work_dirs/vla_quantization/torchao_seed7.npz \
+  --candidate-replay work_dirs/vla_quantization/torchao_replay_seed7.npz \
+  --min-cosine 0.995 --max-relative-l2 0.10 --max-abs 0.5 \
+  --require-exact-replay \
+  --output work_dirs/vla_quantization/bf16_vs_torchao.json
+```
+
+## Serving
+
+Start the native structured service:
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
   .venv-vla/bin/telefuser serve \
   examples/lingbot_vla_v2/lingbot_vla_v2_native_service.py \
-  --task vla_action \
-  --parallelism 1 \
-  --host 127.0.0.1 \
-  --port 18080
+  --task vla_action --parallelism 1 --host 127.0.0.1 --port 18080
 ```
 
-Submit `POST /v1/tasks/structured` with `task="vla_action"`, an `instruction`, the 14-dimensional `state`, and
-the three Base64 camera fields. The creation response contains a task ID. Poll
-`GET /v1/tasks/{task_id}/status`; a completed response contains the action payload under `result` and includes
-`inference_time_s` and the optional `peak_memory_mb`.
-
-The unified client handles image encoding, submission, polling, and result extraction:
+Submit `POST /v1/tasks/structured` with `task="vla_action"`, the instruction, 14-dimensional state, three Base64
+camera fields, and an optional seed. Poll `GET /v1/tasks/{task_id}/status`. Each encoded camera is limited to 10 MiB
+and 16,777,216 decoded pixels.
 
 ```python
 from telefuser.client import TFClient
 
 client = TFClient("http://127.0.0.1:18080")
-actions = client.predict_vla_actions(
+result = client.predict_vla_actions(
     instruction="pick up the red block",
     state=[0.0] * 14,
     camera_high_path="/data/cam_high.png",
@@ -143,206 +202,137 @@ actions = client.predict_vla_actions(
     camera_right_wrist_path="/data/cam_right_wrist.png",
     seed=7,
 )
-print(actions["horizon"], actions["action_dim"])
 ```
 
-For independent replicas, expose one GPU per replica through the existing pipeline pool:
+Use request-level replicas when multiple GPUs are available:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
   .venv-vla/bin/telefuser serve \
   examples/lingbot_vla_v2/lingbot_vla_v2_native_service.py \
-  --task vla_action \
-  --parallelism 2 \
-  --num-replicas 2 \
-  --port 18080
+  --task vla_action --parallelism 2 --num-replicas 2 --port 18080
 ```
 
-This is request-level replication, not tensor parallelism inside one policy replica. The response remains a normalized
-base-model canonical action chunk and must not be treated as a physical robot command.
+This creates one complete policy per GPU; it does not enable tensor or pipeline parallelism within a policy.
 
-## Single-GPU Service Benchmark
+## Validation
 
-Use the VLA-specific benchmark to measure checkpoint construction, first-request latency, steady-state latency,
-sequential throughput, process RSS, CUDA allocator peaks, and source-image-size overhead. The pipeline always converts
-the three source images to the official `256x256` model input, so source size affects boundary and preprocessing cost,
-not the model token shape.
+The repository includes strict upstream parity, runtime, quantization, structured-service, fault, and AIPerf
+validators under `tools/validation/` and `benchmarks/telefuser_aiperf/`.
+
+Compare previously captured upstream and TeleFuser artifacts:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
-  tools/validation/benchmark_lingbot_vla_v2_service.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --image-sizes 256x256,640x480,1280x720 \
-  --warmup 1 \
-  --runs 20 \
-  --output work_dirs/vla_service_benchmark/report.json
+.venv-vla/bin/python tools/validation/run_lingbot_vla_v2_parity.py \
+  --reference work_dirs/vla_parity/upstream_seed7.npz \
+  --candidate work_dirs/vla_parity/telefuser_seed7.npz \
+  --profile strict --output work_dirs/vla_parity/strict_report.json
 ```
 
-The native service moves the policy to its target GPU and runs one synthetic fixed-shape warmup before readiness. It
-also keeps the allocator cache between requests. The report records construction and startup warmup separately, while
-the first accepted request represents a ready replica. The default `service-thread` execution mode matches the native
-service runner's fixed worker thread; use `--execution-mode direct` only to measure the in-process pipeline ceiling.
-Shutdown still offloads the policy explicitly.
-
-## Native Structured API Validation
-
-Use the VLA-specific HTTP validator after the native service reports ready. This is the structured-output counterpart
-to the model-specific direct and AIPerf workloads used by the video and LingBot-World integrations: it exercises the
-real TeleFuser HTTP boundary, asynchronous scheduler, task status polling, pipeline pool, and result serialization.
-It emits raw request facts and aggregate latency distributions to a JSON artifact; it does not add a VLA-specific
-service interface or change shared metric semantics.
-
-Run a single-replica smoke and latency check:
+Validate a running structured service or run a bounded soak:
 
 ```bash
 .venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
   --base-url http://127.0.0.1:18080 \
   --image examples/data/lingbot_world_fast/image.jpg \
-  --warmup 1 \
-  --requests 20 \
-  --concurrency 1 \
+  --quantization-profile bf16 --warmup 1 --requests 20 --concurrency 1 \
   --output work_dirs/vla_service_validation/smoke_20.json
+
+# Replace --requests 20 with --duration-seconds 3600 for a one-hour run.
 ```
 
-When the target was started with two independent replicas, validate request-level concurrency with:
-
-```bash
-.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
-  --base-url http://127.0.0.1:18080 \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --warmup 2 \
-  --requests 100 \
-  --concurrency 2 \
-  --output work_dirs/vla_service_validation/two_replica_100.json
-```
-
-Use duration mode for a bounded soak. Workers use closed-loop scheduling: each worker submits its next request only
-after its previous task reaches a terminal state.
-
-```bash
-.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
-  --base-url http://127.0.0.1:18080 \
-  --camera-high /data/cam_high.png \
-  --camera-left-wrist /data/cam_left_wrist.png \
-  --camera-right-wrist /data/cam_right_wrist.png \
-  --duration-seconds 7200 \
-  --concurrency 1 \
-  --service-pid <telefuser-parent-pid> \
-  --gpu-indexes 0 \
-  --resource-interval-seconds 1 \
-  --output work_dirs/vla_service_validation/soak_2h.json
-```
-
-Resource sampling is opt-in and local-only. `--service-pid` must identify the parent `telefuser serve` process; its
-replica descendants are discovered on every sample. RSS is summed across that process tree, while `nvidia-smi`
-process memory is grouped by physical GPU index. For a two-replica service on physical GPUs 0 and 1, pass
-`--gpu-indexes 0,1`. Omitting `--service-pid` keeps remote-service validation lightweight and does not invoke
-`nvidia-smi`. Reports retain bounded raw samples plus distributions and first/last 10% trends for latency, RSS, and
-per-GPU process memory.
-
-The validator freezes the current structured contract. Requests contain exactly `task`, `instruction`, `state`, the
-three camera fields, and optional `seed`. Action results contain exactly `canonical_normalized_actions`, `horizon`,
-`action_dim`, `checkpoint_variant`, `policy_verified`, and `verification_status`. Safe additive task-status metadata
-remains allowed, but status responses must not echo the three Base64 camera fields.
-
-The command exits nonzero if readiness or contract checks fail, any measured request fails, task IDs are duplicated,
-or the queue is not drained at the end. Each successful record validates the expected `50x55` finite action tensor
-and retains only statistics and a float64 action fingerprint. Full actions and Base64 camera contents are deliberately
-excluded from the artifact. `--max-records` bounds retained per-request samples during long runs while aggregate
-latency and success counters still cover the complete run. `--max-resource-samples` independently bounds retained
-resource samples.
-
-For fault handling, run the independent validator against a ready service:
-
-```bash
-.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_service_faults.py \
-  --base-url http://127.0.0.1:18080 \
-  --image examples/data/lingbot_world_fast/image.jpg
-```
-
-It checks missing cameras, invalid state size, invalid Base64, and cancellation. Replica termination is opt-in and
-requires a disposable two-replica service: add `--service-pid <telefuser-parent-pid>` and
-`--kill-replica-gpu-index <physical-index>`. The tool only selects a GPU compute process inside that parent process
-tree, sends `SIGTERM`, and verifies one-replica capacity degradation plus a subsequent valid `50x55` response. It does
-not promise automatic replica restart.
-
-The same structured API is available through the repository-owned AIPerf workload. Install the pinned isolated
-AIPerf environment once, then run the workload while the native service is ready:
+Run the repository-owned AIPerf workload with:
 
 ```bash
 bash scripts/setup_aiperf.sh
 bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
 ```
 
-AIPerf excludes the configured warmup, aggregates request latency, throughput, success, traces, and server metrics,
-and writes normal AIPerf artifacts. The adapter strictly validates the action contract but retains only bounded action
-facts, not full arrays or Base64 inputs. Passing either validator proves serving and normalized action structure, not
-embodiment-specific control semantics.
-
-## TeleFuser Regression Baseline
-
-The validation capture runs through the public loader and pipeline, then records preprocessing tensors, fixed initial
-noise, every flow-matching `x_t` and velocity step, and the final canonical action. Run it twice before changing VLA
-model code to establish and verify a strict local baseline:
+Run the complete real-GPU release suite after installing AIPerf. It executes every runtime profile in an isolated
+process, compares direct and HTTP actions, changes instruction layout under CUDA Graph, runs bounded load and fault
+checks, verifies shutdown/restart, and records full checkpoint, processor, software, CUDA, and GPU identity:
 
 ```bash
-.venv-vla/bin/python tools/validation/capture_lingbot_vla_v2_telefuser.py \
-  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
-  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
-  --camera-high /data/cam_high.png \
-  --camera-left-wrist /data/cam_left_wrist.png \
-  --camera-right-wrist /data/cam_right_wrist.png \
-  --task "pick up the red block" \
-  --state-json '[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]' \
-  --seed 7 \
-  --deterministic-moe \
-  --output work_dirs/vla_regression/baseline_seed7.npz
-
-# Repeat the same command with:
-#   --output work_dirs/vla_regression/replay_seed7.npz
-
-.venv-vla/bin/python tools/validation/run_lingbot_vla_v2_parity.py \
-  --reference work_dirs/vla_regression/baseline_seed7.npz \
-  --candidate work_dirs/vla_regression/replay_seed7.npz \
-  --profile strict \
-  --output work_dirs/vla_regression/strict_report.json
+.venv-vla/bin/python tools/validation/run_lingbot_vla_v2_release_suite.py suite \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --gpu-index 0 \
+  --output-dir work_dirs/lingbot_vla_v2_release
 ```
 
-Each `.npz` has a same-name `.json` sidecar containing the checkpoint, processor, input, runtime, and tensor contract
-metadata. The default checkpoint identity is a fast filename-and-size manifest. Add `--full-checkpoint-hash` when a
-content hash of every checkpoint shard is required. Keep generated artifacts under `work_dirs`; do not commit them.
+Use `--profiles bf16-eager,bf16-graph` for an intermediate run. Such a partial run is useful for development but is
+not a complete quantization support-matrix release result.
 
-This is a TeleFuser regression check, not upstream parity. It detects changes to the current implementation but does
-not establish equivalence with the official repository.
+These checks establish framework parity and serving contracts, not physical robot task success.
 
-## Official Upstream Parity
+## Performance
 
-The strict upstream baseline pins `Robbyant/lingbot-vla-v2` at commit
-`be27333c9b5f2663b0ec33f069dd7dfd67fa32b5`. Keep the checkout, uv environment, cache, and artifacts under
-`work_dirs`; Git ignores them. Create the isolated runtime with:
+The following measurements used one H100 80 GB, Python 3.10.12, PyTorch 2.11.0+cu130, CUDA 13.0, Transformers
+5.14.1, TorchAO 0.17.0, and bitsandbytes 0.48.0. Runtime means cover the same fixed-shape action request after warmup.
+
+### Runtime And Quantization
+
+| Profile | Runtime mean | Steady GPU allocated | Action comparison | Status |
+| --- | ---: | ---: | --- | --- |
+| BF16 eager | 636.107 ms | 12,299.5 MiB | Strict upstream parity 38/38; max abs `0.0` | Supported |
+| BF16 dual CUDA Graph (historical) | 132.081 ms | 12,454.3 MiB | Cosine `0.999913`; relative L2 `0.013195` | Superseded; rerun denoising-only graph |
+| Fused FP8 dual graph (historical) | 163.194 ms | 10,828.0 MiB | Cosine `0.999040`; relative L2 `0.044357` | Superseded; current release gate pending |
+| TorchAO FP8 | 1,321.630 ms | 8,266.4 MiB | Cosine `0.999714`; relative L2 `0.024001`; historical direct exact replay | Experimental capacity profile |
+| BNB NF4 | 915.299 ms | 6,297.4 MiB | Cosine `0.998031`; relative L2 `0.063843`; historical direct exact replay | Experimental capacity profile |
+| tf-kernel FP8 | Not measured | Not measured | No compatible CUDA 13/SM90 wheel installed | Code support; hardware unverified |
+
+Reproduce a measured profile from a frozen input artifact by changing `--quantization` and the output name. Add
+`--cuda-graph` when measuring BF16 graph or `fused-fp8-graph`:
 
 ```bash
-mkdir -p work_dirs/.uv-cache-upstream work_dirs/.uv-tmp-upstream
-UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv venv work_dirs/.venv-lingbot-upstream --python .venv-vla/bin/python
-UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv pip install --python work_dirs/.venv-lingbot-upstream/bin/python -r tools/validation/requirements-lingbot-vla-v2-upstream.txt
-UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv pip install --python work_dirs/.venv-lingbot-upstream/bin/python --no-deps "lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz"
-git clone https://github.com/Robbyant/lingbot-vla-v2 work_dirs/lingbot-vla-v2-upstream
-git -C work_dirs/lingbot-vla-v2-upstream checkout be27333c9b5f2663b0ec33f069dd7dfd67fa32b5
+CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
+  tools/validation/benchmark_lingbot_vla_v2_runtime.py \
+  --implementation telefuser \
+  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
+  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
+  --input-artifact work_dirs/vla_quantization/bf16_seed7.npz \
+  --seed 7 --device cuda:0 --quantization torchao-fp8 \
+  --warmup 5 --runs 20 \
+  --output work_dirs/vla_quantization/torchao_runtime.json
 ```
 
-Generate the reference with `capture_lingbot_vla_v2_upstream.py` in the upstream uv environment and the candidate
-with `capture_lingbot_vla_v2_telefuser.py` in `.venv-vla`. Pass identical model, processor, camera, task, state, seed,
-and device arguments to both commands, add `--deterministic-moe`, and pass `--upstream-root` to the upstream command.
-Then compare them with the strict comparator shown above. Generated artifacts belong in `work_dirs/vla_upstream_parity`.
+The two dual-graph rows preserve the previous implementation's timing comparison; they are not measurements of the
+current dynamic-prefix implementation. Rerun the release suite and fixed-input runtime benchmark before publishing new
+graph numbers. TorchAO FP8 and BNB NF4 reduced memory but were slower than BF16 eager at batch 1, so they remain
+capacity options rather than latency recommendations.
 
-This is a minimal inference-parity runtime, not a LeRobot training environment. The upstream setup itself combines
-LeRobot 0.4.2 metadata constraints with versions outside those constraints, so LeRobot is installed with `--no-deps`;
-the capture import and end-to-end run are the runtime checks.
+The quantization gate requires finite `50 x 55` actions, cosine similarity at least `0.995`, relative L2 at most
+`0.10`, max absolute error at most `0.5`, and exact deterministic replay. It does not establish robot task success.
 
-The official code hard-codes FlashAttention during construction. The upstream capture replaces that selection only
-inside its validation process so both sides use eager attention on the Python 3.10.12 / PyTorch 2.11 stack. Production
-inference keeps the upstream Triton MoE path through `telefuser.ops`; strict capture uses `--deterministic-moe` because
-the upstream kernel uses atomic accumulation and is not bitwise repeatable across separate processes. Artifact metadata
-records both `attention_backend` and `moe_backend`, and the comparator rejects mixed-backend artifacts.
+### Official Upstream Comparison
+
+The matched eager BF16 run used three warmups and 20 measured requests on the same H100 and frozen inputs:
+
+| Scope | Upstream mean | TeleFuser mean | TeleFuser change |
+| --- | ---: | ---: | ---: |
+| Core model | 669.382 ms | 660.100 ms | -1.39% |
+| Runtime request | 662.462 ms | 658.935 ms | -0.53% |
+
+Negative change means TeleFuser was faster. Both implementations allocated 12,454.8 MiB at peak in this run.
+
+## Troubleshooting
+
+### CUDA Graph Or Quantization Is Rejected
+
+Use CUDA Graph only with BF16 or `fused-fp8-graph`; the fused profile must include `--cuda-graph`. Other online
+quantization profiles run without CUDA Graph and require CUDA.
+
+### tf-kernel FP8 Cannot Load
+
+Install a tf-kernel wheel built for the visible GPU architecture and exact PyTorch/CUDA ABI, or use BF16, TorchAO
+FP8, or BNB NF4. Do not promote tf-kernel FP8 to supported status based only on unit tests.
+
+## Notes
+
+- Canonical normalized actions are not physical robot commands. Deployment requires de-normalization, embodiment
+  mapping, control frequency, limits, safety policy, feedback, and emergency-stop behavior.
+- `unverified_official_6b_base` remains intentional until an embodiment checkpoint and task-success evaluation are
+  available.
+- Quantized profiles require separate numerical, performance, and robot task-success acceptance.
+- Generated captures and benchmark reports belong under the Git-ignored `work_dirs/` directory.

@@ -23,6 +23,7 @@ class LingBotVlaV2PipelineConfig:
     robot_profile: RobotWinProfile = field(default_factory=RobotWinProfile.default)
     image_size: int = 256
     enable_metrics: bool = False
+    cuda_graph: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,12 @@ class LingBotVlaV2Pipeline(BasePipeline):
             image_size=config.image_size,
         )
         self.policy_stage = LingBotVlaV2PolicyStage("policy", module_manager, config.policy_config)
+        if config.cuda_graph:
+            if config.policy_config.device_type != "cuda":
+                raise ValueError("LingBot-VLA v2 CUDA Graph requires a CUDA policy")
+            if not hasattr(policy, "set_cuda_graph_enabled"):
+                raise TypeError("LingBot-VLA v2 policy does not support CUDA Graph execution")
+            policy.set_cuda_graph_enabled(True)
         if config.enable_metrics:
             self.enable_metrics()
 
@@ -118,5 +125,7 @@ class LingBotVlaV2Pipeline(BasePipeline):
     def close(self) -> None:
         """Release policy device memory."""
         if hasattr(self, "policy_stage"):
+            if hasattr(self.policy_stage.policy, "set_cuda_graph_enabled"):
+                self.policy_stage.policy.set_cuda_graph_enabled(False)
             self.policy_stage.offload_models()
             self.policy_stage.onload_models_flag = False

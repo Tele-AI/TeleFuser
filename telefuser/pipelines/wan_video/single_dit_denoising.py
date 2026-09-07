@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
+from telefuser.core.config import ModelRuntimeConfig, SparseAttentionConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_cfg_rank, get_cfg_world_size
 from telefuser.distributed.fsdp import shard_model
@@ -75,6 +75,35 @@ class SingleDitDenoisingStage(BaseStage):
         if hasattr(self.dit, "pp_flag") and self.dit.pp_flag:
             return self.dit.pp_forward
         return self.dit.forward
+
+    def enable_sparse_attention(
+        self,
+        *,
+        height: int,
+        width: int,
+        num_frames: int,
+        sparse_config: SparseAttentionConfig,
+    ) -> None:
+        """Configure sparse attention on the local DiT instance."""
+        if sparse_config.sparse_impl == "radial":
+            self.dit.enable_radial_attention(
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                dense_layers=sparse_config.dense_layers,
+                dense_timesteps=sparse_config.dense_timesteps,
+                decay_factor=sparse_config.decay_factor,
+                use_sage_attention=sparse_config.use_sage_attention,
+            )
+        elif sparse_config.sparse_impl == "sol":
+            self.dit.enable_sol_attention(
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                sparse_config=sparse_config,
+            )
+        else:
+            raise ValueError(f"Unsupported Wan sparse attention: {sparse_config.sparse_impl}")
 
     def predict_noise_with_cfg(
         self,

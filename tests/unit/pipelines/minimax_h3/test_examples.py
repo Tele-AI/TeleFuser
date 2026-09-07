@@ -135,6 +135,8 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "enable_fsdp": True,
                 "online_adaln_cache": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
+                "attention_chunks": 2,
+                "ulysses_sequence_mode": "valid_only",
                 "sol_fp8": False,
                 "sol_dense_steps": 10,
                 "sol_dense_layers": 2,
@@ -191,12 +193,20 @@ def test_quantization_names_resolve_to_runtime_config(
 
 
 def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="single-GPU"):
+    with pytest.raises(ValueError, match="tf-kernel FP8"):
         load_minimax_h3_pipeline(
             tmp_path,
             partition="FL2VA",
             ulysses_degree=2,
             quantization="torchao-fp8",
+        )
+
+    with pytest.raises(FileNotFoundError, match="partition not found"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            ulysses_degree=2,
+            quantization="tf-kernel-fp8",
         )
 
     (tmp_path / "FL2VA").mkdir()

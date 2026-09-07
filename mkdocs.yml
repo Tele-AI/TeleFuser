@@ -1,7 +1,7 @@
 # TeleFuser Documentation Site Configuration
-# Build: mkdocs build
-# Serve: mkdocs serve
-# Deploy: mkdocs gh-deploy --force
+# Build (includes Cookbook): python scripts/docs/prepare_cookbook.py build
+# Serve: python scripts/docs/prepare_cookbook.py serve
+# Deploy: mkdocs gh-deploy --config-file .build/mkdocs.yml --force (after build)
 
 site_name: TeleFuser
 site_description: A streaming inference and serving framework for real-time world models and multimodal generation
@@ -151,6 +151,7 @@ plugins:
             Latent Cache: 潜空间缓存
             Adding New Model: 新增模型
             Adding New Stage: 新增阶段
+            Publishing Cookbook Guides: 发布 Cookbook 指南
             Hash Config Management: 哈希配置管理
             torch.compile Compatibility: torch.compile兼容性
             Testing: 测试
@@ -196,6 +197,7 @@ nav:
       - feature_cache.md
       - latent_cache.md
   - Developer Guides:
+      - Publishing Cookbook Guides: cookbook_authoring.md
       - adding_new_model.md
       - adding_new_stage.md
       - hash_config_management.md

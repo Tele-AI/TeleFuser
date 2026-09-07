@@ -15,6 +15,9 @@ Each model-family directory must include a `README.md` based on
 [`examples/README_TEMPLATE.md`](../../examples/README_TEMPLATE.md). Keep the required section order, remove unused
 optional sections, and replace all template placeholders before submitting the example.
 
+To publish that README on the website, follow [Publishing Cookbook Guides](cookbook_authoring.md).
+Register the source once in `docs/cookbook.yml`; do not copy its body into `docs/`.
+
 ## File Structure and Naming
 
 ### Directory Organization

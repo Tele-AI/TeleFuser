@@ -22,4 +22,15 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 export PYTHONPATH="${ADAPTER_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ -n "${TELEFUSER_AIPERF_SERVICE_PID:-}" ]]; then
+    RESOURCE_PYTHON="${TELEFUSER_VLA_PYTHON:-${ROOT_DIR}/.venv-vla/bin/python}"
+    if [[ ! -x "${RESOURCE_PYTHON}" ]]; then
+        echo "The VLA resource sampler interpreter is unavailable: ${RESOURCE_PYTHON}" >&2
+        exit 1
+    fi
+    exec "${RESOURCE_PYTHON}" benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.py \
+        --config "${CONFIG_PATH}" \
+        --service-pid "${TELEFUSER_AIPERF_SERVICE_PID}" \
+        --output "${TELEFUSER_AIPERF_RESOURCE_OUTPUT:-artifacts/telefuser_aiperf/vla_structured/resource_summary.json}"
+fi
 exec "${AIPERF_PYTHON}" -m telefuser_aiperf.cli profile --config "${CONFIG_PATH}"

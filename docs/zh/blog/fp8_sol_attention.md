@@ -177,8 +177,9 @@ WGMMA Tensor Core。FP8 路径在 BF16 Sol 结构上增加以下工作：
    V channel scale 应用到 FP32 output accumulator。
 6. **统一 online-softmax merge**：exact 与 summary route 更新相同的 row max、row sum 和 output
    accumulator，不落盘完整 attention matrix。
-7. **长序列 Split-KV**：SM90 `auto` 策略在 FP8 序列长度达到 16,384 时选择两个 split，达到 65,536
-   时选择四个 split，最后通过 log-sum-exp reduction 合并部分结果。
+7. **长序列 Split-KV**：SM90 `auto` 策略在 FP8 序列长度达到 16,384 时选择两个 split。H100 实测覆盖
+   到 65,536 token，四个 split 仍无法抵消额外 workspace 与归约开销，因此保持两个 split，最后通过
+   log-sum-exp reduction 合并部分结果。
 
 ```mermaid
 flowchart TB
@@ -217,8 +218,9 @@ KV sink，prefix query 使用 BF16 dense attention 重新计算。前十个 step
 packed FlashAttention-4，token refiner 也始终保持 dense。
 
 不支持的 shape、dtype、device 或 kernel runtime failure 会保留公共 attention fallback。FP8 operand 会先
-反量化再进入 BF16 fallback。Ring/USP 仍走 dense，因为它的分布式 online merge 需要当前 Sol contract
-之外的 log-sum-exp 行为。
+反量化再进入 BF16 fallback。纯 Ulysses sequence parallel 已支持：all-to-all 先得到完整 sequence、局部
+head 的 Q/K/V，每个 rank 再独立计算 FP8 scale 并运行 Sol。Ring 以及 Ulysses-ring 组合仍走 dense，因为
+它们的分布式 online merge 需要当前 Sol contract 之外的 log-sum-exp 行为。
 
 ## 性能结果
 

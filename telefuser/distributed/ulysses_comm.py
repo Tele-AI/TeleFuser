@@ -33,6 +33,24 @@ def _local_head_count(num_heads: int, world_size: int) -> int:
     return num_heads // world_size
 
 
+def _gather_sequence_partition(
+    global_seq_len: int,
+    world_size: int,
+    rank: int,
+    output_sequence_length: int,
+) -> tuple[int, list[int]]:
+    """Return this rank's valid output length and every rank's valid input length."""
+    if output_sequence_length <= 0:
+        raise ValueError("Ulysses gather output sequence length must be positive")
+    if global_seq_len > output_sequence_length * world_size:
+        raise ValueError("Ulysses valid sequence exceeds the padded output capacity")
+    valid_lengths = [
+        max(0, min(output_sequence_length, global_seq_len - destination * output_sequence_length))
+        for destination in range(world_size)
+    ]
+    return valid_lengths[rank], valid_lengths
+
+
 def _wait_async_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Resolve an asynchronous functional collective tensor."""
     if isinstance(tensor, fc.AsyncCollectiveTensor):
@@ -180,6 +198,105 @@ def ulysses_scatter_qkv(
     def wait() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         result = output.reshape(world_size * local_seq_len, local_heads, 3 * head_dim).unsqueeze(0)
         return result.chunk(3, dim=-1)
+
+    return wait
+
+
+def ulysses_scatter_qkv_qknorm_rope_chunk_async(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    eps: float,
+    process_group: dist.ProcessGroup,
+    *,
+    local_head_start: int,
+    local_head_count: int,
+) -> Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Submit one fused Q/K RMSNorm + RoPE + destination-major Ulysses head chunk."""
+    if qkv.ndim != 4 or qkv.shape[1] != 3:
+        raise ValueError("fused Ulysses QKV scatter requires shape [sequence, 3, heads, dim]")
+    _, world_size = _get_distributed_info(process_group)
+    local_seq_len, _, num_heads, head_dim = qkv.shape
+    total_local_heads = _local_head_count(num_heads, world_size)
+    if local_head_start < 0 or local_head_count <= 0 or local_head_start + local_head_count > total_local_heads:
+        raise ValueError("fused Ulysses scatter head chunk falls outside the destination-local heads")
+    if not _can_use_destination_major_kernel(qkv):
+        raise ValueError("fused Ulysses QKV scatter requires eager CUDA FP16/BF16 QKV")
+
+    from telefuser.kernel.triton.ulysses_relayout import pack_qkv_qknorm_rope_destination_major
+
+    packed = pack_qkv_qknorm_rope_destination_major(
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        world_size,
+        eps,
+        local_head_start=local_head_start,
+        local_head_count=local_head_count,
+    )
+    output = torch.empty_like(packed.flatten())
+    work = dist.all_to_all_single(output, packed.flatten(), group=process_group, async_op=True)
+
+    def wait() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        work.wait()
+        result = output.reshape(world_size * local_seq_len, local_head_count, 3 * head_dim).unsqueeze(0)
+        return result.chunk(3, dim=-1)
+
+    return wait
+
+
+def ulysses_gather_heads_chunk_async(
+    tensor: torch.Tensor,
+    process_group: dist.ProcessGroup,
+    *,
+    num_heads: int,
+    local_head_start: int,
+    destination: torch.Tensor,
+    zero_tail: bool = False,
+) -> Callable[[], torch.Tensor]:
+    """Submit one valid-only output head chunk and merge it into a padded destination."""
+    if tensor.ndim != 4:
+        raise ValueError("Ulysses head gather requires a 4D tensor")
+    rank, world_size = _get_distributed_info(process_group)
+    batch, global_seq_len, chunk_local_heads, head_dim = tensor.shape
+    total_local_heads = _local_head_count(num_heads, world_size)
+    if local_head_start < 0 or local_head_start + chunk_local_heads > total_local_heads:
+        raise ValueError("Ulysses gather head chunk falls outside the destination-local heads")
+    if not _can_use_destination_major_kernel(tensor):
+        raise ValueError("chunked Ulysses overlap requires CUDA FP16/BF16 attention output")
+    target_seq_len = destination.shape[1]
+    local_seq_len, valid_lengths = _gather_sequence_partition(global_seq_len, world_size, rank, target_seq_len)
+    expected_suffix = (world_size, total_local_heads, head_dim)
+    if destination.shape[0] != batch or tuple(destination.shape[2:]) != expected_suffix:
+        raise ValueError("invalid Ulysses gather destination shape")
+
+    from telefuser.kernel.triton.ulysses_relayout import merge_ulysses_head_chunk
+
+    packed = tensor.permute(1, 0, 2, 3).contiguous()
+    elements_per_token = batch * chunk_local_heads * head_dim
+    input_split_sizes = [length * elements_per_token for length in valid_lengths]
+    output_split_sizes = [local_seq_len * elements_per_token] * world_size
+    output = torch.empty(sum(output_split_sizes), dtype=tensor.dtype, device=tensor.device)
+    work = dist.all_to_all_single(
+        output,
+        packed.flatten(),
+        output_split_sizes=output_split_sizes,
+        input_split_sizes=input_split_sizes,
+        group=process_group,
+        async_op=True,
+    )
+
+    def wait() -> torch.Tensor:
+        work.wait()
+        received = output.reshape(world_size, local_seq_len, batch, chunk_local_heads, head_dim)
+        return merge_ulysses_head_chunk(
+            received,
+            destination,
+            local_head_start=local_head_start,
+            zero_tail=zero_tail,
+        )
 
     return wait
 

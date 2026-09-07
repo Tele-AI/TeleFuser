@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from telefuser.core.config import QuantConfig, QuantType
 from telefuser.models.lingbot_vla_v2_loader import (
     build_official_6b_config,
     load_lingbot_vla_v2,
@@ -117,4 +118,17 @@ def test_public_loader_routes_official_shards_through_module_manager(tmp_path, m
             "checkpoint_variant": "base",
             "checkpoint_path": str(tmp_path),
         },
+        "quant_config": None,
     }
+
+    quant_config = QuantConfig(enabled=True, quant_type=QuantType.TORCHAO_FP8)
+    load_lingbot_vla_v2(
+        manager,
+        tmp_path,
+        tmp_path / "qwen3vl",
+        torch_dtype=torch.bfloat16,
+        device="cuda:0",
+        quant_config=quant_config,
+    )
+    assert manager.load_kwargs["device"] == "cuda:0"
+    assert manager.load_kwargs["quant_config"] is quant_config

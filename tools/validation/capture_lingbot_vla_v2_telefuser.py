@@ -13,19 +13,17 @@ from typing import Any, Iterator, Sequence
 import numpy as np
 import torch
 import transformers
-from transformers import AutoProcessor
 
-from telefuser.core.config import ModelRuntimeConfig
-from telefuser.core.module_manager import ModuleManager
-from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2, resolve_lingbot_vla_v2_shards
+from telefuser.models.lingbot_vla_v2_loader import OFFICIAL_6B_MODEL_CONFIG, resolve_lingbot_vla_v2_shards
+from telefuser.models.lingbot_vla_v2_quantization import lingbot_vla_v2_quantization_identity
 from telefuser.pipelines.lingbot_vla_v2 import (
     ROBOTWIN_CAMERA_KEYS,
     LingBotVlaV2Observation,
     LingBotVlaV2Pipeline,
-    LingBotVlaV2PipelineConfig,
 )
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 
 
 def _sha256_file(path: Path, digest: Any | None = None) -> str:
@@ -61,16 +59,23 @@ def _input_sha256(task: str, state: Sequence[float], image_paths: Sequence[Path]
     return digest.hexdigest()
 
 
-def _git_commit() -> str:
+def _git_identity() -> tuple[str, bool]:
     repository_root = Path(__file__).resolve().parents[2]
-    completed = subprocess.run(
+    revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
         check=True,
         capture_output=True,
         text=True,
     )
-    return completed.stdout.strip()
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return revision.stdout.strip(), bool(status.stdout.strip())
 
 
 class TensorCapture:
@@ -138,25 +143,27 @@ def trace_predict_velocity(flow_model: Any, capture: TensorCapture) -> Iterator[
         flow_model._use_compile_predict_velocity = compile_enabled
 
 
-def _build_pipeline(model_root: Path, qwen3vl_root: Path, device: str) -> LingBotVlaV2Pipeline:
-    target_device = torch.device(device)
-    dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
-    processor = AutoProcessor.from_pretrained(str(qwen3vl_root), local_files_only=True, padding_side="right")
-    manager = ModuleManager(torch_dtype=dtype, device="cpu")
-    manager.add_module(processor, "lingbot_vla_v2_processor", path=str(qwen3vl_root))
-    load_lingbot_vla_v2(manager, model_root, qwen3vl_root, torch_dtype=dtype)
-    pipeline = LingBotVlaV2Pipeline(device=device, torch_dtype=dtype)
-    pipeline.init(
-        manager,
-        LingBotVlaV2PipelineConfig(
-            policy_config=ModelRuntimeConfig(
-                device_type=target_device.type,
-                device_id=target_device.index or 0,
-                torch_dtype=dtype,
-            )
-        ),
-    )
-    return pipeline
+def _build_pipeline(
+    model_root: Path,
+    qwen3vl_root: Path,
+    device: str,
+    quantization: str | None,
+    vision_attention: str,
+) -> LingBotVlaV2Pipeline:
+    previous = OFFICIAL_6B_MODEL_CONFIG.get("vit_attn_implementation")
+    OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"] = vision_attention
+    try:
+        return get_lingbot_vla_v2_pipeline(
+            str(model_root),
+            str(qwen3vl_root),
+            device=device,
+            quantization=quantization,
+        )
+    finally:
+        if previous is None:
+            del OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"]
+        else:
+            OFFICIAL_6B_MODEL_CONFIG["vit_attn_implementation"] = previous
 
 
 def capture_artifact(
@@ -171,6 +178,8 @@ def capture_artifact(
     device: str,
     full_checkpoint_hash: bool,
     deterministic_moe: bool,
+    vision_attention: str,
+    quantization: str | None = None,
 ) -> tuple[Path, Path]:
     if len(image_paths) != len(ROBOTWIN_CAMERA_KEYS):
         raise ValueError(f"expected {len(ROBOTWIN_CAMERA_KEYS)} camera paths, got {len(image_paths)}")
@@ -178,7 +187,7 @@ def capture_artifact(
     metadata_path = output.with_suffix(".json")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    pipeline = _build_pipeline(model_root, qwen3vl_root, device)
+    pipeline = _build_pipeline(model_root, qwen3vl_root, device, quantization, vision_attention)
     if deterministic_moe:
         for module in pipeline.policy_stage.policy.modules():
             if hasattr(module, "_use_robby_moe_kernel"):
@@ -205,10 +214,12 @@ def capture_artifact(
 
         target_device = torch.device(device)
         checkpoint_paths = [Path(path) for path in resolve_lingbot_vla_v2_shards(model_root)]
+        telefuser_commit, telefuser_worktree_dirty = _git_identity()
         metadata = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "artifact_kind": "telefuser_regression",
-            "telefuser_commit": _git_commit(),
+            "telefuser_commit": telefuser_commit,
+            "telefuser_worktree_dirty": telefuser_worktree_dirty,
             "checkpoint_manifest_sha256": _manifest_sha256(
                 checkpoint_paths,
                 include_contents=full_checkpoint_hash,
@@ -227,11 +238,13 @@ def capture_artifact(
             "num_steps": trace.step,
             "torch_dtype": str(pipeline.torch_dtype).removeprefix("torch."),
             "attention_backend": str(flow_model.config.attention_implementation),
+            "vision_attention_backend": str(flow_model.qwenvl_with_expert.qwenvl.visual.config._attn_implementation),
             "moe_backend": "deterministic_torch_reference" if deterministic_moe else "upstream_triton",
             "device": str(target_device),
             "device_name": torch.cuda.get_device_name(target_device) if target_device.type == "cuda" else "cpu",
             "torch_version": torch.__version__,
             "transformers_version": transformers.__version__,
+            "quantization": lingbot_vla_v2_quantization_identity(pipeline.policy_stage.policy),
             "arrays": capture.array_metadata,
         }
         np.savez(output, **capture.arrays)
@@ -267,6 +280,13 @@ def main() -> None:
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
+    parser.add_argument(
+        "--vision-attention",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="eager",
+        help="Qwen3-VL vision backend; strict official parity requires eager",
+    )
     parser.add_argument(
         "--full-checkpoint-hash",
         action="store_true",
@@ -301,6 +321,8 @@ def main() -> None:
         device=args.device,
         full_checkpoint_hash=args.full_checkpoint_hash,
         deterministic_moe=args.deterministic_moe,
+        vision_attention=args.vision_attention,
+        quantization=args.quantization,
     )
     print(f"Saved LingBot-VLA v2 capture: {artifact}")
     print(f"Saved LingBot-VLA v2 metadata: {metadata}")

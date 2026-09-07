@@ -39,6 +39,11 @@ def test_registration_uses_aiperf_endpoint_and_transport_plugins() -> None:
     assert transport_class is TeleFuserStructuredHttpTransport
     assert plugins.get_endpoint_metadata("telefuser_vla_structured").requires_polling is True
 
+    from aiperf.metrics.metric_registry import MetricRegistry
+
+    assert MetricRegistry.get_class("vla_inference_time").__name__ == "VlaInferenceTimeMetric"
+    assert MetricRegistry.get_class("vla_peak_memory").__name__ == "VlaPeakMemoryMetric"
+
 
 def test_build_vla_payload_reuses_inline_image_for_three_cameras() -> None:
     encoded = base64.b64encode(b"image bytes").decode()
