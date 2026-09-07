@@ -32,10 +32,12 @@ class _Pipeline:
     def __init__(self, profile: RobotWinProfile) -> None:
         self.config = SimpleNamespace(robot_profile=profile)
         self.observations: list[Any] = []
+        self.seeds: list[int | None] = []
         self.closed = False
 
-    def __call__(self, observation) -> LingBotVlaV2CanonicalActionChunk:
+    def __call__(self, observation, seed: int | None = None) -> LingBotVlaV2CanonicalActionChunk:
         self.observations.append(observation)
+        self.seeds.append(seed)
         return LingBotVlaV2CanonicalActionChunk(
             canonical_normalized_actions=torch.zeros(50, 55),
             horizon=50,
@@ -78,14 +80,23 @@ def test_adapter_maps_observation_and_returns_robotwin_chunk() -> None:
     pipeline = _Pipeline(profile)
     adapter = server.RobotWinPolicyAdapter(pipeline, use_length=8)
 
-    result = adapter.infer(_observation())
+    request = {**_observation(), "seed": 7, "request_id": "request-1", "episode_id": "episode-1"}
+    result = adapter.infer(request)
 
     assert result["action"].shape == (8, 14)
     assert result["action"].dtype == np.float32
     assert np.allclose(result["action"][:, [6, 13]], 0.0, atol=1e-6)
     assert np.allclose(np.delete(result["action"], [6, 13], axis=1), 1.0000005)
     assert result["policy_verified"] is False
+    assert result["seed"] == 7
+    assert result["request_id"] == "request-1"
+    assert result["episode_id"] == "episode-1"
+    assert result["server_timing"]["lock_wait_ms"] >= 0
+    assert result["server_timing"]["pipeline_ms"] >= 0
+    assert result["server_timing"]["action_mapping_ms"] >= 0
+    assert result["server_timing"]["adapter_total_ms"] >= 0
     assert len(pipeline.observations) == 1
+    assert pipeline.seeds == [7]
     observation = pipeline.observations[0]
     assert observation.task == "pick up the block"
     assert set(observation.images) == set(ROBOTWIN_CAMERA_KEYS)
@@ -99,6 +110,22 @@ def test_adapter_reset_does_not_run_or_reload_policy() -> None:
     assert pipeline.observations == []
     with pytest.raises(ValueError, match="runtime checkpoint switching"):
         adapter.infer({"reset": True, "path_to_pi_model": "/different/checkpoint"})
+
+
+@pytest.mark.parametrize("field", ["request_id", "episode_id"])
+def test_adapter_rejects_invalid_trace_fields(field: str) -> None:
+    adapter = server.RobotWinPolicyAdapter(_Pipeline(_profile()))
+
+    with pytest.raises(ValueError, match=field):
+        adapter.infer({**_observation(), field: ""})
+
+
+@pytest.mark.parametrize("seed", [True, 1.5, "7"])
+def test_adapter_rejects_non_integer_seed(seed: Any) -> None:
+    adapter = server.RobotWinPolicyAdapter(_Pipeline(_profile()))
+
+    with pytest.raises(ValueError, match="seed must be an integer"):
+        adapter.infer({**_observation(), "seed": seed})
 
 
 def test_adapter_rejects_missing_observation_fields() -> None:
@@ -117,17 +144,42 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
         with client.websocket_connect("/") as websocket:
             metadata = server.unpack_message(websocket.receive_bytes())
             assert metadata["robot_profile"] == "robotwin"
+            assert metadata["protocol_version"] == "1.0"
+            assert metadata["action_type"] == "absolute_qpos"
             assert metadata["action_horizon"] == 3
             assert metadata["action_dim"] == 14
+            assert metadata["action_dtype"] == "float32"
+            assert metadata["action_order"] == list(server.ROBOTWIN_ACTION_ORDER)
 
-            websocket.send_bytes(server.pack_message(_observation()))
+            websocket.send_bytes(
+                server.pack_message(
+                    {**_observation(), "seed": 11, "request_id": "request-1", "episode_id": "episode-1"}
+                )
+            )
             response = server.unpack_message(websocket.receive_bytes())
             assert response["action"].shape == (3, 14)
+            assert response["seed"] == 11
+            assert response["request_id"] == "request-1"
+            assert response["episode_id"] == "episode-1"
+            assert response["server_timing"]["decode_ms"] >= 0
             assert response["server_timing"]["infer_ms"] >= 0
+            assert response["server_timing"]["pipeline_ms"] >= 0
+            assert response["server_timing"]["action_mapping_ms"] >= 0
 
-            websocket.send_bytes(server.pack_message({"reset": True, "robo_name": "robotwin"}))
+            websocket.send_bytes(
+                server.pack_message(
+                    {
+                        "reset": True,
+                        "robo_name": "robotwin",
+                        "request_id": "reset-1",
+                        "episode_id": "episode-1",
+                    }
+                )
+            )
             reset_response = server.unpack_message(websocket.receive_bytes())
             assert reset_response["action"] is None
+            assert reset_response["request_id"] == "reset-1"
+            assert reset_response["episode_id"] == "episode-1"
             assert reset_response["server_timing"]["prev_total_ms"] >= 0
 
 

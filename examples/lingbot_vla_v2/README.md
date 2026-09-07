@@ -258,29 +258,59 @@ result = policy.infer(
 actions = result["action"]  # float32 [50, 14] when --use-length=50
 ```
 
-On the simulation side, place the upstream `experiment/robotwin/eval_policy_client_lingbotvla.py` at
-`<RoboTwin>/script/eval_policy_client_lingbotvla.py`, together with its `script/deploy/websocket_client_policy.py` and
-`msgpack_numpy.py` helpers, then run one smoke episode configuration against the same port:
+The initial metadata frame describes protocol version `1.0`, `absolute_qpos` action semantics, `float32` dtype,
+horizon, dimension, and the exact dual-arm joint order. Inference requests may include an integer `seed` plus
+`request_id` and `episode_id`; the response echoes them and reports decode, lock-wait, pipeline, action-mapping, and
+adapter timings. Existing clients may omit all three request fields.
+
+Validate this direct endpoint before a simulator is available. This sends reset and repeated inference requests to
+the resident model, validates the returned `[H, 14]` action contract, and optionally verifies exact fixed-seed replay:
 
 ```bash
-cd /path/to/RoboTwin
-python -u script/eval_policy_client_lingbotvla.py --config policy/ACT/deploy_policy.yml \
-  --overrides \
-  --task_name lift_pot \
-  --task_config demo_clean \
-  --train_config_name 0 \
-  --seed 0 \
-  --policy_name ACT \
-  --port 9330 \
-  --robo_name robotwin \
-  --eval_video_log False \
-  --output_dir ./eval_results
+.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_robotwin_ws.py \
+  --host 127.0.0.1 --port 9330 \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --task "pick up the object" --seed 7 --requests 2 \
+  --require-exact-replay \
+  --output work_dirs/robotwin_ws_validation/smoke.json
 ```
 
 Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
 profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
 start with 50 for upstream-equivalent open-loop execution. The adapter accepts episode reset messages but deliberately
 rejects runtime checkpoint switching.
+
+For split-machine deployment, run the model endpoint and the repository-owned XPolicyLab proxy on the H100 inference
+host. The proxy does not load a second model; it translates XPolicyLab observations to the direct TeleFuser protocol:
+
+```bash
+cd /data/RoboTwin
+bash XPolicyLab/policy/TeleFuser_LingBot_VLA/setup_eval_policy_server.sh \
+  RoboTwin lift_pot remote_base arx_x5 joint 0 0 \
+  /data/RoboTwin/.venv 19000 0.0.0.0 \
+  127.0.0.1 9330
+```
+
+On the remote RTX/Vulkan workstation, use the standard RoboTwin evaluation client and point it at the proxy. No
+TeleFuser files or model weights are required on that workstation:
+
+```bash
+cd /data/RoboTwin
+bash scripts/eval_policy.sh \
+  --bench_name RoboTwin \
+  --task_name lift_pot \
+  --env_cfg_type arx_x5 \
+  --policy_name TeleFuser_LingBot_VLA \
+  --host INFERENCE_HOST --port 19000 --protocol ws \
+  --eval_batch false --root_dir /data/RoboTwin --device_id 0 \
+  --additional_info ckpt_name=remote_base,action_type=joint \
+  --seed 0 --task_config demo_clean --test_num 1
+```
+
+Keep ports `9330` and `19000` on a trusted private network or an SSH/VPN tunnel. These WebSocket endpoints do not
+provide authentication or transport encryption. The direct validator covers preprocessing, inference, mapping, and
+the inner WebSocket contract; only the RTX smoke episode can additionally establish XPolicyLab translation and one
+real SAPIEN simulation step.
 
 The base checkpoint remains marked `unverified_official_6b_base`. This endpoint establishes preprocessing, inference,
 action mapping, transport, and simulator execution continuity; it does not establish RoboTwin task success without
