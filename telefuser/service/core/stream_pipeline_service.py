@@ -124,15 +124,25 @@ class StreamPipelineService:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def start_service(self, ppl_file: str, skip_validation: bool = False, gpu_num: int = 1) -> bool:
-        """Load module, call get_service(), detect mode, and start."""
+    def start_service(
+        self,
+        ppl_file: str,
+        skip_validation: bool = False,
+        gpu_num: int = 1,
+        gpu_ids: list[str] | None = None,
+    ) -> bool:
+        """Load a stream factory with the worker's explicit CUDA device assignment."""
         if self.is_running:
             logger.warning("Stream service is already running")
             return True
 
         self._startup_measurement = None
         self._runtime_environment = {}
-        devices = visible_cuda_devices()
+        devices = (
+            [gpu_id if str(gpu_id).startswith("cuda") else f"cuda:{gpu_id}" for gpu_id in gpu_ids]
+            if gpu_ids is not None
+            else visible_cuda_devices()
+        )
         started_at = time.perf_counter()
         measurement: RuntimeMeasurement | None = None
         try:
@@ -162,10 +172,15 @@ class StreamPipelineService:
 
             get_service = self._module.get_service
             signature = inspect.signature(get_service)
-            accepts_gpu_num = "gpu_num" in signature.parameters or any(
+            accepts_kwargs = any(
                 parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
             )
-            self.service = get_service(gpu_num=gpu_num) if accepts_gpu_num else get_service()
+            factory_kwargs: dict[str, object] = {}
+            if "gpu_num" in signature.parameters or accepts_kwargs:
+                factory_kwargs["gpu_num"] = gpu_num
+            if "gpu_ids" in signature.parameters or accepts_kwargs:
+                factory_kwargs["gpu_ids"] = list(gpu_ids) if gpu_ids is not None else None
+            self.service = get_service(**factory_kwargs)
             self.stream_mode = self._detect_mode(self.service)
             self.service.start()
             self.is_running = True
@@ -283,6 +298,40 @@ class StreamPipelineService:
         svc = self._ensure_bidirectional()
         async for chunk in svc.pull_chunks(session_id):
             yield chunk
+
+    def enable_publisher_frame_tracking(self, session_id: str) -> bool:
+        """Enable optional publisher feedback on a bidirectional service."""
+
+        service = self._ensure_bidirectional()
+        enable = getattr(service, "enable_publisher_frame_tracking", None)
+        if not callable(enable):
+            return False
+        return bool(enable(session_id))
+
+    def report_publisher_frame_progress(
+        self,
+        session_id: str,
+        *,
+        event: str,
+        frames_delta: int,
+        sequence: int,
+        observed_monotonic_seconds: float,
+    ) -> bool:
+        """Forward optional publisher progress without extending the core protocol."""
+
+        service = self._ensure_bidirectional()
+        report = getattr(service, "report_publisher_frame_progress", None)
+        if not callable(report):
+            return False
+        return bool(
+            report(
+                session_id,
+                event=event,
+                frames_delta=frames_delta,
+                sequence=sequence,
+                observed_monotonic_seconds=observed_monotonic_seconds,
+            )
+        )
 
     def close_session(self, session_id: str) -> None:
         self._ensure_bidirectional().close_session(session_id)

@@ -193,6 +193,7 @@ class VAEStage(BaseStage):
         latents: torch.Tensor,
         is_first_clip: bool,
         is_last_clip: bool,
+        decode_state: object | None = None,
     ) -> torch.Tensor:
         """Decode latents to video frames with persistent feature cache.
 
@@ -213,8 +214,30 @@ class VAEStage(BaseStage):
                 device=self.device,
                 is_first_clip=is_first_clip,
                 is_last_clip=is_last_clip,
+                decode_state=decode_state,
             )
         return frames
+
+    @ProfilingContext4Debug("vae decode video cached batch")
+    def decode_video_cached_batch(
+        self,
+        latents: torch.Tensor,
+        is_first_clip: bool,
+        is_last_clip: bool,
+        decode_states: list[object],
+    ) -> torch.Tensor:
+        """Decode compatible session chunks in one model invocation."""
+        method = getattr(self.vae, "cached_decode_batch_withflag", None)
+        if not callable(method):
+            raise NotImplementedError("The loaded VAE does not support session-batched cached decode")
+        with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
+            return method(
+                latents,
+                device=self.device,
+                is_first_clip=is_first_clip,
+                is_last_clip=is_last_clip,
+                decode_states=decode_states,
+            )
 
     def parallel_models(self):
         """Configure tensor parallelism for VAE."""

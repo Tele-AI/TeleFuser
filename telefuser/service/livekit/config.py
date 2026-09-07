@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,12 +33,47 @@ class LiveKitServeConfig(BaseSettings):
         default=None,
         description="Semicolon-separated worker GPU groups, for example '0,1;2,3'",
     )
-    worker_mode: Literal["in-process", "process"] = Field(
+    worker_mode: Literal["in-process", "process", "process-nccl"] = Field(
         default="in-process",
         description="Worker isolation mode",
     )
 
+    dispatch_trace_path: str | None = Field(
+        default=None,
+        description="Fresh parent-process JSONL path for bounded model-dispatch audit records",
+    )
+    dispatch_trace_max_events: int = Field(
+        default=10_000,
+        ge=1,
+        le=1_000_000,
+        description="Maximum model-dispatch records written to the optional JSONL audit trace",
+    )
+
     queue_size: int = Field(default=0, ge=0, le=10000, description="Maximum queued sessions")
+    autoscaling_enabled: bool = Field(default=False, description="Dynamically load configured GPU workers")
+    autoscaling_min_workers: int = Field(default=1, ge=1, le=64)
+    autoscaling_target_utilization: float = Field(default=0.75, gt=0, le=1)
+    autoscaling_hysteresis: float = Field(default=0.10, ge=0, lt=1)
+    autoscaling_cooldown_seconds: float = Field(default=30.0, ge=0)
+    autoscaling_interval_seconds: float = Field(default=5.0, gt=0)
+    turboserve_rebalance_enabled: bool = Field(
+        default=True,
+        description="Rebalance compatible in-process TurboServe sessions at chunk boundaries",
+    )
+    turboserve_migration_bandwidth_gbps: float = Field(
+        default=24.0,
+        gt=0,
+        description="Conservative effective bandwidth used by the migration-aware placement model",
+    )
+    turboserve_migration_penalty: float = Field(
+        default=1.0,
+        ge=0,
+        description="Relative penalty applied to estimated model-session migration time",
+    )
+    turboserve_scale_in_hold_seconds: float = Field(default=5.0, ge=0)
+    turboserve_migration_eta: float = Field(default=0.35, ge=0)
+    turboserve_min_migration_gain_ms: float = Field(default=40.0, ge=0)
+    turboserve_rebalance_iteration_limit: int = Field(default=3, ge=1, le=64)
     control_idle_timeout: float = Field(
         default=10.0,
         gt=0,
@@ -89,6 +124,20 @@ class LiveKitServeConfig(BaseSettings):
         if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 64:
             raise ValueError("max_sessions_per_worker must be 'auto' or an integer in [1, 64]")
         return value
+
+    @model_validator(mode="after")
+    def validate_autoscaling_bounds(self) -> LiveKitServeConfig:
+        if self.autoscaling_min_workers > self.num_workers:
+            raise ValueError("autoscaling_min_workers cannot exceed num_workers")
+        if self.autoscaling_enabled and self.num_workers > 1 and self.queue_size == 0:
+            raise ValueError("autoscaling with multiple workers requires queue_size > 0 for cold-start admission")
+        if self.worker_mode == "process-nccl":
+            if self.num_workers < 2:
+                raise ValueError("process-nccl requires at least two model workers")
+            groups = self.worker_gpu_groups()
+            if any(len(group) != 1 for group in groups):
+                raise ValueError("process-nccl requires exactly one GPU id per model worker")
+        return self
 
     def session_capacity_limit(self) -> int | None:
         """Return the operator ceiling, or ``None`` for hardware auto-sizing."""

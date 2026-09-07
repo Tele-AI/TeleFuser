@@ -1,34 +1,7 @@
 # ABot-World-0-5B-LF
 
-Generate image-conditioned, camera-controlled video using a local single-GPU HTTP controller or the LiveKit
-streaming service. The public workload is 480x832 at a 12 FPS playback target.
-
-## Requirements
-
-Install the standard [TeleFuser development environment](../../CONTRIBUTING.md#development-setup). This example
-requires one CUDA GPU, the release checkpoint below, and an initial image readable by the server. The maintained
-smoke test checks the 480x832 generation contract; this README does not record a minimum VRAM or a dated throughput
-measurement. The LiveKit path additionally needs LiveKit Server and coturn as described in the
-[stream server guide](../../docs/en/stream_server.md).
-
-## Model Directory
-
-Prepare the unmodified release checkpoint layout:
-
-```text
-ABot-World-0-5B-LF/
-  diffusion_pytorch_model.safetensors
-  Wan2.2_VAE.pth
-  models_t5_umt5-xxl-enc-bf16.pth
-```
-
-The default sample is an external upstream checkout asset at
-`../ABot-World/web_client/datasets/images/84b90ad568b693d2.png`. Supply another server-side image path in the HTTP
-controller when that checkout is unavailable. The LiveKit browser also accepts an uploaded image.
-
-## Quick Start
-
-Run all commands from the repository root. Start the local HTTP controller:
+This example exposes a local single-GPU HTTP entry point and a concurrent
+TurboServe-style LiveKit entry point. The HTTP controller is useful for model debugging:
 
 ```bash
 python examples/abot_world/abot_world_interactive_web.py \
@@ -43,8 +16,9 @@ release the keys and confirm that generation becomes idle. Disconnect before sto
 
 Connecting
 creates the image-conditioned causal session but does not advance the DiT
-until a non-empty control state is received. Generated blocks remain ordered
-in a bounded FIFO and the producer waits when the browser is behind.
+until a non-empty control state is received. Generated blocks remain ordered in a bounded per-session queue. The default
+`latest` mode drops the oldest complete block, with metrics, only when a slow
+browser fills the queue; `lossless` mode applies scheduling backpressure instead.
 The six sink latents and rolling tail use fixed logical RoPE positions, so the
 global session frame number does not index beyond the trained local window.
 
@@ -86,6 +60,19 @@ telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
   --port 8088 --skip-validation
 ```
 
+For multiple GPUs, use one worker per GPU, for example
+`--num-workers 4 --worker-gpu-map '0;1;2;3' --worker-mode process-nccl`. This mode loads each
+GPU replica in a spawned child so Python, asyncio, CUDA contexts, and model execution are isolated across GPUs.
+It keeps room transport in the parent and enables NCCL session migration; its NCCL group is fixed, so do not
+enable process autoscaling. Use plain `--worker-mode process` plus a non-zero queue and
+`--enable-autoscaling --autoscaling-min-workers 1` for on-demand independent replicas.
+Each worker continuously batches compatible retained sessions through both DiT
+and cached VAE decode; GPU IDs are passed explicitly to the ABot model factory.
+
+For a reproducible four-GPU deployment, use one worker per GPU with
+`process-nccl` and an explicit worker map. The parent scheduler assigns each
+public session; clients do not choose a GPU.
+
 Serve the reused browser page in another terminal:
 
 ```bash
@@ -120,16 +107,13 @@ ABOT_WORLD_TEST_IMAGE=/path/to/initial.png \
 pytest -m "gpu and slow" tests/integration/test_abot_world_smoke.py -v
 ```
 
-The smoke uses the public 480x832 shape, a fixed seed, and a fixed control
-state. It checks that every block decodes frames and that the session's
-emitted-frame counter matches the observed count. It is a generation contract
-test, not a visual-quality or long-horizon parity claim.
+The multi-session benchmark exercises 30 continuously batched blocks:
 
-## Troubleshooting
+```bash
+python tools/validation/benchmark_abot_turboserve.py \
+  --model-root /path/to/ABot-World-0-5B-LF --image /path/to/initial.png \
+  --sessions 2 --chunks 30 --batch-size 2 --output /tmp/abot-turboserve.json
+```
 
-- No initial image: provide an existing server-side path in the HTTP controller, or upload an image in the LiveKit UI.
-- Preview without new frames: hold a movement or camera key; an empty control state intentionally keeps generation idle.
-- No LiveKit media connection: check the TURN relay and forwarded ports using the
-  [stream server troubleshooting guide](../../docs/en/stream_server.md#production-deployment).
-
-Documentation builds validate publication and links only. Run the test tiers above separately to validate runtime behavior.
+The smoke and benchmark check generation, session-state isolation, block ordering,
+and batching; they are not visual-quality or long-horizon parity claims.

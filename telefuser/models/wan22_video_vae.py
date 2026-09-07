@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +22,14 @@ from .wan_video_vae import (
     _count_conv3d,
     check_is_instance,
 )
+
+
+@dataclass
+class Wan22VideoVAEStreamingDecodeState:
+    """Session-owned temporal feature cache for incremental Wan2.2 decoding."""
+
+    feat_cache: list[object] = field(default_factory=list)
+    feat_idx: list[int] = field(default_factory=lambda: [0])
 
 
 class Resample(nn.Module):
@@ -1416,6 +1426,7 @@ class Wan22VideoVAE(BaseModel):
         device: torch.device,
         is_first_clip: bool,
         is_last_clip: bool,
+        decode_state: Wan22VideoVAEStreamingDecodeState | None = None,
     ) -> torch.Tensor:
         """Decode with persistent feature cache for streaming generation.
 
@@ -1431,11 +1442,22 @@ class Wan22VideoVAE(BaseModel):
         Returns:
             Decoded video tensor [C, T_out, H_out, W_out]
         """
+        feat_cache = self._feat_cache if decode_state is None else decode_state.feat_cache
+        feat_idx = self._feat_idx if decode_state is None else decode_state.feat_idx
+
         # Initialize cache on first clip
         if is_first_clip:
             conv_num = _count_conv3d(self.model.decoder)
-            self._feat_cache = [None] * conv_num
-            self._feat_idx = [0]
+            feat_cache = [None] * conv_num
+            feat_idx = [0]
+            if decode_state is None:
+                self._feat_cache = feat_cache
+                self._feat_idx = feat_idx
+            else:
+                decode_state.feat_cache = feat_cache
+                decode_state.feat_idx = feat_idx
+        elif not feat_cache:
+            raise RuntimeError("Wan2.2 VAE decode cache must be initialized by the first clip")
 
         # Add batch dimension if needed
         if hidden_state.dim() == 4:
@@ -1452,26 +1474,30 @@ class Wan22VideoVAE(BaseModel):
         x = self.model.conv2(z)
 
         for i in range(iter_):
-            self._feat_idx[0] = 0  # Reset index for each frame
+            feat_idx[0] = 0  # Reset index for each frame
             if i == 0:
                 out = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_cache,
-                    feat_idx=self._feat_idx,
+                    feat_cache=feat_cache,
+                    feat_idx=feat_idx,
                     first_chunk=is_first_clip and i == 0,
                 )
             else:
                 out_ = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
-                    feat_cache=self._feat_cache,
-                    feat_idx=self._feat_idx,
+                    feat_cache=feat_cache,
+                    feat_idx=feat_idx,
                 )
                 out = torch.cat([out, out_], 2)
 
         # Clear cache on last clip
         if is_last_clip:
-            self._feat_cache = []
-            self._feat_idx = [0]
+            if decode_state is None:
+                self._feat_cache = []
+                self._feat_idx = [0]
+            else:
+                decode_state.feat_cache = []
+                decode_state.feat_idx = [0]
 
         video = out.clamp_(-1, 1)
 
@@ -1483,6 +1509,76 @@ class Wan22VideoVAE(BaseModel):
             video = video.squeeze(0)
 
         return video
+
+    def cached_decode_batch_withflag(
+        self,
+        hidden_states: torch.Tensor,
+        device: torch.device,
+        is_first_clip: bool,
+        is_last_clip: bool,
+        decode_states: list[Wan22VideoVAEStreamingDecodeState],
+    ) -> torch.Tensor:
+        """Decode one compatible latent chunk per session in one VAE batch."""
+        if hidden_states.ndim != 5:
+            raise ValueError("Batched Wan2.2 VAE latents must be [B,C,T,H,W]")
+        if hidden_states.shape[0] != len(decode_states) or not decode_states:
+            raise ValueError("decode_states must contain one entry per latent batch item")
+
+        conv_num = _count_conv3d(self.model.decoder)
+        if is_first_clip:
+            for state in decode_states:
+                state.feat_cache = [None] * conv_num
+                state.feat_idx = [0]
+            feat_cache: list[object] = [None] * conv_num
+        else:
+            if any(len(state.feat_cache) != conv_num for state in decode_states):
+                raise RuntimeError("Every Wan2.2 VAE batch state must have an initialized decode cache")
+            feat_cache = []
+            for cache_index in range(conv_num):
+                values = [state.feat_cache[cache_index] for state in decode_states]
+                if all(value is None for value in values):
+                    feat_cache.append(None)
+                elif all(isinstance(value, torch.Tensor) for value in values):
+                    feat_cache.append(torch.cat(values, dim=0))
+                elif all(not isinstance(value, torch.Tensor) and value == values[0] for value in values):
+                    feat_cache.append(values[0])
+                else:
+                    raise RuntimeError("Wan2.2 VAE batch states have incompatible temporal caches")
+
+        hidden_states = hidden_states.to(device)
+        scale = self._get_scale_on_device(device, hidden_states.dtype)
+        z = hidden_states / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(1, self.z_dim, 1, 1, 1)
+        x = self.model.conv2(z)
+        feat_idx = [0]
+        outputs: list[torch.Tensor] = []
+        for frame_index in range(z.shape[2]):
+            feat_idx[0] = 0
+            outputs.append(
+                self.model.decoder(
+                    x[:, :, frame_index : frame_index + 1],
+                    feat_cache=feat_cache,
+                    feat_idx=feat_idx,
+                    first_chunk=is_first_clip and frame_index == 0,
+                )
+            )
+        output = torch.cat(outputs, dim=2).clamp_(-1, 1)
+
+        if is_last_clip:
+            for state in decode_states:
+                state.feat_cache = []
+                state.feat_idx = [0]
+        else:
+            for cache_index, value in enumerate(feat_cache):
+                if isinstance(value, torch.Tensor):
+                    for batch_index, state in enumerate(decode_states):
+                        state.feat_cache[cache_index] = value[batch_index : batch_index + 1].detach()
+                else:
+                    for state in decode_states:
+                        state.feat_cache[cache_index] = value
+                for state in decode_states:
+                    state.feat_idx[0] = 0
+
+        return unpatchify(output, patch_size=2)
 
     @staticmethod
     def state_dict_converter():

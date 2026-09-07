@@ -35,6 +35,13 @@ def test_cli_stream_serve_forwards_livekit_options(monkeypatch) -> None:
             "12.5",
             "--queue-size",
             "3",
+            "--enable-autoscaling",
+            "--autoscaling-min-workers",
+            "1",
+            "--autoscaling-target-utilization",
+            "0.7",
+            "--autoscaling-cooldown-seconds",
+            "10",
         ],
     )
 
@@ -48,4 +55,8 @@ def test_cli_stream_serve_forwards_livekit_options(monkeypatch) -> None:
     assert captured["max_sessions_per_worker"] == 4
     assert captured["control_idle_timeout"] == 12.5
     assert captured["queue_size"] == 3
+    assert captured["autoscaling_enabled"] is True
+    assert captured["autoscaling_min_workers"] == 1
+    assert captured["autoscaling_target_utilization"] == 0.7
+    assert captured["autoscaling_cooldown_seconds"] == 10
     assert captured["skip_validation"] is True

@@ -49,8 +49,8 @@ class InteractiveRuntime:
         control_latent_frames: int,
         output_queue_size: int = _DEFAULT_OUTPUT_QUEUE_SIZE,
     ) -> None:
-        if control_latent_frames not in {1, 3}:
-            raise ValueError("control_latent_frames must be 1 or 3")
+        if control_latent_frames not in {1, 2, 3}:
+            raise ValueError("control_latent_frames must be 1, 2, or 3")
         if output_queue_size <= 0:
             raise ValueError("output_queue_size must be positive")
         self.pipeline = pipeline
@@ -154,7 +154,7 @@ class InteractiveRuntime:
 
         This is deliberate backpressure: normal streaming never discards a
         generated ABot block merely because the browser is temporarily ahead
-        of its 12 FPS playback clock.
+        of its configured playback clock.
         """
         blocked_started_at: float | None = None
         while not self._stop_event.is_set():
@@ -431,7 +431,7 @@ _HTML = r"""<!doctype html>
           <div class="empty"></div><button data-control="k" title="Pitch down">↓</button><div class="empty"></div>
         </div></div>
       </div>
-      <p class="hint">Hold a key or mouse button to light it. Release it to stop that action. While a control is held, the background producer fills a lossless bounded FIFO. With no control held, no idle chunk is sent. The browser waits for at least 12 predecoded frames, then consumes them in order at 12 FPS. A full FIFO applies producer backpressure; normal playback never drops generated frames.</p>
+      <p class="hint">Hold a key or mouse button to light it. Release it to stop that action. While a control is held, the background producer fills a lossless bounded FIFO. With no control held, no idle chunk is sent. The browser waits for one configured playback second of predecoded frames, then consumes them in order at the configured FPS. A full FIFO applies producer backpressure; normal playback never drops generated frames.</p>
       <a id="download" href="/api/video" download="abot_world_session.mp4">Download stopped session video</a>
     </aside>
   </div>
@@ -441,9 +441,10 @@ const DEFAULT_IMAGE_PATH = __DEFAULT_IMAGE_PATH__;
 const DEFAULT_PROMPT = __DEFAULT_PROMPT__;
 const pressedControls = new Set();
 const keyToControl = { ArrowUp:"w", ArrowDown:"s", ArrowLeft:"a", ArrowRight:"d", KeyW:"w", KeyA:"a", KeyS:"s", KeyD:"d", KeyI:"i", KeyJ:"j", KeyK:"k", KeyL:"l" };
-const FRAME_INTERVAL_MS = 1000 / 12;
-const PLAYBACK_JITTER_BUFFER_FRAMES = 12;
-const MAX_CLIENT_BUFFERED_FRAMES = 18;
+const PLAYBACK_FPS = __PLAYBACK_FPS__;
+const FRAME_INTERVAL_MS = 1000 / PLAYBACK_FPS;
+const PLAYBACK_JITTER_BUFFER_FRAMES = PLAYBACK_FPS;
+const MAX_CLIENT_BUFFERED_FRAMES = 2 * PLAYBACK_FPS;
 const playbackQueue = [];
 let running = false;
 let requestInFlight = false;
@@ -696,10 +697,11 @@ byId("release").onclick = releaseAllControls;
 """
 
 
-def _render_html() -> bytes:
+def _render_html(runtime: InteractiveRuntime) -> bytes:
     return (
         _HTML.replace("__DEFAULT_IMAGE_PATH__", json.dumps(str(_OFFICIAL_SAMPLE)))
         .replace("__DEFAULT_PROMPT__", json.dumps(DEFAULT_PROMPT))
+        .replace("__PLAYBACK_FPS__", json.dumps(runtime.fps))
         .encode("utf-8")
     )
 
@@ -729,7 +731,7 @@ def _make_handler(runtime: InteractiveRuntime) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/":
-                self._send(HTTPStatus.OK, _render_html(), "text/html; charset=utf-8")
+                self._send(HTTPStatus.OK, _render_html(runtime), "text/html; charset=utf-8")
             elif path == "/sample-image":
                 self._send(HTTPStatus.OK, _OFFICIAL_SAMPLE.read_bytes(), "image/jpeg")
             elif path.startswith("/api/block-frame/"):
@@ -804,13 +806,15 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--latent-frames", type=int, default=31)
-    parser.add_argument("--fps", type=int, default=12)
+    parser.add_argument(
+        "--fps", type=int, default=8, help="Playback and downloaded-video FPS; 8 is the real-time target."
+    )
     parser.add_argument(
         "--control-latent-frames",
         type=int,
-        choices=(1, 3),
-        default=3,
-        help="Causal latents per control update: 3 matches the official ABot streaming checkpoint; 1 is experimental.",
+        choices=(1, 2, 3),
+        default=2,
+        help="Causal latents per control update: 3 matches the official ABot streaming checkpoint; 2 is the 8-FPS experimental target and 1 is experimental.",
     )
     parser.add_argument("--output-queue-size", type=int, default=_DEFAULT_OUTPUT_QUEUE_SIZE)
     parser.add_argument("--host", default="127.0.0.1")

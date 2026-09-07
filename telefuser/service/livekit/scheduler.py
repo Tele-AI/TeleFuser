@@ -94,7 +94,7 @@ class LiveKitScheduler:
     def assign(self, *, session_id: str, room_name: str) -> SchedulerAdmission:
         """Assign a worker with capacity or enqueue/reject the session."""
         with self._lock:
-            worker = self._first_available_worker()
+            worker = self._least_loaded_worker()
             if worker is not None:
                 worker.status = "assigned"
                 worker.session_ids.append(session_id)
@@ -142,6 +142,51 @@ class LiveKitScheduler:
             worker.room_name = queued.room_name
             worker.last_heartbeat_at = utc_timestamp()
             return SchedulerAdmission(status="assigned", worker_id=worker.worker_id, session_id=queued.session_id)
+
+    def drain_queue(self) -> list[SchedulerAdmission]:
+        """Assign as many queued sessions as newly active capacity permits."""
+        admissions: list[SchedulerAdmission] = []
+        with self._lock:
+            while self._queue and (worker := self._least_loaded_worker()) is not None:
+                queued = self._queue.popleft()
+                worker.status = "assigned"
+                worker.session_ids.append(queued.session_id)
+                self._room_names[queued.session_id] = queued.room_name
+                worker.session_id = queued.session_id
+                worker.room_name = queued.room_name
+                worker.last_heartbeat_at = utc_timestamp()
+                admissions.append(
+                    SchedulerAdmission(status="assigned", worker_id=worker.worker_id, session_id=queued.session_id)
+                )
+        return admissions
+
+    def reassign_session(self, session_id: str, target_worker_id: str) -> SchedulerAdmission:
+        """Move admission ownership after the pipeline router commits migration."""
+        with self._lock:
+            source = self._worker_for_session(session_id)
+            if source is None:
+                raise KeyError(f"Session {session_id} is not assigned")
+            target = self._workers[target_worker_id]
+            if source.worker_id == target.worker_id:
+                return SchedulerAdmission(status="assigned", worker_id=target.worker_id, session_id=session_id)
+            if target.status in {"failed", "stopped", "draining"}:
+                raise RuntimeError(f"Migration target {target_worker_id} is not available")
+            if len(target.session_ids) >= target.session_capacity:
+                raise RuntimeError(f"Migration target {target_worker_id} has no retained-session capacity")
+            source.session_ids.remove(session_id)
+            source.session_id = source.session_ids[-1] if source.session_ids else None
+            source.room_name = self._room_names.get(source.session_id) if source.session_id is not None else None
+            if source.status not in {"failed", "stopped"}:
+                source.status = "assigned" if source.session_ids else "idle"
+                source.error = None
+            source.last_heartbeat_at = utc_timestamp()
+            target.session_ids.append(session_id)
+            target.session_id = session_id
+            target.room_name = self._room_names.get(session_id)
+            target.status = "assigned"
+            target.error = None
+            target.last_heartbeat_at = utc_timestamp()
+            return SchedulerAdmission(status="assigned", worker_id=target.worker_id, session_id=session_id)
 
     def update_worker_status(self, worker_id: str, status: WorkerStatus) -> WorkerState:
         """Update a worker lifecycle status."""
@@ -193,17 +238,29 @@ class LiveKitScheduler:
             workers = list(self._workers.values())
             return {
                 "workers_total": len(workers),
-                "workers_idle": sum(1 for worker in workers if worker.status != "failed" and not worker.session_ids),
+                "workers_idle": sum(1 for worker in workers if worker.status == "idle"),
                 "workers_busy": sum(1 for worker in workers if bool(worker.session_ids)),
                 "workers_failed": sum(1 for worker in workers if worker.status == "failed"),
                 "queued_sessions": len(self._queue),
             }
 
-    def _first_available_worker(self) -> WorkerState | None:
-        for worker in self._workers.values():
-            if worker.status not in {"failed", "stopped"} and len(worker.session_ids) < worker.session_capacity:
-                return worker
-        return None
+    def _least_loaded_worker(self) -> WorkerState | None:
+        candidates = [
+            worker
+            for worker in self._workers.values()
+            if worker.status not in {"failed", "stopped", "draining"}
+            and len(worker.session_ids) < worker.session_capacity
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda worker: (
+                len(worker.session_ids) / worker.session_capacity,
+                len(worker.session_ids),
+                worker.worker_id,
+            ),
+        )
 
     def _worker_for_session(self, session_id: str) -> WorkerState | None:
         for worker in self._workers.values():
