@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -151,10 +152,20 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
             assert metadata["action_dtype"] == "float32"
             assert metadata["action_order"] == list(server.ROBOTWIN_ACTION_ORDER)
             assert metadata["max_request_bytes"] == server.ROBOTWIN_MAX_REQUEST_BYTES
+            assert metadata["scheduling"]["mode"] == "latest_wins"
+            assert metadata["scheduling"]["max_pending_per_session"] == 1
+            assert metadata["scheduling"]["inflight_cancellation"] is False
 
             websocket.send_bytes(
                 server.pack_message(
-                    {**_observation(), "seed": 11, "request_id": "request-1", "episode_id": "episode-1"}
+                    {
+                        **_observation(),
+                        "seed": 11,
+                        "request_id": "request-1",
+                        "episode_id": "episode-1",
+                        "sequence_id": 0,
+                        "request_ttl_ms": 5_000,
+                    }
                 )
             )
             response = server.unpack_message(websocket.receive_bytes())
@@ -162,8 +173,12 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
             assert response["seed"] == 11
             assert response["request_id"] == "request-1"
             assert response["episode_id"] == "episode-1"
+            assert response["sequence_id"] == 0
+            assert response["scheduler_status"] == "completed"
             assert response["server_timing"]["decode_ms"] >= 0
             assert response["server_timing"]["infer_ms"] >= 0
+            assert response["server_timing"]["queue_wait_ms"] >= 0
+            assert response["server_timing"]["scheduler_total_ms"] >= 0
             assert response["server_timing"]["pipeline_ms"] >= 0
             assert response["server_timing"]["action_mapping_ms"] >= 0
 
@@ -184,6 +199,54 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
             assert reset_response["server_timing"]["prev_total_ms"] >= 0
 
 
+def test_websocket_accepts_overlapping_chunks_and_discards_superseded_actions() -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_count = 0
+
+    class BlockingPipeline(_Pipeline):
+        def __call__(self, observation, seed: int | None = None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return super().__call__(observation, seed=seed)
+
+    pipeline = BlockingPipeline(_profile())
+    adapter = server.RobotWinPolicyAdapter(pipeline, use_length=3)
+
+    with TestClient(server.create_robotwin_app(adapter)) as client:
+        with client.websocket_connect("/") as websocket:
+            server.unpack_message(websocket.receive_bytes())
+            for sequence_id in range(3):
+                websocket.send_bytes(
+                    server.pack_message(
+                        {
+                            **_observation(),
+                            "request_id": f"request-{sequence_id}",
+                            "episode_id": "episode",
+                            "sequence_id": sequence_id,
+                        }
+                    )
+                )
+                if sequence_id == 0:
+                    assert first_started.wait(timeout=2)
+            release_first.set()
+            responses = {
+                response["request_id"]: response
+                for response in (server.unpack_message(websocket.receive_bytes()) for _ in range(3))
+            }
+
+    assert responses["request-0"]["scheduler_status"] == "superseded"
+    assert responses["request-0"]["action"] is None
+    assert responses["request-1"]["scheduler_status"] == "superseded"
+    assert responses["request-1"]["action"] is None
+    assert responses["request-2"]["scheduler_status"] == "completed"
+    assert responses["request-2"]["action"].shape == (3, 14)
+    assert call_count == 2
+
+
 def test_cli_exposes_isolated_robotwin_server_options() -> None:
     result = CliRunner().invoke(server.main, ["--help"])
 
@@ -191,6 +254,7 @@ def test_cli_exposes_isolated_robotwin_server_options() -> None:
     assert "--model-root" in result.output
     assert "--qwen3vl-root" in result.output
     assert "--use-length" in result.output
+    assert "--max-pending-sessions" in result.output
     assert "--cuda-graph" in result.output
 
 
