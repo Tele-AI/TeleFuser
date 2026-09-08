@@ -13,6 +13,7 @@ these articles explain the evidence, alternatives, implementation tradeoffs, and
 
 | Date | Article | Status | Validated platform |
 |---|---|---|---|
+| 2026-08-19 | [ABot Multi-Session Serving: State Isolation, Compatible Batching, and Multi-GPU Scheduling](abot_world_multi_session.md) | Validated | 4 x H100 80 GB |
 | 2026-08-19 | [FP8 Sol-Attn: Quantized Sparse Attention for Video DiTs on H100](fp8_sol_attention.md) | Validated | 1 x H100 80 GB |
 | 2026-08-20 | [Agent Dev First Through the MiniMax H3 Integration](agent_dev_first_minimax_h3.md) | Validated | 1, 2, and 4 x H100 80 GB |
 | 2026-08-06 | [CUDA IPC Ulysses: Overlapping Attention Communication on H100](cuda_ipc_ulysses.md) | Validated | 4 x H100 80 GB |
