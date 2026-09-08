@@ -235,9 +235,9 @@ in FP32, fuses their subtraction into SM90 E4M3 preparation, and corrects the re
 rounded to E4M3. `sol_fp8_smoothing=none|k|kv` controls the two equivalent transforms, while
 `sol_fp8_v_bias_correction` controls the post-quantization V correction for ablation.
 The exact K/V statistics share one fused reduction, and a second Triton kernel merges the BF16 dense prefix with the
-corrected sparse suffix in one output pass. At the H3 attention shape this reduces the measured smoothing boundary by
-24.5% while remaining bitwise identical to the unfused implementation. Two matched 50-step runs leave a 0.96%
-throughput difference versus unsmoothed FP8 Sol, with unchanged 37.11 GiB peak allocated memory.
+corrected sparse suffix in one output pass. At the current H3 live shape `(1, 32626, 56, 128)`, this reduces the
+measured smoothing boundary by 23.1% while remaining bitwise identical to the unfused implementation. Two matched
+50-step runs show a 2.11% throughput cost versus unsmoothed FP8 Sol, with unchanged 37.11 GiB peak allocated memory.
 The matched single-H100 quality and performance ablation is recorded in
 [`benchmarks/fp8_sol_attention_quality`](https://github.com/Tele-AI/TeleFuser/tree/main/benchmarks/fp8_sol_attention_quality#readme).
 

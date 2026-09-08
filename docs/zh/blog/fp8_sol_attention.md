@@ -227,9 +227,9 @@ attention output 加回 `mean_T(V)` 即恢复原始结果。TeleFuser 使用 FP3
 E4M3 preparation，并补偿 V 舍入到 E4M3 后实测到的残余均值偏差。`sol_fp8_smoothing=none|k|kv` 用于
 分别消融两个等价变换，`sol_fp8_v_bias_correction` 控制量化后 V 偏差补偿。
 exact K/V 统计共享一个 fused reduction，另一个 Triton kernel 在一次写出中合并 BF16 dense prefix 与完成
-correction 的 sparse suffix。在 H3 attention shape 上，这将 smoothing boundary 耗时降低 24.5%，并与融合前
-实现保持 bitwise 一致。两轮匹配的 50-step 实验中，相比 unsmoothed FP8 Sol 的吞吐差为 0.96%，peak
-allocated 显存均为 37.11 GiB。
+correction 的 sparse suffix。在当前 H3 live shape `(1, 32626, 56, 128)` 上，这将 smoothing boundary 耗时降低
+23.1%，并与融合前实现保持 bitwise 一致。两轮匹配的 50-step 实验中，相比 unsmoothed FP8 Sol 的吞吐开销
+为 2.11%，peak allocated 显存均为 37.11 GiB。
 匹配的单卡 H100 画质与性能消融记录在
 [`benchmarks/fp8_sol_attention_quality`](https://github.com/Tele-AI/TeleFuser/tree/main/benchmarks/fp8_sol_attention_quality#readme)。
 
