@@ -4,6 +4,7 @@ import argparse
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from tools.validation import validate_lingbot_vla_v2_robotwin_ws as validator
 
@@ -19,6 +20,7 @@ def _metadata() -> dict:
         "action_order": list(validator.ACTION_ORDER),
         "policy_verified": False,
         "verification_status": "unverified_official_6b_base",
+        "max_request_bytes": 16 * 1024 * 1024,
     }
 
 
@@ -131,3 +133,17 @@ def test_require_exact_replay_rejects_divergent_digests() -> None:
 def test_parse_state_json_rejects_non_finite_state() -> None:
     with pytest.raises(argparse.ArgumentTypeError, match="finite numbers"):
         validator.parse_state_json("[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1e999]")
+
+
+def test_load_validation_image_bounds_longest_edge_without_upscaling(tmp_path) -> None:
+    large_path = tmp_path / "large.png"
+    small_path = tmp_path / "small.png"
+    Image.new("RGB", (800, 400)).save(large_path)
+    Image.new("RGB", (32, 16)).save(small_path)
+
+    large, source_shape = validator.load_validation_image(large_path, max_image_edge=640)
+    small, _ = validator.load_validation_image(small_path, max_image_edge=640)
+
+    assert source_shape == [400, 800, 3]
+    assert large.shape == (320, 640, 3)
+    assert small.shape == (16, 32, 3)

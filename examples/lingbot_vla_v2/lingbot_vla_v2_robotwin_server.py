@@ -12,6 +12,7 @@ from typing import Any, Mapping, Protocol
 import click
 import msgpack
 import numpy as np
+import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -29,6 +30,7 @@ from telefuser.utils.logging import logger
 ROBOTWIN_PROTOCOL_VERSION = "1.0"
 ROBOTWIN_ACTION_TYPE = "absolute_qpos"
 ROBOTWIN_ACTION_DTYPE = "float32"
+ROBOTWIN_MAX_REQUEST_BYTES = 16 * 1024 * 1024
 ROBOTWIN_ACTION_ORDER = (
     "left_arm_joint_0",
     "left_arm_joint_1",
@@ -154,6 +156,7 @@ class RobotWinPolicyAdapter:
             "action_dim": self.profile.raw_state_dim,
             "action_dtype": ROBOTWIN_ACTION_DTYPE,
             "action_order": list(ROBOTWIN_ACTION_ORDER),
+            "max_request_bytes": ROBOTWIN_MAX_REQUEST_BYTES,
             "policy_verified": False,
             "verification_status": "unverified_official_6b_base",
         }
@@ -272,6 +275,25 @@ def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
     return app
 
 
+def _configure_h100_sdpa_backends(device: str) -> None:
+    """Avoid unsupported cuDNN SDPA plans in the isolated H100 policy process."""
+    resolved_device = torch.device(device)
+    if resolved_device.type != "cuda" or not torch.cuda.is_available():
+        return
+    if "H100" not in torch.cuda.get_device_name(resolved_device):
+        return
+
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    logger.info("Disabled cuDNN SDPA for the LingBot-VLA v2 H100 policy process")
+
+
 @click.command()
 @click.option("--model-root", required=True, type=click.Path(exists=True, file_okay=False))
 @click.option("--qwen3vl-root", required=True, type=click.Path(exists=True, file_okay=False))
@@ -296,6 +318,7 @@ def main(
     quantization: str | None,
 ) -> None:
     """Start one resident LingBot-VLA v2 policy for a RoboTwin client."""
+    _configure_h100_sdpa_backends(device)
     pipeline = get_lingbot_vla_v2_pipeline(
         model_root,
         qwen3vl_root,
@@ -306,7 +329,13 @@ def main(
     )
     adapter = RobotWinPolicyAdapter(pipeline, use_length=use_length)
     try:
-        uvicorn.run(create_robotwin_app(adapter), host=host, port=port, workers=1)
+        uvicorn.run(
+            create_robotwin_app(adapter),
+            host=host,
+            port=port,
+            workers=1,
+            ws_max_size=ROBOTWIN_MAX_REQUEST_BYTES,
+        )
     finally:
         adapter.close()
 
