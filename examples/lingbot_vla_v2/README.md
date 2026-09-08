@@ -237,9 +237,13 @@ Start one resident policy process:
   --device cuda:0 --host 0.0.0.0 --port 9330 --use-length 50
 ```
 
+On NVIDIA H100, this dedicated entrypoint disables cuDNN SDPA before model warmup because the current
+PyTorch/cuDNN combination cannot build a valid vision-attention execution plan. Flash, memory-efficient, and math
+SDPA remain enabled. The override is process-local and is not applied to other TeleFuser pipelines.
+
 The server exposes `GET /healthz` and the policy WebSocket at `/`. On connection it sends a MessagePack metadata
-frame, then accepts multiple binary MessagePack requests on the same connection. This matches the upstream client
-contract:
+frame, including the explicit 16 MiB request limit, then accepts multiple binary MessagePack requests on the same
+connection. This matches the upstream client contract:
 
 ```python
 from deploy.websocket_client_policy import WebsocketClientPolicy
@@ -267,13 +271,19 @@ Validate this direct endpoint before a simulator is available. This sends reset 
 the resident model, validates the returned `[H, 14]` action contract, and optionally verifies exact fixed-seed replay:
 
 ```bash
-.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_robotwin_ws.py \
+.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
   --host 127.0.0.1 --port 9330 \
   --image examples/data/lingbot_world_fast/image.jpg \
-  --task "pick up the object" --seed 7 --requests 2 \
-  --require-exact-replay \
+  --max-image-edge 640 \
+  --task "pick up the object" --seed 7 --requests 10 \
   --output work_dirs/robotwin_ws_validation/smoke.json
 ```
+
+The validator preserves aspect ratio and downsizes only images whose longest edge exceeds `--max-image-edge`, then
+checks the encoded MessagePack request against the limit advertised by the server before sending it. This keeps the
+large repository sample representative of normal RoboTwin camera payloads. Add `--require-exact-replay` only when
+validating a runtime profile that promises bitwise determinism; BF16 H100 inference is validated with numerical
+tolerances rather than identical action hashes.
 
 Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
 profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;

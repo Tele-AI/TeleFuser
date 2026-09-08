@@ -17,6 +17,7 @@ from PIL import Image
 PROTOCOL_VERSION = "1.0"
 ACTION_TYPE = "absolute_qpos"
 ACTION_DTYPE = "float32"
+DEFAULT_MAX_IMAGE_EDGE = 640
 ACTION_ORDER = (
     "left_arm_joint_0",
     "left_arm_joint_1",
@@ -94,6 +95,9 @@ def validate_metadata(metadata: Any) -> dict[str, Any]:
         raise ValidationFailure("metadata policy_verified must be boolean")
     if not isinstance(verification_status, str) or not verification_status:
         raise ValidationFailure("metadata verification_status must be a non-empty string")
+    max_request_bytes = metadata.get("max_request_bytes")
+    if isinstance(max_request_bytes, bool) or not isinstance(max_request_bytes, int) or max_request_bytes < 1:
+        raise ValidationFailure("metadata max_request_bytes must be a positive integer")
     return {
         "protocol_version": PROTOCOL_VERSION,
         "action_shape": [horizon, len(ACTION_ORDER)],
@@ -101,6 +105,7 @@ def validate_metadata(metadata: Any) -> dict[str, Any]:
         "action_dtype": ACTION_DTYPE,
         "policy_verified": policy_verified,
         "verification_status": verification_status,
+        "max_request_bytes": max_request_bytes,
     }
 
 
@@ -207,6 +212,16 @@ def _receive_binary(connection: Any, *, timeout_seconds: float) -> bytes:
     return payload
 
 
+def load_validation_image(image_path: Path, *, max_image_edge: int) -> tuple[np.ndarray, list[int]]:
+    """Load an RGB image and bound its encoded request size while preserving aspect ratio."""
+    with Image.open(image_path) as opened:
+        image = opened.convert("RGB")
+        source_shape = [image.height, image.width, 3]
+        if max(image.size) > max_image_edge:
+            image.thumbnail((max_image_edge, max_image_edge), Image.Resampling.LANCZOS)
+        return np.asarray(image, dtype=np.uint8), source_shape
+
+
 def run_validation(
     *,
     host: str,
@@ -218,6 +233,7 @@ def run_validation(
     request_count: int,
     timeout_seconds: float,
     exact_replay: bool,
+    max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
 ) -> dict[str, Any]:
     """Connect to a resident policy and exercise reset plus fixed-seed inference."""
     from websockets.sync.client import connect
@@ -228,8 +244,7 @@ def run_validation(
         raise ValueError("request_count must be positive")
     if exact_replay and request_count < 2:
         raise ValueError("exact replay validation requires request_count >= 2")
-    with Image.open(image_path) as opened:
-        image = np.asarray(opened.convert("RGB"), dtype=np.uint8)
+    image, source_image_shape = load_validation_image(image_path, max_image_edge=max_image_edge)
 
     episode_id = f"validator-{time.time_ns()}"
     uri = f"ws://{host}:{port}/"
@@ -267,6 +282,12 @@ def run_validation(
             "episode_id": episode_id,
             "seed": seed,
         }
+        request_payload_bytes = len(pack_message({**base_request, "request_id": "validator-size-check"}))
+        if request_payload_bytes > metadata["max_request_bytes"]:
+            raise ValidationFailure(
+                f"encoded request uses {request_payload_bytes} bytes, exceeding the server limit "
+                f"of {metadata['max_request_bytes']} bytes"
+            )
         for index in range(request_count):
             request_id = f"validator-{index}"
             request_started_at = time.perf_counter()
@@ -294,6 +315,10 @@ def run_validation(
             "seed": seed,
             "request_count": request_count,
             "exact_replay": exact_replay,
+            "max_image_edge": max_image_edge,
+            "source_image_shape": source_image_shape,
+            "transmitted_image_shape": list(image.shape),
+            "request_payload_bytes": request_payload_bytes,
         },
         "metadata": metadata,
         "metadata_summary": metadata_summary,
@@ -331,6 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--requests", type=_positive_int, default=2)
     parser.add_argument("--timeout-seconds", type=_positive_float, default=120.0)
+    parser.add_argument("--max-image-edge", type=_positive_int, default=DEFAULT_MAX_IMAGE_EDGE)
     parser.add_argument("--require-exact-replay", action="store_true")
     parser.add_argument("--output", type=Path)
     return parser
@@ -349,6 +375,7 @@ def main() -> None:
         request_count=args.requests,
         timeout_seconds=args.timeout_seconds,
         exact_replay=args.require_exact_replay,
+        max_image_edge=args.max_image_edge,
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.output is not None:

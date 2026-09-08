@@ -150,6 +150,7 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
             assert metadata["action_dim"] == 14
             assert metadata["action_dtype"] == "float32"
             assert metadata["action_order"] == list(server.ROBOTWIN_ACTION_ORDER)
+            assert metadata["max_request_bytes"] == server.ROBOTWIN_MAX_REQUEST_BYTES
 
             websocket.send_bytes(
                 server.pack_message(
@@ -191,3 +192,32 @@ def test_cli_exposes_isolated_robotwin_server_options() -> None:
     assert "--qwen3vl-root" in result.output
     assert "--use-length" in result.output
     assert "--cuda-graph" in result.output
+
+
+def test_h100_policy_process_disables_only_cudnn_sdpa(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "NVIDIA H100 80GB HBM3")
+    monkeypatch.setattr(torch.backends.cuda, "enable_cudnn_sdp", lambda enabled: calls.append(("cudnn", enabled)))
+    monkeypatch.setattr(torch.backends.cuda, "enable_flash_sdp", lambda enabled: calls.append(("flash", enabled)))
+    monkeypatch.setattr(torch.backends.cuda, "enable_math_sdp", lambda enabled: calls.append(("math", enabled)))
+    monkeypatch.setattr(
+        torch.backends.cuda,
+        "enable_mem_efficient_sdp",
+        lambda enabled: calls.append(("mem_efficient", enabled)),
+    )
+
+    server._configure_h100_sdpa_backends("cuda:0")
+
+    assert calls == [("cudnn", False), ("flash", True), ("math", True), ("mem_efficient", True)]
+
+
+def test_non_h100_policy_process_preserves_sdpa_backends(monkeypatch) -> None:
+    calls: list[bool] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "NVIDIA RTX 4090")
+    monkeypatch.setattr(torch.backends.cuda, "enable_cudnn_sdp", calls.append)
+
+    server._configure_h100_sdpa_backends("cuda:0")
+
+    assert calls == []
