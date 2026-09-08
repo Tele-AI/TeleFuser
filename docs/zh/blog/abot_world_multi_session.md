@@ -34,8 +34,6 @@ embedding、DiT 的 KV cache、scheduler 以及视频解码的 temporal state，
 4. LiveKit 控制面与模型 worker 解耦，支持多 GPU 和 chunk 边界迁移；
 5. batch 不兼容、显存不足或 CUDA Graph 不适用时，保留 B1/eager fallback。
 
-本文不改变模型结构和 checkpoint 格式，也不把固定的 12 FPS 当作所有用户的服务承诺。
-
 ## 架构总览
 
 ```text
@@ -152,7 +150,7 @@ LF3 microbenchmark 中，聚合吞吐从 B1 的 30.98 FPS 增加到 B4 的 37.01
 所有模型 dispatch 都返回 `ok`。
 
 平均活跃用户 FPS 为 11.13，demand SLO 达成率为 81.8%。batch 收益取决于 session 控制消息的到达时间和
-tensor 兼容性，因此这组结果说明的是容量和计算复用收益，不是每个用户固定 12 FPS 的保证。
+tensor 兼容性，这组结果主要体现了多用户场景下的容量和计算复用收益。
 
 ## 复现记录
 
@@ -163,7 +161,7 @@ results/experiments/abot_4gpu1237_lf3_12fps_publicdemo_b3_f36_graph_30min_202608
 ```
 
 workload 使用公开 TurboServe trace 归一化得到，覆盖 admission、batch dispatch、状态保持、输出交付和多
-GPU worker 行为，不代表生产流量或论文私有 workload。
+GPU worker 行为。
 
 ## 限制
 
@@ -174,6 +172,5 @@ GPU worker 行为，不代表生产流量或论文私有 workload。
 
 ## Related Work
 
-实现使用了 continuous batching、deadline-aware scheduling 和多 GPU worker pool 等通用思想，不主张这些
-方法本身具有算法层面的首创性。工程重点是将它们接入 ABot-World 的 KV cache、TAEW/VAE temporal state 和
-LiveKit 实时交付路径。
+实现结合了 continuous batching、deadline-aware scheduling 和多 GPU worker pool，并将这些机制接入
+ABot-World 的 KV cache、TAEW/VAE temporal state 和 LiveKit 实时交付路径。

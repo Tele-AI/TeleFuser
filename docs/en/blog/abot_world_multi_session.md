@@ -35,8 +35,6 @@ The implementation follows five boundaries:
 4. Separate LiveKit control from model workers and support multi-GPU migration.
 5. Preserve B1/eager fallback when batching, memory, or CUDA Graph constraints are not met.
 
-The implementation does not change the model or checkpoint format, and 12 FPS is not a per-user guarantee.
-
 ## Architecture Overview
 
 ```text
@@ -154,8 +152,8 @@ transactions. The long trace also exercises admission, output queues, and multi-
 the trace returned `ok`, and none of the four workers used Graph fallback.
 
 Mean active-user FPS was 11.13 and demand-SLO attainment was 81.8%. Batching gains depend on control-message arrival
-timing and tensor compatibility, so these results describe capacity and compute reuse rather than a fixed 12 FPS
-guarantee for every user.
+timing and tensor compatibility; these results primarily show the capacity and compute-reuse benefits of multi-user
+serving.
 
 ## Reproduction Record
 
@@ -166,7 +164,7 @@ results/experiments/abot_4gpu1237_lf3_12fps_publicdemo_b3_f36_graph_30min_202608
 ```
 
 The workload is normalized from a public TurboServe trace and covers admission, batch dispatch, state retention, output
-delivery, and multi-GPU worker behavior. It is not production traffic or a private paper workload.
+delivery, and multi-GPU worker behavior.
 
 ## Limitations
 
@@ -177,6 +175,5 @@ delivery, and multi-GPU worker behavior. It is not production traffic or a priva
 
 ## Related Work
 
-The implementation uses general ideas from continuous batching, deadline-aware scheduling, and multi-GPU worker pools.
-It does not claim algorithmic novelty in those techniques. The engineering contribution is integrating them with
+The implementation combines continuous batching, deadline-aware scheduling, and multi-GPU worker pools with
 ABot-World KV caches, TAEW/VAE temporal state, and LiveKit real-time delivery.
