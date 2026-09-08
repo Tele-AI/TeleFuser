@@ -7,6 +7,7 @@ import contextlib
 import operator
 import threading
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Mapping, Protocol
 
 import click
@@ -21,6 +22,7 @@ from telefuser.pipelines.lingbot_vla_v2 import (
     LingBotVlaV2Observation,
     RobotWinProfile,
 )
+from telefuser.pipelines.lingbot_vla_v2.action_scheduler import ActionChunkScheduler
 from telefuser.pipelines.lingbot_vla_v2.runtime import (
     LINGBOT_VLA_V2_QUANTIZATION_CHOICES,
     get_lingbot_vla_v2_pipeline,
@@ -227,9 +229,23 @@ class RobotWinPolicyAdapter:
         self.pipeline.close()
 
 
-def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
+def create_robotwin_app(
+    adapter: RobotWinPolicyAdapter,
+    *,
+    max_pending_sessions: int = 32,
+) -> FastAPI:
     """Create a standalone app compatible with upstream WebsocketClientPolicy."""
-    app = FastAPI(title="LingBot-VLA v2 RoboTwin Policy")
+    scheduler = ActionChunkScheduler(adapter.infer, max_pending_sessions=max_pending_sessions)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await scheduler.start()
+        try:
+            yield
+        finally:
+            await scheduler.close()
+
+    app = FastAPI(title="LingBot-VLA v2 RoboTwin Policy", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -238,8 +254,41 @@ def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
     @app.websocket("/")
     async def policy_socket(websocket: WebSocket) -> None:
         await websocket.accept()
-        await websocket.send_bytes(pack_message(adapter.metadata))
+        await websocket.send_bytes(pack_message({**adapter.metadata, **scheduler.metadata}))
+        connection_key = str(id(websocket))
+        session_keys: set[str] = set()
+        delivery_tasks: set[asyncio.Task[None]] = set()
+        send_lock = asyncio.Lock()
         previous_total_ms: float | None = None
+
+        async def deliver(
+            response_future: asyncio.Future[dict[str, Any]],
+            *,
+            decode_ms: float,
+            round_started_at: float,
+        ) -> None:
+            nonlocal previous_total_ms
+            try:
+                response = dict(await response_future)
+                server_timing = dict(response.get("server_timing", {}))
+                server_timing["decode_ms"] = decode_ms
+                response["server_timing"] = server_timing
+                async with send_lock:
+                    if previous_total_ms is not None:
+                        server_timing["prev_total_ms"] = previous_total_ms
+                    await websocket.send_bytes(pack_message(response))
+                    previous_total_ms = (time.monotonic() - round_started_at) * 1000.0
+            except asyncio.CancelledError:
+                raise
+            except WebSocketDisconnect:
+                return
+            except Exception as error:
+                logger.exception("LingBot-VLA v2 RoboTwin request failed")
+                async with send_lock:
+                    with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+                        await websocket.send_text(f"{type(error).__name__}: {error}")
+                        await websocket.close(code=1011)
+
         try:
             while True:
                 message = await websocket.receive()
@@ -253,17 +302,24 @@ def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
                 decode_started_at = time.monotonic()
                 request = unpack_message(payload)
                 decode_ms = (time.monotonic() - decode_started_at) * 1000.0
-                inference_started_at = time.monotonic()
-                response = await asyncio.to_thread(adapter.infer, request)
-                inference_ms = (time.monotonic() - inference_started_at) * 1000.0
-                response = dict(response)
-                server_timing = dict(response.get("server_timing", {}))
-                server_timing.update(decode_ms=decode_ms, infer_ms=inference_ms)
-                if previous_total_ms is not None:
-                    server_timing["prev_total_ms"] = previous_total_ms
-                response["server_timing"] = server_timing
-                await websocket.send_bytes(pack_message(response))
-                previous_total_ms = (time.monotonic() - round_started_at) * 1000.0
+                trace_fields = _trace_fields(request)
+                episode_id = trace_fields.get("episode_id", "default")
+                session_key = f"{connection_key}:{episode_id!r}"
+                if request.get("reset", False):
+                    for previous_session_key in session_keys - {session_key}:
+                        scheduler.release_session(previous_session_key)
+                    session_keys.intersection_update({session_key})
+                session_keys.add(session_key)
+                response_future = scheduler.submit(request, session_key=session_key)
+                task = asyncio.create_task(
+                    deliver(
+                        response_future,
+                        decode_ms=decode_ms,
+                        round_started_at=round_started_at,
+                    )
+                )
+                delivery_tasks.add(task)
+                task.add_done_callback(delivery_tasks.discard)
         except WebSocketDisconnect:
             return
         except Exception as error:
@@ -271,6 +327,13 @@ def create_robotwin_app(adapter: RobotWinPolicyAdapter) -> FastAPI:
             with contextlib.suppress(WebSocketDisconnect, RuntimeError):
                 await websocket.send_text(f"{type(error).__name__}: {error}")
                 await websocket.close(code=1011)
+        finally:
+            for session_key in session_keys:
+                scheduler.release_session(session_key)
+            for task in delivery_tasks:
+                task.cancel()
+            if delivery_tasks:
+                await asyncio.gather(*delivery_tasks, return_exceptions=True)
 
     return app
 
@@ -301,6 +364,13 @@ def _configure_h100_sdpa_backends(device: str) -> None:
 @click.option("--port", default=9330, show_default=True, type=click.IntRange(1, 65535))
 @click.option("--device", default="cuda:0", show_default=True)
 @click.option("--use-length", default=50, show_default=True, type=click.IntRange(1, 50))
+@click.option(
+    "--max-pending-sessions",
+    default=32,
+    show_default=True,
+    type=click.IntRange(1),
+    help="Bound the number of sessions waiting behind the GPU worker",
+)
 @click.option("--cuda-graph", is_flag=True, help="Enable fixed-shape CUDA Graph inference")
 @click.option(
     "--quantization",
@@ -314,6 +384,7 @@ def main(
     port: int,
     device: str,
     use_length: int,
+    max_pending_sessions: int,
     cuda_graph: bool,
     quantization: str | None,
 ) -> None:
@@ -330,7 +401,7 @@ def main(
     adapter = RobotWinPolicyAdapter(pipeline, use_length=use_length)
     try:
         uvicorn.run(
-            create_robotwin_app(adapter),
+            create_robotwin_app(adapter, max_pending_sessions=max_pending_sessions),
             host=host,
             port=port,
             workers=1,

@@ -21,6 +21,14 @@ def _metadata() -> dict:
         "policy_verified": False,
         "verification_status": "unverified_official_6b_base",
         "max_request_bytes": 16 * 1024 * 1024,
+        "scheduling": {
+            "mode": "latest_wins",
+            "max_pending_per_session": 1,
+            "max_pending_sessions": 32,
+            "sequence_field": "sequence_id",
+            "ttl_field": "request_ttl_ms",
+            "inflight_cancellation": False,
+        },
     }
 
 
@@ -30,11 +38,15 @@ def _response() -> dict:
         "seed": 7,
         "request_id": "request-1",
         "episode_id": "episode-1",
+        "sequence_id": 3,
+        "scheduler_status": "completed",
         "policy_verified": False,
         "verification_status": "unverified_official_6b_base",
         "server_timing": {
             "decode_ms": 0.1,
             "infer_ms": 2.0,
+            "queue_wait_ms": 0.1,
+            "scheduler_total_ms": 2.1,
             "lock_wait_ms": 0.05,
             "pipeline_ms": 1.5,
             "action_mapping_ms": 0.2,
@@ -75,6 +87,7 @@ def test_validate_action_response_returns_stable_float32_digest() -> None:
         expected_horizon=3,
         request_id="request-1",
         episode_id="episode-1",
+        sequence_id=3,
         seed=7,
     )
 
@@ -101,6 +114,7 @@ def test_validate_action_response_rejects_invalid_action(actions: np.ndarray) ->
             expected_horizon=3,
             request_id="request-1",
             episode_id="episode-1",
+            sequence_id=3,
             seed=7,
         )
 
@@ -118,6 +132,25 @@ def test_validate_reset_response_checks_trace_and_timings() -> None:
     )
 
     assert summary["server_timing_ms"] == {"decode_ms": 0.1, "infer_ms": 0.2}
+
+
+def test_validate_discarded_response_rejects_action_execution() -> None:
+    summary = validator.validate_discarded_response(
+        {
+            "action": None,
+            "request_id": "request-1",
+            "episode_id": "episode-1",
+            "sequence_id": 3,
+            "scheduler_status": "superseded",
+            "error": {"code": "superseded", "message": "newer observation received"},
+            "server_timing": {"decode_ms": 0.1},
+        },
+        request_id="request-1",
+        episode_id="episode-1",
+        sequence_id=3,
+    )
+
+    assert summary["scheduler_status"] == "superseded"
 
 
 def test_require_exact_replay_rejects_divergent_digests() -> None:

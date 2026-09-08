@@ -267,6 +267,18 @@ horizon, dimension, and the exact dual-arm joint order. Inference requests may i
 `request_id` and `episode_id`; the response echoes them and reports decode, lock-wait, pipeline, action-mapping, and
 adapter timings. Existing clients may omit all three request fields.
 
+The endpoint also advertises an additive, latest-wins action scheduler. A client that overlaps simulation and
+inference should send a monotonically increasing `sequence_id` within each `episode_id`, plus a positive
+`request_ttl_ms`. The server has one GPU worker, retains at most one pending request per connection/episode, and
+accepts new observations while inference is running. A newer observation replaces queued work; because an in-flight
+CUDA call cannot be cancelled, its result is discarded after completion when it has become stale. Successful
+responses use `scheduler_status="completed"`. Responses with `superseded`, `expired`, `stale_sequence`, or
+`overloaded` contain `action=None` and a structured `error`; clients must never execute those responses.
+
+`request_ttl_ms` starts when the H100 server receives the request. Do not compare monotonic timestamps between the
+H100 and RTX machines. The RTX client should separately enforce its round-trip deadline and hold the current joint
+positions when no fresh action is available.
+
 Validate this direct endpoint before a simulator is available. This sends reset and repeated inference requests to
 the resident model, validates the returned `[H, 14]` action contract, and optionally verifies exact fixed-seed replay:
 
@@ -284,6 +296,20 @@ checks the encoded MessagePack request against the limit advertised by the serve
 large repository sample representative of normal RoboTwin camera payloads. Add `--require-exact-replay` only when
 validating a runtime profile that promises bitwise determinism; BF16 H100 inference is validated with numerical
 tolerances rather than identical action hashes.
+
+Exercise overlapping submissions and stale-action rejection without a simulator:
+
+```bash
+.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
+  --host 127.0.0.1 --port 9330 \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --task "pick up the object" --seed 7 --requests 3 \
+  --request-ttl-ms 5000 --overlap-requests \
+  --output work_dirs/robotwin_ws_validation/overlap.json
+```
+
+This mode sends all observations before receiving responses, requires the newest request to return an action, and
+requires at least one older request to be reported as `superseded`.
 
 Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
 profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
@@ -316,6 +342,12 @@ bash scripts/eval_policy.sh \
   --additional_info ckpt_name=remote_base,action_type=joint \
   --seed 0 --task_config demo_clean --test_num 1
 ```
+
+The current XPolicyLab proxy calls `infer()` synchronously, so it remains compatible but does not yet overlap action
+execution with inference. Full overlap requires an incremental RTX-side change: execute chunk N while submitting a
+newer observation for chunk N+1, keep only the newest completed chunk in an atomic action buffer, and apply the same
+sequence/deadline checks before execution. That simulator-side change is outside this repository and is not required
+for the no-simulation server validation above.
 
 Keep ports `9330` and `19000` on a trusted private network or an SSH/VPN tunnel. These WebSocket endpoints do not
 provide authentication or transport encryption. The direct validator covers preprocessing, inference, mapping, and
