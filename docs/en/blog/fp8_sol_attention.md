@@ -239,7 +239,7 @@ corrected sparse suffix in one output pass. At the H3 attention shape this reduc
 24.5% while remaining bitwise identical to the unfused implementation. Two matched 50-step runs leave a 0.96%
 throughput difference versus unsmoothed FP8 Sol, with unchanged 37.11 GiB peak allocated memory.
 The matched single-H100 quality and performance ablation is recorded in
-[`benchmarks/fp8_sol_attention_quality`](../../../benchmarks/fp8_sol_attention_quality/README.md).
+[`benchmarks/fp8_sol_attention_quality`](https://github.com/Tele-AI/TeleFuser/tree/main/benchmarks/fp8_sol_attention_quality#readme).
 
 Unsupported shapes, dtypes, devices, or runtime kernel failures retain the public attention fallback. FP8 operands
 are dequantized before the BF16 fallback. Pure Ulysses sequence parallelism is supported: its all-to-all first

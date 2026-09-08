@@ -231,7 +231,7 @@ correction 的 sparse suffix。在 H3 attention shape 上，这将 smoothing bou
 实现保持 bitwise 一致。两轮匹配的 50-step 实验中，相比 unsmoothed FP8 Sol 的吞吐差为 0.96%，peak
 allocated 显存均为 37.11 GiB。
 匹配的单卡 H100 画质与性能消融记录在
-[`benchmarks/fp8_sol_attention_quality`](../../../benchmarks/fp8_sol_attention_quality/README.md)。
+[`benchmarks/fp8_sol_attention_quality`](https://github.com/Tele-AI/TeleFuser/tree/main/benchmarks/fp8_sol_attention_quality#readme)。
 
 不支持的 shape、dtype、device 或 kernel runtime failure 会保留公共 attention fallback。FP8 operand 会先
 反量化再进入 BF16 fallback。纯 Ulysses sequence parallel 已支持：all-to-all 先得到完整 sequence、局部
