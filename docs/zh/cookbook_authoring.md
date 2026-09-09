@@ -67,6 +67,9 @@ python scripts/docs/prepare_cookbook.py serve --dev-addr 127.0.0.1:8000
 `.build/mkdocs.yml`，每次生成清除旧页面和未使用资源。不要编辑或提交 `.build/`、`site/`。原有主题、插件、
 脚本、样式、专题导航和部署目标保留；继承配置关闭日期插件对临时文件的扫描，由源码 hook 提供日期字段。
 
-CI 覆盖文档、示例、文档脚本及测试的变更，检查清单、运行测试、构建双语页面、校验 Cookbook 链接和渲染后
+生成的 Cookbook 导航嵌套在“模型与 Cookbook”下。构建还会从同一棵最终导航树生成 `/llms.txt`，保证用户导航
+和机器可读入口同步。不要编辑生成的索引；应修改 `mkdocs.yml` 或 `docs/cookbook.yml`。
+
+CI 覆盖文档、示例、文档脚本及测试的变更，检查清单、运行测试、构建双语页面、校验所有站内链接、资源和渲染后
 锚点，并拒绝超出 `scripts/docs/warnings-baseline.txt` 的新增告警。历史告警减少无需更新基线，新增问题必须
 修复。工作流提供 PR 检查；仓库分支保护需要将该检查设为必需，才能阻止失败的 PR 合并。

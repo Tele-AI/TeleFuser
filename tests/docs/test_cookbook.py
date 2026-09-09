@@ -16,6 +16,7 @@ from scripts.docs.prepare_cookbook import (
     Publisher,
     check_site,
     check_warnings,
+    documentation_url,
     prepare,
     read_manifest,
     rewrite_markdown,
@@ -228,6 +229,26 @@ class CookbookTests(unittest.TestCase):
         self.assertEqual(generated["site_dir"], str(self.root / "site"))
         self.assertTrue((output / "en/cookbook/categories/models/index.md").is_file())
         self.assertEqual((output / "styles/extra.css").read_text(), "body { color: black; }\n")
+        llms = (output / "llms.txt").read_text()
+        self.assertIn("https://example.org/TeleFuser/", llms)
+        self.assertIn("https://example.org/TeleFuser/cookbook/second/", llms)
+        self.assertNotIn("https://example.org/TeleFuser/cookbook/first/", llms)
+
+    def test_cookbook_nests_under_models_navigation(self) -> None:
+        base_path = self.root / "mkdocs.yml"
+        base = yaml.safe_load(base_path.read_text())
+        base["nav"].insert(1, {"Models & Cookbook": [{"Supported Models": "guide.md"}]})
+        base_path.write_text(yaml.safe_dump(base))
+        generated = yaml.safe_load(prepare(self.root).read_text())
+        models = generated["nav"][1]["Models & Cookbook"]
+        self.assertEqual(models[0], {"Supported Models": "guide.md"})
+        self.assertIn("Cookbook", models[1])
+
+    def test_documentation_url_modes(self) -> None:
+        site_url = "https://example.org/TeleFuser/"
+        self.assertEqual(documentation_url(site_url, "index.md", True), site_url)
+        self.assertEqual(documentation_url(site_url, "guide.md#run", True), site_url + "guide/#run")
+        self.assertEqual(documentation_url(site_url, "guide.md", False), site_url + "guide.html")
 
     def test_rendered_site_search_edit_links_and_media(self) -> None:
         self.image("examples/first/photo.png")
@@ -276,6 +297,11 @@ class CookbookTests(unittest.TestCase):
     def test_rendered_non_cookbook_broken_link_fails(self) -> None:
         self.write("site/index.html", '<a href="missing/">bad</a>')
         with self.assertRaisesRegex(ValueError, "missing target"):
+            check_site(self.root / "site", "https://example.org/TeleFuser/")
+
+    def test_missing_llms_index_fails(self) -> None:
+        self.write("site/index.html", "<h1>Home</h1>")
+        with self.assertRaisesRegex(ValueError, "missing generated documentation index"):
             check_site(self.root / "site", "https://example.org/TeleFuser/")
 
     def test_new_warnings_fail_without_requiring_old_warnings(self) -> None:

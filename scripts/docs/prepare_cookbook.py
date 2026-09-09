@@ -103,6 +103,51 @@ def read_manifest(root: Path) -> dict:
     return manifest
 
 
+def iter_navigation(entries: list[Any], parents: tuple[str, ...] = ()) -> Iterator[tuple[str, str]]:
+    """Yield titled pages from a MkDocs navigation tree."""
+    for entry in entries:
+        if not isinstance(entry, dict) or len(entry) != 1:
+            continue
+        title, target = next(iter(entry.items()))
+        if isinstance(target, str):
+            yield " > ".join((*parents, title)), target
+        elif isinstance(target, list):
+            yield from iter_navigation(target, (*parents, title))
+
+
+def documentation_url(site_url: str, target: str, use_directory_urls: bool) -> str:
+    """Convert a MkDocs source target to its canonical published URL."""
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return target
+    path = parts.path
+    if path == "index.md":
+        path = ""
+    elif use_directory_urls:
+        path = path.removesuffix("index.md") if path.endswith("index.md") else path.removesuffix(".md") + "/"
+    else:
+        path = path.removesuffix(".md") + ".html"
+    return urljoin(site_url.rstrip("/") + "/", urlunsplit(("", "", path, parts.query, parts.fragment)))
+
+
+def write_llms_index(output: Path, navigation: list[Any], site_url: str, use_directory_urls: bool) -> None:
+    """Publish a compact machine-readable index from the canonical navigation."""
+    lines = [
+        "# TeleFuser Documentation",
+        "",
+        "> Streaming inference and serving for real-time world models and multimodal generation.",
+        "",
+    ]
+    seen: set[str] = set()
+    for title, target in iter_navigation(navigation):
+        url = documentation_url(site_url, target, use_directory_urls)
+        if url in seen:
+            continue
+        seen.add(url)
+        lines.append(f"- [{title}]({url})")
+    (output / "llms.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class MediaHTML(HTMLParser):
     """Replace parsed URL attributes, preserving all other HTML bytes."""
 
@@ -365,11 +410,22 @@ def prepare(root: Path = ROOT) -> Path:
         if isinstance(plugin, dict) and "git-revision-date-localized" in plugin:
             # Copied files have no Git history. The source hook supplies dates.
             plugin["git-revision-date-localized"]["enabled"] = False
+    site_navigation = copy.deepcopy(base["nav"])
+    for section in site_navigation:
+        if isinstance(section, dict) and "Models & Cookbook" in section:
+            entries = section["Models & Cookbook"]
+            if not isinstance(entries, list):
+                raise ValueError("Models & Cookbook navigation must be a list")
+            entries.append({"Cookbook": navigation})
+            break
+    else:
+        site_navigation.insert(1, {"Cookbook": navigation})
+    write_llms_index(output, site_navigation, config.site_url, config.use_directory_urls)
     generated = {
         "INHERIT": str(base_path),
         "docs_dir": str(output),
         "site_dir": str(config.site_dir),
-        "nav": [*base["nav"][:1], {"Cookbook": navigation}, *base["nav"][1:]],
+        "nav": site_navigation,
         "plugins": plugins,
         "hooks": [
             *[str((root / path).resolve()) for path in base.get("hooks", [])],
@@ -406,12 +462,9 @@ def check_site(site: Path, site_url: str) -> None:
     prefix = urlsplit(base).path
     cache: dict[Path, SiteHTML] = {}
     errors = []
-    for page in sorted(site.rglob("*.html")):
-        parsed = SiteHTML(page.read_text(encoding="utf-8"))
-        cache[page] = parsed
-        relative = page.relative_to(site).as_posix()
-        current = urljoin(base, relative.removesuffix("index.html"))
-        for link in parsed.links:
+
+    def validate_links(relative: str, current: str, links: list[str]) -> None:
+        for link in links:
             target = urlsplit(urljoin(current, link))
             if target.netloc != urlsplit(base).netloc or target.scheme not in {"http", "https"}:
                 continue
@@ -428,6 +481,21 @@ def check_site(site: Path, site_url: str) -> None:
                     cache[local] = SiteHTML(local.read_text(encoding="utf-8"))
                 if unquote(target.fragment) not in cache[local].ids:
                     errors.append(f"{relative}: missing anchor: {link}")
+
+    for page in sorted(site.rglob("*.html")):
+        parsed = SiteHTML(page.read_text(encoding="utf-8"))
+        cache[page] = parsed
+        relative = page.relative_to(site).as_posix()
+        current = urljoin(base, relative.removesuffix("index.html"))
+        validate_links(relative, current, parsed.links)
+    llms = site / "llms.txt"
+    if not llms.is_file():
+        errors.append("llms.txt: missing generated documentation index")
+    else:
+        links = re.findall(r"\[[^]]+\]\(([^)]+)\)", llms.read_text(encoding="utf-8"))
+        if not links:
+            errors.append("llms.txt: generated documentation index has no links")
+        validate_links("llms.txt", base, links)
     if errors:
         raise ValueError("Site link validation failed:\n" + "\n".join(errors))
 

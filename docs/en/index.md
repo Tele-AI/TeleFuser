@@ -31,27 +31,27 @@ built for continuous pipelines, distributed GPU execution, and production servic
 Continuous execution, stateful sessions, and bidirectional control loops.
 </div>
 <div class="feature-card" markdown>
-**Parallel Inference**
+**[Parallel Inference](parallel.md)**
 
 Ulysses, Ring Attention, tensor parallelism, pipeline parallelism, and FSDP.
 </div>
 <div class="feature-card" markdown>
-**Optimized Operators**
+**[Optimized Operators](ops.md)**
 
 Compile-aware ops with eager CUDA Triton kernels and PyTorch native fallbacks.
 </div>
 <div class="feature-card" markdown>
-**Streaming Service**
+**[Streaming Service](serving.md)**
 
 FastAPI batch serving and LiveKit-backed rooms for server-push and resilient interactive WebRTC.
 </div>
 <div class="feature-card" markdown>
-**Feature Cache**
+**[Feature Cache](feature_cache.md)**
 
 AdaTaylorCache and runtime cache controls for repeated generation workloads.
 </div>
 <div class="feature-card" markdown>
-**Extensible Pipelines**
+**[Extensible Pipelines](adding_new_model.md)**
 
 Reusable stages, model configs, schedulers, and pipeline orchestration.
 </div>
@@ -95,36 +95,22 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 |-------|-------|-------------|
 | [LingBot-VLA v2](/TeleFuser/cookbook/lingbot-vla-v2/) | Robot manipulation | Vision-language-action inference for supported robot profiles |
 
-## Quick Start
+## Start Here
 
-```bash
-# Install
-pip install telefuser
-
-# Batch serving
-telefuser serve /path/to/pipeline.py --port 8000
-
-# LiveKit-backed streaming (Python SDK included in the base install)
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-  --livekit-url ws://127.0.0.1:7880 \
-  --livekit-api-key devkey --livekit-api-secret secret \
-  -p 8088
-```
+<div class="tf-link-grid">
+<a href="streaming_quickstart/"><strong>Core WebRTC Experience</strong><span>Control LingBot-World v2 and receive generated video in the browser.</span></a>
+<a href="installation/"><strong>Installation</strong><span>Install the package and verify CUDA availability.</span></a>
+<a href="quickstart/"><strong>Basic Inference</strong><span>Run Wan2.1 1.3B locally and submit an HTTP task.</span></a>
+<a href="supported_models/"><strong>Supported Models</strong><span>Select a model, checkpoint source, and validated profile.</span></a>
+</div>
 
 ## Documentation Sections
 
 <div class="tf-link-grid">
-<a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
-<a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, retained capacity, LingBot time slicing, and bidirectional control.</span></a>
-<a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
-<a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch video and LingBot LiveKit workflows.</span></a>
+<a href="configuration/"><strong>Runtime and Optimization</strong><span>Configuration, parallelism, attention, caching, quantization, and offload.</span></a>
+<a href="operations_reference/"><strong>Operations and Reference</strong><span>Metrics, logging, profiling, benchmarks, and troubleshooting.</span></a>
+<a href="adding_new_model/"><strong>Developer Guide</strong><span>Integrate models, stages, examples, and public operations.</span></a>
 <a href="blog/"><strong>Technical Blog</strong><span>Optimization design, profiling evidence, results, and related work.</span></a>
-<a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
-<a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
-<a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
-<a href="communication/"><strong>Communication Architecture</strong><span>NCCL collectives, CUDA IPC, ordering, and efficiency.</span></a>
-<a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
-<a href="profiler/"><strong>Profiler</strong><span>Performance analysis tools.</span></a>
 </div>
 
 ---

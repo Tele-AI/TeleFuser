@@ -30,27 +30,27 @@ description: >-
 连续执行、有状态会话和双向控制循环。
 </div>
 <div class="feature-card" markdown>
-**并行推理**
+**[并行推理](parallel.md)**
 
 Ulysses、Ring Attention、张量并行、流水线并行和 FSDP。
 </div>
 <div class="feature-card" markdown>
-**优化算子**
+**[优化算子](ops.md)**
 
 编译感知 ops，支持 eager CUDA Triton 内核和 PyTorch 原生回退。
 </div>
 <div class="feature-card" markdown>
-**流式服务**
+**[流式服务](serving.md)**
 
 FastAPI 批量服务，以及同时支持 server-push 和稳定交互式 WebRTC 的 LiveKit room。
 </div>
 <div class="feature-card" markdown>
-**特征缓存**
+**[特征缓存](feature_cache.md)**
 
 AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 </div>
 <div class="feature-card" markdown>
-**可扩展流水线**
+**[可扩展流水线](adding_new_model.md)**
 
 可复用阶段、模型配置、调度器和流水线编排。
 </div>
@@ -94,36 +94,22 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 |------|------|------|
 | [LingBot-VLA v2](/TeleFuser/zh/cookbook/lingbot-vla-v2/) | 机器人操作 | 面向受支持机器人配置的视觉语言动作推理 |
 
-## 快速开始
+## 从这里开始
 
-```bash
-# 安装
-pip install telefuser
-
-# 批量服务
-telefuser serve /path/to/pipeline.py --port 8000
-
-# LiveKit-backed 流服务（基础安装已包含 Python SDK）
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-  --livekit-url ws://127.0.0.1:7880 \
-  --livekit-api-key devkey --livekit-api-secret secret \
-  -p 8088
-```
+<div class="tf-link-grid">
+<a href="streaming_quickstart/"><strong>WebRTC 核心体验</strong><span>在浏览器控制 LingBot-World v2 并接收生成视频。</span></a>
+<a href="installation/"><strong>安装</strong><span>安装软件包并验证 CUDA 可用性。</span></a>
+<a href="quickstart/"><strong>基础推理</strong><span>在本地运行 Wan2.1 1.3B 并提交 HTTP 任务。</span></a>
+<a href="supported_models/"><strong>支持的模型</strong><span>选择模型、权重来源和经过验证的运行配置。</span></a>
+</div>
 
 ## 文档分区
 
 <div class="tf-link-grid">
-<a href="service/"><strong>服务指南</strong><span>批量服务、任务 API 和 SDK。</span></a>
-<a href="stream_server/"><strong>流式服务</strong><span>LiveKit session、常驻容量、LingBot 时分复用和双向控制。</span></a>
-<a href="stream_scheduler/"><strong>流式调度器</strong><span>Actor 所有权、有界数据流、生命周期、指标和 GPU 卡位。</span></a>
-<a href="benchmark_aiperf/"><strong>AIPerf 基准测试</strong><span>Batch 视频与 LingBot LiveKit 测试流程。</span></a>
+<a href="configuration/"><strong>运行时与优化</strong><span>配置、并行、注意力、缓存、量化和卸载。</span></a>
+<a href="operations_reference/"><strong>运维与参考</strong><span>指标、日志、性能分析、基准和故障排查。</span></a>
+<a href="adding_new_model/"><strong>开发者指南</strong><span>集成模型、阶段、示例和公共算子。</span></a>
 <a href="blog/"><strong>技术博客</strong><span>优化设计、profiling 证据、效果与 Related Work。</span></a>
-<a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
-<a href="tf_kernel/"><strong>TF-Kernel</strong><span>安装、编译、验证和使用可选 CUDA 扩展。</span></a>
-<a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>
-<a href="communication/"><strong>通信架构</strong><span>NCCL collective、CUDA IPC、顺序与效率设计。</span></a>
-<a href="adding_new_model/"><strong>新增模型</strong><span>集成新的模型架构和阶段。</span></a>
-<a href="profiler/"><strong>性能分析</strong><span>性能分析工具。</span></a>
 </div>
 
 ---

@@ -87,8 +87,12 @@ Each generation replaces the temporary document tree, removing old pages and unu
 configuration retains its theme, plugins, scripts, styles, existing navigation, and deployment destination.
 The revision plugin's temporary-file scan is disabled in this configuration; the source hook provides its date fields.
 
+The generated Cookbook navigation is nested under `Models & Cookbook`. Generation also writes `/llms.txt` from the
+same final navigation tree, so human and machine-readable discovery stay synchronized. Do not edit the generated
+index; update `mkdocs.yml` or `docs/cookbook.yml` instead.
+
 CI runs on changes to documentation, examples, documentation tooling, and its tests. It validates the manifest, runs
-the focused tests, builds both languages, checks Cookbook links and rendered anchors, and rejects warnings beyond
+the focused tests, builds both languages, checks all rendered internal links, assets, and anchors, and rejects warnings beyond
 the recorded `scripts/docs/warnings-baseline.txt`. Existing warnings may disappear without updating the baseline;
-new Cookbook problems must be fixed. The workflow provides a PR check; repository branch protection must require
+new documentation problems must be fixed. The workflow provides a PR check; repository branch protection must require
 that check for it to block merging.

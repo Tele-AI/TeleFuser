@@ -13,7 +13,14 @@ Install the [TeleFuser development environment](../../CONTRIBUTING.md#developmen
 and GPU environment in the [LingBot-World guide](../lingbot/README.md). The command below uses four H100 GPUs.
 Model-free replay and overlay scripts are separate service examples; they do not validate model inference speed.
 
-## Quick Start
+## Model-Free Preflight
+
+Start with `stream_arrow_overlay.py`. It generates its own moving frames when no video file is present and accepts
+the same browser control protocol as LingBot-World, so it validates signaling, TURN relay, controls, and return video
+without loading a checkpoint. Follow the four-terminal procedure in the
+[WebRTC Core Experience](../../docs/en/streaming_quickstart.md), using the overlay service as Terminal 3.
+
+## LingBot-World v2
 
 Run all commands from the repository root. The checked-in browser demo forces TCP TURN relay, so the complete
 interactive stack has four services. Install the
@@ -33,14 +40,15 @@ turnserver -n -m 1 \
 livekit-server --dev
 
 # Terminal 3: TeleFuser model and session API
-TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+  TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey \
   --livekit-api-secret secret \
   --worker-gpu-map 0,1,2,3 \
-  --max-sessions-per-worker 2 \
+  --max-sessions-per-worker 1 \
   --control-idle-timeout 10 \
   --port 8088 \
   --skip-validation
@@ -65,9 +73,8 @@ establish that the model is producing frames.
 ## Configuration and Troubleshooting
 
 This command starts one process, one in-process model worker, and one shared LingBot service instance. It exposes four
-physical GPUs as process-local devices 0-3, declares one four-device logical worker group, and retains up to two
-independent sessions. The LingBot execution lease serializes their model chunks; it is not a generic replication
-option.
+physical GPUs as process-local devices 0-3, declares one four-device logical worker group, and retains one session.
+The LingBot execution lease serializes model chunks; it is not a generic replication option.
 
 The LiveKit Python SDK is part of TeleFuser's base dependencies; the LiveKit Server is installed and operated
 separately. See the [Stream Server guide](../../docs/en/stream_server.md) for room roles and viewer fan-out, the exact

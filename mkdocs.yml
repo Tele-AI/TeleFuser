@@ -123,8 +123,17 @@ plugins:
           build: true
           nav_translations:
             Home: 首页
-            User Guides: 用户指南
-            Benchmarks: 基准测试
+            Get Started: 开始使用
+            Installation: 安装
+            Core WebRTC Experience: WebRTC 核心体验
+            Basic Inference: 基础推理
+            Models & Cookbook: 模型与 Cookbook
+            Supported Models: 支持的模型
+            Serving & APIs: 服务与 API
+            Batch Service and API Reference: 批量服务与 API 参考
+            Runtime & Optimization: 运行时与优化
+            Operations & Reference: 运维与参考
+            Troubleshooting: 故障排查
             Technical Blog: 技术博客
             Overview: 总览
             FP8 Sol-Attn: FP8 Sol-Attn
@@ -132,7 +141,7 @@ plugins:
             CUDA IPC Ulysses: CUDA IPC Ulysses
             Parallel Inference: 并行推理
             Communication Architecture: 通信架构
-            Developer Guides: 开发者指南
+            Developer Guide: 开发者指南
             Configuration: 配置
             Tools: 工具
             Service: 服务指南
@@ -170,44 +179,52 @@ plugins:
 # Navigation (locale-neutral paths resolved by i18n plugin)
 nav:
   - Home: index.md
-  - User Guides:
+  - Get Started:
+      - Overview: getting_started.md
+      - Installation: installation.md
+      - Core WebRTC Experience: streaming_quickstart.md
+      - Basic Inference: quickstart.md
+  - Models & Cookbook:
+      - Supported Models: supported_models.md
+  - Serving & APIs:
+      - Overview: serving.md
+      - Batch Service and API Reference: service.md
+      - Stream Server: stream_server.md
+      - Service Metadata: service_metadata.md
+  - Runtime & Optimization:
       - World Model Streaming Inference: world_model_streaming_inference.md
-      - service.md
-      - stream_server.md
-      - stream_scheduler.md
-      - service_metadata.md
-      - adding_new_example.md
-      - model_loading.md
+      - Stream Scheduler: stream_scheduler.md
+      - Configuration: configuration.md
+      - Model Loading: model_loading.md
+      - Parallel Inference: parallel.md
+      - Communication Architecture: communication.md
+      - Attention: attention.md
+      - Quantization: quantization.md
+      - Feature Cache: feature_cache.md
+      - Latent Cache: latent_cache.md
       - TF-Kernel: tf_kernel.md
-      - offload.md
-  - Benchmarks:
+      - CPU Offloading: offload.md
+  - Operations & Reference:
+      - Overview: operations_reference.md
+      - Metrics: metrics.md
+      - Logging: logging.md
+      - Profiler: profiler.md
       - TeleFuser and AIPerf: benchmark_aiperf.md
+      - Troubleshooting: troubleshooting.md
+  - Developer Guide:
+      - Publishing Cookbook Guides: cookbook_authoring.md
+      - Adding New Example: adding_new_example.md
+      - Adding New Model: adding_new_model.md
+      - Adding New Stage: adding_new_stage.md
+      - Ops: ops.md
+      - Hash Config Management: hash_config_management.md
+      - torch.compile Compatibility: torch_compile_compatibility.md
+      - Testing: testing.md
   - Technical Blog:
       - Overview: blog/index.md
       - FP8 Sol-Attn: blog/fp8_sol_attention.md
       - Agent Dev First: blog/agent_dev_first_minimax_h3.md
       - CUDA IPC Ulysses: blog/cuda_ipc_ulysses.md
-  - Configuration:
-      - configuration.md
-      - Quantization: quantization.md
-  - Parallel Inference:
-      - parallel.md
-      - Communication Architecture: communication.md
-      - attention.md
-      - feature_cache.md
-      - latent_cache.md
-  - Developer Guides:
-      - Publishing Cookbook Guides: cookbook_authoring.md
-      - adding_new_model.md
-      - adding_new_stage.md
-      - hash_config_management.md
-      - torch_compile_compatibility.md
-  - Tools:
-      - profiler.md
-      - metrics.md
-      - logging.md
-      - ops.md
-      - testing.md
 
 # Extra
 extra:

@@ -273,22 +273,17 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 
 ## Documentation
 
-- [docs/en/blog/index.md](docs/en/blog/index.md): optimization design, profiling evidence, results, and related work
-- [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
-- [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
-- [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
-- [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
-- [docs/en/communication.md](docs/en/communication.md): collectives, CUDA IPC, synchronization, and transport lifecycle
-- [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
-- [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
-- [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns
-- [docs/en/attention.md](docs/en/attention.md): attention backends and configuration
-- [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
-- [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
-- [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
-- [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
-- [examples/lingbot_vla_v2/README.md](examples/lingbot_vla_v2/README.md): LingBot-VLA v2 inference, structured service, parity, and validation boundaries
-- [examples/swiftvr/README.md](examples/swiftvr/README.md): SwiftVR checkpoint loading, streaming usage, performance, and acceleration options
+- [Get Started](docs/en/getting_started.md): installation, first-run workflow, and path selection
+- [Core WebRTC Experience](docs/en/streaming_quickstart.md): LingBot-World v2 browser controls and live generated video
+- [Supported Models](docs/en/supported_models.md): model families, tasks, execution modes, and Cookbook entry points
+- [Serving and APIs](docs/en/serving.md): batch HTTP tasks and stateful LiveKit streaming
+- [Runtime and Optimization](docs/en/configuration.md): configuration, loading, parallelism, attention, caching, and offload
+- [Operations and Reference](docs/en/operations_reference.md): metrics, logging, profiling, benchmarks, and diagnostics
+- [Developer Guide](docs/en/adding_new_model.md): model, stage, example, operation, and testing contracts
+- [Technical Blog](docs/en/blog/index.md): optimization design, profiling evidence, results, and related work
+
+The published site provides the same English and Chinese information architecture. Model-specific instructions are
+generated from registered example READMEs under **Models & Cookbook**. The build also publishes `/TeleFuser/llms.txt`.
 
 ## Known Limitations
 

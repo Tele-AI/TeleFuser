@@ -100,7 +100,7 @@ livekit-server --dev
 # Terminal 3：模型、准入和 session API
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey \
   --livekit-api-secret secret \

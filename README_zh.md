@@ -253,21 +253,17 @@ telefuser/
 
 ## 文档
 
-- [docs/zh/blog/index.md](docs/zh/blog/index.md)：优化设计、profiling 证据、效果与 Related Work
-- [docs/zh/service.md](docs/zh/service.md)：REST 服务、任务 API、OpenAI 兼容接口
-- [docs/zh/stream_server.md](docs/zh/stream_server.md)：LiveKit 流服务、session API、data topic 和部署
-- [docs/zh/stream_scheduler.md](docs/zh/stream_scheduler.md)：基于 actor 的 Stage 调度、backpressure、生命周期、指标和 LingBot 卡位
-- [docs/zh/parallel.md](docs/zh/parallel.md)：分布式推理架构
-- [docs/zh/communication.md](docs/zh/communication.md)：collective、CUDA IPC、同步与传输生命周期
-- [docs/zh/latent_cache.md](docs/zh/latent_cache.md)：CacheSeek latent cache 集成
-- [docs/zh/feature_cache.md](docs/zh/feature_cache.md)：`AdaTaylorCache`
-- [docs/zh/model_loading.md](docs/zh/model_loading.md)：模型加载方式
-- [docs/zh/attention.md](docs/zh/attention.md)：注意力后端与配置
-- [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md)：`torch.compile` 相关约束
-- [docs/zh/adding_new_model.md](docs/zh/adding_new_model.md)：新模型接入
-- [docs/zh/adding_new_example.md](docs/zh/adding_new_example.md)：Example 与 Pipeline Contract 编写方式
+- [开始使用](docs/zh/getting_started.md)：安装、首次运行和工作流选择
+- [WebRTC 核心体验](docs/zh/streaming_quickstart.md)：LingBot-World v2 浏览器控制与实时生成视频
+- [支持的模型](docs/zh/supported_models.md)：模型系列、任务、执行方式和 Cookbook 入口
+- [服务与 API](docs/zh/serving.md)：批量 HTTP 任务和有状态 LiveKit 流式服务
+- [运行时与优化](docs/zh/configuration.md)：配置、加载、并行、注意力、缓存和卸载
+- [运维与参考](docs/zh/operations_reference.md)：指标、日志、性能分析、基准和诊断
+- [开发者指南](docs/zh/adding_new_model.md)：模型、阶段、示例、算子和测试契约
+- [技术博客](docs/zh/blog/index.md)：优化设计、profiling 证据、效果与 Related Work
 
-- [examples/swiftvr/README.md](examples/swiftvr/README.md)：SwiftVR 权重下载、流式推理、加速配置和 H100 性能
+发布站点使用一致的中英文信息架构。模型说明从登记的示例 README 生成到“模型与 Cookbook”分区，构建流程
+同时发布 `/TeleFuser/llms.txt`，供工具和编码 Agent 快速发现文档。
 
 ## 已知限制
 

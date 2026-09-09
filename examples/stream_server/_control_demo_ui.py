@@ -18,7 +18,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>LingBot-World-Fast LiveKit Demo</title>
+<title>LingBot-World v2 WebRTC Demo</title>
 <style>
   :root {
     color-scheme: light;
@@ -276,7 +276,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <main>
-  <h1>LingBot-World-Fast LiveKit Demo</h1>
+  <h1>LingBot-World v2 WebRTC Demo</h1>
   <div class="workspace">
     <section class="panel video-panel">
       <div class="video-head">
