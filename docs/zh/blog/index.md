@@ -12,6 +12,7 @@ description: 记录 TeleFuser 模型集成、工程架构、性能与运行时�
 
 | 日期 | 文章 | 状态 | 验证平台 |
 |---|---|---|---|
+| 2026-08-19 | [ABot 多会话服务：状态隔离、兼容批处理与多卡调度](abot_world_multi_session.md) | 已验证 | 4 x H100 80 GB |
 | 2026-08-19 | [FP8 Sol-Attn：H100 视频 DiT 的量化稀疏注意力](fp8_sol_attention.md) | 已验证 | 1 x H100 80 GB |
 | 2026-08-20 | [从 MiniMax H3 适配看 Agent Dev First](agent_dev_first_minimax_h3.md) | 已验证 | 1、2、4 x H100 80 GB |
 | 2026-08-06 | [CUDA IPC Ulysses：在 H100 上重叠 Attention 通信](cuda_ipc_ulysses.md) | 已验证 | 4 x H100 80 GB |
