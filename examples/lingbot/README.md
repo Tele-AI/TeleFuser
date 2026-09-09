@@ -3,7 +3,30 @@
 Offline image-to-video and interactive WebRTC streaming generation for LingBot-World-Fast (v1) and LingBot-World
 v2. Both variants use the shared causal-fast streaming engine; their checkpoint layout and PPL defaults differ.
 
-## Validated H100 Development Environment
+## Model Source
+
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| Wan2.2-I2V-A14B | [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) | [Wan-AI/Wan2.2-I2V-A14B](https://modelscope.cn/models/Wan-AI/Wan2.2-I2V-A14B) | Shared image-to-video base |
+| LingBot-World-Fast | [robbyant/lingbot-world-fast](https://huggingface.co/robbyant/lingbot-world-fast) | [Robbyant/lingbot-world-fast](https://modelscope.cn/models/Robbyant/lingbot-world-fast) | v1 causal world-model checkpoint |
+| LingBot-World v2 14B Causal Fast | [robbyant/lingbot-world-v2-14b-causal-fast](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-fast) | [Robbyant/lingbot-world-v2-14b-causal-fast](https://modelscope.cn/models/Robbyant/lingbot-world-v2-14b-causal-fast) | v2 causal world-model transformer |
+
+## Feature Support
+
+| Feature | Support | Notes |
+| --- | --- | --- |
+| Offline image-to-video | Supported | v1 and v2 entry points |
+| Camera control | Supported | Repository pose and intrinsics traces |
+| Continuous streaming | Supported | Shared causal-fast streaming engine |
+| Multi-GPU inference | Supported | Ulysses SP; v2 also supports configurable tensor parallelism |
+| FSDP | Supported | Configurable through the pipeline settings |
+| Quantization | Unsupported | The documented examples do not expose a quantization option |
+| CPU offload | Supported | Used by the single-GPU lifecycle |
+| Server API | Supported | Real-time stream-service integration |
+
+## Requirements
+
+### Validated H100 Development Environment
 
 The four-H100 LingBot-World v2 AIPerf test used the following environment. TeleFuser supports broader
 versions through its normal dependency ranges, but performance results in this README should be reproduced with
@@ -102,22 +125,11 @@ For the browser client, continue with [Real-Time Streaming](#real-time-streaming
 [shared LiveKit example](../stream_server/README.md). The measurements below describe prior runtime validation;
 publishing this README does not rerun those GPU workloads.
 
-## Feature Support
+## Examples
 
-| Feature | Support |
-| --- | --- |
-| Offline image-to-video | ✔️ |
-| Camera control | ✔️ |
-| Continuous chunked generation | ✔️ |
-| Single-GPU inference | ✔️ |
-| Ulysses Sequence Parallel | ✔️ |
-| Tensor Parallel (v2 DiT) | Configurable through `--tp_degree` offline or `PPL_CONFIG["tp_degree"]` for stream service |
-| FSDP | Configurable through PPL_CONFIG |
-| H100 optimized attention | v2: FA4, then FA3/SageAttention; v1: SageAttention |
+### Offline Image-To-Video
 
-## Files
-
-### lingbot_world_fast_image_to_video_h100.py
+#### `lingbot_world_fast_image_to_video_h100.py`
 
 Offline generation and stream-server entry point for LingBot-World-Fast with camera control.
 
@@ -134,7 +146,7 @@ Default configuration:
 - Default control directory: `examples/data/lingbot_world_fast/`
 - Default output: `work_dirs/lingbot_world_fast_i2v_<gpu_num>gpu.mp4`
 
-### lingbot_world_v2_image_to_video_h100.py
+#### `lingbot_world_v2_image_to_video_h100.py`
 
 Offline generation and stream-server entry point for camera-controlled v2. The default is 77 frames at 16 FPS: 20 latent frames, exactly five
 complete chunks of four. With complete chunk streaming, 81 output frames cannot be represented by `chunk_size=4`.

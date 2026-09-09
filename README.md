@@ -240,7 +240,7 @@ telefuser/
 |----------|------|-------|
 | `LingBot-World v2` | Bidirectional world-model streaming | LiveKit control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
 | `ABot-World-0-5B-LF` | Single-GPU interactive world model | Direct HTTP or shared LiveKit controller via [examples/abot_world/README.md](examples/abot_world/README.md) |
-| `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
+| `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/README.md](examples/liveact/README.md) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 | `SwiftVR` | Causal video restoration | Single-GPU BF16 offline and direct streaming restoration via [examples/swiftvr/README.md](examples/swiftvr/README.md) |
 

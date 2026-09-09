@@ -9,7 +9,7 @@ from diffusers import ZImagePipeline
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 
 pipe = ZImagePipeline.from_pretrained(
-    os.paht.join(TF_MODEL_ZOO_PATH, "Z-Image-Turbo"),
+    os.path.join(TF_MODEL_ZOO_PATH, "Z-Image-Turbo"),
     torch_dtype=torch.bfloat16,
     low_cpu_mem_usage=False,
 )

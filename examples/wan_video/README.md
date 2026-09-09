@@ -1,46 +1,42 @@
-# WanVideo Example
+# WanVideo Examples
 
 Video generation using Wan2.1 and Wan2.2 models for Text-to-Video and Image-to-Video tasks.
 
 ## Model Source
 
-### Wan2.1 Models
-
-| Model | HuggingFace | ModelScope |
-|-------|-------------|------------|
-| Wan2.1-T2V-1.3B | [Wan-AI/Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) | [Wan-AI/Wan2.1-T2V-1.3B](https://modelscope.cn/models/Wan-AI/Wan2.1-T2V-1.3B) |
-| Wan2.1-T2V-14B | [Wan-AI/Wan2.1-T2V-14B](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) | [Wan-AI/Wan2.1-T2V-14B](https://modelscope.cn/models/Wan-AI/Wan2.1-T2V-14B) |
-| Wan2.1-I2V-14B-720P | [Wan-AI/Wan2.1-I2V-14B-720P](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) | [Wan-AI/Wan2.1-I2V-14B-720P](https://modelscope.cn/models/Wan-AI/Wan2.1-I2V-14B-720P) |
-
-### Wan2.2 Models
-
-| Model | HuggingFace | ModelScope |
-|-------|-------------|------------|
-| Wan2.2-T2V-14B | [Wan-AI/Wan2.2-T2V-14B](https://huggingface.co/Wan-AI/Wan2.2-T2V-14B) | [Wan-AI/Wan2.2-T2V-14B](https://modelscope.cn/models/Wan-AI/Wan2.2-T2V-14B) |
-| Wan2.2-I2V-A14B | [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) | [Wan-AI/Wan2.2-I2V-A14B](https://modelscope.cn/models/Wan-AI/Wan2.2-I2V-A14B) |
-| Wan2.2-TI2V-5B | [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) | [Wan-AI/Wan2.2-TI2V-5B](https://modelscope.cn/models/Wan-AI/Wan2.2-TI2V-5B) |
-
-### Other
-
-| Model | HuggingFace | ModelScope |
-|-------|-------------|------------|
-| RIFE v4.26 | Video Frame Interpolation | [RIFEv4.26](https://huggingface.co/hzwer/RIFE/resolve/main/RIFEv4.26_0921.zip) |
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| Wan2.1-T2V-1.3B | [Wan-AI/Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) | [Wan-AI/Wan2.1-T2V-1.3B](https://modelscope.cn/models/Wan-AI/Wan2.1-T2V-1.3B) | Text-to-video generation |
+| Wan2.1-T2V-14B | [Wan-AI/Wan2.1-T2V-14B](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) | [Wan-AI/Wan2.1-T2V-14B](https://modelscope.cn/models/Wan-AI/Wan2.1-T2V-14B) | Text-to-video generation |
+| Wan2.1-I2V-14B-720P | [Wan-AI/Wan2.1-I2V-14B-720P](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P) | [Wan-AI/Wan2.1-I2V-14B-720P](https://modelscope.cn/models/Wan-AI/Wan2.1-I2V-14B-720P) | Image-to-video generation |
+| Wan2.2-T2V-14B | [Wan-AI/Wan2.2-T2V-14B](https://huggingface.co/Wan-AI/Wan2.2-T2V-14B) | [Wan-AI/Wan2.2-T2V-14B](https://modelscope.cn/models/Wan-AI/Wan2.2-T2V-14B) | Text-to-video generation |
+| Wan2.2-I2V-A14B | [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) | [Wan-AI/Wan2.2-I2V-A14B](https://modelscope.cn/models/Wan-AI/Wan2.2-I2V-A14B) | Image-to-video and first-last-frame generation |
+| Wan2.2-TI2V-5B | [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) | [Wan-AI/Wan2.2-TI2V-5B](https://modelscope.cn/models/Wan-AI/Wan2.2-TI2V-5B) | Text- and image-conditioned video |
+| RIFE v4.26 | [RIFEv4.26](https://huggingface.co/hzwer/RIFE/resolve/main/RIFEv4.26_0921.zip) | N/A | Optional frame interpolation |
 
 ## Feature Support
 
-| Feature | Wan2.1 | Wan2.2 |
-|---------|--------|--------|
-| CFG Parallel (CFGP) | ✔️ | ✔️ |
-| Ulysses Sequence Parallel (USP) | ✔️ | ✔️ |
-| LoRA | ✔️ | ✔️ |
-| FP8 Quantization | ✔️ | ✔️ |
-| FSDP | ✔️ | ✔️ |
-| Encoder Parallel | ✔️ | ✔️ |
-| Async Pipeline | ✔️ | ✔️ |
-| Feature Cache (AdaTaylor) | ✔️ | ✔️ |
-| Distilled Model | ❔ | ✔️ |
-| First-Last-Frame to Video (FL2V) | ❌ | ✔️ |
-| Server API | ✔️ | ✔️ |
+| Feature | Wan2.1 | Wan2.2 | Notes |
+| --- | --- | --- | --- |
+| Text-to-video | Supported | Supported | 1.3B/14B and 5B/A14B variants |
+| Image-to-video | Supported | Supported | Image-conditioned generation |
+| Multi-GPU inference | Supported | Supported | CFG, Ulysses, FSDP, and encoder parallelism |
+| LoRA | Supported | Supported | Model-specific LoRA examples |
+| Quantization | Supported | Supported | FP8 examples where provided |
+| Feature cache | Supported | Supported | AdaTaylor calibration and inference |
+| Distilled checkpoints | Unsupported | Supported | Wan2.2 distillation examples |
+| First-last-frame video | Unsupported | Supported | Wan2.2 A14B only |
+| Server API | Supported | Supported | Standard and specialized service entry points |
+
+## Requirements
+
+- GPU: CUDA GPUs with enough memory for the selected 1.3B, 5B, or 14B checkpoint; H100 is the validated target for
+  scripts ending in `_h100.py`
+- Software: the standard TeleFuser installation; optional attention, FP8, Ray, and RIFE paths require their respective
+  dependencies
+- Input assets: a readable image for I2V/FL2V and optional LoRA, distillation, cache, or RIFE weights for those variants
+
+Install TeleFuser by following the [development setup](../../CONTRIBUTING.md#development-setup).
 
 ## Parallel Configuration
 
@@ -64,11 +60,46 @@ For Wan2.2 dual-branch models (dit_high/dit_low), each branch is configured inde
 # Total parallelism = 1 * 4 = 4
 ```
 
-## Files
+## Model Directory
+
+Wan examples use separate roots for each upstream checkpoint. Preserve each downloaded repository layout:
+
+```text
+${TF_MODEL_ZOO_PATH}/
+|-- Wan2.1-T2V-1.3B/
+|-- Wan2.1-T2V-14B/
+|-- Wan2.1-I2V-14B-720P/
+|-- Wan2.1-I2V-14B-480P/
+|-- Wan2.2-T2V-A14B/
+|-- Wan2.2-I2V-A14B/
+|-- Wan2.2-TI2V-5B/
+|-- Wan2.2-Distill-Models/
+\-- RIFEv4.26_0921/
+    \-- flownet.pkl
+```
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+The individual script's `PPL_CONFIG` lists any extra LoRA, FP8, or cache artifact used outside its main model root.
+
+## Quick Start
+
+```bash
+TELEAI_EXAMPLE_OUTPUT_DIR=work_dirs \
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Wan2.1-T2V-1.3B" \
+  --prompt "A sailboat crosses a calm lake at sunrise"
+```
+
+The command writes `work_dirs/wan21_1_3b_text_to_video_h100_1gpu.mp4`.
+
+## Examples
 
 ### Text-to-Video Examples
 
-#### wan21_1_3b_text_to_video_h100.py
+#### `wan21_1_3b_text_to_video_h100.py`
 
 Basic T2V generation with Wan2.1 1.3B model.
 
@@ -89,7 +120,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py --resolution 480p --a
 **Features:**
 - Video Frame Interpolation (VFI) with RIFE model for 30fps output
 - CFG parallel when cfg_scale > 1
-#### wan21_1_3b_text_to_video_hf.py
+#### `wan21_1_3b_text_to_video_hf.py`
 
 T2V with HuggingFace format loading.
 
@@ -104,7 +135,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_hf.py --model_source "Wan-AI/
 python examples/wan_video/wan21_1_3b_text_to_video_hf.py --model_source "/path/to/Wan2.1-T2V-1.3B"
 ```
 
-#### wan21_1_3b_text_to_video_ada_taylor_cache.py
+#### `wan21_1_3b_text_to_video_ada_taylor_cache.py`
 
 T2V with AdaTaylorCache V2 feature caching.
 
@@ -136,7 +167,7 @@ pipe_config.dit_config.feature_cache_config = FeatureCacheConfig(
 )
 ```
 
-#### wan21_1_3b_text_to_video_radial.py
+#### `wan21_1_3b_text_to_video_radial.py`
 
 T2V with radial sparse attention.
 
@@ -172,7 +203,7 @@ pipe_config.dit_config.attention_config = AttentionConfig.sol_attention()
 
 Sol-Attn is built into TeleFuser. Eligible BF16 self-attention calls use the sparse kernel; unsupported calls
 automatically use the existing dense fallback. The defaults follow the official Wan2.1 profile: Morton3D token ordering, dense layer 0, and 10 dense warm-up steps for the standard 50-step schedule.
-#### wan21_1_3b_text_to_video_optimized_h100.py
+#### `wan21_1_3b_text_to_video_optimized_h100.py`
 
 Provides one entry point for independently enabling attention and quantization
 optimizations. The defaults are `--attention dense --quantization none`, which
@@ -317,7 +348,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_optimized_h100.py \
     --sample-solver unipc --cfg-scale 5.0 --sigma-shift 5.0 --seed 42
 ```
 
-#### wan21_1_3b_text_to_video_cache_calibrate.py
+#### `wan21_1_3b_text_to_video_cache_calibrate.py`
 
 Calibration tool for AdaTaylorCache.
 
@@ -339,7 +370,7 @@ Generates a JSON file with:
 
 **Note:** You must adjust `K`, `retention_ratio`, and `thresh` based on your quality/speed requirements after calibration.
 
-#### wan21_14b_text_to_video_h100.py
+#### `wan21_14b_text_to_video_h100.py`
 
 T2V with Wan2.1 14B model.
 
@@ -369,7 +400,7 @@ ulimit -n 65535
 - UNPC scheduler with sigma_shift=5.0
 - No CLIP stage required for T2V
 
-#### wan22_t2v_5b.py
+#### `wan22_t2v_5b.py`
 
 T2V with Wan2.2 TI2V 5B model.
 
@@ -392,7 +423,7 @@ python examples/wan_video/wan22_t2v_5b.py --resolution 480p --aspect_ratio 16:9
 - Ulysses sequence parallelism for multi-GPU
 - 50-step UNPC sampling with sigma_shift=5.0
 
-#### wan22_14b_text_to_video_h100.py
+#### `wan22_14b_text_to_video_h100.py`
 
 T2V with Wan2.2 14B model (MoE architecture).
 
@@ -418,7 +449,7 @@ python examples/wan_video/wan22_14b_text_to_video_h100.py --resolution 720p --as
 
 ### Image-to-Video Examples (Wan2.1 14B)
 
-#### wan21_14b_image_to_video_h100.py
+#### `wan21_14b_image_to_video_h100.py`
 
 Standard I2V with Wan2.1 14B model.
 
@@ -435,7 +466,7 @@ python examples/wan_video/wan21_14b_image_to_video_h100.py \
 - Model CPU offloading for memory efficiency
 - CFG parallel (cfg_scale=5.0)
 
-#### wan21_14b_image_to_video_lora_h100.py
+#### `wan21_14b_image_to_video_lora_h100.py`
 
 I2V with LoRA acceleration.
 
@@ -454,7 +485,7 @@ python examples/wan_video/wan21_14b_image_to_video_lora_h100.py \
 
 ### Image-to-Video Examples (Wan2.2 14B)
 
-#### wan22_14b_image_to_video_h100.py
+#### `wan22_14b_image_to_video_h100.py`
 
 Standard I2V with Wan2.2 A14B model.
 
@@ -487,7 +518,7 @@ pipe_config.dit_low_config.feature_cache_config = FeatureCacheConfig(
 )
 ```
 
-#### wan22_14b_image_to_video_distill_h100.py
+#### `wan22_14b_image_to_video_distill_h100.py`
 
 I2V with distilled model for fast inference.
 
@@ -505,7 +536,7 @@ python examples/wan_video/wan22_14b_image_to_video_distill_h100.py \
 - No CFG (cfg_scale=1.0), full sequence parallel
 - FSDP and VAE parallel enabled for multi-GPU
 
-#### wan22_14b_image_to_video_distill_fp8_h100.py
+#### `wan22_14b_image_to_video_distill_fp8_h100.py`
 
 I2V with FP8 quantization for memory efficiency.
 
@@ -523,7 +554,7 @@ python examples/wan_video/wan22_14b_image_to_video_distill_fp8_h100.py \
 - 8-step inference with distilled weights
 - No CFG parallel (cfg_scale=1.0)
 
-#### wan22_14b_image_to_video_lora_h100.py
+#### `wan22_14b_image_to_video_lora_h100.py`
 
 I2V with LoRA weights for fast inference.
 
@@ -541,7 +572,7 @@ python examples/wan_video/wan22_14b_image_to_video_lora_h100.py \
 - 8-step inference
 - No CFG parallel (cfg_scale=1.0)
 
-#### wan22_14b_image_to_video_mix_h100.py
+#### `wan22_14b_image_to_video_mix_h100.py`
 
 I2V with mixed precision/optimizations.
 
@@ -560,7 +591,7 @@ python examples/wan_video/wan22_14b_image_to_video_mix_h100.py \
 - Mix-euler scheduler
 - CFG parallel for dit_high only (cfg_scale_high=3.5, cfg_scale_low=1.0)
 
-#### wan22_14b_image_to_video_h100_ray.py
+#### `wan22_14b_image_to_video_h100_ray.py`
 
 I2V with Ray distributed inference.
 
@@ -579,7 +610,7 @@ python examples/wan_video/wan22_14b_image_to_video_h100_ray.py \
 - VAE parallel processing
 - No CFG parallel (cfg_scale=1.0)
 
-#### wan22_14b_image_to_video_cache_calibrate.py
+#### `wan22_14b_image_to_video_cache_calibrate.py`
 
 Calibration tool for Wan2.2 I2V AdaTaylorCache.
 
@@ -601,7 +632,7 @@ python examples/wan_video/wan22_14b_image_to_video_cache_calibrate.py \
 
 **Note:** Wan2.2 uses a dual-branch architecture where dit_high and dit_low work together in the sampling loop. A single calibrator is shared between both branches to capture the complete denoising process.
 
-#### wan22_i2v_5b.py
+#### `wan22_i2v_5b.py`
 
 I2V with Wan2.2 TI2V 5B model.
 
@@ -620,7 +651,7 @@ python examples/wan_video/wan22_i2v_5b.py \
 
 ### First-Last-Frame to Video Examples (FL2V)
 
-#### wan22_14b_first_last_frame_to_video_h100.py
+#### `wan22_14b_first_last_frame_to_video_h100.py`
 
 Generate video from first and last frames.
 
@@ -657,7 +688,7 @@ video = pipeline(
 
 ### Async Pipeline Examples
 
-#### async_wan22_14b_image_to_video_distill_h100.py
+#### `async_wan22_14b_image_to_video_distill_h100.py`
 
 Async I2V with event streaming.
 
@@ -677,52 +708,19 @@ python examples/wan_video/async_wan22_14b_image_to_video_distill_h100.py \
 - No CFG parallel (cfg_scale=1.0)
 - Suitable for API server integration
 
-## Performance
+## Serving
 
-### Text-to-Video (Wan2.1 1.3B)
+The standard service-compatible examples can be started with `telefuser serve`. The specialized Wan2.2 T2V files
+also configure cache-aware production service behavior:
 
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| T2V 1.3B | H100*1 | 40 | 81 | 480p | TBD | TBD |
-| T2V 1.3B | H100*2 | 40 | 81 | 480p | TBD | TBD |
-| T2V 1.3B + AdaTaylor | H100*1 | 40 | 81 | 480p | TBD | TBD |
-| T2V 1.3B + Radial | H100*1 | 40 | 81 | 480p | TBD | TBD |
+```bash
+telefuser serve examples/wan_video/wan21_14b_image_to_video_480p_service.py --port 8000
+telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --port 8001
+telefuser serve examples/wan_video/wan22_14b_text_to_video_service_nocache.py --port 8002
+```
 
-### Text-to-Video (Wan2.1 14B)
-
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| T2V 14B | H100*1 | 40 | 81 | 720p | TBD | TBD |
-
-### Text-to-Video (Wan2.2 14B)
-
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| T2V 14B | H100*1 | 40 | 81 | 720p | TBD | TBD |
-| T2V 14B | H100*2 | 40 | 81 | 720p | TBD | TBD |
-
-### Image-to-Video (Wan2.1 14B)
-
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| I2V 14B | H100*1 | 40 | 81 | 720p | TBD | TBD |
-| I2V 14B + LoRA | H100*1 | 8 | 81 | 720p | TBD | TBD |
-
-### Image-to-Video (Wan2.2 A14B)
-
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| I2V A14B BF16 | H100*1 | 40 | 81 | 720p | TBD | TBD |
-| I2V A14B Distill BF16 | H100*1 | 8 | 81 | 720p | TBD | TBD |
-| I2V A14B Distill FP8 | H100*1 | 8 | 81 | 720p | TBD | TBD |
-| I2V A14B Distill BF16 | H100*2 | 8 | 81 | 720p | TBD | TBD |
-
-### First-Last-Frame to Video (Wan2.2 A14B)
-
-| Config | Device | Steps | Frames | Resolution | Time (s) | Max VRAM (GB) |
-|--------|--------|-------|--------|------------|----------|---------------|
-| FL2V A14B | H100*1 | 40 | 81 | 720p | TBD | TBD |
-| FL2V A14B | H100*2 | 40 | 81 | 720p | TBD | TBD |
+Review each service file's `PPL_CONFIG` and required model paths before starting it. See the
+[service guide](../../docs/en/service.md) for request and deployment behavior.
 
 ## Notes
 

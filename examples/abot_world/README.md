@@ -1,58 +1,78 @@
-# ABot-World-0-5B-LF
+# ABot-World Examples
 
-This example exposes a local single-GPU HTTP entry point and a concurrent
-TurboServe-style LiveKit entry point. The HTTP controller is useful for model debugging:
+ABot-World-0-5B-LF provides a single-GPU interactive world-model controller with persistent causal state through a
+local HTTP UI or the shared LiveKit streaming service.
+
+## Model Source
+
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| ABot-World-0-5B-LF | [acvlab/ABot-World-0-5B-LF](https://huggingface.co/acvlab/ABot-World-0-5B-LF) | [amap_cvlab/ABot-World-0-5B-LF](https://modelscope.cn/models/amap_cvlab/ABot-World-0-5B-LF) | Interactive causal DiT checkpoint |
+| Wan2.2 VAE and T5 | [Bundled in ABot-World-0-5B-LF](https://huggingface.co/acvlab/ABot-World-0-5B-LF) | [Bundled in ABot-World-0-5B-LF](https://modelscope.cn/models/amap_cvlab/ABot-World-0-5B-LF) | Video codec and prompt encoder |
+| TAEHW2 decoder | [Bundled in ABot-World-0-5B-LF](https://huggingface.co/acvlab/ABot-World-0-5B-LF) | [Bundled in ABot-World-0-5B-LF](https://modelscope.cn/models/amap_cvlab/ABot-World-0-5B-LF) | Low-latency browser preview |
+
+## Feature Support
+
+| Feature | Support | Notes |
+| --- | --- | --- |
+| Interactive world generation | Supported | WASD/arrow movement and IJKL camera controls |
+| Persistent causal sessions | Supported | Bounded KV cache and fixed local RoPE positions |
+| Multi-GPU inference | Partial | Independent one-GPU replicas; one model session is not tensor-sharded |
+| CPU offload | Supported | VAE, T5, and DiT use model CPU offload |
+| Quantization | Unsupported | The loader uses BF16 DiT/T5 and FP32 VAE weights |
+| Server API | Supported | Local HTTP and LiveKit stream-service entry points |
+
+## Requirements
+
+- GPU: one CUDA GPU per model worker; the optimized SageAttention path requires an SM90 H100-class GPU
+- Software: the standard TeleFuser installation; LiveKit Server and coturn are required only for the LiveKit path
+- Input assets: a source image, either uploaded in the UI or provided by path
+
+Install TeleFuser by following the [development setup](../../CONTRIBUTING.md#development-setup). See the
+[ABot architecture guide](../../docs/en/abot_world.md) for cache and service details.
+
+## Model Directory
+
+```text
+/path/to/ABot-World-0-5B-LF/
+|-- diffusion_pytorch_model.safetensors
+|-- Wan2.2_VAE.pth
+|-- taew2_2.pth
+\-- models_t5_umt5-xxl-enc-bf16.pth
+```
+
+## Quick Start
 
 ```bash
 python examples/abot_world/abot_world_interactive_web.py \
   --model-root /path/to/ABot-World-0-5B-LF \
-  --host 127.0.0.1 \
-  --port 7860
+  --host 127.0.0.1 --port 7860
 ```
 
-Open `http://127.0.0.1:7860`, provide an image path, and connect. The browser controls WASD/arrow movement and IJKL
-camera rotation. Confirm that the preview appears, then hold a movement key and check that new frames arrive;
-release the keys and confirm that generation becomes idle. Disconnect before stopping the server with Ctrl+C.
+Open `http://127.0.0.1:7860`, upload an image, connect, and hold a movement key to generate frames.
 
-Connecting
-creates the image-conditioned causal session but does not advance the DiT
-until a non-empty control state is received. Generated blocks remain ordered in a bounded per-session queue. The default
-`latest` mode drops the oldest complete block, with metrics, only when a slow
-browser fills the queue; `lossless` mode applies scheduling backpressure instead.
-The six sink latents and rolling tail use fixed logical RoPE positions, so the
-global session frame number does not index beyond the trained local window.
+## Examples
 
-## Configuration
+### Local Interactive Controller
 
-The HTTP entry point exposes `--height` (480), `--width` (832), `--fps` (12), and `--control-latent-frames` (3).
-Three causal latents per control update match the official streaming checkpoint; the one-latent mode is experimental.
-The playback FPS is not a measured compute throughput. See the [pipeline architecture](../../docs/en/abot_world.md)
-for model and cache behavior.
-
-## LiveKit
-
-The LiveKit path uses TeleFuser's existing `stream-serve` service and the
-shared LingBot browser controls. Start coturn with one fixed relay port and
-LiveKit Server first, then run the model worker:
+#### `abot_world_interactive_web.py`
 
 ```bash
-turnserver -n -m 1 \
-  --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
-  --listening-port=3478 --min-port=49160 --max-port=49160 \
-  --user=livekit-demo:livekit-demo-password --realm=livekit.local \
-  --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
-  --allow-loopback-peers
+python examples/abot_world/abot_world_interactive_web.py \
+  --model-root /path/to/ABot-World-0-5B-LF \
+  --height 480 --width 832 \
+  --fps 8 --control-latent-frames 2
 ```
 
-```bash
-livekit-server --dev
-```
+The default two-latent control block targets 8 FPS. Three causal latents match the official streaming checkpoint;
+one latent remains experimental. Height and width must be divisible by 32, and `latent-frames` must equal `1 mod 3`.
 
-Then run the model worker:
+### LiveKit Service
+
+#### `abot_world_livekit_service.py`
 
 ```bash
-TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-CUDA_VISIBLE_DEVICES=0 \
+TF_MODEL_ZOO_PATH=/path/to/model_zoo CUDA_VISIBLE_DEVICES=0 \
 telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey --livekit-api-secret secret \
@@ -60,60 +80,33 @@ telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
   --port 8088 --skip-validation
 ```
 
-For multiple GPUs, use one worker per GPU, for example
-`--num-workers 4 --worker-gpu-map '0;1;2;3' --worker-mode process-nccl`. This mode loads each
-GPU replica in a spawned child so Python, asyncio, CUDA contexts, and model execution are isolated across GPUs.
-It keeps room transport in the parent and enables NCCL session migration; its NCCL group is fixed, so do not
-enable process autoscaling. Use plain `--worker-mode process` plus a non-zero queue and
-`--enable-autoscaling --autoscaling-min-workers 1` for on-demand independent replicas.
-Each worker continuously batches compatible retained sessions through both DiT
-and cached VAE decode; GPU IDs are passed explicitly to the ABot model factory.
+Start coturn and LiveKit Server before this command. For multiple independent replicas, use an explicit worker map
+such as `--num-workers 4 --worker-gpu-map '0;1;2;3'`.
 
-For a reproducible four-GPU deployment, use one worker per GPU with
-`process-nccl` and an explicit worker map. The parent scheduler assigns each
-public session; clients do not choose a GPU.
+### LiveKit Browser
 
-Serve the reused browser page in another terminal:
+#### `abot_world_livekit.py`
 
 ```bash
 python examples/abot_world/abot_world_livekit.py \
   --server-url http://127.0.0.1:8088 --port 8092 --no-open
 ```
 
-Open `http://127.0.0.1:8092`, upload an image, and click **Start**. Hold a movement key to receive generated video.
-Stop the browser session before stopping the browser proxy, model worker, LiveKit, and TURN relay in that order.
+Open `http://127.0.0.1:8092`, upload an image, and start the session.
 
-The SSH connection must also forward relay port `49160` in addition to
-`8092`, `7880`, and `3478`. The default image requires the upstream checkout described above, but an uploaded image
-is sent as a data URL in the session request. It sends the existing `tf.control`
-`control_state` and press/release messages; the ABot service emits a preview
-first and then ordered 12 FPS chunks only while controls are held.
+#### `abot_world_livekit_service.py` and `_loader.py`
 
-## Test tiers
+The service file provides the stream-service factory. `_loader.py` is a shared checkpoint loader rather than a
+standalone entry point.
 
-CPU contract tests cover action-channel layout, checkpoint conversion, sink
-KV rolling, RoPE boundary validation, session cleanup, and the direct runtime
-idle/FIFO behavior:
+## Configuration
+
+The output queue is bounded per session. `latest` mode drops the oldest complete block when a slow browser fills the
+queue; `lossless` mode applies scheduling backpressure. Stop the browser session before shutting down the proxy,
+model worker, LiveKit, and TURN relay.
+
+## Validation
 
 ```bash
 pytest tests/unit/pipelines/abot_world
 ```
-
-The 30-block GPU smoke is opt-in because it loads the release checkpoint:
-
-```bash
-ABOT_WORLD_MODEL_ROOT=/path/to/ABot-World-0-5B-LF \
-ABOT_WORLD_TEST_IMAGE=/path/to/initial.png \
-pytest -m "gpu and slow" tests/integration/test_abot_world_smoke.py -v
-```
-
-The multi-session benchmark exercises 30 continuously batched blocks:
-
-```bash
-python tools/validation/benchmark_abot_turboserve.py \
-  --model-root /path/to/ABot-World-0-5B-LF --image /path/to/initial.png \
-  --sessions 2 --chunks 30 --batch-size 2 --output /tmp/abot-turboserve.json
-```
-
-The smoke and benchmark check generation, session-state isolation, block ordering,
-and batching; they are not visual-quality or long-horizon parity claims.
