@@ -407,8 +407,6 @@ def check_site(site: Path, site_url: str) -> None:
     cache: dict[Path, SiteHTML] = {}
     errors = []
     for page in sorted(site.rglob("*.html")):
-        if "cookbook" not in page.relative_to(site).parts:
-            continue
         parsed = SiteHTML(page.read_text(encoding="utf-8"))
         cache[page] = parsed
         relative = page.relative_to(site).as_posix()
@@ -431,7 +429,7 @@ def check_site(site: Path, site_url: str) -> None:
                 if unquote(target.fragment) not in cache[local].ids:
                     errors.append(f"{relative}: missing anchor: {link}")
     if errors:
-        raise ValueError("Cookbook link validation failed:\n" + "\n".join(errors))
+        raise ValueError("Site link validation failed:\n" + "\n".join(errors))
 
 
 def check_warnings(warnings: list[str], baseline: Path) -> None:
@@ -475,7 +473,7 @@ def main() -> None:
         config = load_config(str(generated))
         check_site(Path(config.site_dir), config.site_url)
         check_warnings(warnings, ROOT / "scripts/docs/warnings-baseline.txt")
-        print("Cookbook pages, assets, and rendered anchors validated.")
+        print("Rendered site pages, assets, and anchors validated.")
 
 
 if __name__ == "__main__":

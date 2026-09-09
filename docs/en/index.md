@@ -63,31 +63,37 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
-| LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
-| ABot-World-0-5B-LF | Single-GPU interactive generation | Direct HTTP or LiveKit browser control with persistent causal KV state; see the [ABot guide](abot_world/) |
+| [LingBot-World v2](/TeleFuser/cookbook/lingbot-world/) | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
+| [LingBot-World-Fast](/TeleFuser/cookbook/lingbot-world/) | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
+| [ABot-World-0-5B-LF](/TeleFuser/cookbook/abot-world/) | Single-GPU interactive generation | Direct HTTP or LiveKit browser control with persistent causal KV state |
 
 ### Video Generation
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
-| LTX Video | I2V + Audio | Video generation with audio |
-| LTX-2.5 Distilled | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP; see the [example guide](../../examples/ltx25_distilled/README.md) |
-| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
-| FlashVSR | VSR | Video super-resolution |
-| SwiftVR | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options; see the [example guide](../../examples/swiftvr/README.md) |
-| LiveAct | S2V | Speech-to-video |
-| LongCat-Video | T2V, I2V | Long video generation |
-| LingBot-Video | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |
+| [WanVideo (Wan2.1 / Wan2.2)](/TeleFuser/cookbook/wan-video/) | T2V, I2V, FL2V | Video generation and editing |
+| [LTX Video](/TeleFuser/cookbook/ltx23/) | I2V + Audio | Video generation with audio |
+| [LTX-2.5 Distilled](/TeleFuser/cookbook/ltx25-distilled/) | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP |
+| [MiniMax H3](/TeleFuser/cookbook/minimax-h3/) | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
+| [FlashVSR](/TeleFuser/cookbook/flashvsr/) | VSR | Video super-resolution |
+| [SwiftVR](/TeleFuser/cookbook/swiftvr/) | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options |
+| [LiveAct](/TeleFuser/cookbook/liveact/) | S2V | Speech-to-video |
+| [LongCat-Video](/TeleFuser/cookbook/longcat-video/) | T2V, I2V | Long video generation |
+| [LingBot-Video](/TeleFuser/cookbook/lingbot-video/) | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |
 
 ### Image Generation
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| Qwen-Image | T2I, Edit | Image generation and editing |
-| Z-Image | T2I | Image generation |
-| Flux2 Klein | T2I | Image generation |
+| [Qwen-Image](/TeleFuser/cookbook/qwen-image/) | T2I, Edit | Image generation and editing |
+| [Z-Image](/TeleFuser/cookbook/z-image/) | T2I | Image generation |
+| [Flux2 Klein](/TeleFuser/cookbook/flux2-klein/) | T2I | Image generation |
+
+### Vision-Language-Action
+
+| Model | Tasks | Description |
+|-------|-------|-------------|
+| [LingBot-VLA v2](/TeleFuser/cookbook/lingbot-vla-v2/) | Robot manipulation | Vision-language-action inference for supported robot profiles |
 
 ## Quick Start
 

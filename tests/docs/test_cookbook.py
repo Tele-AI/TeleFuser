@@ -273,6 +273,11 @@ class CookbookTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deployment prefix"):
             check_site(self.root / "site", "https://example.org/TeleFuser/")
 
+    def test_rendered_non_cookbook_broken_link_fails(self) -> None:
+        self.write("site/index.html", '<a href="missing/">bad</a>')
+        with self.assertRaisesRegex(ValueError, "missing target"):
+            check_site(self.root / "site", "https://example.org/TeleFuser/")
+
     def test_new_warnings_fail_without_requiring_old_warnings(self) -> None:
         baseline = self.write("warnings.txt", "# Existing\nOld warning\n")
         check_warnings([], baseline)

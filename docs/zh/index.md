@@ -62,30 +62,37 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| LingBot-World v2 | 双向流式推理 | 通过 LiveKit 进行相机控制的交互式世界模型 |
-| LingBot-World-Fast | 双向流式推理 | 通过 LiveKit 可靠数据消息控制的 legacy/causal-fast 模型 |
+| [LingBot-World v2](/TeleFuser/zh/cookbook/lingbot-world/) | 双向流式推理 | 通过 LiveKit 进行相机控制的交互式世界模型 |
+| [LingBot-World-Fast](/TeleFuser/zh/cookbook/lingbot-world/) | 双向流式推理 | 通过 LiveKit 可靠数据消息控制的 legacy/causal-fast 模型 |
+| [ABot-World-0-5B-LF](/TeleFuser/zh/cookbook/abot-world/) | 单卡交互式生成 | 通过直接 HTTP 或 LiveKit 浏览器控制，并保持因果 KV 状态 |
 
 ### 视频生成
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
-| LTX Video | I2V + Audio | 视频生成 + 音频 |
-| LTX-2.5 Distilled | T2V、I2V + Audio | 基于 ModuleManager 的六阶段流水线，支持 1/2/4 张 H100 的 Ulysses SP，见[示例文档](../../examples/ltx25_distilled/README.md) |
-| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
-| FlashVSR | VSR | 视频超分辨率 |
-| SwiftVR | 因果视频修复 | 支持 BF16、torch.compile、FP8Linear、Ulysses SP 和 stage-parallel，见 [示例文档](../../examples/swiftvr/README.md) |
-| LiveAct | S2V | 语音转视频 |
-| LongCat-Video | T2V, I2V | 长视频生成 |
-| LingBot-Video | T2I, T2V, TI2V, MoE refiner | 精度优先的 Dense/MoE 视频生成 |
+| [WanVideo (Wan2.1 / Wan2.2)](/TeleFuser/zh/cookbook/wan-video/) | T2V, I2V, FL2V | 视频生成和编辑 |
+| [LTX Video](/TeleFuser/zh/cookbook/ltx23/) | I2V + Audio | 视频生成 + 音频 |
+| [LTX-2.5 Distilled](/TeleFuser/zh/cookbook/ltx25-distilled/) | T2V、I2V + Audio | 基于 ModuleManager 的六阶段流水线，支持 1/2/4 张 H100 的 Ulysses SP |
+| [MiniMax H3](/TeleFuser/zh/cookbook/minimax-h3/) | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
+| [FlashVSR](/TeleFuser/zh/cookbook/flashvsr/) | VSR | 视频超分辨率 |
+| [SwiftVR](/TeleFuser/zh/cookbook/swiftvr/) | 因果视频修复 | 支持 BF16、torch.compile、FP8Linear、Ulysses SP 和 stage-parallel |
+| [LiveAct](/TeleFuser/zh/cookbook/liveact/) | S2V | 语音转视频 |
+| [LongCat-Video](/TeleFuser/zh/cookbook/longcat-video/) | T2V, I2V | 长视频生成 |
+| [LingBot-Video](/TeleFuser/zh/cookbook/lingbot-video/) | T2I, T2V, TI2V, MoE refiner | 精度优先的 Dense/MoE 视频生成 |
 
 ### 图像生成
 
 | 模型 | 任务 | 描述 |
 |------|------|------|
-| Qwen-Image | T2I, Edit | 图像生成和编辑 |
-| Z-Image | T2I | 图像生成 |
-| Flux2 Klein | T2I | 图像生成 |
+| [Qwen-Image](/TeleFuser/zh/cookbook/qwen-image/) | T2I, Edit | 图像生成和编辑 |
+| [Z-Image](/TeleFuser/zh/cookbook/z-image/) | T2I | 图像生成 |
+| [Flux2 Klein](/TeleFuser/zh/cookbook/flux2-klein/) | T2I | 图像生成 |
+
+### 视觉语言动作
+
+| 模型 | 任务 | 描述 |
+|------|------|------|
+| [LingBot-VLA v2](/TeleFuser/zh/cookbook/lingbot-vla-v2/) | 机器人操作 | 面向受支持机器人配置的视觉语言动作推理 |
 
 ## 快速开始
 
