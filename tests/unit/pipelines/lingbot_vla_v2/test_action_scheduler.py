@@ -8,6 +8,11 @@ from typing import Any, Mapping
 import pytest
 
 from telefuser.pipelines.lingbot_vla_v2.action_scheduler import ActionChunkScheduler
+from telefuser.vla.runtime import ActionChunkScheduler as CommonActionChunkScheduler
+
+
+def test_lingbot_scheduler_import_is_a_compatibility_alias() -> None:
+    assert ActionChunkScheduler is CommonActionChunkScheduler
 
 
 def test_scheduler_discards_inflight_and_pending_work_when_newer_observation_arrives() -> None:
