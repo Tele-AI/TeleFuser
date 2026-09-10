@@ -198,6 +198,21 @@ def test_websocket_is_persistent_and_uses_upstream_response_fields() -> None:
             assert reset_response["episode_id"] == "episode-1"
             assert reset_response["server_timing"]["prev_total_ms"] >= 0
 
+            websocket.send_bytes(
+                server.pack_message(
+                    {
+                        **_observation(),
+                        "request_id": "after-reset",
+                        "episode_id": "episode-1",
+                        "sequence_id": 0,
+                    }
+                )
+            )
+            after_reset = server.unpack_message(websocket.receive_bytes())
+            assert after_reset["scheduler_status"] == "completed"
+            assert after_reset["sequence_id"] == 0
+            assert after_reset["action"].shape == (3, 14)
+
 
 def test_websocket_accepts_overlapping_chunks_and_discards_superseded_actions() -> None:
     first_started = threading.Event()

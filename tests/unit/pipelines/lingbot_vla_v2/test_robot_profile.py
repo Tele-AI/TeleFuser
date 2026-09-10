@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from telefuser.pipelines.lingbot_vla_v2.robot_profile import RobotWinProfile
+from telefuser.pipelines.lingbot_vla_v2.robot_profile import (
+    LINGBOT_VLA_V2_ACTION_SPACE,
+    ROBOTWIN_ACTION_ORDER,
+    ROBOTWIN_ACTION_SPACE,
+    RobotWinProfile,
+)
+from telefuser.vla import ModelActionChunk, RobotObservation, RobotState
 
 
 def _stats() -> dict[str, dict[str, list[float]]]:
@@ -82,3 +88,30 @@ def test_profile_rejects_invalid_state_and_action_shapes() -> None:
         profile.normalize_state(torch.zeros(13))
     with pytest.raises(ValueError, match="canonical actions must have shape"):
         profile.structure_actions(torch.zeros(2, 54))
+
+
+def test_profile_implements_semantic_embodiment_contract() -> None:
+    profile = RobotWinProfile(_stats())
+    observation = RobotObservation(
+        RobotState(torch.zeros(14), ROBOTWIN_ACTION_ORDER, timestamp_ns=123),
+        {key: object() for key in profile.camera_keys},
+    )
+    model_observation = profile.encode_observation(observation)
+    model_chunk = ModelActionChunk(
+        torch.zeros(3, 55),
+        LINGBOT_VLA_V2_ACTION_SPACE,
+        2,
+        123,
+        7,
+        "episode",
+        {"source": "lingbot"},
+    )
+
+    robot_chunk = profile.decode_actions(model_chunk, observation.state)
+
+    assert model_observation.state.shape == (14,)
+    assert robot_chunk.actions.shape == (2, 14)
+    assert robot_chunk.valid_length == 2
+    assert robot_chunk.action_space == ROBOTWIN_ACTION_SPACE
+    assert robot_chunk.sequence_id == 7
+    assert robot_chunk.metadata["source"] == "lingbot"

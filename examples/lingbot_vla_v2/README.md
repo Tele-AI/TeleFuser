@@ -29,6 +29,7 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
 | RoboTwin action mapping | Supported | Unnormalizes canonical output to absolute-position `50 x 14` chunks |
+| Semantic VLA contract | Supported | Model and robot action spaces are explicit; see [VLA Action Integration](../../docs/en/vla.md) |
 
 ## Requirements
 
@@ -315,6 +316,10 @@ Each request runs the existing pipeline, converts normalized canonical `50 x 55`
 profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
 start with 50 for upstream-equivalent open-loop execution. The adapter accepts episode reset messages but deliberately
 rejects runtime checkpoint switching.
+
+Internally this compatibility endpoint uses the shared `VLAPolicy`, `EmbodimentAdapter`, `VLASessionManager`, and
+`ChunkExecutor` contracts. The wire protocol and the existing `LingBotVlaV2Pipeline` API remain unchanged. The
+declared control rate is intentionally unresolved until the remote RoboTwin loop supplies its actual frequency.
 
 For split-machine deployment, run the model endpoint and the repository-owned XPolicyLab proxy on the H100 inference
 host. The proxy does not load a second model; it translates XPolicyLab observations to the direct TeleFuser protocol:

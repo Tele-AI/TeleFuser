@@ -10,6 +10,15 @@ from typing import Mapping, Sequence
 
 import torch
 
+from telefuser.vla.contracts import (
+    ActionSpaceSpec,
+    ModelActionChunk,
+    ModelObservation,
+    RobotActionChunk,
+    RobotObservation,
+    RobotState,
+)
+
 ROBOTWIN_CAMERA_KEYS = (
     "observation.images.cam_high",
     "observation.images.cam_left_wrist",
@@ -19,6 +28,39 @@ ROBOTWIN_STATE_DIM = 14
 CANONICAL_DIM = 55
 ARM_SLICE = slice(0, 12)
 EFFECTOR_SLICE = slice(28, 30)
+ROBOTWIN_ACTION_ORDER = (
+    "left_arm_joint_0",
+    "left_arm_joint_1",
+    "left_arm_joint_2",
+    "left_arm_joint_3",
+    "left_arm_joint_4",
+    "left_arm_joint_5",
+    "left_gripper",
+    "right_arm_joint_0",
+    "right_arm_joint_1",
+    "right_arm_joint_2",
+    "right_arm_joint_3",
+    "right_arm_joint_4",
+    "right_arm_joint_5",
+    "right_gripper",
+)
+LINGBOT_VLA_V2_ACTION_SPACE = ActionSpaceSpec(
+    representation="canonical_normalized",
+    dimension_names=tuple(f"canonical_action_{index}" for index in range(CANONICAL_DIM)),
+    units=("normalized",) * CANONICAL_DIM,
+    frame=None,
+    control_hz=None,
+    normalized=True,
+    normalization_profile="lingbot_vla_v2_canonical",
+)
+ROBOTWIN_ACTION_SPACE = ActionSpaceSpec(
+    representation="absolute_qpos",
+    dimension_names=ROBOTWIN_ACTION_ORDER,
+    units=("radian",) * 6 + ("normalized_position",) + ("radian",) * 6 + ("normalized_position",),
+    frame="robot_joint",
+    control_hz=None,
+    normalized=False,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +81,7 @@ class RobotWinProfile:
     """Map RobotWin observations and actions to LingBot's canonical space."""
 
     name = "robotwin"
+    embodiment_id = "robotwin"
     camera_keys = ROBOTWIN_CAMERA_KEYS
     canonical_dim = CANONICAL_DIM
     raw_state_dim = ROBOTWIN_STATE_DIM
@@ -80,6 +123,51 @@ class RobotWinProfile:
         mask[ARM_SLICE] = True
         mask[EFFECTOR_SLICE] = True
         return mask
+
+    @property
+    def model_action_space(self) -> ActionSpaceSpec:
+        """Return the semantic action space accepted from LingBot-VLA v2."""
+        return LINGBOT_VLA_V2_ACTION_SPACE
+
+    @property
+    def robot_action_space(self) -> ActionSpaceSpec:
+        """Return the semantic action space emitted for RoboTwin."""
+        return ROBOTWIN_ACTION_SPACE
+
+    def encode_observation(self, observation: RobotObservation) -> ModelObservation:
+        """Validate a RoboTwin observation while retaining raw state for the model processor."""
+        if not isinstance(observation, RobotObservation):
+            raise TypeError("observation must be a RobotObservation")
+        if observation.state.dimension_names != ROBOTWIN_ACTION_ORDER:
+            raise ValueError("RobotWin state dimension order does not match the robot profile")
+        missing = [key for key in self.camera_keys if key not in observation.images]
+        if missing:
+            raise ValueError(f"RobotWin observation is missing camera keys: {missing}")
+        return ModelObservation(
+            state=observation.state.values,
+            images={key: observation.images[key] for key in self.camera_keys},
+            metadata=observation.metadata,
+        )
+
+    def decode_actions(
+        self,
+        actions: ModelActionChunk,
+        robot_state: RobotState,
+    ) -> RobotActionChunk:
+        """Map a semantic LingBot chunk to an absolute RoboTwin joint chunk."""
+        self.model_action_space.require_compatible(actions.action_space, context="LingBot model action space")
+        if robot_state.dimension_names != ROBOTWIN_ACTION_ORDER:
+            raise ValueError("RobotWin state dimension order does not match the robot profile")
+        structured = self.structure_actions(actions.actions[: actions.valid_length])
+        return RobotActionChunk(
+            actions=structured.raw_actions,
+            action_space=self.robot_action_space,
+            valid_length=structured.horizon,
+            observation_timestamp_ns=actions.observation_timestamp_ns,
+            sequence_id=actions.sequence_id,
+            episode_id=actions.episode_id,
+            metadata=actions.metadata,
+        )
 
     def normalize_state(self, raw_state: torch.Tensor | Sequence[float]) -> torch.Tensor:
         """Convert one raw 14-D RobotWin state to normalized canonical 55-D space."""
