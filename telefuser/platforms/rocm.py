@@ -63,6 +63,18 @@ class RocmPlatform(BasePlatform):
         return torch.cuda.set_device(device)
 
     @staticmethod
+    def device_count() -> int:
+        return torch.cuda.device_count()
+
+    @staticmethod
+    def is_accelerator_available() -> bool:
+        return torch.cuda.is_available() and torch.cuda.device_count() > 0
+
+    @staticmethod
+    def current_device() -> int:
+        return torch.cuda.current_device()
+
+    @staticmethod
     def get_device_capability(device: int | str | torch.device | None = None) -> tuple[int, int]:
         return torch.cuda.get_device_capability(device)
 

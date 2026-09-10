@@ -10,6 +10,7 @@
 | Python | 3.10 至 3.13 |
 | PyTorch | 2.6 或更高版本 |
 | CUDA Toolkit | 当前 CUDA 开发路径要求 12.8 或更高版本 |
+| ROCm | AMD GPU 使用 ROCm 7.x 与 PyTorch `+rocm` 构建，详见验证安装一节的说明 |
 | GPU | 取决于所选模型，以对应 Cookbook 为准 |
 
 具体示例可能要求更严格的软件版本或 GPU 架构。特别是本地构建的 `tf-kernel` 产物与其记录的 PyTorch、
@@ -53,6 +54,12 @@ telefuser --help
 
 模型执行要求 `torch.cuda.is_available()` 输出 `True`。否则应先检查 PyTorch CUDA 构建和 NVIDIA 驱动，
 再排查 TeleFuser。
+
+AMD ROCm 主机应安装 PyTorch `+rocm` 构建，而非 CUDA Toolkit 路径。HIP 构建下
+`torch.cuda.is_available()` 同样输出 `True`（可通过 `torch.version.hip` 区分），TeleFuser 平台层会先
+检测 ROCm 再检测 CUDA。以 `_rocm.py` 结尾的示例（例如
+`examples/wan_video/wan21_1_3b_text_to_video_rocm.py`）是已验证的入口；各平台能力与后端可用性见
+[硬件平台](platforms.md)。
 
 ## 模型权重
 

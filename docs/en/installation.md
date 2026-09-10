@@ -11,6 +11,7 @@ distribution are installed separately.
 | Python | 3.10 through 3.13 |
 | PyTorch | 2.6 or newer |
 | CUDA toolkit | 12.8 or newer for the maintained CUDA development path |
+| ROCm | 7.x with a PyTorch `+rocm` build for AMD GPUs; see the ROCm note under verification |
 | GPU | Depends on the selected model; check its Cookbook guide |
 
 An example may impose stricter versions or GPU architecture requirements. In particular, locally built `tf-kernel`
@@ -54,6 +55,12 @@ telefuser --help
 
 Model execution expects `torch.cuda.is_available()` to print `True`. If it does not, verify the installed PyTorch
 build and visible NVIDIA driver before diagnosing TeleFuser.
+
+On AMD ROCm hosts, install a PyTorch `+rocm` build instead of the CUDA toolkit path. A HIP build also prints `True`
+for `torch.cuda.is_available()` (check `torch.version.hip` to distinguish it), and TeleFuser's platform layer detects
+ROCm before CUDA. Examples ending in `_rocm.py` (for example `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`)
+are the validated entry points; see [Hardware Platforms](platforms.md) for per-platform capabilities and backend
+availability.
 
 ## Model Checkpoints
 
