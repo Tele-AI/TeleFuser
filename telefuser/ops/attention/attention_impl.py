@@ -1,7 +1,7 @@
 """Unified attention implementation with dense and sparse support.
 
 Supports multiple attention implementations:
-- Dense: TORCH_SDPA, TORCH_CUDNN, FLASH_ATTN_2/3/4, SAGE_ATTN variants, SPARGE_ATTN
+- Dense: TORCH_SDPA, TORCH_CUDNN, FLASH_ATTN_2/3/4, SAGE_ATTN variants, SPARGE_ATTN, MINDIE_ATTN (Ascend NPU)
 - Sparse: RADIAL_ATTN, LOCAL_SPARSE_ATTN, SOL_ATTN
 
 Note: Attention functions are decorated with @torch.compiler.disable because:
@@ -31,6 +31,7 @@ from telefuser.ops.attention.backends import (
     FLASH_ATTN_2_AVAILABLE,
     FLASH_ATTN_3_AVAILABLE,
     FLASH_ATTN_4_AVAILABLE,
+    MINDIE_ATTN_AVAILABLE,
     SAGE_ATTN_AVAILABLE,
     SDPA_AVAILABLE,
     SOL_ATTN_AVAILABLE,
@@ -39,6 +40,7 @@ from telefuser.ops.attention.backends import (
     flash_attn4,
     flash_attn4_varlen,
     get_lse_fallback_impl,
+    mindie_attn,
     sageattention,
     sdpa_attn_cudnn,
     sol_attn,
@@ -296,7 +298,7 @@ def attention(
     # - Flash Attention expects BSND (NHD) layout
     # - PyTorch SDPA variants expect BNSD (HND) layout
     # - SageAttention can accept both via tensor_layout parameter
-    BNSD_IMPLS = {AttnImplType.TORCH_CUDNN, AttnImplType.TORCH_SDPA, AttnImplType.SPARGE_ATTN}
+    BNSD_IMPLS = {AttnImplType.TORCH_CUDNN, AttnImplType.TORCH_SDPA, AttnImplType.SPARGE_ATTN, AttnImplType.MINDIE_ATTN}
 
     # Track current layout after potential conversions
     current_layout = input_layout
@@ -372,6 +374,10 @@ def attention(
             output, lse, _ = result
         else:
             output = result
+
+    # MindIE-SD attention (Ascend NPU)
+    elif sequence_lengths is None and attn_impl == AttnImplType.MINDIE_ATTN and MINDIE_ATTN_AVAILABLE:
+        output = mindie_attn(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
 
     # PyTorch SDPA
     elif sequence_lengths is None and attn_impl == AttnImplType.TORCH_CUDNN and SDPA_AVAILABLE:
