@@ -141,6 +141,7 @@ plugins:
             CUDA IPC Ulysses: CUDA IPC Ulysses
             Parallel Inference: 并行推理
             Communication Architecture: 通信架构
+            Hardware Platforms: 硬件平台
             Developer Guide: 开发者指南
             Configuration: 配置
             Tools: 工具
@@ -198,6 +199,7 @@ nav:
       - Model Loading: model_loading.md
       - Parallel Inference: parallel.md
       - Communication Architecture: communication.md
+      - Hardware Platforms: platforms.md
       - Attention: attention.md
       - Quantization: quantization.md
       - Feature Cache: feature_cache.md

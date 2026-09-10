@@ -116,6 +116,7 @@ uv.lock
 /benchmarks/aiperf/
 /models
 /data
+model_zoo/
 .vscode
 .idea
 *.pkl

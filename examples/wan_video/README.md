@@ -32,6 +32,9 @@ Video generation using Wan2.1 and Wan2.2 models for Text-to-Video and Image-to-V
 
 - GPU: CUDA GPUs with enough memory for the selected 1.3B, 5B, or 14B checkpoint; H100 is the validated target for
   scripts ending in `_h100.py`
+- GPU: AMD ROCm GPUs for scripts ending in `_rocm.py`; validated on a Radeon RX 9070 (ROCm 7.2, `torch` built with
+  `+rocm`). These examples use the PyTorch SDPA attention backend and need no tf-kernel, flash-attn, or SageAttention
+  installation
 - Software: the standard TeleFuser installation; optional attention, FP8, Ray, and RIFE paths require their respective
   dependencies
 - Input assets: a readable image for I2V/FL2V and optional LoRA, distillation, cache, or RIFE weights for those variants
@@ -120,6 +123,44 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py --resolution 480p --a
 **Features:**
 - Video Frame Interpolation (VFI) with RIFE model for 30fps output
 - CFG parallel when cfg_scale > 1
+
+#### `wan21_1_3b_text_to_video_rocm.py`
+
+T2V on AMD ROCm GPUs.
+
+**Purpose:** Wan2.1 1.3B text-to-video for ROCm hosts, loading the official (non-Diffusers) checkpoint layout.
+
+**Usage:**
+```bash
+TELEAI_EXAMPLE_OUTPUT_DIR=work_dirs \
+python examples/wan_video/wan21_1_3b_text_to_video_rocm.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Wan2.1-T2V-1.3B" \
+  --prompt "A sailboat crosses a calm lake at sunrise"
+```
+
+**Features:**
+- PyTorch SDPA attention backend (natively available on ROCm; no flash-attn, SageAttention, or tf-kernel needed)
+- Eager execution (`torch.compile` disabled by default; not validated on ROCm)
+- 2-tile VAE decode geometry (`tile_size=(60, 62)`, `tile_stride=(30, 54)`): covers the 480p 16:9 latent with
+  ~1.4x redundant compute instead of the default 12-tile layout's ~2.9x, cutting VAE decode from ~61s to ~34s on a
+  Radeon RX 9070 at ~7.7GiB peak VRAM
+- Text encoder CPU offloading with pageable (non-pinned) host copies: the ~10.6GB bf16 T5 encoder is only
+  moved to the GPU during text encoding, and page-locked copies are avoided because they exceed a 16GB
+  host RAM budget together with the DiT/VAE weights
+- Validated single-GPU on Radeon RX 9070 (gfx1201) with ROCm 7.2
+- Multi-GPU branches follow the `_h100.py` parallel configuration and are not yet validated on ROCm
+- VFI (RIFE) is disabled by default; enable it in `PPL_CONFIG` to add the interpolation model
+
+**ROCm performance notes (Radeon RX 9070, gfx1201, ROCm 7.2, 832x480, 81 frames):**
+
+- The DiT denoiser is at the operator-level hardware limit in eager mode: hipBLASLt serves the MLP GEMMs at
+  ~99 TFLOPS (RDNA4 bf16 peak) and the AOTriton-backed flash SDPA is the only fast attention kernel on this GPU,
+  so there is no faster ROCm operator to switch to. Measured alternatives are slower: `torch.compile` warm steps
+  (~14.6s vs ~14.0s), TunableOp autotuned GEMMs (~15.2s plus a ~400s autotune pass), and MIOpen's fused
+  attention has no gfx1201 kernel ("No available kernel" error)
+- The first MIOpen conv run per shape pays one-time JIT compilation, cached cross-process under
+  `~/.cache/miopen`; subsequent runs (including in new processes) reuse it
+
 #### `wan21_1_3b_text_to_video_hf.py`
 
 T2V with HuggingFace format loading.
