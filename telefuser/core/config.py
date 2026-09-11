@@ -253,8 +253,8 @@ class AttentionConfig:
         sol_fp8: bool = False,
         sol_fp8_layer_start: int = 0,
         sol_fp8_layer_end: int | None = None,
-        sol_fp8_smoothing: str = "none",
-        sol_fp8_v_bias_correction: bool = False,
+        sol_fp8_smoothing: str = "kv",
+        sol_fp8_v_bias_correction: bool = True,
         **kwargs: any,
     ) -> AttentionConfig:
         """Create a Sol-Attn config for dynamic sparse video self-attention."""

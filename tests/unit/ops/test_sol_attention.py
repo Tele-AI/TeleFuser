@@ -14,6 +14,9 @@ def test_sol_attention_config_defaults_and_validation() -> None:
 
     assert config.attn_impl is AttnImplType.SOL_ATTN
     assert config.is_sparse()
+    assert config.sparse_config is not None
+    assert config.sparse_config.sol_fp8_smoothing == "kv"
+    assert config.sparse_config.sol_fp8_v_bias_correction is True
     assert config.sparse_config == SparseAttentionConfig(
         sparse_impl="sol",
         dense_timesteps=10,
@@ -21,6 +24,8 @@ def test_sol_attention_config_defaults_and_validation() -> None:
         sol_tau=1.0,
         sol_threshold_type="diag",
         sol_kv_splits="auto",
+        sol_fp8_smoothing="kv",
+        sol_fp8_v_bias_correction=True,
     )
 
     with pytest.raises(ValueError, match="threshold type"):
@@ -33,7 +38,7 @@ def test_sol_attention_config_defaults_and_validation() -> None:
         AttentionConfig.sol_attention(sol_fp8_smoothing="k", sol_fp8_v_bias_correction=True)
 
 
-def test_sol_attention_config_accepts_fp8_quality_profile() -> None:
+def test_sol_attention_config_accepts_explicit_fp8_quality_profile() -> None:
     config = AttentionConfig.sol_attention(
         sol_fp8=True,
         sol_fp8_smoothing="kv",

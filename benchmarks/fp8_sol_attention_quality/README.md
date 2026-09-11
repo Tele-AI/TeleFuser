@@ -107,7 +107,6 @@ CUDA_VISIBLE_DEVICES=0 python -m tools.validation.benchmark_minimax_h3_fp8_sol_s
 
 CUDA_VISIBLE_DEVICES=0 python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
   --gpu-num 1 --profile optimized --duration 4 --steps 50 --no-warmup \
-  --sol-fp8-smoothing kv --sol-fp8-v-bias-correction \
   --output outputs/h3_fp8_sol_kv_bias.mp4
 ```
 
