@@ -35,6 +35,9 @@ Video generation using Wan2.1 and Wan2.2 models for Text-to-Video and Image-to-V
 - GPU: AMD ROCm GPUs for scripts ending in `_rocm.py`; validated on a Radeon RX 9070 (ROCm 7.2, `torch` built with
   `+rocm`). These examples use the PyTorch SDPA attention backend and need no tf-kernel, flash-attn, or SageAttention
   installation
+- GPU: Huawei Ascend NPUs for `wan22_t2v_5b.py`, which auto-detects the platform; validated on an Atlas 910B
+  (CANN 8.2, torch 2.9 with a matching `torch_npu`). NPU execution uses the PyTorch SDPA attention backend and
+  needs no tf-kernel, flash-attn, SageAttention, or triton installation
 - Software: the standard TeleFuser installation; optional attention, FP8, Ray, and RIFE paths require their respective
   dependencies
 - Input assets: a readable image for I2V/FL2V and optional LoRA, distillation, cache, or RIFE weights for those variants
@@ -463,6 +466,9 @@ python examples/wan_video/wan22_t2v_5b.py --resolution 480p --aspect_ratio 16:9
 - CFG parallel enabled by default (cfg_scale=5.0)
 - Ulysses sequence parallelism for multi-GPU
 - 50-step UNPC sampling with sigma_shift=5.0
+- Platform auto-detection via `current_platform`: the script runs unmodified on CUDA and Ascend NPU hosts
+- Validated on an Ascend Atlas 910B (CANN 8.2, torch 2.9 with a matching `torch_npu`): single-card and 4-card
+  CFG × Ulysses over HCCL, PyTorch SDPA attention, eager execution
 
 #### `wan22_14b_text_to_video_h100.py`
 

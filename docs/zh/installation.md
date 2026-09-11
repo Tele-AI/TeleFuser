@@ -11,6 +11,7 @@
 | PyTorch | 2.6 或更高版本 |
 | CUDA Toolkit | 当前 CUDA 开发路径要求 12.8 或更高版本 |
 | ROCm | AMD GPU 使用 ROCm 7.x 与 PyTorch `+rocm` 构建，详见验证安装一节的说明 |
+| 昇腾 NPU | CANN 8.2 搭配版本匹配的 `torch` 与 `torch_npu` 构建，详见验证安装一节的说明 |
 | GPU | 取决于所选模型，以对应 Cookbook 为准 |
 
 具体示例可能要求更严格的软件版本或 GPU 架构。特别是本地构建的 `tf-kernel` 产物与其记录的 PyTorch、
@@ -60,6 +61,10 @@ AMD ROCm 主机应安装 PyTorch `+rocm` 构建，而非 CUDA Toolkit 路径。H
 检测 ROCm 再检测 CUDA。以 `_rocm.py` 结尾的示例（例如
 `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`）是已验证的入口；各平台能力与后端可用性见
 [硬件平台](platforms.md)。
+
+华为昇腾主机应安装与 PyTorch 版本匹配的 `torch_npu`，而非 CUDA Toolkit 路径。当 `torch_npu` 可导入且存在
+可见昇腾设备（由 `ASCEND_RT_VISIBLE_DEVICES` 控制）时，平台层会选择 NPU；此时 `torch.cuda.is_available()`
+输出 `False` 属预期行为。`examples/wan_video/wan22_t2v_5b.py` 是已验证的 NPU 入口。
 
 ## 模型权重
 

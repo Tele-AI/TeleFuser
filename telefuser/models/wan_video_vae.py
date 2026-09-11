@@ -119,7 +119,11 @@ class CausalConv3d(nn.Conv3d):
             x = torch.cat([cache_x, x], dim=2)
             padding[4] -= cache_x.shape[2]
         x = F.pad(x, padding)
-        x = x.contiguous(memory_format=torch.channels_last_3d)
+        if x.device.type == "cuda":
+            x = x.contiguous(memory_format=torch.channels_last_3d)
+        else:
+            # channels_last_3d activations are only supported by cuDNN; NPU/CPU require standard contiguous.
+            x = x.contiguous()
         return super().forward(x)
 
 

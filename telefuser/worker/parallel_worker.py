@@ -7,6 +7,7 @@ with proper process group initialization.
 from __future__ import annotations
 
 import gc
+import itertools
 import os
 import signal
 import threading
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
 
 
 _DISCARD_TENSOR_REFS = "__telefuser_discard_tensor_refs__"
+
+# Each concurrent worker group needs a distinct HCCL socket range on NPU hosts;
+# overlapping ranges fail comm init with EJ0003 (port already bound).
+_hccl_group_counter = itertools.count()
 
 
 def to_device(data: Any, device: str | torch.device) -> Any:
@@ -65,6 +70,7 @@ def _worker_loop(
     master_port: int,
     tensor_output_channel: WorkerTensorChannel | None = None,
     tensor_input_channels: tuple[WorkerTensorChannel, ...] = (),
+    hccl_if_base_port: int | None = None,
 ) -> None:
     """Worker process main loop.
 
@@ -89,6 +95,11 @@ def _worker_loop(
             os.environ["WORLD_SIZE"] = str(world_size)
             os.environ["MASTER_ADDR"] = "localhost"
             os.environ["MASTER_PORT"] = str(master_port)
+            if hccl_if_base_port is not None:
+                # Give each worker group a distinct host-side HCCL socket base;
+                # overlapping ranges fail comm init with EJ0003 when several
+                # groups share the same devices (e.g. denoise + VAE workers).
+                os.environ["HCCL_IF_BASE_PORT"] = str(hccl_if_base_port)
             device_ids = parallel_config.device_ids
             device_id = rank
             if device_ids is not None:
@@ -158,6 +169,9 @@ def _worker_loop(
                 y = tensor_output_channel.send(y)
             # Always output results when world_size=1
             if world_size == 1 or rank == 0:
+                if current_platform.device_type != "cuda":
+                    # Queue transport without reliable device IPC: marshal results through CPU.
+                    y = to_device(y, "cpu")
                 queue_out.put(y)
     except Exception as e:
         import traceback
@@ -206,7 +220,8 @@ class ParallelWorker:
             self.device_ids = list(range(self.world_size))
 
         self.name: str = f"Parallel Worker {stage.name}"
-        self.queue_with_cpu: bool = parallel_config.queue_with_cpu
+        # Queue transport requires CPU marshalling on platforms without reliable device IPC (e.g. NPU).
+        self.queue_with_cpu: bool = parallel_config.queue_with_cpu or current_platform.device_type != "cuda"
         self.timeout: int = parallel_config.timeout
         self._lifecycle_lock = threading.Lock()
         self._failed = False
@@ -253,6 +268,7 @@ class ParallelWorker:
                 master_port,
                 self.tensor_output_channel,
                 self.tensor_input_channels,
+                60000 + 1024 * next(_hccl_group_counter) if current_platform.device_type == "npu" else None,
             ),
             nprocs=self.world_size,
             join=False,
