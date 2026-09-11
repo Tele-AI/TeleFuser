@@ -61,6 +61,19 @@ ROCm 支持面向使用 ROCm 7.x 与 PyTorch `+rocm` 构建的 AMD GPU；安装�
 
 ## NPU 与 CPU
 
-NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。平台层与算子分发层均已接入 NPU，但现有
-示例在 CUDA 上验证、部分示例在 ROCm 上验证 —— 生产使用前请先在目标 NPU 上完成验证。CPU 平台是未检测到
-加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。
+NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。
+
+- 注意力经原生回退路径使用 `TORCH_SDPA`；无需安装 `tf-kernel`、`flash_attn`、`sageattention` 或 `triton`。
+- 算子层在算子定义了 `forward_npu` 时优先选择，否则回退到 PyTorch 原生实现。目前尚未集成 NPU 优化内核，
+  Pipeline 完全运行在原生路径上。
+- 多卡推理通过 `hccl` 后端字符串使用 HCCL。并行 worker 队列经 CPU 中转张量（`torch_npu` 不提供可靠的
+  跨进程设备 IPC）；每个新起的 worker 组会分配独立的 `HCCL_IF_BASE_PORT`，避免并发组在 HCCL 数据面端口段
+  上冲突。
+- `torch.compile` 在 NPU 上未验证；NPU 示例以 eager 模式运行。
+- 已验证入口为
+  [Wan2.2 TI2V-5B 文生视频](https://github.com/Tele-AI/TeleFuser/tree/main/examples/wan_video)
+  （`wan22_t2v_5b.py`）：示例自动检测平台、免修改运行，已在 Atlas 910B（CANN 8.2，torch 2.9 搭配版本匹配的
+  `torch_npu`）上验证单卡以及 4 卡 CFG × Ulysses 并行（HCCL）。Wan2.2 A14B 复用同一代码路径，但尚未在
+  NPU 硬件上运行；其他示例在生产使用前请先在目标 NPU 上完成验证。
+
+CPU 平台是未检测到加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。

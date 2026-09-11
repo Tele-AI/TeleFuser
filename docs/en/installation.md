@@ -12,6 +12,7 @@ distribution are installed separately.
 | PyTorch | 2.6 or newer |
 | CUDA toolkit | 12.8 or newer for the maintained CUDA development path |
 | ROCm | 7.x with a PyTorch `+rocm` build for AMD GPUs; see the ROCm note under verification |
+| Ascend NPU | CANN 8.2 with matching `torch` and `torch_npu` builds; see the NPU note under verification |
 | GPU | Depends on the selected model; check its Cookbook guide |
 
 An example may impose stricter versions or GPU architecture requirements. In particular, locally built `tf-kernel`
@@ -61,6 +62,11 @@ for `torch.cuda.is_available()` (check `torch.version.hip` to distinguish it), a
 ROCm before CUDA. Examples ending in `_rocm.py` (for example `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`)
 are the validated entry points; see [Hardware Platforms](platforms.md) for per-platform capabilities and backend
 availability.
+
+On Huawei Ascend hosts, install a `torch_npu` build matching your PyTorch version instead of the CUDA toolkit
+path. The platform layer selects NPU when `torch_npu` imports and an Ascend device is visible
+(`ASCEND_RT_VISIBLE_DEVICES` controls visibility); `torch.cuda.is_available()` printing `False` is expected there.
+`examples/wan_video/wan22_t2v_5b.py` is the validated NPU entry point.
 
 ## Model Checkpoints
 
