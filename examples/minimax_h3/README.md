@@ -444,9 +444,9 @@ python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
 ~~~
 
 Use `--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, `--sol-threshold-type`,
-`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. Use
-`--sol-fp8-smoothing none|k|kv` and `--no-sol-fp8-v-bias-correction` to isolate the quality protections. The defaults
-use K+V smoothing and V bias correction for the H100 MiniMax-H3 Sol profile.
+`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. FP8 Sol enables
+K+V smoothing and V bias correction by default, so the standard example needs no additional quality flags. The
+dedicated validation benchmark retains explicit overrides for comparing against an unsmoothed profile.
 
 For a warmed matched comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
 peaks, run the two single-GPU profiles below. Pass `--gpu-num 4` to retain the earlier Ulysses2 x TP2 benchmark mode.
