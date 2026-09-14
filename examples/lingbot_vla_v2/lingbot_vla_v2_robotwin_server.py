@@ -1,4 +1,4 @@
-"""Serve LingBot-VLA v2 through the upstream RoboTwin policy protocol."""
+"""Compatibility server for the upstream RoboTwin policy protocol."""
 
 from __future__ import annotations
 
@@ -20,15 +20,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from telefuser.pipelines.lingbot_vla_v2 import (
     ROBOTWIN_ACTION_ORDER,
     ROBOTWIN_CAMERA_KEYS,
-    LingBotVlaV2VLAPolicy,
     RobotWinProfile,
+    create_lingbot_vla_v2_session_manager,
 )
 from telefuser.pipelines.lingbot_vla_v2.runtime import (
     LINGBOT_VLA_V2_QUANTIZATION_CHOICES,
+    configure_lingbot_vla_v2_h100_sdpa,
     get_lingbot_vla_v2_pipeline,
 )
 from telefuser.utils.logging import logger
-from telefuser.vla import RobotObservation, RobotState, VLARegistry, VLASessionManager
+from telefuser.vla import RobotObservation, RobotState
 from telefuser.vla.runtime import ActionChunkScheduler
 
 ROBOTWIN_PROTOCOL_VERSION = "1.0"
@@ -149,10 +150,7 @@ class RobotWinPolicyAdapter:
         self.use_length = use_length
         self._lock = threading.Lock()
         self._next_sequence: dict[str, int] = {}
-        registry = VLARegistry()
-        registry.register_policy("lingbot-vla-v2", LingBotVlaV2VLAPolicy(pipeline))
-        registry.register_embodiment(self.profile.embodiment_id, self.profile)
-        self._sessions = VLASessionManager(registry)
+        self._sessions = create_lingbot_vla_v2_session_manager(pipeline, profile=self.profile)
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -391,25 +389,6 @@ def create_robotwin_app(
     return app
 
 
-def _configure_h100_sdpa_backends(device: str) -> None:
-    """Avoid unsupported cuDNN SDPA plans in the isolated H100 policy process."""
-    resolved_device = torch.device(device)
-    if resolved_device.type != "cuda" or not torch.cuda.is_available():
-        return
-    if "H100" not in torch.cuda.get_device_name(resolved_device):
-        return
-
-    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
-        torch.backends.cuda.enable_cudnn_sdp(False)
-    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-        torch.backends.cuda.enable_flash_sdp(True)
-    if hasattr(torch.backends.cuda, "enable_math_sdp"):
-        torch.backends.cuda.enable_math_sdp(True)
-    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-    logger.info("Disabled cuDNN SDPA for the LingBot-VLA v2 H100 policy process")
-
-
 @click.command()
 @click.option("--model-root", required=True, type=click.Path(exists=True, file_okay=False))
 @click.option("--qwen3vl-root", required=True, type=click.Path(exists=True, file_okay=False))
@@ -441,8 +420,8 @@ def main(
     cuda_graph: bool,
     quantization: str | None,
 ) -> None:
-    """Start one resident LingBot-VLA v2 policy for a RoboTwin client."""
-    _configure_h100_sdpa_backends(device)
+    """Start the legacy-compatible policy endpoint for an upstream RoboTwin client."""
+    configure_lingbot_vla_v2_h100_sdpa(device)
     pipeline = get_lingbot_vla_v2_pipeline(
         model_root,
         qwen3vl_root,

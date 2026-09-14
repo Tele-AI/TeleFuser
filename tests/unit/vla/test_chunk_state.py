@@ -169,3 +169,13 @@ def test_terminal_history_preserves_inflight_ticket_until_discard_recovery() -> 
     assert runtime.status(inflight) is ChunkStatus.SUPERSEDED
     assert runtime.complete(inflight, _chunk(1, 100)) is ChunkStatus.SUPERSEDED
     assert recovered == ["episode"]
+
+
+def test_inference_failure_rejects_pending_ticket() -> None:
+    runtime = ActionChunkStateMachine("episode", execute_horizon=1)
+    ticket = runtime.submit(1, 100)
+    runtime.mark_inference_started(ticket)
+
+    assert runtime.reject(ticket, "policy failed") is ChunkStatus.REJECTED
+    assert runtime.reason(ticket) == "policy failed"
+    assert runtime.state is RuntimeState.EMPTY

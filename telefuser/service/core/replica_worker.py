@@ -31,6 +31,14 @@ class ReplicaDeadError(RuntimeError):
     pass
 
 
+class ReplicaVLAError(RuntimeError):
+    """Structured application error returned by a live VLA replica."""
+
+    def __init__(self, error_type: str, message: str) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
+
 # ---------------------------------------------------------------------------
 # Subprocess entry point
 # ---------------------------------------------------------------------------
@@ -48,6 +56,7 @@ def _replica_main(
     security_level_name: str,
     skip_validation: bool,
     server_config_data: dict[str, Any] | None = None,
+    vla_provider_factory_name: str | None = None,
 ) -> None:
     """Entry point for a replica subprocess.
 
@@ -91,22 +100,57 @@ def _replica_main(
         loop.close()
         return
 
-    metadata = _collect_metadata(svc)
+    vla_provider = None
+    if vla_provider_factory_name is not None:
+        try:
+            module = svc._module
+            if module is None or not hasattr(module, vla_provider_factory_name):
+                raise RuntimeError(
+                    f"Pipeline file must define optional VLA provider factory {vla_provider_factory_name}(pipeline)"
+                )
+            factory = getattr(module, vla_provider_factory_name)
+            vla_provider = factory(svc.pipeline)
+            if not callable(getattr(vla_provider, "dispatch", None)):
+                raise TypeError("VLA provider must define dispatch(operation, payload)")
+            if not callable(getattr(vla_provider, "metadata", None)):
+                raise TypeError("VLA provider must define metadata()")
+        except Exception as e:
+            conn.send(("error", f"Replica {replica_id} VLA provider init failed: {e}\n{traceback.format_exc()}"))
+            loop.run_until_complete(svc.aclose())
+            conn.close()
+            loop.close()
+            return
+
+    try:
+        metadata = _collect_metadata(svc, vla_provider=vla_provider)
+    except Exception as e:
+        conn.send(("error", f"Replica {replica_id} metadata collection failed: {e}\n{traceback.format_exc()}"))
+        if vla_provider is not None and callable(getattr(vla_provider, "close", None)):
+            vla_provider.close()
+        loop.run_until_complete(svc.aclose())
+        conn.close()
+        loop.close()
+        return
     conn.send(("ready", metadata))
     logger.info(f"Replica {replica_id} ready, entering task loop")
 
     try:
-        loop.run_until_complete(_task_loop(replica_id, svc, conn, cancel_event, logger))
+        loop.run_until_complete(_task_loop(replica_id, svc, conn, cancel_event, logger, vla_provider=vla_provider))
     except Exception as e:
         logger.error(f"Replica {replica_id} loop crashed: {e}")
     finally:
+        if vla_provider is not None and callable(getattr(vla_provider, "close", None)):
+            try:
+                vla_provider.close()
+            except Exception as e:
+                logger.warning(f"Replica {replica_id} VLA provider cleanup failed: {e}")
         loop.run_until_complete(svc.aclose())
         loop.close()
         conn.close()
         logger.info(f"Replica {replica_id} exited")
 
 
-def _collect_metadata(svc: Any) -> dict:
+def _collect_metadata(svc: Any, *, vla_provider: Any | None = None) -> dict:
     """Collect metadata from initialized PipelineService for pool caching."""
     task_contracts: dict[str, Any] = {}
     for t in svc.supported_tasks():
@@ -115,11 +159,17 @@ def _collect_metadata(svc: Any) -> dict:
             task_contracts[t] = tc.to_metadata()
         elif isinstance(tc, dict):
             task_contracts[t] = tc
-    return {
+    metadata = {
         "server_metadata": svc.server_metadata(),
         "supported_tasks": list(svc.supported_tasks()),
         "task_contracts": task_contracts,
     }
+    if vla_provider is not None:
+        vla_metadata = vla_provider.metadata()
+        if not isinstance(vla_metadata, dict):
+            raise TypeError("VLA provider metadata must be a dictionary")
+        metadata["vla"] = vla_metadata
+    return metadata
 
 
 def _cancel_watcher_fn(
@@ -139,6 +189,8 @@ async def _task_loop(
     conn: Connection,
     cancel_event: mp_stdlib.Event,
     logger: Any,
+    *,
+    vla_provider: Any | None = None,
 ) -> None:
     """Persistent async task loop inside the replica subprocess."""
     loop = asyncio.get_running_loop()
@@ -179,6 +231,18 @@ async def _task_loop(
             finally:
                 cancel_event.set()
                 forwarder_done.wait(1.0)
+            continue
+
+        if msg[0] == "vla":
+            _, operation, payload = msg
+            if vla_provider is None:
+                conn.send(("vla_error", {"type": "RuntimeError", "message": "replica has no VLA provider"}))
+                continue
+            try:
+                result = await asyncio.to_thread(vla_provider.dispatch, operation, payload)
+                conn.send(("ok", result))
+            except Exception as e:
+                conn.send(("vla_error", {"type": type(e).__name__, "message": str(e)}))
 
 
 def _recv_with_poll(conn: Connection, timeout: float) -> Any:
@@ -278,6 +342,48 @@ class ReplicaHandle:
         if tag == "error":
             raise RuntimeError(f"Replica {self.replica_id}: {payload}")
         return payload
+
+    async def run_vla_operation(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Send one session-affine VLA operation to this replica."""
+        if not isinstance(operation, str) or not operation:
+            raise ValueError("operation must be a non-empty string")
+        if timeout_s is not None and (
+            isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0
+        ):
+            raise ValueError("timeout_s must be None or a positive number")
+        ipc_timeout = (float(timeout_s) if timeout_s is not None else 600.0) + _TASK_IPC_MARGIN_S
+        loop = asyncio.get_running_loop()
+        if not self.process.is_alive():
+            self._dead = True
+            raise ReplicaDeadError(f"Replica {self.replica_id} process is not alive")
+        try:
+            self.conn.send(("vla", operation, payload))
+            result = await loop.run_in_executor(None, self._recv_with_health_check, ipc_timeout)
+        except (EOFError, OSError) as error:
+            self._dead = True
+            raise ReplicaDeadError(f"Replica {self.replica_id} IPC failed: {error}") from error
+        if result is None:
+            self._dead = True
+            raise ReplicaDeadError(
+                f"Replica {self.replica_id} did not respond within {ipc_timeout}s "
+                f"(process alive: {self.process.is_alive()})"
+            )
+        tag, response = result
+        if tag == "vla_error":
+            if not isinstance(response, dict):
+                raise RuntimeError(f"Replica {self.replica_id} returned an invalid VLA error")
+            raise ReplicaVLAError(str(response.get("type", "RuntimeError")), str(response.get("message", "")))
+        if tag == "error":
+            raise RuntimeError(f"Replica {self.replica_id}: {response}")
+        if tag != "ok" or not isinstance(response, dict):
+            raise RuntimeError(f"Replica {self.replica_id} returned an invalid VLA response")
+        return response
 
     def _recv_with_health_check(self, total_timeout: float) -> tuple[str, Any] | None:
         """Receive with periodic health checks. Returns (tag, payload) or None."""

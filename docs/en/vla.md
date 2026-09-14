@@ -32,6 +32,7 @@ The public modules are:
 - `telefuser.vla.runtime`: scheduling, deterministic chunk state, action trimming, age checks, and safety policies.
 - `telefuser.integrations.sim`: simulator protocol and the dependency-free RoboTwin callback adapter.
 - `telefuser.service.vla_session`: the additive generic VLA WebSocket application factory.
+- `telefuser.service.vla_replica`: worker-local OPEN, PREDICT, RESET, and CLOSE dispatch for pipeline replicas.
 
 ## LingBot-VLA v2 Compatibility
 
@@ -42,8 +43,10 @@ changed. It labels the normalized canonical `[T,55]` result as a `ModelActionChu
 chunk to an absolute-position `[H,14]` `RobotActionChunk` in the declared dual-arm joint order. Its model and robot
 action spaces are exported as `LINGBOT_VLA_V2_ACTION_SPACE` and `ROBOTWIN_ACTION_SPACE`.
 
-The existing LingBot RoboTwin WebSocket endpoint now calls this policy, embodiment, session, and runtime path
-internally. Its URL, MessagePack request fields, metadata frame, response fields, reset behavior, and latest-wins
+The generic VLA WebSocket is the primary online integration path. The existing LingBot RoboTwin WebSocket endpoint
+is a compatibility adapter for unmodified upstream `WebsocketClientPolicy` clients and calls the same policy,
+embodiment, session, and runtime path internally. Its URL, MessagePack request fields, metadata frame, response fields,
+reset behavior, and latest-wins
 scheduler behavior remain compatible. The old model-specific scheduler import is retained as an alias to the common
 runtime scheduler.
 
@@ -83,7 +86,9 @@ clocks on separate machines are not comparable.
 
 ## Generic WebSocket Protocol
 
-`create_vla_session_app` exposes `/v1/vla/session` without changing an existing TeleFuser service route. The server
+`create_vla_session_app` exposes `/v1/vla/session` for an in-process registry, while
+`create_pipeline_pool_vla_session_app` exposes the same protocol through worker-local sessions pinned by
+`PipelinePool`. Neither factory changes an existing TeleFuser service route. The server
 first sends `HELLO` with protocol version `1.0`, wire encoding, supported operations, registered component IDs, and
 payload limits. A client then uses `OPEN`, ordered `PREDICT`, `RESET`, and `CLOSE`. `OPEN` can declare the expected
 robot action space; semantic incompatibility is rejected before inference.
@@ -92,7 +97,8 @@ The protocol returns machine-readable error codes for malformed messages, unsupp
 or sessions, action-space mismatches, out-of-order or expired observations, request timeout, unavailable sessions, and
 replica failure. Tensor payloads are dense, typed, shape-checked Base64 data inside bounded JSON messages. This is the
 stable interoperability format; the LingBot-RoboTwin compatibility endpoint continues to use its existing MessagePack
-format.
+format. New model and simulator integrations must target the generic protocol rather than add behavior to the
+model-specific compatibility endpoint.
 
 `request_ttl_ms` is measured with server monotonic time and bounds inference delivery. Observation age is checked
 separately using `observation_timestamp_ns` and `observation_clock_now_ns`, which must come from the same clock domain.
@@ -107,8 +113,9 @@ After a timed-out stateful inference finishes, the session is reset before it ac
 then stops replicas.
 
 This API is additive. Existing HTTP work continues to use `PipelinePool.acquire()`, whose allocation behavior and
-callers are unchanged. The generic in-process WebSocket factory accepts a `VLASessionManager`; a deployment backed by
-subprocess replicas must use these lease methods when adding its replica RPC adapter.
+callers are unchanged. When `PipelinePool.start_all(..., vla_provider_factory="get_vla_provider")` is requested, each
+worker constructs its own provider around the already-loaded pipeline and handles VLA lifecycle RPC. The provider is
+optional; pipeline files and callers that do not enable it keep the original task and shutdown protocols.
 
 ## Chunk State Machine
 
@@ -117,6 +124,10 @@ executed, superseded, expired, or rejected states. It supports latest-sequence a
 network-TTL checks, configurable discard/retain handling after `execute_horizon`, reset, and deterministic hold/stop
 states after disconnect. Stateful policies must provide a recovery callback; it is invoked when an inference that may
 have mutated history is discarded.
+
+The generic server tracks inference admission through PENDING, READY, SUPERSEDED, EXPIRED, and REJECTED. It does not
+claim that a returned action was executed. `SimulatorChunkRuntime` runs on the simulator client and owns READY,
+EXECUTING, EXECUTED, HOLD, and STOP transitions while calling a `SimulatorAdapter` one action at a time.
 
 The bundled RoboTwin statistics do not declare an authoritative simulator control frequency, so both exported
 LingBot/RoboTwin specs use `control_hz=None`. The remote simulator must resolve its actual control period rather than
@@ -132,15 +143,16 @@ Adding another simulator requires a new `SimulatorAdapter`; it must not add mode
 robot requires an `EmbodimentAdapter`. Adding another VLA requires a `VLAPolicy` wrapper around its maintained
 pipeline.
 
-## Current Boundary
+## Service Boundary
 
-The generic WebSocket application is intentionally an explicit factory rather than an automatically mounted
-`telefuser serve` route. Subprocess replica transport still needs VLA-specific OPEN/PREDICT/RESET/CLOSE RPC commands
-before the WebSocket factory can directly own `PipelinePool` leases. The lease primitive is implemented and tested,
-but this RPC bridge is outside the current P0 scope.
+The generic WebSocket application remains an explicit factory rather than an automatically mounted `telefuser serve`
+route. The LingBot example supplies a standalone server that starts `PipelinePool` with the optional VLA provider.
+This keeps existing HTTP routing and every non-VLA pipeline unchanged. A real simulator still owns control timing,
+actuator feedback, and verification that each returned action was actually applied.
 
-The chunk state machine is also transport-neutral. The existing LingBot compatibility server retains its proven
-latest-wins scheduler until a later compatibility-preserving integration uses the generic state machine end to end.
+The direct inference CLI and structured HTTP task remain separate because they provide reference and batch workflows,
+not simulator session transports. The legacy RoboTwin MessagePack endpoint should be removed only after the RTX client
+passes generic-protocol action delivery, reset, timeout, reconnect, and latest-wins parity checks.
 
 No new dependencies, environment variables, shared model configuration fields, CLI options, HTTP schemas, or
 existing service routes are introduced by this semantic and transport layer.

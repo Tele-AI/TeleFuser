@@ -74,6 +74,7 @@ class PipelinePool:
         self._cached_server_metadata: dict[str, Any] = {}
         self._cached_supported_tasks: tuple[str, ...] = ()
         self._cached_task_contracts: dict[str, Any] = {}
+        self._cached_vla_metadata: dict[str, Any] = {}
 
     def start_all(
         self,
@@ -81,13 +82,22 @@ class PipelinePool:
         parallelism_per_replica: int,
         task: str,
         skip_validation: bool,
+        *,
+        vla_provider_factory: str | None = None,
     ) -> bool:
         """Start all replica subprocesses. Returns True on success."""
         device_env_var = current_platform.device_control_env_var
         original_cvd = os.environ.get(device_env_var)
 
         try:
-            return self._start_all_replicas(ppl_file, parallelism_per_replica, task, skip_validation, device_env_var)
+            return self._start_all_replicas(
+                ppl_file,
+                parallelism_per_replica,
+                task,
+                skip_validation,
+                device_env_var,
+                vla_provider_factory,
+            )
         finally:
             self._restore_cvd(device_env_var, original_cvd)
 
@@ -98,6 +108,7 @@ class PipelinePool:
         task: str,
         skip_validation: bool,
         device_env_var: str,
+        vla_provider_factory: str | None,
     ) -> bool:
         for i, device_ids in enumerate(self._replica_device_ids):
             visible_devices = ",".join(device_ids)
@@ -122,6 +133,7 @@ class PipelinePool:
                     self._security_level_name,
                     skip_validation,
                     self._server_config_data,
+                    vla_provider_factory,
                 ),
                 daemon=False,
             )
@@ -155,6 +167,12 @@ class PipelinePool:
                 self._cached_server_metadata = payload.get("server_metadata", {})
                 self._cached_supported_tasks = tuple(payload.get("supported_tasks", []))
                 self._cached_task_contracts = payload.get("task_contracts", {})
+                self._cached_vla_metadata = payload.get("vla", {})
+            elif payload.get("vla", {}) != self._cached_vla_metadata:
+                logger.error(f"Replica {i} VLA metadata differs from replica 0")
+                p.terminate()
+                self._cleanup_started()
+                return False
 
             handle = ReplicaHandle(
                 replica_id=i,
@@ -335,6 +353,18 @@ class PipelinePool:
         async with self._session_leases_lock:
             return {session_id: lease.replica_id for session_id, lease in sorted(self._session_leases.items())}
 
+    async def run_vla_operation(
+        self,
+        session_id: str,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Run one VLA operation on the replica permanently assigned to a session."""
+        async with self.acquire_session(session_id) as handle:
+            return await handle.run_vla_operation(operation, payload, timeout_s=timeout_s)
+
     async def run_task_with_stop_event(
         self,
         task_data: dict,
@@ -466,6 +496,10 @@ class PipelinePool:
     def get_task_contract(self, task: str) -> Any:
         """Return the task-level contract for a declared task, if available."""
         return self._cached_task_contracts.get(task)
+
+    def vla_metadata(self) -> dict[str, Any]:
+        """Return component metadata reported consistently by all VLA replicas."""
+        return dict(self._cached_vla_metadata)
 
     def pool_status(self) -> list[dict]:
         """Return per-replica status for monitoring."""

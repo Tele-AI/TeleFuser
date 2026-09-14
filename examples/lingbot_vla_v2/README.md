@@ -25,11 +25,12 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
 | Quantization | Partial | Profile-specific release status; see Configuration and Performance |
 | Native server API | Supported | Asynchronous structured task API and `TFClient` |
-| RoboTwin policy protocol | Supported | Standalone persistent MessagePack WebSocket service |
+| RoboTwin policy protocol | Compatibility | Legacy MessagePack endpoint for unmodified upstream clients |
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
 | RoboTwin action mapping | Supported | Unnormalizes canonical output to absolute-position `50 x 14` chunks |
 | Semantic VLA contract | Supported | Model and robot action spaces are explicit; see [VLA Action Integration](../../docs/en/vla.md) |
+| Generic VLA session server | Preferred | Versioned JSON WebSocket with replica-affine sessions |
 
 ## Requirements
 
@@ -191,6 +192,10 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
 
 ## Serving
 
+The generic VLA session server is the primary online path for new deployments and simulator integrations. The native
+structured service remains the HTTP path for single requests, offline evaluation, and batch clients. The RoboTwin
+MessagePack server is retained only when an unmodified upstream `WebsocketClientPolicy` must connect directly.
+
 Start the native structured service:
 
 ```bash
@@ -229,11 +234,30 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 
 This creates one complete policy per GPU; it does not enable tensor or pipeline parallelism within a policy.
 
-### RoboTwin Policy Server
+### Generic VLA Session Server
 
-The standalone policy server implements the persistent MessagePack WebSocket protocol used by the upstream
-`WebsocketClientPolicy`. It is isolated from `telefuser serve`: no TeleFuser API routes, service schemas, or other
-model integrations are changed.
+Start the preferred additive WebSocket service without mounting routes into `telefuser serve`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+  .venv-vla/bin/python -m examples.lingbot_vla_v2.lingbot_vla_v2_vla_server \
+  --parallelism 1 --num-replicas 1 --host 0.0.0.0 --port 8000
+```
+
+The service exposes `GET /healthz` and `/v1/vla/session`. Each `OPEN` reserves one pipeline replica for that session;
+`PREDICT`, `RESET`, and `CLOSE` are sent to the same worker-local `VLASession`. Closing or disconnecting releases the
+replica. The H100 cuDNN SDPA guard is applied inside each LingBot worker before model loading.
+
+This protocol returns semantic `RobotActionChunk` values. The RTX-side simulator process should deserialize the chunk,
+pass it to `SimulatorChunkRuntime`, and then execute it through its own `SimulatorAdapter`. The inference server tracks
+pending/ready/expired inference only and does not report simulator execution as completed.
+
+### Legacy RoboTwin Protocol Compatibility
+
+This compatibility server implements the persistent MessagePack WebSocket protocol used by the upstream
+`WebsocketClientPolicy`. Use it only when the upstream client cannot yet consume the generic VLA session protocol.
+New transport, scheduling, and simulator integrations belong on the generic VLA path. The compatibility endpoint is
+isolated from `telefuser serve`: no TeleFuser API routes, service schemas, or other model integrations are changed.
 
 Install the protocol dependency in the TeleFuser inference environment:
 
@@ -332,6 +356,10 @@ rejects runtime checkpoint switching.
 Internally this compatibility endpoint uses the shared `VLAPolicy`, `EmbodimentAdapter`, `VLASessionManager`, and
 `ChunkExecutor` contracts. The wire protocol and the existing `LingBotVlaV2Pipeline` API remain unchanged. The
 declared control rate is intentionally unresolved until the remote RoboTwin loop supplies its actual frequency.
+
+Keep this endpoint until the RTX client has passed end-to-end action delivery, reset, timeout, reconnect, and
+latest-wins parity checks through the generic protocol. After that migration, the compatibility module can be removed
+without changing the model pipeline or the generic VLA service.
 
 For split-machine deployment, run the model endpoint and the repository-owned XPolicyLab proxy on the H100 inference
 host. The proxy does not load a second model; it translates XPolicyLab observations to the direct TeleFuser protocol:
