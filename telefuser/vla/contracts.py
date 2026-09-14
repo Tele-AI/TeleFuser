@@ -11,6 +11,110 @@ import torch
 
 
 @dataclass(frozen=True)
+class ImageObservationSpec:
+    """Describe one named image in a robot observation."""
+
+    name: str
+    dtype: str = "uint8"
+    layout: str = "HWC"
+    channels: int = 3
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("image observation name must be a non-empty string")
+        if not isinstance(self.dtype, str) or not self.dtype:
+            raise ValueError("image observation dtype must be a non-empty string")
+        if self.layout not in {"HWC", "CHW"}:
+            raise ValueError("image observation layout must be HWC or CHW")
+        if not isinstance(self.channels, int) or isinstance(self.channels, bool) or self.channels < 1:
+            raise ValueError("image observation channels must be a positive integer")
+
+
+@dataclass(frozen=True)
+class ObservationSpaceSpec:
+    """Describe state and named image inputs expected by an embodiment."""
+
+    state_dimension_names: tuple[str, ...]
+    images: tuple[ImageObservationSpec, ...] = ()
+    allow_extra_images: bool = True
+    timestamp_unit: str = "nanosecond"
+    timestamp_clock: str = "observation_source_monotonic"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state_dimension_names, tuple) or not self.state_dimension_names:
+            raise ValueError("state_dimension_names must be a non-empty tuple")
+        if any(not isinstance(name, str) or not name for name in self.state_dimension_names):
+            raise ValueError("state_dimension_names must contain non-empty strings")
+        if len(set(self.state_dimension_names)) != len(self.state_dimension_names):
+            raise ValueError("state_dimension_names must be unique")
+        if not isinstance(self.images, tuple) or any(
+            not isinstance(spec, ImageObservationSpec) for spec in self.images
+        ):
+            raise ValueError("images must be a tuple of ImageObservationSpec values")
+        if len({spec.name for spec in self.images}) != len(self.images):
+            raise ValueError("image observation names must be unique")
+        if not isinstance(self.allow_extra_images, bool):
+            raise ValueError("allow_extra_images must be a boolean")
+        if self.timestamp_unit != "nanosecond":
+            raise ValueError("timestamp_unit must be nanosecond")
+        if not isinstance(self.timestamp_clock, str) or not self.timestamp_clock:
+            raise ValueError("timestamp_clock must be a non-empty string")
+
+    def require_compatible(self, actual: "ObservationSpaceSpec", *, context: str = "observation space") -> None:
+        """Reject semantic mismatches between declared observation contracts."""
+        mismatches = []
+        if self.state_dimension_names != actual.state_dimension_names:
+            mismatches.append("state_dimension_names")
+        if {spec.name: spec for spec in self.images} != {spec.name: spec for spec in actual.images}:
+            mismatches.append("images")
+        if self.allow_extra_images != actual.allow_extra_images:
+            mismatches.append("allow_extra_images")
+        if self.timestamp_unit != actual.timestamp_unit:
+            mismatches.append("timestamp_unit")
+        if self.timestamp_clock != actual.timestamp_clock:
+            mismatches.append("timestamp_clock")
+        if mismatches:
+            raise ValueError(f"{context} mismatch in fields: {mismatches}")
+
+    def validate(self, observation: "RobotObservation") -> None:
+        """Validate one observation without imposing image height or width."""
+        if not isinstance(observation, RobotObservation):
+            raise TypeError("observation must be a RobotObservation")
+        if observation.state.dimension_names != self.state_dimension_names:
+            raise ValueError("robot observation space mismatch in state_dimension_names")
+        expected_names = {spec.name for spec in self.images}
+        actual_names = set(observation.images)
+        missing = sorted(expected_names - actual_names)
+        if missing:
+            raise ValueError(f"robot observation space is missing images: {missing}")
+        if not self.allow_extra_images:
+            extra = sorted(actual_names - expected_names)
+            if extra:
+                raise ValueError(f"robot observation space has unexpected images: {extra}")
+        for spec in self.images:
+            image = observation.images[spec.name]
+            shape = getattr(image, "shape", None)
+            dtype = getattr(image, "dtype", None)
+            if shape is None or dtype is None:
+                try:
+                    image = torch.as_tensor(image)
+                except (TypeError, ValueError) as error:
+                    raise TypeError(f"robot observation image {spec.name!r} must be tensor-like") from error
+                shape = image.shape
+                dtype = image.dtype
+            if len(shape) != 3:
+                raise ValueError(f"robot observation image {spec.name!r} must be rank 3")
+            channel_axis = 2 if spec.layout == "HWC" else 0
+            if shape[channel_axis] != spec.channels:
+                raise ValueError(
+                    f"robot observation image {spec.name!r} must have {spec.channels} channels in {spec.layout} layout"
+                )
+            dtype_name = str(dtype).removeprefix("torch.")
+            if dtype_name != spec.dtype:
+                raise ValueError(f"robot observation image {spec.name!r} dtype must be {spec.dtype}, got {dtype_name}")
+
+
+@dataclass(frozen=True)
 class ActionSpaceSpec:
     """Describe action meaning independently of its tensor shape."""
 

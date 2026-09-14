@@ -11,10 +11,18 @@ from typing import Any
 import numpy as np
 import torch
 
-from .contracts import ActionSpaceSpec, RobotActionChunk, RobotObservation, RobotState
+from .contracts import (
+    ActionSpaceSpec,
+    ImageObservationSpec,
+    ObservationSpaceSpec,
+    RobotActionChunk,
+    RobotObservation,
+    RobotState,
+)
 
 VLA_WIRE_SCHEMA_VERSION = 1
 VLA_WIRE_ENCODING = "json-base64-v1"
+VLA_SESSION_PROTOCOL_VERSION = "1.0"
 DEFAULT_MAX_TENSOR_BYTES = 64 * 1024 * 1024
 
 _DTYPES: dict[str, torch.dtype] = {
@@ -68,6 +76,51 @@ def action_space_from_wire(payload: Mapping[str, Any]) -> ActionSpaceSpec:
         )
     except (KeyError, TypeError) as error:
         raise ValueError("invalid VLA action-space payload") from error
+
+
+def observation_space_to_wire(spec: ObservationSpaceSpec) -> dict[str, Any]:
+    """Serialize an observation-space contract."""
+    return {
+        "schema": "telefuser.vla.observation_space",
+        "schema_version": VLA_WIRE_SCHEMA_VERSION,
+        "state_dimension_names": list(spec.state_dimension_names),
+        "images": [
+            {"name": image.name, "dtype": image.dtype, "layout": image.layout, "channels": image.channels}
+            for image in spec.images
+        ],
+        "allow_extra_images": spec.allow_extra_images,
+        "timestamp_unit": spec.timestamp_unit,
+        "timestamp_clock": spec.timestamp_clock,
+    }
+
+
+def observation_space_from_wire(payload: Mapping[str, Any]) -> ObservationSpaceSpec:
+    """Deserialize and validate an observation-space contract."""
+    _require_schema(payload, "telefuser.vla.observation_space")
+    state_names = payload.get("state_dimension_names")
+    images = payload.get("images")
+    if not isinstance(state_names, list) or not isinstance(images, list):
+        raise ValueError("VLA observation-space state_dimension_names and images must be arrays")
+    if any(not isinstance(image, Mapping) for image in images):
+        raise ValueError("VLA observation-space images must contain objects")
+    try:
+        return ObservationSpaceSpec(
+            state_dimension_names=tuple(state_names),
+            images=tuple(
+                ImageObservationSpec(
+                    name=image["name"],
+                    dtype=image.get("dtype", "uint8"),
+                    layout=image.get("layout", "HWC"),
+                    channels=image.get("channels", 3),
+                )
+                for image in images
+            ),
+            allow_extra_images=payload.get("allow_extra_images", True),
+            timestamp_unit=payload.get("timestamp_unit", "nanosecond"),
+            timestamp_clock=payload.get("timestamp_clock", "observation_source_monotonic"),
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError("invalid VLA observation-space payload") from error
 
 
 def tensor_to_wire(value: torch.Tensor | np.ndarray) -> dict[str, Any]:

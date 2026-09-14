@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from threading import Event
 
 import pytest
 import torch
@@ -17,8 +18,10 @@ from telefuser.service.vla_session import (
 )
 from telefuser.vla import (
     ActionSpaceSpec,
+    ImageObservationSpec,
     ModelActionChunk,
     ModelObservation,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
@@ -26,6 +29,7 @@ from telefuser.vla import (
     VLARegistry,
     VLASessionManager,
     action_space_to_wire,
+    observation_space_to_wire,
     robot_action_chunk_from_wire,
     robot_action_chunk_to_wire,
     robot_observation_to_wire,
@@ -33,18 +37,36 @@ from telefuser.vla import (
 
 MODEL_SPACE = ActionSpaceSpec("joint_delta", ("joint",), ("radian",), None, 10.0, False)
 ROBOT_SPACE = ActionSpaceSpec("joint_position", ("joint",), ("radian",), None, 10.0, False)
+OBSERVATION_SPACE = ObservationSpaceSpec(("joint",), (ImageObservationSpec("front"),))
 
 
 class _Policy:
-    def __init__(self, *, delay_s: float = 0, failure: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        delay_s: float = 0,
+        failure: Exception | None = None,
+        stateful: bool = False,
+        block_first: bool = False,
+    ) -> None:
         self.delay_s = delay_s
         self.failure = failure
+        self.stateful = stateful
         self.resets: list[str] = []
+        self.sequences: list[int] = []
+        self.started = Event()
+        self.release = Event()
+        if not block_first:
+            self.release.set()
 
     def capabilities(self) -> VLACapabilities:
-        return VLACapabilities("fake", MODEL_SPACE, max_horizon=3)
+        return VLACapabilities("fake", MODEL_SPACE, max_horizon=3, stateful=self.stateful)
 
     def predict(self, request) -> ModelActionChunk:
+        self.sequences.append(request.sequence_id)
+        if len(self.sequences) == 1:
+            self.started.set()
+            assert self.release.wait(timeout=2)
         if self.delay_s:
             time.sleep(self.delay_s)
         if self.failure is not None:
@@ -67,6 +89,7 @@ class _Embodiment:
     embodiment_id: str = "fake-robot"
     model_action_space: ActionSpaceSpec = MODEL_SPACE
     robot_action_space: ActionSpaceSpec = ROBOT_SPACE
+    observation_space: ObservationSpaceSpec = OBSERVATION_SPACE
 
     def encode_observation(self, observation: RobotObservation) -> ModelObservation:
         return ModelObservation(observation.state.values, observation.images)
@@ -131,6 +154,8 @@ def test_protocol_negotiates_capabilities_and_runs_full_session_lifecycle() -> N
             assert hello["type"] == "HELLO"
             assert hello["protocol_version"] == "1.0"
             assert hello["operations"] == ["OPEN", "PREDICT", "RESET", "CLOSE"]
+            assert hello["capabilities"]["prediction_queue"] == "latest-wins"
+            assert hello["capabilities"]["control_barriers"] is True
             assert hello["model_ids"] == ["fake"]
             assert hello["embodiment_ids"] == ["fake-robot"]
 
@@ -139,6 +164,7 @@ def test_protocol_negotiates_capabilities_and_runs_full_session_lifecycle() -> N
             assert opened["type"] == "OPENED"
             assert opened["supports_seed"] is True
             assert opened["robot_action_space"] == action_space_to_wire(ROBOT_SPACE)
+            assert opened["robot_observation_space"] == observation_space_to_wire(OBSERVATION_SPACE)
 
             websocket.send_json(_predict(1))
             response = websocket.receive_json()
@@ -173,6 +199,10 @@ def test_protocol_returns_stable_errors_for_version_components_contract_order_an
             mismatch = ActionSpaceSpec("velocity", ("joint",), ("radian_per_second",), None, 10.0, False)
             websocket.send_json(_open(expected_robot_action_space=action_space_to_wire(mismatch)))
             assert websocket.receive_json()["error"]["code"] == "action_space_mismatch"
+
+            observation_mismatch = ObservationSpaceSpec(("joint",), (ImageObservationSpec("wrist"),))
+            websocket.send_json(_open(expected_robot_observation_space=observation_space_to_wire(observation_mismatch)))
+            assert websocket.receive_json()["error"]["code"] == "observation_space_mismatch"
 
             websocket.send_json(_open(max_observation_age_ns=10))
             assert websocket.receive_json()["type"] == "OPENED"
@@ -241,6 +271,7 @@ class _FakePipelinePool:
                 "embodiment_id": "fake-robot",
                 "model_action_space": action_space_to_wire(MODEL_SPACE),
                 "robot_action_space": action_space_to_wire(ROBOT_SPACE),
+                "robot_observation_space": observation_space_to_wire(OBSERVATION_SPACE),
                 "max_horizon": 3,
                 "stateful": False,
                 "supports_seed": True,
@@ -287,3 +318,72 @@ def test_pipeline_pool_backend_runs_full_protocol_and_releases_lease() -> None:
         ("session", "RESET"),
         ("session", "CLOSE"),
     ]
+
+
+def test_protocol_keeps_one_inference_and_only_the_latest_waiting_prediction() -> None:
+    policy = _Policy(block_first=True, stateful=True)
+    manager, _ = _manager(policy)
+    with TestClient(create_vla_session_app(manager)) as client:
+        with client.websocket_connect("/v1/vla/session") as websocket:
+            websocket.receive_json()
+            websocket.send_json(_open())
+            websocket.receive_json()
+            websocket.send_json(_predict(1))
+            assert policy.started.wait(timeout=1)
+            websocket.send_json(_predict(2))
+            websocket.send_json(_predict(3))
+            policy.release.set()
+
+            responses = {response["request_id"]: response for response in (websocket.receive_json() for _ in range(3))}
+            assert responses["predict-1"]["error"]["code"] == "superseded"
+            assert responses["predict-2"]["error"]["code"] == "superseded"
+            assert responses["predict-3"]["type"] == "ACTION_CHUNK"
+            assert policy.resets == ["episode"]
+    assert policy.sequences == [1, 3]
+
+
+def test_reset_is_a_barrier_for_inflight_results_and_restarts_ordering() -> None:
+    policy = _Policy(block_first=True, stateful=True)
+    manager, _ = _manager(policy)
+    with TestClient(create_vla_session_app(manager)) as client:
+        with client.websocket_connect("/v1/vla/session") as websocket:
+            websocket.receive_json()
+            websocket.send_json(_open())
+            websocket.receive_json()
+            websocket.send_json(_predict(1))
+            assert policy.started.wait(timeout=1)
+            websocket.send_json(
+                {"type": "RESET", "request_id": "reset", "session_id": "session", "episode_id": "episode-2"}
+            )
+            policy.release.set()
+
+            barrier_responses = {
+                response["request_id"]: response for response in (websocket.receive_json() for _ in range(2))
+            }
+            assert barrier_responses["predict-1"]["error"]["code"] == "superseded"
+            assert barrier_responses["reset"]["type"] == "RESET_ACK"
+            websocket.send_json(_predict(0, observation_timestamp_ns=200))
+            assert websocket.receive_json()["type"] == "ACTION_CHUNK"
+
+    assert policy.resets == ["episode", "episode-2"]
+
+
+def test_close_is_a_barrier_for_inflight_results() -> None:
+    policy = _Policy(block_first=True)
+    manager, _ = _manager(policy)
+    with TestClient(create_vla_session_app(manager)) as client:
+        with client.websocket_connect("/v1/vla/session") as websocket:
+            websocket.receive_json()
+            websocket.send_json(_open())
+            websocket.receive_json()
+            websocket.send_json(_predict(1))
+            assert policy.started.wait(timeout=1)
+            websocket.send_json({"type": "CLOSE", "request_id": "close", "session_id": "session"})
+            policy.release.set()
+
+            barrier_responses = {
+                response["request_id"]: response for response in (websocket.receive_json() for _ in range(2))
+            }
+            assert barrier_responses["predict-1"]["error"]["code"] == "superseded"
+            assert barrier_responses["close"]["type"] == "CLOSE_ACK"
+    assert manager.session_ids() == ()

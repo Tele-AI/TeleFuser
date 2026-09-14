@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
@@ -14,22 +15,24 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from telefuser.service.core.pipeline_pool import PipelinePool
 from telefuser.service.core.replica_worker import ReplicaDeadError, ReplicaVLAError
 from telefuser.vla import VLASessionManager
-from telefuser.vla.contracts import ActionSpaceSpec, RobotActionChunk
+from telefuser.vla.contracts import ActionSpaceSpec, ObservationSpaceSpec, RobotActionChunk
 from telefuser.vla.runtime import ActionChunkStateMachine, ChunkStatus
 from telefuser.vla.runtime.chunk_state import ChunkTicket
 from telefuser.vla.serialization import (
     DEFAULT_MAX_TENSOR_BYTES,
+    VLA_SESSION_PROTOCOL_VERSION,
     VLA_WIRE_ENCODING,
     action_space_from_wire,
     action_space_to_wire,
     dumps_wire_message,
     loads_wire_message,
+    observation_space_from_wire,
+    observation_space_to_wire,
     robot_action_chunk_from_wire,
     robot_action_chunk_to_wire,
     robot_observation_from_wire,
 )
 
-VLA_SESSION_PROTOCOL_VERSION = "1.0"
 DEFAULT_MAX_VLA_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
@@ -42,7 +45,9 @@ class VLAErrorCode(str, Enum):
     UNKNOWN_SESSION = "unknown_session"
     UNKNOWN_COMPONENT = "unknown_component"
     ACTION_SPACE_MISMATCH = "action_space_mismatch"
+    OBSERVATION_SPACE_MISMATCH = "observation_space_mismatch"
     OUT_OF_ORDER = "out_of_order"
+    SUPERSEDED = "superseded"
     EXPIRED = "expired"
     TIMEOUT = "timeout"
     REPLICA_UNAVAILABLE = "replica_unavailable"
@@ -93,6 +98,7 @@ class _LocalVLABackend:
         except KeyError as error:
             raise VLAProtocolError(VLAErrorCode.UNKNOWN_COMPONENT, str(error)) from error
         _validate_expected_action_space(payload, embodiment.robot_action_space)
+        _validate_expected_observation_space(payload, embodiment.observation_space)
         await asyncio.to_thread(
             self.sessions.open,
             session_id,
@@ -109,6 +115,7 @@ class _LocalVLABackend:
             "embodiment_id": embodiment_id,
             "model_action_space": action_space_to_wire(capabilities.output_action_space),
             "robot_action_space": action_space_to_wire(embodiment.robot_action_space),
+            "robot_observation_space": observation_space_to_wire(embodiment.observation_space),
             "max_horizon": capabilities.max_horizon,
             "stateful": capabilities.stateful,
             "supports_seed": capabilities.supports_seed,
@@ -182,6 +189,205 @@ class _PipelinePoolVLABackend:
                 await self.pool.close_session(session_id)
 
 
+@dataclass
+class _PredictionJob:
+    message: Mapping[str, Any]
+    ticket: ChunkTicket
+    response: asyncio.Future[dict[str, Any]]
+
+
+class _SessionRuntime:
+    """Run one prediction at a time while retaining only the latest waiting request."""
+
+    def __init__(
+        self,
+        backend: _VLABackend,
+        session_id: str,
+        state: ActionChunkStateMachine,
+        *,
+        stateful: bool,
+    ) -> None:
+        self.backend = backend
+        self.session_id = session_id
+        self.state = state
+        self.stateful = stateful
+        self._waiting: _PredictionJob | None = None
+        self._runner: asyncio.Task[None] | None = None
+        self._accepting = True
+        self._recovering = False
+        self._barrier_active = False
+
+    def submit(self, message: Mapping[str, Any]) -> asyncio.Future[dict[str, Any]]:
+        """Admit a request immediately without waiting for the replica."""
+        loop = asyncio.get_running_loop()
+        response: asyncio.Future[dict[str, Any]] = loop.create_future()
+        if not self._accepting or self._recovering:
+            response.set_exception(
+                VLAProtocolError(VLAErrorCode.SESSION_UNAVAILABLE, "session is not accepting predictions")
+            )
+            return response
+
+        timestamp_ns = _required_nonnegative_int(message, "observation_timestamp_ns")
+        timeout_s = _optional_timeout_s(message)
+        ticket = self.state.submit(
+            _required_nonnegative_int(message, "sequence_id"),
+            timestamp_ns,
+            request_ttl_ms=None if timeout_s is None else timeout_s * 1000.0,
+            observation_clock_now_ns=_optional_nonnegative_int(message, "observation_clock_now_ns"),
+        )
+        admission = self.state.status(ticket)
+        if admission is ChunkStatus.REJECTED:
+            response.set_exception(
+                VLAProtocolError(VLAErrorCode.OUT_OF_ORDER, self.state.reason(ticket) or "action chunk was rejected")
+            )
+            return response
+        if admission is ChunkStatus.EXPIRED:
+            response.set_exception(
+                VLAProtocolError(VLAErrorCode.EXPIRED, self.state.reason(ticket) or "observation expired")
+            )
+            return response
+
+        job = _PredictionJob(message, ticket, response)
+        if self._waiting is not None:
+            self._fail(
+                self._waiting,
+                VLAProtocolError(VLAErrorCode.SUPERSEDED, "a newer observation superseded the waiting request"),
+            )
+        self._waiting = job
+        if self._runner is None:
+            self._runner = asyncio.create_task(self._run())
+        return response
+
+    async def reset(self, episode_id: str | None) -> None:
+        """Apply a barrier, discard earlier results, and reset policy history."""
+        self._accepting = False
+        self._barrier_active = True
+        self.state.reset(episode_id)
+        if self._waiting is not None:
+            self._fail(
+                self._waiting,
+                VLAProtocolError(VLAErrorCode.SESSION_UNAVAILABLE, "request was discarded by RESET"),
+            )
+            self._waiting = None
+        await self._await_runner()
+        await self.backend.reset(self.session_id, episode_id)
+        self.state.reset(episode_id)
+        self._barrier_active = False
+        self._accepting = True
+
+    async def close(self, *, disconnect: bool = False) -> None:
+        """Stop admission, isolate late results, and close the backend session."""
+        self._accepting = False
+        self._barrier_active = True
+        self.state.reset()
+        if self._waiting is not None:
+            self._fail(
+                self._waiting,
+                VLAProtocolError(VLAErrorCode.SESSION_UNAVAILABLE, "request was discarded by CLOSE"),
+            )
+            self._waiting = None
+        await self._await_runner()
+        await self.backend.close(self.session_id)
+        if disconnect:
+            self.state.disconnect()
+
+    async def _run(self) -> None:
+        try:
+            while self._waiting is not None:
+                job = self._waiting
+                self._waiting = None
+                if self.state.status(job.ticket) is not ChunkStatus.PENDING:
+                    self._fail(
+                        job,
+                        VLAProtocolError(
+                            VLAErrorCode.SUPERSEDED,
+                            self.state.reason(job.ticket) or "action chunk was superseded",
+                        ),
+                    )
+                    continue
+                await self._predict(job)
+        except Exception as error:
+            self._accepting = False
+            if self._waiting is not None:
+                self._fail(self._waiting, error)
+                self._waiting = None
+        finally:
+            self._runner = None
+
+    async def _predict(self, job: _PredictionJob) -> None:
+        self.state.mark_inference_started(job.ticket)
+        predict_task = asyncio.create_task(self.backend.predict(self.session_id, job.message))
+        timeout_s = _optional_timeout_s(job.message)
+        try:
+            if timeout_s is None:
+                chunk = await predict_task
+            else:
+                chunk = await asyncio.wait_for(asyncio.shield(predict_task), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            self._recovering = True
+            self._fail(job, VLAProtocolError(VLAErrorCode.TIMEOUT, "PREDICT exceeded request_ttl_ms"))
+            try:
+                try:
+                    chunk = await predict_task
+                except Exception as error:
+                    self.state.reject(job.ticket, str(error) or "timed-out VLA inference failed")
+                else:
+                    self.state.complete(
+                        job.ticket,
+                        chunk,
+                        observation_clock_now_ns=_optional_nonnegative_int(
+                            job.message,
+                            "observation_clock_now_ns",
+                        ),
+                    )
+                if not self._barrier_active:
+                    await self.backend.reset(self.session_id, None)
+                    self.state.reset()
+            finally:
+                self._recovering = False
+            return
+        except Exception as error:
+            self.state.reject(job.ticket, str(error) or "VLA inference failed")
+            self._fail(job, error)
+            return
+
+        completion = self.state.complete(
+            job.ticket,
+            chunk,
+            observation_clock_now_ns=_optional_nonnegative_int(job.message, "observation_clock_now_ns"),
+        )
+        if completion is ChunkStatus.READY:
+            self._succeed(
+                job,
+                {
+                    "type": "ACTION_CHUNK",
+                    "protocol_version": VLA_SESSION_PROTOCOL_VERSION,
+                    "request_id": _request_id(job.message),
+                    "session_id": self.session_id,
+                    "chunk": robot_action_chunk_to_wire(chunk),
+                },
+            )
+            return
+        code = VLAErrorCode.EXPIRED if completion is ChunkStatus.EXPIRED else VLAErrorCode.SUPERSEDED
+        self._fail(job, VLAProtocolError(code, self.state.reason(job.ticket) or "action chunk was discarded"))
+        if self.stateful and not self._barrier_active:
+            await self.backend.reset(self.session_id, None)
+
+    async def _await_runner(self) -> None:
+        if self._runner is not None:
+            await self._runner
+
+    @staticmethod
+    def _succeed(job: _PredictionJob, response: dict[str, Any]) -> None:
+        if not job.response.done():
+            job.response.set_result(response)
+
+    @staticmethod
+    def _fail(job: _PredictionJob, error: Exception) -> None:
+        if not job.response.done():
+            job.response.set_exception(error)
+
+
 def create_vla_session_app(
     sessions: VLASessionManager,
     *,
@@ -239,16 +445,24 @@ def _create_vla_session_app(
     async def session_socket(websocket: WebSocket) -> None:
         await websocket.accept()
         owned_sessions: set[str] = set()
-        recovery_tasks: dict[str, asyncio.Task[None]] = {}
-        chunk_states: dict[str, ActionChunkStateMachine] = {}
+        runtimes: dict[str, _SessionRuntime] = {}
+        delivery_tasks: set[asyncio.Task[None]] = set()
+        send_lock = asyncio.Lock()
         metadata = backend.metadata()
-        await _send(
+        await _locked_send(
             websocket,
+            send_lock,
             {
                 "type": "HELLO",
                 "protocol_version": VLA_SESSION_PROTOCOL_VERSION,
                 "encoding": VLA_WIRE_ENCODING,
                 "operations": ["OPEN", "PREDICT", "RESET", "CLOSE"],
+                "capabilities": {
+                    "observation_contract": True,
+                    "concurrent_predict": True,
+                    "prediction_queue": "latest-wins",
+                    "control_barriers": True,
+                },
                 "model_ids": list(metadata.get("model_ids", [])),
                 "embodiment_ids": list(metadata.get("embodiment_ids", [])),
                 "max_message_bytes": max_message_bytes,
@@ -264,39 +478,51 @@ def _create_vla_session_app(
                         max_message_bytes=max_message_bytes,
                     )
                     request_id = _request_id(message)
-                    response = await _handle_message(
+                    operation = message.get("type")
+                    if isinstance(operation, str) and operation.upper() == "PREDICT":
+                        session_id = _required_string(message, "session_id")
+                        if session_id not in owned_sessions:
+                            raise VLAProtocolError(
+                                VLAErrorCode.UNKNOWN_SESSION,
+                                f"session is not open on this connection: {session_id!r}",
+                            )
+                        response_future = runtimes[session_id].submit(message)
+                        task = asyncio.create_task(
+                            _deliver_prediction(websocket, send_lock, response_future, request_id=request_id)
+                        )
+                        delivery_tasks.add(task)
+                        task.add_done_callback(delivery_tasks.discard)
+                        continue
+                    response = await _handle_control_message(
                         backend,
                         message,
                         owned_sessions=owned_sessions,
-                        recovery_tasks=recovery_tasks,
-                        chunk_states=chunk_states,
+                        runtimes=runtimes,
                     )
                 except WebSocketDisconnect:
                     break
                 except Exception as error:
                     response = _error_response(error, request_id=request_id)
-                await _send(websocket, response)
+                await _locked_send(websocket, send_lock, response)
         finally:
-            for task in list(recovery_tasks.values()):
+            for runtime in tuple(runtimes.values()):
                 with contextlib.suppress(Exception):
+                    await runtime.close(disconnect=True)
+            for task in tuple(delivery_tasks):
+                task.cancel()
+            for task in tuple(delivery_tasks):
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-            for session_id in tuple(owned_sessions):
-                with contextlib.suppress(KeyError):
-                    await backend.close(session_id)
-                state = chunk_states.pop(session_id, None)
-                if state is not None:
-                    state.disconnect()
 
     return app
 
 
-async def _handle_message(
+async def _handle_control_message(
     backend: _VLABackend,
     message: Mapping[str, Any],
     *,
     owned_sessions: set[str],
-    recovery_tasks: dict[str, asyncio.Task[None]],
-    chunk_states: dict[str, ActionChunkStateMachine],
+    runtimes: dict[str, _SessionRuntime],
 ) -> dict[str, Any]:
     operation = message.get("type")
     if not isinstance(operation, str):
@@ -308,7 +534,7 @@ async def _handle_message(
             backend,
             message,
             owned_sessions=owned_sessions,
-            chunk_states=chunk_states,
+            runtimes=runtimes,
             request_id=request_id,
         )
 
@@ -316,73 +542,15 @@ async def _handle_message(
     if session_id not in owned_sessions:
         raise VLAProtocolError(VLAErrorCode.UNKNOWN_SESSION, f"session is not open on this connection: {session_id!r}")
     if operation == "PREDICT":
-        recovery = recovery_tasks.get(session_id)
-        if recovery is not None and not recovery.done():
-            raise VLAProtocolError(VLAErrorCode.SESSION_UNAVAILABLE, "session is recovering from a timed-out request")
-        timestamp_ns = _required_nonnegative_int(message, "observation_timestamp_ns")
-        timeout_s = _optional_timeout_s(message)
-        state = chunk_states[session_id]
-        ticket = state.submit(
-            _required_nonnegative_int(message, "sequence_id"),
-            timestamp_ns,
-            request_ttl_ms=None if timeout_s is None else timeout_s * 1000.0,
-            observation_clock_now_ns=_optional_nonnegative_int(message, "observation_clock_now_ns"),
-        )
-        admission = state.status(ticket)
-        if admission is ChunkStatus.REJECTED:
-            raise VLAProtocolError(VLAErrorCode.OUT_OF_ORDER, state.reason(ticket) or "action chunk was rejected")
-        if admission is ChunkStatus.EXPIRED:
-            raise VLAProtocolError(VLAErrorCode.EXPIRED, state.reason(ticket) or "observation expired")
-        state.mark_inference_started(ticket)
-        predict_task = asyncio.create_task(backend.predict(session_id, message))
-        try:
-            if timeout_s is None:
-                chunk = await predict_task
-            else:
-                chunk = await asyncio.wait_for(asyncio.shield(predict_task), timeout=timeout_s)
-        except asyncio.TimeoutError as error:
-            recovery_tasks[session_id] = asyncio.create_task(
-                _recover_timed_out_session(
-                    backend,
-                    session_id,
-                    predict_task,
-                    recovery_tasks,
-                    state,
-                    ticket,
-                    _optional_nonnegative_int(message, "observation_clock_now_ns"),
-                )
-            )
-            raise VLAProtocolError(VLAErrorCode.TIMEOUT, "PREDICT exceeded request_ttl_ms") from error
-        except Exception as error:
-            state.reject(ticket, str(error) or "VLA inference failed")
-            raise
-        completion = state.complete(
-            ticket,
-            chunk,
-            observation_clock_now_ns=_optional_nonnegative_int(message, "observation_clock_now_ns"),
-        )
-        if completion is ChunkStatus.EXPIRED:
-            raise VLAProtocolError(VLAErrorCode.EXPIRED, state.reason(ticket) or "action chunk expired")
-        if completion is not ChunkStatus.READY:
-            raise VLAProtocolError(VLAErrorCode.SESSION_UNAVAILABLE, state.reason(ticket) or "action chunk discarded")
-        return {
-            "type": "ACTION_CHUNK",
-            "protocol_version": VLA_SESSION_PROTOCOL_VERSION,
-            "request_id": request_id,
-            "session_id": session_id,
-            "chunk": robot_action_chunk_to_wire(chunk),
-        }
+        raise RuntimeError("PREDICT must be scheduled by the connection receiver")
     if operation == "RESET":
-        await _await_recovery(session_id, recovery_tasks)
         episode_id = _optional_string(message, "episode_id")
-        await backend.reset(session_id, episode_id)
-        chunk_states[session_id].reset(episode_id)
+        await runtimes[session_id].reset(episode_id)
         return _success_response("RESET", session_id, request_id)
     if operation == "CLOSE":
-        await _await_recovery(session_id, recovery_tasks)
-        await backend.close(session_id)
+        await runtimes[session_id].close()
         owned_sessions.remove(session_id)
-        chunk_states.pop(session_id).disconnect()
+        runtimes.pop(session_id).state.disconnect()
         return _success_response("CLOSE", session_id, request_id)
     raise VLAProtocolError(VLAErrorCode.INVALID_MESSAGE, f"unsupported VLA operation: {operation!r}")
 
@@ -392,7 +560,7 @@ async def _open_session(
     message: Mapping[str, Any],
     *,
     owned_sessions: set[str],
-    chunk_states: dict[str, ActionChunkStateMachine],
+    runtimes: dict[str, _SessionRuntime],
     request_id: str | int | None,
 ) -> dict[str, Any]:
     version = message.get("protocol_version")
@@ -408,10 +576,16 @@ async def _open_session(
         await backend.close(session_id)
         owned_sessions.remove(session_id)
         raise RuntimeError("VLA backend returned an invalid max_horizon")
-    chunk_states[session_id] = ActionChunkStateMachine(
+    state = ActionChunkStateMachine(
         _required_string(message, "episode_id"),
         execute_horizon=_optional_positive_int(message, "execute_horizon") or max_horizon,
         max_observation_age_ns=_optional_positive_int(message, "max_observation_age_ns"),
+    )
+    runtimes[session_id] = _SessionRuntime(
+        backend,
+        session_id,
+        state,
+        stateful=bool(opened.get("stateful", False)),
     )
     return {
         "type": "OPENED",
@@ -419,28 +593,6 @@ async def _open_session(
         "request_id": request_id,
         **opened,
     }
-
-
-async def _recover_timed_out_session(
-    backend: _VLABackend,
-    session_id: str,
-    predict_task: asyncio.Task[Any],
-    recovery_tasks: dict[str, asyncio.Task[None]],
-    state: ActionChunkStateMachine,
-    ticket: ChunkTicket,
-    observation_clock_now_ns: int | None,
-) -> None:
-    try:
-        try:
-            chunk = await predict_task
-        except Exception as error:
-            state.reject(ticket, str(error) or "timed-out VLA inference failed")
-        else:
-            state.complete(ticket, chunk, observation_clock_now_ns=observation_clock_now_ns)
-        await backend.reset(session_id, None)
-        state.reset()
-    finally:
-        recovery_tasks.pop(session_id, None)
 
 
 def _validate_expected_action_space(payload: Mapping[str, Any], robot_action_space: ActionSpaceSpec) -> None:
@@ -455,14 +607,47 @@ def _validate_expected_action_space(payload: Mapping[str, Any], robot_action_spa
     )
 
 
-async def _await_recovery(session_id: str, recovery_tasks: dict[str, asyncio.Task[None]]) -> None:
-    recovery = recovery_tasks.get(session_id)
-    if recovery is not None:
-        await recovery
+def _validate_expected_observation_space(
+    payload: Mapping[str, Any],
+    robot_observation_space: ObservationSpaceSpec,
+) -> None:
+    expected_payload = payload.get("expected_robot_observation_space")
+    if expected_payload is None:
+        return
+    if not isinstance(expected_payload, Mapping):
+        raise VLAProtocolError(VLAErrorCode.INVALID_MESSAGE, "expected_robot_observation_space must be an object")
+    observation_space_from_wire(expected_payload).require_compatible(
+        robot_observation_space,
+        context="client and embodiment robot observation space",
+    )
 
 
 async def _send(websocket: WebSocket, payload: Mapping[str, Any]) -> None:
     await websocket.send_text(dumps_wire_message(payload))
+
+
+async def _locked_send(
+    websocket: WebSocket,
+    lock: asyncio.Lock,
+    payload: Mapping[str, Any],
+) -> None:
+    async with lock:
+        await _send(websocket, payload)
+
+
+async def _deliver_prediction(
+    websocket: WebSocket,
+    lock: asyncio.Lock,
+    response: asyncio.Future[dict[str, Any]],
+    *,
+    request_id: str | int | None,
+) -> None:
+    try:
+        payload = await response
+    except Exception as error:
+        payload = _error_response(error, request_id=request_id)
+    with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+        await _locked_send(websocket, lock, payload)
 
 
 def _error_response(error: Exception, *, request_id: str | int | None) -> dict[str, Any]:
@@ -501,6 +686,8 @@ def _error_code(error: Exception) -> VLAErrorCode:
 
 def _value_error_code(message: str) -> VLAErrorCode:
     normalized = message.lower()
+    if "observation space" in normalized or "observation-space" in normalized:
+        return VLAErrorCode.OBSERVATION_SPACE_MISMATCH
     if "action space" in normalized or "action-space" in normalized:
         return VLAErrorCode.ACTION_SPACE_MISMATCH
     if "sequence_id" in normalized or "must increase" in normalized:

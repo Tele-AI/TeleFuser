@@ -9,6 +9,7 @@ from telefuser.vla import (
     ActionSpaceSpec,
     ModelActionChunk,
     ModelObservation,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
@@ -24,6 +25,7 @@ def _space(representation: str) -> ActionSpaceSpec:
 
 MODEL_SPACE = _space("joint_delta")
 ROBOT_SPACE = _space("joint_position")
+OBSERVATION_SPACE = ObservationSpaceSpec(("joint",))
 
 
 class _Policy:
@@ -54,6 +56,7 @@ class _Embodiment:
     embodiment_id: str = "fake-robot"
     model_action_space: ActionSpaceSpec = MODEL_SPACE
     robot_action_space: ActionSpaceSpec = ROBOT_SPACE
+    observation_space: ObservationSpaceSpec = OBSERVATION_SPACE
 
     def encode_observation(self, observation: RobotObservation) -> ModelObservation:
         return ModelObservation(observation.state.values, observation.images)
@@ -135,3 +138,12 @@ def test_open_rejects_policy_and_embodiment_action_space_mismatch() -> None:
 
     with pytest.raises(ValueError, match="representation"):
         manager.open("session", model_id="fake", embodiment_id="fake-robot", episode_id="episode")
+
+
+def test_session_rejects_observation_contract_before_policy_inference() -> None:
+    manager, _ = _manager()
+    session = manager.open("session", model_id="fake", embodiment_id="fake-robot", episode_id="episode")
+    observation = RobotObservation(RobotState(torch.tensor([1.0]), ("wrong_joint",), 100), {})
+
+    with pytest.raises(ValueError, match="observation space"):
+        session.predict(observation, "move", sequence_id=1)

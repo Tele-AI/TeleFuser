@@ -8,6 +8,7 @@ from .contracts import (
     ActionSpaceSpec,
     ModelActionChunk,
     ModelObservation,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
@@ -26,6 +27,9 @@ class EmbodimentAdapter(Protocol):
 
     @property
     def robot_action_space(self) -> ActionSpaceSpec: ...
+
+    @property
+    def observation_space(self) -> ObservationSpaceSpec: ...
 
     def encode_observation(self, observation: RobotObservation) -> ModelObservation: ...
 
