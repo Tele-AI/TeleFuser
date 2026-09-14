@@ -65,3 +65,46 @@ def test_client_runtime_rejects_mismatch_and_fails_closed_on_execution_error() -
     with pytest.raises(RuntimeError, match="simulator failed"):
         runtime.execute_ready()
     assert runtime.state is RuntimeState.HOLDING
+
+
+def test_client_runtime_exposes_transport_neutral_execution_reports() -> None:
+    simulator = _Simulator()
+    runtime = SimulatorChunkRuntime(simulator, SPACE, "episode", execute_horizon=2)
+
+    no_action = runtime.execute_ready_with_report()
+    assert no_action.status == "no_action"
+    assert no_action.sequence_id is None
+    assert no_action.executed_steps == 0
+
+    assert runtime.accept(_chunk()) is ChunkStatus.READY
+    report = runtime.execute_ready_with_report()
+    assert report.status == "executed"
+    assert report.sequence_id == 1
+    assert report.executed_steps == 2
+
+
+@pytest.mark.asyncio
+async def test_client_runtime_can_execute_without_blocking_async_caller() -> None:
+    simulator = _Simulator()
+    runtime = SimulatorChunkRuntime(simulator, SPACE, "episode", execute_horizon=3)
+    assert runtime.accept(_chunk()) is ChunkStatus.READY
+
+    report = await runtime.execute_ready_async()
+
+    assert report.status == "executed"
+    assert report.executed_steps == 3
+    assert runtime.state is RuntimeState.EMPTY
+
+
+def test_client_runtime_reports_simulator_failure_without_raising() -> None:
+    simulator = _Simulator(fail_at=1)
+    runtime = SimulatorChunkRuntime(simulator, SPACE, "episode", execute_horizon=3)
+    assert runtime.accept(_chunk()) is ChunkStatus.READY
+
+    report = runtime.execute_ready_with_report()
+
+    assert report.status == "failed"
+    assert report.sequence_id == 1
+    assert report.executed_steps == 1
+    assert report.reason == "simulator failed"
+    assert runtime.state is RuntimeState.HOLDING

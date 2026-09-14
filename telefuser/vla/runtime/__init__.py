@@ -11,7 +11,7 @@ from .chunk_state import (
 from .executor import ChunkExecutor, RobotAction
 from .safety import ActionSafetyPolicy, BoundedActionSafety, FiniteActionSafety
 from .scheduler import ActionChunkScheduler
-from .simulator import SimulatorChunkRuntime
+from .simulator import ChunkExecutionReport, SimulatorChunkRuntime
 
 __all__ = [
     "ActionChunkStateMachine",
@@ -19,6 +19,7 @@ __all__ = [
     "ActionChunkScheduler",
     "BoundedActionSafety",
     "ChunkExecutor",
+    "ChunkExecutionReport",
     "ChunkStatus",
     "ChunkTicket",
     "DisconnectPolicy",
