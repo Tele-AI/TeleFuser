@@ -192,9 +192,18 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
 
 ## Serving
 
-The generic VLA session server is the primary online path for new deployments and simulator integrations. The native
-structured service remains the HTTP path for single requests, offline evaluation, and batch clients. The RoboTwin
-MessagePack server is retained only when an unmodified upstream `WebsocketClientPolicy` must connect directly.
+The generic VLA session server is the only recommended online path for new simulator integrations. The four current
+entrypoints share one `LingBotVlaV2Pipeline`; they are access modes, not separate model implementations:
+
+| Entry point | Role | Recommendation |
+| --- | --- | --- |
+| `lingbot_vla_v2_inference.py` | Direct Python reference and offline baseline | Keep for regression/debugging |
+| `lingbot_vla_v2_native_service.py` via `telefuser serve` | Native HTTP structured requests | Keep for TeleFuser compatibility |
+| `lingbot_vla_v2_vla_server.py` | Stateful generic VLA WebSocket | **Primary simulator path** |
+| `lingbot_vla_v2_robotwin_server.py` | Upstream RoboTwin MessagePack compatibility | Legacy; remove after client migration |
+
+For a production or simulation deployment, start only the generic WebSocket server. The other entries remain for
+baseline comparison and backward compatibility and do not change the model or session implementation.
 
 Start the native structured service:
 
@@ -402,6 +411,33 @@ real SAPIEN simulation step.
 The base checkpoint remains marked `unverified_official_6b_base`. This endpoint establishes preprocessing, inference,
 action mapping, transport, and simulator execution continuity; it does not establish RoboTwin task success without
 an embodiment-validated checkpoint.
+
+## Local MuJoCo smoke simulation
+
+When the RTX RoboTwin workstation is unavailable, the generic VLA action path can be exercised locally with MuJoCo.
+The setup script installs MuJoCo into the existing TeleFuser `.venv` and stages EGL/OSMesa packages under the ignored
+`.venv-mujoco-libs` directory; it never runs `apt install` or changes system Python. The scene reads the existing
+RoboTwin ALOHA-Agilex URDF and meshes directly from `/data/RoboTwin` and adds a tabletop, cube, and three cameras.
+
+```bash
+bash examples/lingbot_vla_v2/setup_mujoco_local.sh
+
+# Physics + three-camera local smoke (no VLA model required)
+.venv/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_mujoco.py \
+  --mode local --image-size 256 --execute-horizon 8 \
+  --output-dir work_dirs/lingbot_vla_v2/mujoco_local
+
+# Complete local simulator -> generic VLA WebSocket -> simulator loop
+.venv/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_mujoco.py \
+  --mode websocket --server-url ws://127.0.0.1:18080/v1/vla/session \
+  --chunks 2 --execute-horizon 8 \
+  --output-dir work_dirs/lingbot_vla_v2/mujoco_websocket
+```
+
+The adapter uses a semantic 14-dimensional `absolute_qpos` contract, PD torque control, and the existing
+`SimulatorChunkRuntime`. `--mode local` validates model loading, rendering, action mapping, and execution without
+loading LingBot. `--mode websocket` additionally validates the live generic VLA session and requires a running VLA
+server. This is a chain/physics smoke test, not a RoboTwin task-success or checkpoint-quality evaluation.
 
 ## Validation
 
