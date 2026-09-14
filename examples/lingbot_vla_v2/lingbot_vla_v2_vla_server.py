@@ -1,4 +1,4 @@
-"""Standalone generic VLA WebSocket service backed by TeleFuser replicas."""
+"""Primary generic VLA WebSocket service backed by TeleFuser replicas."""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Compatibility server for the upstream RoboTwin policy protocol."""
+"""Legacy compatibility server for the upstream RoboTwin policy protocol.
+
+New simulator integrations should use the generic VLA WebSocket protocol in
+``lingbot_vla_v2_vla_server.py``. This endpoint remains only for unmodified
+upstream ``WebsocketClientPolicy`` clients.
+"""
 
 from __future__ import annotations
 

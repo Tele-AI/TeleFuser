@@ -1,4 +1,9 @@
-"""Native TeleFuser service contract for LingBot-VLA v2 action inference."""
+"""Native TeleFuser HTTP service contract for LingBot-VLA v2.
+
+This module is also the pipeline definition loaded by the generic VLA
+WebSocket server. It remains available for ``telefuser serve`` compatibility;
+the WebSocket server is the primary continuous-control entrypoint.
+"""
 
 from __future__ import annotations
 
