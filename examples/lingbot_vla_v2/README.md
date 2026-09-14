@@ -257,9 +257,16 @@ The service exposes `GET /healthz` and `/v1/vla/session`. Each `OPEN` reserves o
 `PREDICT`, `RESET`, and `CLOSE` are sent to the same worker-local `VLASession`. Closing or disconnecting releases the
 replica. The H100 cuDNN SDPA guard is applied inside each LingBot worker before model loading.
 
-This protocol returns semantic `RobotActionChunk` values. The RTX-side simulator process should deserialize the chunk,
-pass it to `SimulatorChunkRuntime`, and then execute it through its own `SimulatorAdapter`. The inference server tracks
-pending/ready/expired inference only and does not report simulator execution as completed.
+This protocol returns semantic `RobotActionChunk` values. The simulator process should deserialize the chunk, pass it
+to `SimulatorChunkRuntime`, and then execute it through its own `SimulatorAdapter`. The inference server tracks
+pending/ready/expired inference only and does not infer simulator execution. The simulator side can call
+`execute_ready_with_report()` (or `execute_ready_async()` from an async client) to obtain a small transport-neutral
+report containing `executed`, `failed`, or `no_action`, the chunk sequence, and the executed step count. The report can
+be forwarded on an existing control channel; it is intentionally not a new WebSocket operation.
+
+For a minimal P0 check, use one fake adapter test for report status and one async test for non-blocking execution. A
+long-running soak, cross-machine clock comparison, and full simulator episode are not required to validate this
+runtime API.
 
 ### Legacy RoboTwin Protocol Compatibility
 
