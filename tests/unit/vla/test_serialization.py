@@ -7,11 +7,15 @@ import torch
 
 from telefuser.vla import (
     ActionSpaceSpec,
+    ImageObservationSpec,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
     action_space_from_wire,
     action_space_to_wire,
+    observation_space_from_wire,
+    observation_space_to_wire,
     robot_action_chunk_from_wire,
     robot_action_chunk_to_wire,
     robot_observation_from_wire,
@@ -20,6 +24,7 @@ from telefuser.vla import (
 from telefuser.vla.serialization import dumps_wire_message, loads_wire_message, tensor_from_wire, tensor_to_wire
 
 SPACE = ActionSpaceSpec("joint_position", ("a", "b"), ("radian", "radian"), "base", 20.0, False)
+OBSERVATION_SPACE = ObservationSpaceSpec(("a", "b"), (ImageObservationSpec("front"),))
 
 
 def test_action_space_observation_and_chunk_round_trip_without_semantic_loss() -> None:
@@ -31,6 +36,7 @@ def test_action_space_observation_and_chunk_round_trip_without_semantic_loss() -
     chunk = RobotActionChunk(torch.tensor([[1.0, 2.0], [3.0, 4.0]]), SPACE, 2, 123, 7, "episode")
 
     assert action_space_from_wire(action_space_to_wire(SPACE)) == SPACE
+    assert observation_space_from_wire(observation_space_to_wire(OBSERVATION_SPACE)) == OBSERVATION_SPACE
     restored_observation = robot_observation_from_wire(robot_observation_to_wire(observation))
     assert restored_observation.state.dimension_names == observation.state.dimension_names
     assert restored_observation.state.timestamp_ns == observation.state.timestamp_ns
@@ -77,3 +83,31 @@ def test_action_space_wire_requires_arrays_not_ambiguous_strings() -> None:
     payload["dimension_names"] = "ab"
     with pytest.raises(ValueError, match="must be arrays"):
         action_space_from_wire(payload)
+
+
+def test_observation_space_validates_named_image_layout_dtype_and_channels() -> None:
+    state = RobotState(torch.tensor([0.1, 0.2]), ("a", "b"), 123)
+    OBSERVATION_SPACE.validate(RobotObservation(state, {"front": torch.zeros((2, 2, 3), dtype=torch.uint8)}))
+
+    with pytest.raises(ValueError, match="dtype"):
+        OBSERVATION_SPACE.validate(RobotObservation(state, {"front": torch.zeros((2, 2, 3))}))
+    with pytest.raises(ValueError, match="channels"):
+        OBSERVATION_SPACE.validate(RobotObservation(state, {"front": torch.zeros((2, 2, 1), dtype=torch.uint8)}))
+
+
+def test_observation_space_compatibility_uses_camera_names_not_declaration_order() -> None:
+    expected = ObservationSpaceSpec(
+        ("a", "b"),
+        (ImageObservationSpec("front"), ImageObservationSpec("wrist")),
+    )
+    reordered = ObservationSpaceSpec(
+        ("a", "b"),
+        (ImageObservationSpec("wrist"), ImageObservationSpec("front")),
+    )
+
+    expected.require_compatible(reordered)
+
+    malformed = observation_space_to_wire(expected)
+    malformed["images"] = [1]
+    with pytest.raises(ValueError, match="must contain objects"):
+        observation_space_from_wire(malformed)

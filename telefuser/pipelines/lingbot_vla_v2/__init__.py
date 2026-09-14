@@ -8,6 +8,7 @@ from .robot_profile import (
     ROBOTWIN_ACTION_ORDER,
     ROBOTWIN_ACTION_SPACE,
     ROBOTWIN_CAMERA_KEYS,
+    ROBOTWIN_OBSERVATION_SPACE,
     LingBotVlaV2ActionChunk,
     RobotWinProfile,
 )
@@ -33,5 +34,6 @@ __all__ = [
     "ROBOTWIN_ACTION_ORDER",
     "ROBOTWIN_ACTION_SPACE",
     "ROBOTWIN_CAMERA_KEYS",
+    "ROBOTWIN_OBSERVATION_SPACE",
     "RobotWinProfile",
 ]

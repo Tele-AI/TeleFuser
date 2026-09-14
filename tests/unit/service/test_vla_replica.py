@@ -12,6 +12,7 @@ from telefuser.vla import (
     ActionSpaceSpec,
     ModelActionChunk,
     ModelObservation,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
@@ -19,12 +20,14 @@ from telefuser.vla import (
     VLARegistry,
     VLASessionManager,
     action_space_to_wire,
+    observation_space_to_wire,
     robot_action_chunk_from_wire,
     robot_observation_to_wire,
 )
 
 MODEL_SPACE = ActionSpaceSpec("joint_delta", ("joint",), ("radian",), None, 10.0, False)
 ROBOT_SPACE = ActionSpaceSpec("joint_position", ("joint",), ("radian",), None, 10.0, False)
+OBSERVATION_SPACE = ObservationSpaceSpec(("joint",))
 
 
 class _Policy:
@@ -53,6 +56,7 @@ class _Embodiment:
     embodiment_id: str = "fake-robot"
     model_action_space: ActionSpaceSpec = MODEL_SPACE
     robot_action_space: ActionSpaceSpec = ROBOT_SPACE
+    observation_space: ObservationSpaceSpec = OBSERVATION_SPACE
 
     def encode_observation(self, observation: RobotObservation) -> ModelObservation:
         return ModelObservation(observation.state.values, observation.images)
@@ -87,10 +91,12 @@ def test_provider_dispatches_complete_worker_local_session() -> None:
             "embodiment_id": "fake-robot",
             "episode_id": "episode",
             "expected_robot_action_space": action_space_to_wire(ROBOT_SPACE),
+            "expected_robot_observation_space": observation_space_to_wire(OBSERVATION_SPACE),
         },
     )
     assert opened["max_horizon"] == 2
     assert opened["robot_action_space"] == action_space_to_wire(ROBOT_SPACE)
+    assert opened["robot_observation_space"] == observation_space_to_wire(OBSERVATION_SPACE)
 
     observation = RobotObservation(RobotState(torch.tensor([1.0]), ("joint",), 100), {})
     response = provider.dispatch(
@@ -124,6 +130,22 @@ def test_provider_rejects_action_contract_mismatch_before_open() -> None:
                 "embodiment_id": "fake-robot",
                 "episode_id": "episode",
                 "expected_robot_action_space": action_space_to_wire(mismatch),
+            },
+        )
+
+
+def test_provider_rejects_observation_contract_mismatch_before_open() -> None:
+    provider, _ = _provider()
+    mismatch = ObservationSpaceSpec(("other_joint",))
+    with pytest.raises(ValueError, match="observation space"):
+        provider.dispatch(
+            "OPEN",
+            {
+                "session_id": "session",
+                "model_id": "fake",
+                "embodiment_id": "fake-robot",
+                "episode_id": "episode",
+                "expected_robot_observation_space": observation_space_to_wire(mismatch),
             },
         )
 

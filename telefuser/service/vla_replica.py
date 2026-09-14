@@ -10,6 +10,8 @@ from telefuser.vla.serialization import (
     DEFAULT_MAX_TENSOR_BYTES,
     action_space_from_wire,
     action_space_to_wire,
+    observation_space_from_wire,
+    observation_space_to_wire,
     robot_action_chunk_to_wire,
     robot_observation_from_wire,
 )
@@ -75,6 +77,14 @@ class VLAReplicaProvider:
                 embodiment.robot_action_space,
                 context="client and embodiment robot action space",
             )
+        expected_observation_payload = payload.get("expected_robot_observation_space")
+        if expected_observation_payload is not None:
+            if not isinstance(expected_observation_payload, Mapping):
+                raise ValueError("expected_robot_observation_space must be an object")
+            observation_space_from_wire(expected_observation_payload).require_compatible(
+                embodiment.observation_space,
+                context="client and embodiment robot observation space",
+            )
         self.sessions.open(
             session_id,
             model_id=model_id,
@@ -90,6 +100,7 @@ class VLAReplicaProvider:
             "embodiment_id": embodiment_id,
             "model_action_space": action_space_to_wire(capabilities.output_action_space),
             "robot_action_space": action_space_to_wire(embodiment.robot_action_space),
+            "robot_observation_space": observation_space_to_wire(embodiment.observation_space),
             "max_horizon": capabilities.max_horizon,
             "stateful": capabilities.stateful,
             "supports_seed": capabilities.supports_seed,

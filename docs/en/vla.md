@@ -21,6 +21,10 @@ Tensor width is never used to infer action meaning. Every chunk carries an `Acti
 ordered dimension names, units, frame, control rate, and normalization identity. Session opening rejects a policy and
 embodiment pair whose action spaces are semantically incompatible.
 
+Each embodiment also declares an `ObservationSpaceSpec` with ordered state dimensions, named image dtype, layout,
+and channel requirements, plus the timestamp unit and clock domain. Image height and width remain dynamic so
+simulators can choose their native camera resolution.
+
 The public modules are:
 
 - `telefuser.vla.contracts`: observations, requests, capabilities, action spaces, and model/robot chunks.
@@ -28,11 +32,13 @@ The public modules are:
 - `telefuser.vla.embodiment`: observation encoding and model-to-robot action mapping.
 - `telefuser.vla.registry`: explicit registration of already-loaded policies and embodiments.
 - `telefuser.vla.session`: transport-neutral OPEN, PREDICT, RESET, and CLOSE lifecycle.
-- `telefuser.vla.serialization`: versioned JSON/Base64 wire formats for action spaces, observations, and chunks.
+- `telefuser.vla.serialization`: versioned JSON/Base64 wire formats for action and observation spaces, observations,
+  and chunks.
 - `telefuser.vla.runtime`: scheduling, deterministic chunk state, action trimming, age checks, and safety policies.
 - `telefuser.integrations.sim`: simulator protocol and the dependency-free RoboTwin callback adapter.
 - `telefuser.service.vla_session`: the additive generic VLA WebSocket application factory.
 - `telefuser.service.vla_replica`: worker-local OPEN, PREDICT, RESET, and CLOSE dispatch for pipeline replicas.
+- `telefuser.client.AsyncVLAClient`: remote session client with concurrent request correlation.
 
 ## LingBot-VLA v2 Compatibility
 
@@ -91,18 +97,22 @@ clocks on separate machines are not comparable.
 `PipelinePool`. Neither factory changes an existing TeleFuser service route. The server
 first sends `HELLO` with protocol version `1.0`, wire encoding, supported operations, registered component IDs, and
 payload limits. A client then uses `OPEN`, ordered `PREDICT`, `RESET`, and `CLOSE`. `OPEN` can declare the expected
-robot action space; semantic incompatibility is rejected before inference.
+robot action and observation spaces; semantic incompatibility is rejected before inference.
 
 The protocol returns machine-readable error codes for malformed messages, unsupported versions, unknown components
-or sessions, action-space mismatches, out-of-order or expired observations, request timeout, unavailable sessions, and
-replica failure. Tensor payloads are dense, typed, shape-checked Base64 data inside bounded JSON messages. This is the
-stable interoperability format; the LingBot-RoboTwin compatibility endpoint continues to use its existing MessagePack
-format. New model and simulator integrations must target the generic protocol rather than add behavior to the
-model-specific compatibility endpoint.
+or sessions, contract mismatches, superseded work, out-of-order or expired observations, request timeout, unavailable
+sessions, and replica failure. Tensor payloads are dense, typed, shape-checked Base64 data inside bounded JSON
+messages. This is the stable interoperability format; the LingBot-RoboTwin compatibility endpoint continues to use
+its existing MessagePack format. New model and simulator integrations must target the generic protocol rather than
+add behavior to the model-specific compatibility endpoint.
 
 `request_ttl_ms` is measured with server monotonic time and bounds inference delivery. Observation age is checked
 separately using `observation_timestamp_ns` and `observation_clock_now_ns`, which must come from the same clock domain.
-After a timed-out stateful inference finishes, the session is reset before it accepts more prediction work.
+The server permits inference and observation delivery to overlap. Per session it runs one replica request and retains
+only the newest waiting observation; replaced requests return `superseded`. `RESET` and `CLOSE` are barriers: they
+invalidate earlier tickets and wait for any non-cancellable replica call before acknowledging. A discarded stateful
+inference triggers policy reset before the retained observation runs. After a timed-out inference finishes, the
+session is reset before it accepts more prediction work.
 
 ## Replica Session Leases
 
@@ -149,6 +159,11 @@ The generic WebSocket application remains an explicit factory rather than an aut
 route. The LingBot example supplies a standalone server that starts `PipelinePool` with the optional VLA provider.
 This keeps existing HTTP routing and every non-VLA pipeline unchanged. A real simulator still owns control timing,
 actuator feedback, and verification that each returned action was actually applied.
+
+For LingBot-VLA v2, the standalone generic WebSocket is the primary continuous-control entrypoint. The direct Python
+entrypoint remains the reference/offline baseline, and the native HTTP structured service remains for existing
+TeleFuser callers. The RoboTwin MessagePack server is a legacy compatibility entrypoint only; it can be removed after
+all upstream clients migrate to `/v1/vla/session`.
 
 The direct inference CLI and structured HTTP task remain separate because they provide reference and batch workflows,
 not simulator session transports. The legacy RoboTwin MessagePack endpoint should be removed only after the RTX client

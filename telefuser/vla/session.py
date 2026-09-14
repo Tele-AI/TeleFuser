@@ -65,6 +65,7 @@ class VLASession:
             capabilities = self.policy.capabilities()
             if seed is not None and not capabilities.supports_seed:
                 raise ValueError(f"VLA policy {capabilities.model_id!r} does not support seeded inference")
+            self.embodiment.observation_space.validate(observation)
             stage_started_at = time.monotonic()
             model_observation = self.embodiment.encode_observation(observation)
             if timings is not None:

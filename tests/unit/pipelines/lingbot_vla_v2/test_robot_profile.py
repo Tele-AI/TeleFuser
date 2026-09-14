@@ -7,6 +7,7 @@ from telefuser.pipelines.lingbot_vla_v2.robot_profile import (
     LINGBOT_VLA_V2_ACTION_SPACE,
     ROBOTWIN_ACTION_ORDER,
     ROBOTWIN_ACTION_SPACE,
+    ROBOTWIN_OBSERVATION_SPACE,
     RobotWinProfile,
 )
 from telefuser.vla import ModelActionChunk, RobotObservation, RobotState
@@ -94,7 +95,7 @@ def test_profile_implements_semantic_embodiment_contract() -> None:
     profile = RobotWinProfile(_stats())
     observation = RobotObservation(
         RobotState(torch.zeros(14), ROBOTWIN_ACTION_ORDER, timestamp_ns=123),
-        {key: object() for key in profile.camera_keys},
+        {key: torch.zeros((2, 2, 3), dtype=torch.uint8) for key in profile.camera_keys},
     )
     model_observation = profile.encode_observation(observation)
     model_chunk = ModelActionChunk(
@@ -110,6 +111,7 @@ def test_profile_implements_semantic_embodiment_contract() -> None:
     robot_chunk = profile.decode_actions(model_chunk, observation.state)
 
     assert model_observation.state.shape == (14,)
+    assert profile.observation_space == ROBOTWIN_OBSERVATION_SPACE
     assert robot_chunk.actions.shape == (2, 14)
     assert robot_chunk.valid_length == 2
     assert robot_chunk.action_space == ROBOTWIN_ACTION_SPACE

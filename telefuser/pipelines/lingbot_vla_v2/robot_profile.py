@@ -12,8 +12,10 @@ import torch
 
 from telefuser.vla.contracts import (
     ActionSpaceSpec,
+    ImageObservationSpec,
     ModelActionChunk,
     ModelObservation,
+    ObservationSpaceSpec,
     RobotActionChunk,
     RobotObservation,
     RobotState,
@@ -60,6 +62,11 @@ ROBOTWIN_ACTION_SPACE = ActionSpaceSpec(
     frame="robot_joint",
     control_hz=None,
     normalized=False,
+)
+ROBOTWIN_OBSERVATION_SPACE = ObservationSpaceSpec(
+    state_dimension_names=ROBOTWIN_ACTION_ORDER,
+    images=tuple(ImageObservationSpec(name=key) for key in ROBOTWIN_CAMERA_KEYS),
+    allow_extra_images=True,
 )
 
 
@@ -134,15 +141,14 @@ class RobotWinProfile:
         """Return the semantic action space emitted for RoboTwin."""
         return ROBOTWIN_ACTION_SPACE
 
+    @property
+    def observation_space(self) -> ObservationSpaceSpec:
+        """Return the RoboTwin state and camera contract."""
+        return ROBOTWIN_OBSERVATION_SPACE
+
     def encode_observation(self, observation: RobotObservation) -> ModelObservation:
         """Validate a RoboTwin observation while retaining raw state for the model processor."""
-        if not isinstance(observation, RobotObservation):
-            raise TypeError("observation must be a RobotObservation")
-        if observation.state.dimension_names != ROBOTWIN_ACTION_ORDER:
-            raise ValueError("RobotWin state dimension order does not match the robot profile")
-        missing = [key for key in self.camera_keys if key not in observation.images]
-        if missing:
-            raise ValueError(f"RobotWin observation is missing camera keys: {missing}")
+        self.observation_space.validate(observation)
         return ModelObservation(
             state=observation.state.values,
             images={key: observation.images[key] for key in self.camera_keys},
