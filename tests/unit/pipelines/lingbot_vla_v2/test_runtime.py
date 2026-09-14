@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from telefuser.core.config import QuantKernelBackend, QuantType
 from telefuser.pipelines.lingbot_vla_v2.runtime import (
+    configure_lingbot_vla_v2_h100_sdpa,
     get_lingbot_vla_v2_pipeline,
     lingbot_vla_v2_quant_config,
 )
@@ -54,3 +56,32 @@ def test_quantization_rejects_unknown_name() -> None:
 def test_cuda_graph_rejects_cpu_before_loading_models() -> None:
     with pytest.raises(ValueError, match="CUDA Graph requires a CUDA device"):
         get_lingbot_vla_v2_pipeline("unused", "unused", device="cpu", cuda_graph=True)
+
+
+def test_h100_policy_process_disables_only_cudnn_sdpa(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "NVIDIA H100 80GB HBM3")
+    monkeypatch.setattr(torch.backends.cuda, "enable_cudnn_sdp", lambda enabled: calls.append(("cudnn", enabled)))
+    monkeypatch.setattr(torch.backends.cuda, "enable_flash_sdp", lambda enabled: calls.append(("flash", enabled)))
+    monkeypatch.setattr(torch.backends.cuda, "enable_math_sdp", lambda enabled: calls.append(("math", enabled)))
+    monkeypatch.setattr(
+        torch.backends.cuda,
+        "enable_mem_efficient_sdp",
+        lambda enabled: calls.append(("mem_efficient", enabled)),
+    )
+
+    configure_lingbot_vla_v2_h100_sdpa("cuda:0")
+
+    assert calls == [("cudnn", False), ("flash", True), ("math", True), ("mem_efficient", True)]
+
+
+def test_non_h100_policy_process_preserves_sdpa_backends(monkeypatch) -> None:
+    calls: list[bool] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _device: "NVIDIA RTX 4090")
+    monkeypatch.setattr(torch.backends.cuda, "enable_cudnn_sdp", calls.append)
+
+    configure_lingbot_vla_v2_h100_sdpa("cuda:0")
+
+    assert calls == []

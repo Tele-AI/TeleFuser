@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from telefuser.vla.contracts import ModelActionChunk, VLACapabilities, VLARequest
+from telefuser.vla.registry import VLARegistry
+from telefuser.vla.session import VLASessionManager
 
 from .data import LingBotVlaV2Observation
-from .robot_profile import LINGBOT_VLA_V2_ACTION_SPACE
+from .robot_profile import LINGBOT_VLA_V2_ACTION_SPACE, RobotWinProfile
+
+LINGBOT_VLA_V2_MODEL_ID = "lingbot-vla-v2"
 
 
 class _LingBotPipeline(Protocol):
@@ -22,7 +26,7 @@ class LingBotVlaV2VLAPolicy:
             raise ValueError("max_horizon must be positive")
         self.pipeline = pipeline
         self._capabilities = VLACapabilities(
-            model_id="lingbot-vla-v2",
+            model_id=LINGBOT_VLA_V2_MODEL_ID,
             output_action_space=LINGBOT_VLA_V2_ACTION_SPACE,
             max_horizon=max_horizon,
             stateful=False,
@@ -64,3 +68,16 @@ class LingBotVlaV2VLAPolicy:
         """Validate RESET for the currently stateless LingBot base policy."""
         if not isinstance(episode_id, str) or not episode_id:
             raise ValueError("episode_id must be a non-empty string")
+
+
+def create_lingbot_vla_v2_session_manager(
+    pipeline: _LingBotPipeline,
+    *,
+    profile: RobotWinProfile | None = None,
+) -> VLASessionManager:
+    """Register the shared LingBot policy and RoboTwin embodiment once."""
+    resolved_profile = profile or RobotWinProfile.default()
+    registry = VLARegistry()
+    registry.register_policy(LINGBOT_VLA_V2_MODEL_ID, LingBotVlaV2VLAPolicy(pipeline))
+    registry.register_embodiment(resolved_profile.embodiment_id, resolved_profile)
+    return VLASessionManager(registry)

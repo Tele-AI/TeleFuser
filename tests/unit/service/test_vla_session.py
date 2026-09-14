@@ -10,7 +10,11 @@ import torch
 from fastapi.testclient import TestClient
 
 from telefuser.service.core.replica_worker import ReplicaDeadError
-from telefuser.service.vla_session import VLA_SESSION_PROTOCOL_VERSION, create_vla_session_app
+from telefuser.service.vla_session import (
+    VLA_SESSION_PROTOCOL_VERSION,
+    create_pipeline_pool_vla_session_app,
+    create_vla_session_app,
+)
 from telefuser.vla import (
     ActionSpaceSpec,
     ModelActionChunk,
@@ -23,6 +27,7 @@ from telefuser.vla import (
     VLASessionManager,
     action_space_to_wire,
     robot_action_chunk_from_wire,
+    robot_action_chunk_to_wire,
     robot_observation_to_wire,
 )
 
@@ -210,3 +215,75 @@ def test_disconnect_closes_connection_owned_sessions() -> None:
             assert websocket.receive_json()["type"] == "OPENED"
         assert manager.session_ids() == ()
     assert policy.resets == ["episode"]
+
+
+class _FakePipelinePool:
+    def __init__(self) -> None:
+        self.session_ids: set[str] = set()
+        self.operations: list[tuple[str, str]] = []
+
+    def vla_metadata(self) -> dict:
+        return {"model_ids": ["fake"], "embodiment_ids": ["fake-robot"]}
+
+    async def open_session(self, session_id: str) -> int:
+        if session_id in self.session_ids:
+            raise ValueError(f"pipeline session is already open: {session_id!r}")
+        self.session_ids.add(session_id)
+        return 0
+
+    async def run_vla_operation(self, session_id: str, operation: str, payload: dict) -> dict:
+        assert session_id in self.session_ids
+        self.operations.append((session_id, operation))
+        if operation == "OPEN":
+            return {
+                "session_id": session_id,
+                "model_id": "fake",
+                "embodiment_id": "fake-robot",
+                "model_action_space": action_space_to_wire(MODEL_SPACE),
+                "robot_action_space": action_space_to_wire(ROBOT_SPACE),
+                "max_horizon": 3,
+                "stateful": False,
+                "supports_seed": True,
+            }
+        if operation == "PREDICT":
+            chunk = RobotActionChunk(
+                torch.tensor([[1.1], [1.2]]),
+                ROBOT_SPACE,
+                2,
+                payload["observation_timestamp_ns"],
+                payload["sequence_id"],
+                "episode",
+            )
+            return {"session_id": session_id, "chunk": robot_action_chunk_to_wire(chunk)}
+        return {"session_id": session_id}
+
+    async def close_session(self, session_id: str) -> int:
+        self.session_ids.remove(session_id)
+        return 0
+
+
+def test_pipeline_pool_backend_runs_full_protocol_and_releases_lease() -> None:
+    pool = _FakePipelinePool()
+    app = create_pipeline_pool_vla_session_app(pool, close_pool_on_shutdown=False)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/vla/session") as websocket:
+            hello = websocket.receive_json()
+            assert hello["model_ids"] == ["fake"]
+            websocket.send_json(_open())
+            assert websocket.receive_json()["type"] == "OPENED"
+            websocket.send_json(_predict(1))
+            response = websocket.receive_json()
+            assert response["type"] == "ACTION_CHUNK"
+            assert robot_action_chunk_from_wire(response["chunk"]).valid_length == 2
+            websocket.send_json({"type": "RESET", "session_id": "session"})
+            assert websocket.receive_json()["type"] == "RESET_ACK"
+            websocket.send_json({"type": "CLOSE", "session_id": "session"})
+            assert websocket.receive_json()["type"] == "CLOSE_ACK"
+
+    assert pool.session_ids == set()
+    assert pool.operations == [
+        ("session", "OPEN"),
+        ("session", "PREDICT"),
+        ("session", "RESET"),
+        ("session", "CLOSE"),
+    ]

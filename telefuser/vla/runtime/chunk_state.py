@@ -254,6 +254,21 @@ class ActionChunkStateMachine:
             record.reason = None
             return record.status
 
+    def reject(self, ticket: ChunkTicket, reason: str) -> ChunkStatus:
+        """Reject pending inference after a policy or transport failure."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        with self._lock:
+            record = self._record(ticket)
+            record.inference_completed = True
+            if record.status is not ChunkStatus.PENDING or self._pending != ticket:
+                self._recover_discarded_state(record)
+                return record.status
+            self._pending = None
+            self._set_terminal(record, ChunkStatus.REJECTED, reason)
+            self._recover_discarded_state(record)
+            return record.status
+
     def begin_execution(self) -> RobotActionChunk | None:
         """Move the newest ready chunk into execution and apply execute_horizon."""
         with self._lock:

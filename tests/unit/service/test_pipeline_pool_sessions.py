@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -76,6 +76,23 @@ def test_same_session_requests_are_serialized() -> None:
         assert entered == ["first", "second"]
 
     asyncio.run(scenario())
+
+
+def test_vla_operation_uses_the_session_affine_replica() -> None:
+    pool, handles = _pool(num_replicas=1)
+    handles[0].run_vla_operation = AsyncMock(return_value={"session_id": "one"})
+
+    async def scenario() -> None:
+        await pool.open_session("one")
+        result = await pool.run_vla_operation("one", "RESET", {"session_id": "one"})
+        assert result == {"session_id": "one"}
+
+    asyncio.run(scenario())
+    handles[0].run_vla_operation.assert_awaited_once_with(
+        "RESET",
+        {"session_id": "one"},
+        timeout_s=None,
+    )
 
 
 def test_dead_session_replica_invalidates_binding_deterministically() -> None:
