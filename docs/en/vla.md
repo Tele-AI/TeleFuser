@@ -40,7 +40,7 @@ The public modules are:
 - `telefuser.service.vla_replica`: worker-local OPEN, PREDICT, RESET, and CLOSE dispatch for pipeline replicas.
 - `telefuser.client.AsyncVLAClient`: remote session client with concurrent request correlation.
 
-## LingBot-VLA v2 Compatibility
+## LingBot-VLA v2 Integration
 
 `LingBotVlaV2VLAPolicy` wraps `LingBotVlaV2Pipeline`; the pipeline's existing tensor input and return types are not
 changed. It labels the normalized canonical `[T,55]` result as a `ModelActionChunk`.
@@ -49,16 +49,9 @@ changed. It labels the normalized canonical `[T,55]` result as a `ModelActionChu
 chunk to an absolute-position `[H,14]` `RobotActionChunk` in the declared dual-arm joint order. Its model and robot
 action spaces are exported as `LINGBOT_VLA_V2_ACTION_SPACE` and `ROBOTWIN_ACTION_SPACE`.
 
-The generic VLA WebSocket is the primary online integration path. The existing LingBot RoboTwin WebSocket endpoint
-is a compatibility adapter for unmodified upstream `WebsocketClientPolicy` clients and calls the same policy,
-embodiment, session, and runtime path internally. Its URL, MessagePack request fields, metadata frame, response fields,
-reset behavior, and latest-wins
-scheduler behavior remain compatible. The old model-specific scheduler import is retained as an alias to the common
-runtime scheduler.
-
-The standalone endpoint owns one resident pipeline, so each connection session is inherently pinned to that policy
-instance. The shared HTTP structured-task route remains unchanged and continues to return the existing canonical
-JSON result.
+The generic VLA WebSocket is the online integration path for both RoboTwin and MuJoCo clients. Each connection opens
+an explicit model and embodiment pair, while the shared HTTP structured-task route remains unchanged and continues to
+return the existing canonical JSON result.
 
 ## Session Lifecycle
 
@@ -102,9 +95,7 @@ robot action and observation spaces; semantic incompatibility is rejected before
 The protocol returns machine-readable error codes for malformed messages, unsupported versions, unknown components
 or sessions, contract mismatches, superseded work, out-of-order or expired observations, request timeout, unavailable
 sessions, and replica failure. Tensor payloads are dense, typed, shape-checked Base64 data inside bounded JSON
-messages. This is the stable interoperability format; the LingBot-RoboTwin compatibility endpoint continues to use
-its existing MessagePack format. New model and simulator integrations must target the generic protocol rather than
-add behavior to the model-specific compatibility endpoint.
+messages. This is the stable interoperability format for all model and simulator integrations.
 
 `request_ttl_ms` is measured with server monotonic time and bounds inference delivery. Observation age is checked
 separately using `observation_timestamp_ns` and `observation_clock_now_ns`, which must come from the same clock domain.
@@ -160,14 +151,10 @@ route. The LingBot example supplies a standalone server that starts `PipelinePoo
 This keeps existing HTTP routing and every non-VLA pipeline unchanged. A real simulator still owns control timing,
 actuator feedback, and verification that each returned action was actually applied.
 
-For LingBot-VLA v2, the standalone generic WebSocket is the primary continuous-control entrypoint. The direct Python
+For LingBot-VLA v2, the standalone generic WebSocket is the continuous-control entrypoint. The direct Python
 entrypoint remains the reference/offline baseline, and the native HTTP structured service remains for existing
-TeleFuser callers. The RoboTwin MessagePack server is a legacy compatibility entrypoint only; it can be removed after
-all upstream clients migrate to `/v1/vla/session`.
-
-The direct inference CLI and structured HTTP task remain separate because they provide reference and batch workflows,
-not simulator session transports. The legacy RoboTwin MessagePack endpoint should be removed only after the RTX client
-passes generic-protocol action delivery, reset, timeout, reconnect, and latest-wins parity checks.
+TeleFuser callers. The direct inference CLI and structured HTTP task remain separate because they provide reference
+and batch workflows, not simulator session transports.
 
 No new dependencies, environment variables, shared model configuration fields, CLI options, HTTP schemas, or
 existing service routes are introduced by this semantic and transport layer.

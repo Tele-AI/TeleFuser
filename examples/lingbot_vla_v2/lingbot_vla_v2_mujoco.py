@@ -236,7 +236,7 @@ async def _run_websocket_loop(
 @click.command()
 @click.option("--mode", type=click.Choice(("local", "websocket")), default="local", show_default=True)
 @click.option("--urdf", "urdf_path", type=click.Path(path_type=Path, exists=True, dir_okay=False), default=DEFAULT_URDF)
-@click.option("--server-url", default="ws://127.0.0.1:18080/v1/vla/session", show_default=True)
+@click.option("--server-url", default="ws://127.0.0.1:8000/v1/vla/session", show_default=True)
 @click.option("--instruction", default="pick up the red block", show_default=True)
 @click.option("--seed", type=int, default=7, show_default=True)
 @click.option("--chunks", type=click.IntRange(min=1), default=2, show_default=True)
