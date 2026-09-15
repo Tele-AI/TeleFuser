@@ -25,7 +25,6 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
 | Quantization | Partial | Profile-specific release status; see Configuration and Performance |
 | Native server API | Supported | Asynchronous structured task API and `TFClient` |
-| RoboTwin policy protocol | Compatibility | Legacy MessagePack endpoint for unmodified upstream clients |
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
 | RoboTwin action mapping | Supported | Unnormalizes canonical output to absolute-position `50 x 14` chunks |
@@ -192,15 +191,14 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
 
 ## Serving
 
-The generic VLA session server is the only recommended online path for new simulator integrations. The four current
-entrypoints share one `LingBotVlaV2Pipeline`; they are access modes, not separate model implementations:
+The three inference entrypoints share one `LingBotVlaV2Pipeline`; they are access modes, not separate model
+implementations:
 
 | Entry point | Role | Recommendation |
 | --- | --- | --- |
 | `lingbot_vla_v2_inference.py` | Direct Python reference and offline baseline | Keep for regression/debugging |
 | `lingbot_vla_v2_native_service.py` via `telefuser serve` | Native HTTP structured requests | Keep for TeleFuser compatibility |
 | `lingbot_vla_v2_vla_server.py` | Stateful generic VLA WebSocket | **Primary simulator path** |
-| `lingbot_vla_v2_robotwin_server.py` | Upstream RoboTwin MessagePack compatibility | Legacy; remove after client migration |
 
 For a production or simulation deployment, start only the generic WebSocket server. The other entries remain for
 baseline comparison and backward compatibility and do not change the model or session implementation.
@@ -268,156 +266,16 @@ For a minimal P0 check, use one fake adapter test for report status and one asyn
 long-running soak, cross-machine clock comparison, and full simulator episode are not required to validate this
 runtime API.
 
-### Legacy RoboTwin Protocol Compatibility
+### RoboTwin via Generic VLA Session
 
-This compatibility server implements the persistent MessagePack WebSocket protocol used by the upstream
-`WebsocketClientPolicy`. Use it only when the upstream client cannot yet consume the generic VLA session protocol.
-New transport, scheduling, and simulator integrations belong on the generic VLA path. The compatibility endpoint is
-isolated from `telefuser serve`: no TeleFuser API routes, service schemas, or other model integrations are changed.
+RoboTwin clients use the same `/v1/vla/session` endpoint as MuJoCo. The XPolicyLab-side `TeleFuser_VLA` policy maps
+RoboTwin observations to the negotiated `robotwin` embodiment contract and returns validated absolute-position action
+chunks. No model-specific server or MessagePack dependency is required in TeleFuser.
 
-Install the protocol dependency in the TeleFuser inference environment:
-
-```bash
-.venv-vla/bin/python -m pip install -r examples/lingbot_vla_v2/requirements-robotwin.txt
-```
-
-Start one resident policy process:
-
-```bash
-.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_robotwin_server.py \
-  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
-  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
-  --device cuda:0 --host 0.0.0.0 --port 9330 --use-length 50
-```
-
-On NVIDIA H100, this dedicated entrypoint disables cuDNN SDPA before model warmup because the current
-PyTorch/cuDNN combination cannot build a valid vision-attention execution plan. Flash, memory-efficient, and math
-SDPA remain enabled. The override is process-local and is not applied to other TeleFuser pipelines.
-
-The server exposes `GET /healthz` and the policy WebSocket at `/`. On connection it sends a MessagePack metadata
-frame, including the explicit 16 MiB request limit, then accepts multiple binary MessagePack requests on the same
-connection. This matches the upstream client contract:
-
-```python
-from deploy.websocket_client_policy import WebsocketClientPolicy
-
-policy = WebsocketClientPolicy(host="127.0.0.1", port=9330)
-policy.reset("robotwin")
-result = policy.infer(
-    {
-        "observation.images.cam_high": camera_high,
-        "observation.images.cam_left_wrist": camera_left_wrist,
-        "observation.images.cam_right_wrist": camera_right_wrist,
-        "observation.state": state,
-        "task": instruction,
-    }
-)
-actions = result["action"]  # float32 [50, 14] when --use-length=50
-```
-
-The initial metadata frame describes protocol version `1.0`, `absolute_qpos` action semantics, `float32` dtype,
-horizon, dimension, and the exact dual-arm joint order. Inference requests may include an integer `seed` plus
-`request_id` and `episode_id`; the response echoes them and reports decode, lock-wait, pipeline, action-mapping, and
-adapter timings. Existing clients may omit all three request fields.
-
-The endpoint also advertises an additive, latest-wins action scheduler. A client that overlaps simulation and
-inference should send a monotonically increasing `sequence_id` within each `episode_id`, plus a positive
-`request_ttl_ms`. The server has one GPU worker, retains at most one pending request per connection/episode, and
-accepts new observations while inference is running. A newer observation replaces queued work; because an in-flight
-CUDA call cannot be cancelled, its result is discarded after completion when it has become stale. Successful
-responses use `scheduler_status="completed"`. Responses with `superseded`, `expired`, `stale_sequence`, or
-`overloaded` contain `action=None` and a structured `error`; clients must never execute those responses.
-
-`request_ttl_ms` starts when the H100 server receives the request. Do not compare monotonic timestamps between the
-H100 and RTX machines. The RTX client should separately enforce its round-trip deadline and hold the current joint
-positions when no fresh action is available.
-
-Validate this direct endpoint before a simulator is available. This sends reset and repeated inference requests to
-the resident model, validates the returned `[H, 14]` action contract, and optionally verifies exact fixed-seed replay:
-
-```bash
-.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
-  --host 127.0.0.1 --port 9330 \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --max-image-edge 640 \
-  --task "pick up the object" --seed 7 --requests 10 \
-  --output work_dirs/robotwin_ws_validation/smoke.json
-```
-
-The validator preserves aspect ratio and downsizes only images whose longest edge exceeds `--max-image-edge`, then
-checks the encoded MessagePack request against the limit advertised by the server before sending it. This keeps the
-large repository sample representative of normal RoboTwin camera payloads. Add `--require-exact-replay` only when
-validating a runtime profile that promises bitwise determinism; BF16 H100 inference is validated with numerical
-tolerances rather than identical action hashes.
-
-Exercise overlapping submissions and stale-action rejection without a simulator:
-
-```bash
-.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
-  --host 127.0.0.1 --port 9330 \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --task "pick up the object" --seed 7 --requests 3 \
-  --request-ttl-ms 5000 --overlap-requests \
-  --output work_dirs/robotwin_ws_validation/overlap.json
-```
-
-This mode sends all observations before receiving responses, requires the newest request to return an action, and
-requires at least one older request to be reported as `superseded`.
-
-Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
-profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
-start with 50 for upstream-equivalent open-loop execution. The adapter accepts episode reset messages but deliberately
-rejects runtime checkpoint switching.
-
-Internally this compatibility endpoint uses the shared `VLAPolicy`, `EmbodimentAdapter`, `VLASessionManager`, and
-`ChunkExecutor` contracts. The wire protocol and the existing `LingBotVlaV2Pipeline` API remain unchanged. The
-declared control rate is intentionally unresolved until the remote RoboTwin loop supplies its actual frequency.
-
-Keep this endpoint until the RTX client has passed end-to-end action delivery, reset, timeout, reconnect, and
-latest-wins parity checks through the generic protocol. After that migration, the compatibility module can be removed
-without changing the model pipeline or the generic VLA service.
-
-For split-machine deployment, run the model endpoint and the repository-owned XPolicyLab proxy on the H100 inference
-host. The proxy does not load a second model; it translates XPolicyLab observations to the direct TeleFuser protocol:
-
-```bash
-cd /data/RoboTwin
-bash XPolicyLab/policy/TeleFuser_LingBot_VLA/setup_eval_policy_server.sh \
-  RoboTwin lift_pot remote_base arx_x5 joint 0 0 \
-  /data/RoboTwin/.venv 19000 0.0.0.0 \
-  127.0.0.1 9330
-```
-
-On the remote RTX/Vulkan workstation, use the standard RoboTwin evaluation client and point it at the proxy. No
-TeleFuser files or model weights are required on that workstation:
-
-```bash
-cd /data/RoboTwin
-bash scripts/eval_policy.sh \
-  --bench_name RoboTwin \
-  --task_name lift_pot \
-  --env_cfg_type arx_x5 \
-  --policy_name TeleFuser_LingBot_VLA \
-  --host INFERENCE_HOST --port 19000 --protocol ws \
-  --eval_batch false --root_dir /data/RoboTwin --device_id 0 \
-  --additional_info ckpt_name=remote_base,action_type=joint \
-  --seed 0 --task_config demo_clean --test_num 1
-```
-
-The current XPolicyLab proxy calls `infer()` synchronously, so it remains compatible but does not yet overlap action
-execution with inference. Full overlap requires an incremental RTX-side change: execute chunk N while submitting a
-newer observation for chunk N+1, keep only the newest completed chunk in an atomic action buffer, and apply the same
-sequence/deadline checks before execution. That simulator-side change is outside this repository and is not required
-for the no-simulation server validation above.
-
-Keep ports `9330` and `19000` on a trusted private network or an SSH/VPN tunnel. These WebSocket endpoints do not
-provide authentication or transport encryption. The direct validator covers preprocessing, inference, mapping, and
-the inner WebSocket contract; only the RTX smoke episode can additionally establish XPolicyLab translation and one
-real SAPIEN simulation step.
-
-The base checkpoint remains marked `unverified_official_6b_base`. This endpoint establishes preprocessing, inference,
-action mapping, transport, and simulator execution continuity; it does not establish RoboTwin task success without
-an embodiment-validated checkpoint.
+Run the generic server on the inference host, then point the XPolicyLab adapter at
+`ws://INFERENCE_HOST:8000/v1/vla/session` with `model_id=lingbot-vla-v2` and `embodiment_id=robotwin`. Keep the generic
+WebSocket and the XPolicyLab policy server on a trusted private network or an SSH/VPN tunnel because neither endpoint
+provides authentication.
 
 ## Local MuJoCo smoke simulation
 
@@ -436,7 +294,7 @@ bash examples/lingbot_vla_v2/setup_mujoco_local.sh
 
 # Complete local simulator -> generic VLA WebSocket -> simulator loop
 .venv/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_mujoco.py \
-  --mode websocket --server-url ws://127.0.0.1:18080/v1/vla/session \
+  --mode websocket --server-url ws://127.0.0.1:8000/v1/vla/session \
   --chunks 2 --execute-horizon 8 \
   --output-dir work_dirs/lingbot_vla_v2/mujoco_websocket
 ```
