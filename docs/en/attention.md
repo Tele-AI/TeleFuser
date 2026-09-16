@@ -246,6 +246,10 @@ pipe_config.dit_config.attention_config = config
 
 **Note on Flash Attention 4**: Flash Attention 4 is optimized for **Hopper (SM90, H100)** and **Blackwell (SM100+, B100/B200)** GPUs. It provides significant performance improvements on these architectures. For older GPUs (Ampere, Ada Lovelace), use Flash Attention 2 or 3 instead.
 
+**Note on AMD ROCm**: only `TORCH_SDPA` is natively available on ROCm hosts (`tf-kernel`, SageAttention, and
+`flash_attn` are CUDA-only), so ROCm examples default to SDPA explicitly. The per-platform backend matrix lives in
+[Hardware Platforms](platforms.md).
+
 ### Sparse Attention Backends
 
 | Backend | Description | Requirements |

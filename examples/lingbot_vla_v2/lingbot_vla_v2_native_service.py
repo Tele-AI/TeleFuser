@@ -1,4 +1,9 @@
-"""Native TeleFuser service contract for LingBot-VLA v2 action inference."""
+"""Native TeleFuser HTTP service contract for LingBot-VLA v2.
+
+This module is also the pipeline definition loaded by the generic VLA
+WebSocket server. It remains available for ``telefuser serve`` compatibility;
+the WebSocket server is the primary continuous-control entrypoint.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +12,16 @@ from pathlib import Path
 from typing import Any
 
 from telefuser.pipelines.lingbot_vla_v2.pipeline import LingBotVlaV2Pipeline
-from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
+from telefuser.pipelines.lingbot_vla_v2.runtime import (
+    configure_lingbot_vla_v2_h100_sdpa,
+    get_lingbot_vla_v2_pipeline,
+)
 from telefuser.pipelines.lingbot_vla_v2.service import (
     LingBotVlaV2ActionRequest,
     predict_lingbot_vla_v2_action,
 )
+from telefuser.pipelines.lingbot_vla_v2.vla_policy import create_lingbot_vla_v2_session_manager
+from telefuser.service.vla_replica import VLAReplicaProvider
 from telefuser.utils.logging import logger
 
 TF_MODEL_ZOO_PATH = Path(os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")).expanduser()
@@ -84,6 +94,7 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
     """Load one policy replica for the native TeleFuser service."""
     if parallelism != 1:
         raise ValueError("LingBot-VLA v2 supports parallelism=1 per replica; use --num-replicas for a pipeline pool")
+    configure_lingbot_vla_v2_h100_sdpa(PPL_CONFIG["device"])
     logger.info(
         f"Loading LingBot-VLA v2 service profile quantization={PPL_CONFIG['quantization'] or 'bf16'} "
         f"cuda_graph={PPL_CONFIG['cuda_graph']}"
@@ -98,6 +109,11 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
     )
 
 
+def get_vla_provider(pipeline: LingBotVlaV2Pipeline) -> VLAReplicaProvider:
+    """Create worker-local semantic VLA sessions around the loaded pipeline."""
+    return VLAReplicaProvider(create_lingbot_vla_v2_session_manager(pipeline))
+
+
 def run_structured(
     pipeline: LingBotVlaV2Pipeline,
     instruction: str,
@@ -106,6 +122,7 @@ def run_structured(
     camera_left_wrist: str,
     camera_right_wrist: str,
     seed: int | None = None,
+    stop_event: Any | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Return one JSON-serializable canonical normalized action chunk."""
@@ -122,5 +139,6 @@ def run_structured(
         request,
         max_image_bytes=int(PPL_CONFIG["max_image_bytes"]),
         max_image_pixels=int(PPL_CONFIG["max_image_pixels"]),
+        stop_event=stop_event,
     )
     return response.model_dump(mode="json")

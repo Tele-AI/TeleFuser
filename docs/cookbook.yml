@@ -46,6 +46,13 @@ pages:
       zh: LTX-2.5 音视频生成
     sources:
       en: examples/ltx25_distilled/README.md
+  - slug: liveact
+    category: audio-video
+    title:
+      en: LiveAct
+      zh: LiveAct
+    sources:
+      en: examples/liveact/README.md
   - slug: livekit-streaming
     category: services
     title:

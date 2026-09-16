@@ -1,69 +1,94 @@
-# LTX 2.3 Example (Two-Stage Image-to-Video + Audio)
+# LTX 2.3 Examples
 
-Two-stage Image-to-Video generation using the LTX 2.3 22B checkpoint. This example produces a **single `.mp4`** that
-contains **both video and audio**.
+This example performs two-stage image-to-video generation with the LTX 2.3 22B checkpoint and writes one MP4
+containing generated video and audio.
+
+## Model Source
+
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| LTX 2.3 22B | [Lightricks/LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) | [Lightricks/LTX-2.3](https://modelscope.cn/models/Lightricks/LTX-2.3) | Main transformer, spatial upsampler, and distilled stage-two LoRA |
+| Gemma 3 12B | [google/gemma-3-12b-it](https://huggingface.co/google/gemma-3-12b-it) | N/A | Text encoder |
 
 ## Feature Support
 
-| Feature | Support |
-|---------|---------|
-| Audio-Video Generation | ✔️ |
-| Two-Stage (Stage1 + Upsample + Stage2) | ✔️ |
-| Ulysses Sequence Parallel (SP) | ✔️ |
-| FSDP | ✔️ |
-| LoRA (Stage2 distilled) | ✔️ |
-| VAE Parallel | ✔️ |
-| Ray VAE Actor | ❔ |
+| Feature | Support | Notes |
+| --- | --- | --- |
+| Image-to-video with audio | Supported | Produces an MP4 with an AAC audio track |
+| Two-stage denoising | Supported | Base generation, latent upsampling, then refinement |
+| Multi-GPU inference | Supported | Ulysses sequence parallelism and FSDP through `--gpu_num` |
+| LoRA | Supported | Uses the stage-two distilled LoRA when present |
+| VAE parallelism | Supported | Enabled with multi-GPU execution |
+| Ray VAE actor | Unsupported | The checked-in script does not expose this mode |
+| Server API | Unsupported | The script is an offline CLI entry point |
 
-## Files
+## Requirements
 
-### ltx23_22b_image_to_video_two_stage_h100.py
+- GPU: two CUDA GPUs by default; use another supported count through `--gpu_num`
+- Software: the standard TeleFuser installation and an `ffmpeg` executable on `PATH`
+- Input assets: a PIL-readable source image supplied with `--image_path`
 
-**Purpose:** Generate an audio-video clip from a reference image and a prompt using LTX2.3 two-stage denoising.
+Install TeleFuser by following the [development setup](../../CONTRIBUTING.md#development-setup).
 
-**Output:** A single `.mp4` with an AAC audio track.
+## Model Directory
 
-**Usage:**
-```bash
-# Basic (2 GPUs by default)
-python examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py \
-  --image_path /path/to/image.png \
-  --prompt "A stylish little girl gently caressing her dog in a sunny backyard."
-
-# Multi-GPU
-python examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py \
-  --gpu_num 4 \
-  --image_path /path/to/image.png \
-  --prompt "A cinematic outdoor scene with natural motion."
-
-# Custom model root
-python examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py \
-  --model_root /path/to/LTX-2.3 \
-  --image_path /path/to/image.png \
-  --prompt "A slow dolly-in shot, soft lighting, realistic motion."
+```text
+${TF_MODEL_ZOO_PATH}/
+|-- LTX-2.3/
+|   |-- ltx-2.3-22b-dev.safetensors
+|   |-- ltx-2.3-spatial-upscaler-x2-1.0.safetensors
+|   \-- ltx-2.3-22b-distilled-lora-384.safetensors
+\-- gemma-3-12b-it-qat-q4_0-unquantized/
+    |-- model-00001-of-00005.safetensors
+    |-- ...
+    \-- model-00005-of-00005.safetensors
 ```
 
-**Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--gpu_num` | 2 | Number of GPUs for parallel inference |
-| `--image_path` | `examples/data/101235-video-720_0.png` | Reference image path |
-| `--prompt` | (preset) | Positive text prompt |
-| `--negative_prompt` | `""` | Extra negative prompt appended to the built-in negative prompt |
-| `--model_root` | `/nvfile-heatstorage/model_zoo/modelscope/LTX-2.3` | Directory containing checkpoint files |
-| `--resolution` | `1080p` | Target resolution preset (`720p`, `1080p`, `2k`, `4k`) |
-| `--num_inference_steps` | 30 | Denoising steps for both stages |
-| `--num_frames` | 121 | Number of video frames to generate |
-| `--seed` | 42 | Random seed |
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
 
-**Output location:**
-- Uses `TELEAI_EXAMPLE_OUTPUT_DIR` if set, otherwise saves to the current directory.
+## Quick Start
 
-## Model Files Expected
+```bash
+TELEAI_EXAMPLE_OUTPUT_DIR=work_dirs \
+python examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/LTX-2.3" \
+  --image_path /path/to/input.png \
+  --prompt "A slow camera move through a sunlit garden."
+```
 
-Under `--model_root`, the example expects at least:
-- `ltx-2.3-22b-dev.safetensors` (main checkpoint)
-- `ltx-2.3-spatial-upscaler-x2-1.0.safetensors` (2x spatial upsampler)
-- Gemma text encoder shards (see `gemma_path_list` in the script)
-- `ltx-2.3-22b-distilled-lora-384.safetensors` (stage2 LoRA; optional but recommended for quality)
+The command writes `work_dirs/ltx23_22b_image_to_video_two_stage_h100_2gpu.mp4`.
 
+## Examples
+
+### Two-Stage Image-To-Video
+
+#### `ltx23_22b_image_to_video_two_stage_h100.py`
+
+```bash
+TELEAI_EXAMPLE_OUTPUT_DIR=work_dirs \
+python examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py \
+  --gpu_num 4 \
+  --model_root "$TF_MODEL_ZOO_PATH/LTX-2.3" \
+  --image_path /path/to/input.png \
+  --resolution 1080p \
+  --prompt "A cinematic outdoor scene with natural motion."
+```
+
+Key options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--gpu_num` | `2` | Number of inference workers |
+| `--image_path` | Legacy local sample path | Pass an existing image explicitly |
+| `--model_root` | `${TF_MODEL_ZOO_PATH}/LTX-2.3` | LTX checkpoint directory |
+| `--resolution` | `1080p` | One of `720p`, `1080p`, `2k`, or `4k` |
+| `--num_inference_steps` | `30` | Steps in each denoising stage |
+| `--num_frames` | `121` | Generated frame count |
+| `--seed` | `42` | Random seed |
+
+## Notes
+
+- The default input asset is not packaged, so pass `--image_path` explicitly.
+- The stage-two LoRA is optional at load time but recommended for the intended output quality.

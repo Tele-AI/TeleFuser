@@ -1,8 +1,28 @@
-# MiniMax H3
+# MiniMax H3 Examples
 
 These examples run the local MiniMax H3 Base release from its original FL2VA and Ref2VA partitions. They generate
 24 FPS video with synchronized 32 kHz stereo audio. The local path supports 768p-class output; hosted Context-IR and
 Regenerate-2K services are not implemented or implied.
+
+## Model Source
+
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| MiniMax H3 Base | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | [MiniMax/MiniMax-H3](https://modelscope.cn/models/MiniMax/MiniMax-H3) | FL2VA and Ref2VA audio-video generation |
+| MiniMax H3 Turbo LoRA | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | N/A | Eight-step FL2VA acceleration |
+
+## Feature Support
+
+| Feature | Support | Notes |
+| --- | --- | --- |
+| T2VA and FL2VA | Supported | `FL2VA` checkpoint partition |
+| Ref2VA | Supported | Reference video, audio, and voice conditioning |
+| Multi-GPU inference | Supported | Ulysses, tensor parallelism, and supported FSDP layouts on 2 or 4 GPUs |
+| LoRA | Supported | Separate Turbo LoRA entry point |
+| Quantization | Partial | Backend and parallelism constraints are documented below |
+| CPU offload | Supported | Default for one-GPU execution |
+| Feature cache | Supported | Online AdaLN cache and calibration flow |
+| Server API | Supported | FL2VA and Ref2VA scripts declare pipeline manifests |
 
 ## Requirements
 
@@ -10,7 +30,7 @@ Regenerate-2K services are not implemented or implied.
 - One NVIDIA H100 80GB for sequential stage offload, or two/four H100 80GB GPUs for resident multi-GPU execution.
 - Enough host memory for the approximately 63 GB encoder and 62 GB DiT partitions.
 - The repository development environment and the unmodified model directory at
-  `/hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3`.
+  `${TF_MODEL_ZOO_PATH}/MiniMaxAI_MiniMax-H3`.
 
 Run commands from the repository root. The examples load original checkpoint shards through `ModuleManager`. A
 one-GPU run uses stage-level model CPU offload. Multi-GPU runs keep the stages resident: two GPUs use Ulysses2 for
@@ -21,7 +41,40 @@ reference FP16 autocast boundary applied only to CUDA video decode.
 The source-controlled default inputs live in `examples/data/minimax-h3/`. They are the exact inputs frozen for the
 official SGLang parity runs; `provenance.json` records their original URLs, byte sizes, and SHA-256 hashes.
 
-## T2VA And FL2VA
+## Model Directory
+
+`--model-root` must contain the original checkpoint partitions:
+
+```text
+/path/to/MiniMaxAI_MiniMax-H3/
+|-- FL2VA/
+\-- Ref2VA/
+```
+
+Each partition retains its upstream shard and configuration layout. Set the common model root with:
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+## Quick Start
+
+```bash
+python examples/minimax_h3/minimax_h3_fl2va_h100.py \
+  --model-root "$TF_MODEL_ZOO_PATH/MiniMaxAI_MiniMax-H3" \
+  --mode t2va \
+  --prompt "A coastal landscape with synchronized ambient sound." \
+  --duration 5 \
+  --output work_dirs/minimax-h3-t2va.mp4
+```
+
+The command writes a five-second video with synchronized audio to `work_dirs/minimax-h3-t2va.mp4`.
+
+## Examples
+
+### T2VA And FL2VA
+
+#### `minimax_h3_fl2va_h100.py`
 
 Use the explicit mode names when demonstrating a particular task. T2VA has no reference input:
 
@@ -67,7 +120,9 @@ python examples/minimax_h3/minimax_h3_fl2va_h100.py \
 For compatibility, omitting `--mode` infers T2VA, first-frame, last-frame, or first-last from `--image` and
 `--last-image`. Explicit modes are preferable in reproducible commands.
 
-## Turbo LoRA
+### Turbo LoRA
+
+#### `minimax_h3_turbo_lora_h100.py`
 
 LightX2V's released MiniMax H3 Turbo LoRA is available through the H100 example. It uses the FL2VA
 checkpoint, the checkpoint metadata alpha, the training-Euler update, and nine scheduler points (eight denoising
@@ -125,7 +180,9 @@ The `vsa-*` FastH3 adapters contain trained attention compression-gate replaceme
 implement that VSA-H3 backend and rejects those files instead of silently dropping the gates; use the dense adapter
 variant unless a VSA backend is available.
 
-## Feature Cache
+### Feature Cache
+
+#### `minimax_h3_cache_calibrate.py`
 
 MiniMax H3 uses AdaTaylorCache around the complete joint audio-video DiT block stack. Calibrate once on one H100
 with the same step count and scheduler shifts used for inference:
@@ -160,7 +217,9 @@ retention, and a `0.03` schedule threshold. See the unified warm benchmark in
 [Measured Four-GPU Profile](#measured-four-gpu-profile). Recalibrate when step count, scheduler shifts, checkpoint,
 or target workload changes.
 
-## Ref2VA
+### Ref2VA
+
+#### `minimax_h3_ref2va_h100.py`
 
 With no material arguments, the simple Ref2VA script uses the bundled reference video followed by the bundled voice
 reference:
@@ -419,7 +478,11 @@ The same FL2VA example exposes dense/Sol and BF16/FP8 as independent switches. `
 tf-kernel W8A8 Linear GEMMs to the transformer blocks. `--attn-impl SOL_ATTN` enables the MiniMax-H3 Sol policy:
 the first 10 denoising steps and first 2 DiT layers remain dense, the full condition prefix is an exact KV sink, and
 prefix queries are recomputed with BF16 dense attention. Adding `--sol-fp8` quantizes post-RoPE Q/K/V in active sparse
-layers and dispatches the SM90 CuTe FP8 Sol mainloop.
+layers and dispatches the SM90 CuTe FP8 Sol mainloop. The MiniMax-H3 quality profile also centers K and V over the live
+sequence before E4M3 conversion, adds the V mean back after attention, and corrects the residual V mean bias caused by
+E4M3 rounding. These are attention-equivalent transforms rather than Linear SmoothQuant. K/V statistics use one exact
+fused reduction, and dense-prefix replacement is fused with the sparse-output correction; the optimized output is
+bitwise identical to the original exact smoothing path.
 
 ~~~bash
 # BF16 dense
@@ -435,22 +498,23 @@ python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
 
 # FP8 Linear + FP8 Sol attention
 python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
-  --gpu-num 4 --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
+  --gpu-num 1 --mode t2va --quantization fp8 --attn-impl SOL_ATTN --sol-fp8 \
   --output outputs/h3_fp8_sol.mp4
 ~~~
 
 Use `--sol-dense-steps`, `--sol-dense-layers`, `--sol-tau`, `--sol-threshold-type`,
-`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. The defaults
-match the released H100 MiniMax-H3 Sol profile.
+`--sol-fp8-layer-start`, and `--sol-fp8-layer-end` to override the policy for controlled ablations. FP8 Sol enables
+K+V smoothing and V bias correction by default, so the standard example needs no additional quality flags. The
+dedicated validation benchmark retains explicit overrides for comparing against an unsmoothed profile.
 
-For a warmed four-GPU comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
-peaks, run the two profiles below. Four GPUs use Ulysses2 x TP2 for both profiles.
+For a warmed matched comparison that saves synchronized MP4s, decoded arrays, throughput, and sampled device-memory
+peaks, run the two single-GPU profiles below. Pass `--gpu-num 4` to retain the earlier Ulysses2 x TP2 benchmark mode.
 
 ~~~bash
 python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
-  --profile baseline --output benchmarks/minimax_h3_fp8_sol/baseline_sp2_tp2_bf16_flash.mp4
+  --gpu-num 1 --profile baseline --output benchmarks/minimax_h3_fp8_sol/baseline_bf16_flash.mp4
 python -m tools.validation.benchmark_minimax_h3_fp8_sol_sp \
-  --profile optimized --output benchmarks/minimax_h3_fp8_sol/optimized_sp2_tp2_fp8_sol_exact.mp4
+  --gpu-num 1 --profile optimized --output benchmarks/minimax_h3_fp8_sol/optimized_fp8_sol_exact.mp4
 ~~~
 
 For matched BF16/TorchAO-FP8/tf-kernel-FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
@@ -519,9 +583,11 @@ python examples/run_examples.py \
   --gpus 0,1,2,3
 ```
 
-## Measured Four-GPU Profile
+## Performance
 
-The comparison below was retested on 2026-08-06 using the frozen 768p, five-second, 50-point T2VA request with seed
+### Measured Four-GPU Profile
+
+The comparison below was retested on 2026-08-06 and recorded in TeleFuser commit `257187c7679abd1d88927555b05a254e1de502cd` using the frozen 768p, five-second, 50-point T2VA request with seed
 0, online AdaLN cache enabled, and the resident Ulysses2 x TP2 four-H100 profile. Each configuration starts
 a fresh pipeline, runs one unmeasured warmup request, then measures the second request. Pipeline time includes text
 encoding, DiT, video/audio decode, host materialization, and orchestration; it excludes model/worker initialization

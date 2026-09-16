@@ -244,6 +244,9 @@ pipe_config.dit_config.attention_config = config
 
 **Flash Attention 4 说明**: Flash Attention 4 针对 **Hopper (SM90, H100)** 和 **Blackwell (SM100+, B100/B200)** GPU 架构进行了优化，在这些架构上提供显著的性能提升。对于旧版 GPU（Ampere、Ada Lovelace），请使用 Flash Attention 2 或 3。
 
+**AMD ROCm 说明**：ROCm 主机上仅 `TORCH_SDPA` 原生可用（`tf-kernel`、SageAttention 与 `flash_attn` 仅支持
+CUDA），因此 ROCm 示例显式默认 SDPA。各平台后端矩阵见[硬件平台](platforms.md)。
+
 ### 稀疏注意力后端
 
 | 后端 | 描述 | 依赖 |

@@ -24,6 +24,7 @@ class TaskInfo:
     task_id: str
     status: TaskStatus
     message: Any
+    request_metadata: dict[str, Any] = field(default_factory=dict)
     start_time: datetime = field(default_factory=datetime.now)
     end_time: datetime | None = None
     error: str | None = None
@@ -85,6 +86,7 @@ class TaskManager:
                 task_id=task_id,
                 status=TaskStatus.PENDING,
                 message=message,
+                request_metadata=self._serialize_task_message(message),
                 output_path=getattr(message, "output_path", None),
             )
 
@@ -154,6 +156,7 @@ class TaskManager:
                 get_service_metrics().record_task_completed(duration)
             task.peak_memory_mb = peak_memory_mb
             task.result = result
+            task.message = None
 
     def fail_task(self, task_id: str, error: str) -> None:
         """Mark task as failed with metrics."""
@@ -170,6 +173,7 @@ class TaskManager:
             task.status = TaskStatus.FAILED
             task.end_time = datetime.now()
             task.error = error
+            task.message = None
 
             self.failed_tasks += 1
             get_service_metrics().record_task_failed()
@@ -187,10 +191,13 @@ class TaskManager:
             if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
                 return False
 
+            previous_status = task.status
             task.stop_event.set()
             task.status = TaskStatus.CANCELLED
             task.end_time = datetime.now()
             task.error = "Task cancelled by user"
+            if previous_status == TaskStatus.PENDING:
+                task.message = None
 
             get_service_metrics().record_task_cancelled()
 
@@ -232,7 +239,7 @@ class TaskManager:
         }
         if task.result is not None:
             status["result"] = task.result
-        status.update(self._serialize_task_message(task.message))
+        status.update(task.request_metadata)
         return status
 
     def get_all_tasks(self) -> dict[str, dict[str, Any] | None]:
@@ -335,6 +342,9 @@ class TaskManager:
         """
         with self._lock:
             self._current_processing_tasks.pop(task_id, None)
+            task = self._tasks.get(task_id)
+            if task is not None and task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+                task.message = None
 
     def get_service_status(self) -> dict[str, Any]:
         """Get overall service status."""
@@ -388,6 +398,7 @@ class TaskManager:
                 task.status = TaskStatus.FAILED
                 task.end_time = datetime.now()
                 task.error = error
+                task.message = None
                 self.failed_tasks += 1
                 get_service_metrics().record_task_failed()
                 logger.warning(f"Task {task_id} failed: {error}")

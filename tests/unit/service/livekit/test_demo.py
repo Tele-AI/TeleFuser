@@ -11,7 +11,7 @@ def test_stream_demo_preserves_controls_and_uses_livekit_transport() -> None:
     html = namespace["_render_html"]("")
 
     required_fragments = [
-        "LingBot-World-Fast LiveKit Demo",
+        "LingBot-World v2 WebRTC Demo",
         "livekit-client@2.21.0",
         "RoomEvent.TrackSubscribed",
         "RoomEvent.DataReceived",

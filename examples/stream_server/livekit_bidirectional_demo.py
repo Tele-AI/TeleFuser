@@ -1,4 +1,4 @@
-"""LingBot-World-Fast LiveKit control demo.
+"""LingBot-World LiveKit control demo.
 
 The page reuses the shared control UI asset to keep the prompt, image, controls,
 and telemetry behavior consistent across interactive examples.
@@ -6,7 +6,7 @@ and telemetry behavior consistent across interactive examples.
 Usage:
     # 1. Start a LiveKit server and export its URL/key/secret.
     # 2. Start TeleFuser:
-    telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py --skip-validation
+    telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py --skip-validation
     # 3. Start this browser client:
     python examples/stream_server/livekit_bidirectional_demo.py --server-url http://localhost:8088
 """
@@ -257,7 +257,7 @@ def _render_html(server_url: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="LingBot-World-Fast LiveKit control demo")
+    parser = argparse.ArgumentParser(description="LingBot-World v2 WebRTC control demo")
     parser.add_argument("--server-url", default=DEFAULT_SERVER_URL, help="LiveKit API server base URL")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Local HTTP server port")
     parser.add_argument(
@@ -330,7 +330,7 @@ def main() -> None:
 
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     url = f"http://localhost:{args.port}"
-    print(f"Serving LingBot-World-Fast LiveKit demo at {url}")
+    print(f"Serving LingBot-World v2 WebRTC demo at {url}")
     print(f"LiveKit API server: {args.server_url}")
     print(f"LiveKit JS client: {LIVEKIT_CLIENT_URL}")
     if args.proxy_backend:

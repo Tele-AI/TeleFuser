@@ -1,6 +1,6 @@
 """Bidirectional stream pipeline: replay video with arrow key overlay.
 
-Loads a local video at startup.  Each session receives keyboard arrow-key
+Loads a local video or generates a test pattern. Each session receives keyboard
 events via ``push_chunk()`` and yields video frames with a D-pad HUD
 overlay via ``pull_chunks()``.
 
@@ -28,6 +28,12 @@ VIDEO_PATH = str(Path(__file__).parent / "data" / "liveact_1.mp4")
 OUTPUT_FPS = 24
 
 _ARROW_KEYS = frozenset({"ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"})
+_CONTROL_TO_ARROW = {
+    "w": "ArrowUp",
+    "s": "ArrowDown",
+    "a": "ArrowLeft",
+    "d": "ArrowRight",
+}
 
 # D-pad colors (BGR)
 _COLOR_ACTIVE = (0, 220, 0)
@@ -87,14 +93,42 @@ class ArrowOverlayService:
     # -- lifecycle -------------------------------------------------------------
 
     def start(self) -> None:
-        import av as _av
+        video_path = Path(self._video_path)
+        if video_path.is_file():
+            import av as _av
 
-        container = _av.open(self._video_path)
-        for vframe in container.decode(video=0):
-            bgr = vframe.to_ndarray(format="bgr24")
-            self._frames.append(bgr)
-        container.close()
-        print(f"[ArrowOverlayService] Loaded {len(self._frames)} frames from {self._video_path}")
+            container = _av.open(str(video_path))
+            for vframe in container.decode(video=0):
+                self._frames.append(vframe.to_ndarray(format="bgr24"))
+            container.close()
+            print(f"[ArrowOverlayService] Loaded {len(self._frames)} frames from {video_path}")
+            return
+
+        self._frames = self._generate_test_frames()
+        print(f"[ArrowOverlayService] Generated {len(self._frames)} model-free test frames")
+
+    @staticmethod
+    def _generate_test_frames(frame_count: int = 96, width: int = 832, height: int = 480) -> list[np.ndarray]:
+        """Generate a moving test pattern when no replay asset is available."""
+        frames = []
+        for index in range(frame_count):
+            frame = np.zeros((height, width, 3), dtype=np.uint8)
+            frame[:, :, 0] = np.linspace(35, 105, width, dtype=np.uint8)
+            frame[:, :, 1] = np.linspace(30, 85, height, dtype=np.uint8)[:, None]
+            marker_x = 40 + (index * 8) % (width - 80)
+            cv2.circle(frame, (marker_x, height // 2), 24, (40, 210, 245), cv2.FILLED)
+            cv2.putText(
+                frame,
+                "TeleFuser WebRTC preflight",
+                (32, 54),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (240, 240, 240),
+                2,
+                cv2.LINE_AA,
+            )
+            frames.append(frame)
+        return frames
 
     def stop(self) -> None:
         for state in self._sessions.values():
@@ -124,6 +158,11 @@ class ArrowOverlayService:
     def push_chunk(self, session_id: str, chunk: dict) -> None:
         state = self._sessions.get(session_id)
         if state is None:
+            return
+        if chunk.get("type") == "control_state":
+            state.pressed_keys = {
+                _CONTROL_TO_ARROW[control] for control in chunk.get("controls", []) if control in _CONTROL_TO_ARROW
+            }
             return
         if chunk.get("type") != "control":
             return

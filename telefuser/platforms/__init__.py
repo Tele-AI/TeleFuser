@@ -28,7 +28,10 @@ def _is_cuda_available() -> bool:
 
 def _is_rocm_available() -> bool:
     """Check if ROCm is available."""
-    return hasattr(torch.version, "hip") and torch.version.hip is not None
+    if not (hasattr(torch.version, "hip") and torch.version.hip is not None):
+        return False
+    # A HIP build without a visible GPU falls back to CPU like the CUDA check below.
+    return torch.cuda.is_available()
 
 
 def _is_npu_available() -> bool:

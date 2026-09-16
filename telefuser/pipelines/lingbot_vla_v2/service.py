@@ -6,7 +6,7 @@ import base64
 import binascii
 import io
 import math
-from typing import Protocol
+from typing import Any, Protocol
 
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -16,6 +16,7 @@ from .pipeline import LingBotVlaV2CanonicalActionChunk
 from .robot_profile import ROBOTWIN_CAMERA_KEYS
 
 DEFAULT_MAX_IMAGE_PIXELS = 16 * 1024 * 1024
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 class LingBotVlaV2ActionRequest(BaseModel):
@@ -64,6 +65,7 @@ class _Pipeline(Protocol):
         self,
         observation: LingBotVlaV2Observation,
         seed: int | None = None,
+        stop_event: Any | None = None,
     ) -> LingBotVlaV2CanonicalActionChunk: ...
 
 
@@ -109,19 +111,21 @@ def predict_lingbot_vla_v2_action(
     *,
     max_image_bytes: int,
     max_image_pixels: int = DEFAULT_MAX_IMAGE_PIXELS,
+    stop_event: Any | None = None,
 ) -> LingBotVlaV2ActionResponse:
     """Decode one request and return the canonical normalized action chunk."""
-    encoded_images = (request.camera_high, request.camera_left_wrist, request.camera_right_wrist)
-    images = {
-        key: _decode_image(
-            value,
-            max_image_bytes=max_image_bytes,
-            max_image_pixels=max_image_pixels,
-        )
-        for key, value in zip(ROBOTWIN_CAMERA_KEYS, encoded_images, strict=True)
-    }
+    images = _decode_request_images(
+        request,
+        max_image_bytes=max_image_bytes,
+        max_image_pixels=max_image_pixels,
+    )
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("LingBot-VLA v2 inference cancelled")
     observation = LingBotVlaV2Observation(task=request.task, state=request.state, images=images)
-    chunk = pipeline(observation, seed=request.seed)
+    if stop_event is None:
+        chunk = pipeline(observation, seed=request.seed)
+    else:
+        chunk = pipeline(observation, seed=request.seed, stop_event=stop_event)
     return LingBotVlaV2ActionResponse(
         canonical_normalized_actions=chunk.canonical_normalized_actions.tolist(),
         horizon=chunk.horizon,
@@ -129,4 +133,35 @@ def predict_lingbot_vla_v2_action(
         checkpoint_variant=chunk.checkpoint_variant,
         policy_verified=chunk.policy_verified,
         verification_status=chunk.verification_status,
+    )
+
+
+def _decode_request_images(
+    request: LingBotVlaV2ActionRequest,
+    *,
+    max_image_bytes: int,
+    max_image_pixels: int,
+) -> dict[str, Image.Image]:
+    encoded_images = (request.camera_high, request.camera_left_wrist, request.camera_right_wrist)
+    return {
+        key: _decode_image(
+            value,
+            max_image_bytes=max_image_bytes,
+            max_image_pixels=max_image_pixels,
+        )
+        for key, value in zip(ROBOTWIN_CAMERA_KEYS, encoded_images, strict=True)
+    }
+
+
+def validate_lingbot_vla_v2_action_request(
+    request: LingBotVlaV2ActionRequest,
+    *,
+    max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    max_image_pixels: int = DEFAULT_MAX_IMAGE_PIXELS,
+) -> None:
+    """Validate all encoded camera images without invoking the policy."""
+    _decode_request_images(
+        request,
+        max_image_bytes=max_image_bytes,
+        max_image_pixels=max_image_pixels,
     )

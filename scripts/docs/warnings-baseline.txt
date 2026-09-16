@@ -1,7 +1,2 @@
-# Existing MkDocs warnings, recorded before Cookbook integration.
+# Existing MkDocs warnings belong here only while they cannot be fixed immediately.
 # Removing warnings is allowed; new warnings require a fix, not a baseline expansion.
-Doc file 'en/index.md' contains a link '../../examples/ltx25_distilled/README.md', but the target '../examples/ltx25_distilled/README.md' is not found among documentation files.
-Doc file 'en/index.md' contains a link '../../examples/swiftvr/README.md', but the target '../examples/swiftvr/README.md' is not found among documentation files.
-Doc file 'en/adding_new_example.md' contains a link '../../examples/README_TEMPLATE.md', but the target '../examples/README_TEMPLATE.md' is not found among documentation files.
-Doc file 'zh/index.md' contains a link '../../examples/ltx25_distilled/README.md', but the target '../examples/ltx25_distilled/README.md' is not found among documentation files.
-Doc file 'zh/index.md' contains a link '../../examples/swiftvr/README.md', but the target '../examples/swiftvr/README.md' is not found among documentation files.

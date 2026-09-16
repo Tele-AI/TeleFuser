@@ -62,6 +62,9 @@ TeleFuser 遵循严格的分层架构：
 - **性能优化**：ops 层在 eager 模式下使用优化的 Triton 内核
 - **关注点分离**：kernel 层专注纯内核实现，ops 层处理分发逻辑
 
+AMD ROCm 上，未定义 `forward_rocm` 内核时分发会复用 `forward_cuda` 的 Triton 路径。各平台的完整分发行为与
+`tf-kernel` 门控见[硬件平台](platforms.md)。
+
 ### 不同算子类型的 torch.compile 策略
 
 TeleFuser 采用**混合策略**处理 torch.compile 兼容性，根据算子特性优化：

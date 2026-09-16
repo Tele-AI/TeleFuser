@@ -99,6 +99,8 @@ def get_pipeline(
     sol_threshold_type: str = "exact",
     sol_fp8_layer_start: int = 0,
     sol_fp8_layer_end: int | None = None,
+    sol_fp8_smoothing: str = "kv",
+    sol_fp8_v_bias_correction: bool = True,
     enable_feature_cache: bool = False,
     feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
     feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
@@ -129,6 +131,8 @@ def get_pipeline(
         sol_threshold_type=sol_threshold_type,
         sol_fp8_layer_start=sol_fp8_layer_start,
         sol_fp8_layer_end=sol_fp8_layer_end,
+        sol_fp8_smoothing=sol_fp8_smoothing,
+        sol_fp8_v_bias_correction=sol_fp8_v_bias_correction,
         feature_cache_config=FeatureCacheConfig(
             enabled=enable_feature_cache,
             model_type=feature_cache_model_type,

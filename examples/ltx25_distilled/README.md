@@ -10,7 +10,7 @@ The LTX-2.5 implementation is isolated under `telefuser/models/ltx25` and
 
 | Model | HuggingFace | ModelScope | Purpose |
 | --- | --- | --- | --- |
-| LTX-2.5 22B distilled model pack | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | N/A | Transformer, text encoder, video/audio VAEs, spatial upsampler, and duration head |
+| LTX-2.5 22B distilled model pack | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | [Lightricks/LTX-2.5](https://modelscope.cn/models/Lightricks/LTX-2.5) | Transformer, text encoder, video/audio VAEs, spatial upsampler, and duration head |
 
 This example does not auto-download weights. Download the official repository while preserving its directory layout:
 
@@ -53,6 +53,16 @@ python -c "import natten; print(natten.HAS_LIBNATTEN)"
 
 The command must print `True`. Without NATTEN, the DiffVAE decoder uses the Triton/eager compatibility fallback,
 which is not the formal performance or accuracy baseline.
+
+Download and verify the repository-referenced I2V image before running the I2V example:
+
+```bash
+curl -L \
+  https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png \
+  -o examples/data/ltx25/official_guitar_man.png
+echo "e31cbbe4822ce07e1548121b436c0db3a067d1d78f2e75ab3e69375377b57274  examples/data/ltx25/official_guitar_man.png" \
+  | sha256sum --check -
+```
 
 ## Model Directory
 
@@ -112,7 +122,9 @@ python examples/ltx25_distilled/ltx25_distilled_t2v_h100.py \
 
 ## Examples
 
-### `ltx25_distilled_t2v_h100.py`
+### Text-To-Video
+
+#### `ltx25_distilled_t2v_h100.py`
 
 This is the standalone text-to-video entry point.
 
@@ -123,7 +135,9 @@ python examples/ltx25_distilled/ltx25_distilled_t2v_h100.py \
   --output-path work_dirs/ltx25-t2v.mp4
 ```
 
-### `ltx25_distilled_i2v_h100.py`
+### Image-To-Video
+
+#### `ltx25_distilled_i2v_h100.py`
 
 This is the standalone image-to-video entry point. It uses the repository's frozen reference image by default;
 `--image-path` can override it when reproducing another 896x512, 121-frame workload:
@@ -229,28 +243,6 @@ consume arbitrary additive masks.
 - `num_frames` must satisfy `num_frames = 8k + 1`; examples include 1, 9, 17, and 121.
 - `frame_rate` must be positive.
 - `image_frame_index` must be non-negative and `image_strength` must be in `[0, 1]`.
-
-## Performance
-
-The formal quality and performance gates use BF16 on one H100 80 GB with PyTorch 2.11.0, CUDA 12.8, NATTEN 0.21.6,
-the upstream eager DiffVAE tiling, and matching request/runtime provenance. The 1536x1024, 121-frame T2V comparison
-recorded 61.90 dB PSNR and 0.999685 SSIM; the frozen 896x512, 121-frame I2V comparison recorded 62.95 dB PSNR and
-0.999671 SSIM.
-
-The timings below are synchronized end-to-end p50 seconds from five cold and five warm samples:
-
-These are historical runtime measurements. Their exact run date and TeleFuser revision were not recorded in this
-README; do not interpret the documentation publication date as the benchmark date or as a fresh GPU validation.
-
-| Workload | Mode | Upstream cold / warm | TeleFuser cold / warm |
-| --- | --- | ---: | ---: |
-| T2V 1536x1024 / 121 | `offload=cpu` | 76.78 / 77.29 | 64.44 / 60.09 |
-| I2V 896x512 / 121 | `offload=cpu` | 65.02 / 64.52 | 51.98 / 44.08 |
-| T2V 1536x1024 / 121 | `offload=none` | 58.28 / 55.29 | 46.79 / 46.93 |
-| I2V 896x512 / 121 | `offload=none` | 48.45 / 42.34 | 30.24 / 30.29 |
-
-The no-offload TeleFuser run reserved 79.14 GB at peak. Lower resolutions and shorter valid frame counts are useful
-for diagnostics but do not replace these formal gates.
 
 ## Troubleshooting
 

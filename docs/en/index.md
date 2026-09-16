@@ -31,27 +31,27 @@ built for continuous pipelines, distributed GPU execution, and production servic
 Continuous execution, stateful sessions, and bidirectional control loops.
 </div>
 <div class="feature-card" markdown>
-**Parallel Inference**
+**[Parallel Inference](parallel.md)**
 
 Ulysses, Ring Attention, tensor parallelism, pipeline parallelism, and FSDP.
 </div>
 <div class="feature-card" markdown>
-**Optimized Operators**
+**[Optimized Operators](ops.md)**
 
 Compile-aware ops with eager CUDA Triton kernels and PyTorch native fallbacks.
 </div>
 <div class="feature-card" markdown>
-**Streaming Service**
+**[Streaming Service](serving.md)**
 
 FastAPI batch serving and LiveKit-backed rooms for server-push and resilient interactive WebRTC.
 </div>
 <div class="feature-card" markdown>
-**Feature Cache**
+**[Feature Cache](feature_cache.md)**
 
 AdaTaylorCache and runtime cache controls for repeated generation workloads.
 </div>
 <div class="feature-card" markdown>
-**Extensible Pipelines**
+**[Extensible Pipelines](adding_new_model.md)**
 
 Reusable stages, model configs, schedulers, and pipeline orchestration.
 </div>
@@ -63,62 +63,54 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
-| LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
-| ABot-World-0-5B-LF | Single-GPU interactive generation | Direct HTTP or LiveKit browser control with persistent causal KV state; see the [ABot guide](abot_world/) |
+| [LingBot-World v2](/TeleFuser/cookbook/lingbot-world/) | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
+| [LingBot-World-Fast](/TeleFuser/cookbook/lingbot-world/) | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
+| [ABot-World-0-5B-LF](/TeleFuser/cookbook/abot-world/) | Single-GPU interactive generation | Direct HTTP or LiveKit browser control with persistent causal KV state |
 
 ### Video Generation
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
-| LTX Video | I2V + Audio | Video generation with audio |
-| LTX-2.5 Distilled | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP; see the [example guide](../../examples/ltx25_distilled/README.md) |
-| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
-| FlashVSR | VSR | Video super-resolution |
-| SwiftVR | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options; see the [example guide](../../examples/swiftvr/README.md) |
-| LiveAct | S2V | Speech-to-video |
-| LongCat-Video | T2V, I2V | Long video generation |
-| LingBot-Video | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |
+| [WanVideo (Wan2.1 / Wan2.2)](/TeleFuser/cookbook/wan-video/) | T2V, I2V, FL2V | Video generation and editing |
+| [LTX Video](/TeleFuser/cookbook/ltx23/) | I2V + Audio | Video generation with audio |
+| [LTX-2.5 Distilled](/TeleFuser/cookbook/ltx25-distilled/) | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP |
+| [MiniMax H3](/TeleFuser/cookbook/minimax-h3/) | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
+| [FlashVSR](/TeleFuser/cookbook/flashvsr/) | VSR | Video super-resolution |
+| [SwiftVR](/TeleFuser/cookbook/swiftvr/) | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options |
+| [LiveAct](/TeleFuser/cookbook/liveact/) | S2V | Speech-to-video |
+| [LongCat-Video](/TeleFuser/cookbook/longcat-video/) | T2V, I2V | Long video generation |
+| [LingBot-Video](/TeleFuser/cookbook/lingbot-video/) | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |
 
 ### Image Generation
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
-| Qwen-Image | T2I, Edit | Image generation and editing |
-| Z-Image | T2I | Image generation |
-| Flux2 Klein | T2I | Image generation |
+| [Qwen-Image](/TeleFuser/cookbook/qwen-image/) | T2I, Edit | Image generation and editing |
+| [Z-Image](/TeleFuser/cookbook/z-image/) | T2I | Image generation |
+| [Flux2 Klein](/TeleFuser/cookbook/flux2-klein/) | T2I | Image generation |
 
-## Quick Start
+### Vision-Language-Action
 
-```bash
-# Install
-pip install telefuser
+| Model | Tasks | Description |
+|-------|-------|-------------|
+| [LingBot-VLA v2](/TeleFuser/cookbook/lingbot-vla-v2/) | Robot manipulation | Vision-language-action inference for supported robot profiles |
 
-# Batch serving
-telefuser serve /path/to/pipeline.py --port 8000
+## Start Here
 
-# LiveKit-backed streaming (Python SDK included in the base install)
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-  --livekit-url ws://127.0.0.1:7880 \
-  --livekit-api-key devkey --livekit-api-secret secret \
-  -p 8088
-```
+<div class="tf-link-grid">
+<a href="streaming_quickstart/"><strong>Core WebRTC Experience</strong><span>Control LingBot-World v2 and receive generated video in the browser.</span></a>
+<a href="installation/"><strong>Installation</strong><span>Install the package and verify CUDA availability.</span></a>
+<a href="quickstart/"><strong>Basic Inference</strong><span>Run Wan2.1 1.3B locally and submit an HTTP task.</span></a>
+<a href="supported_models/"><strong>Supported Models</strong><span>Select a model, checkpoint source, and validated profile.</span></a>
+</div>
 
 ## Documentation Sections
 
 <div class="tf-link-grid">
-<a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
-<a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, retained capacity, LingBot time slicing, and bidirectional control.</span></a>
-<a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
-<a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch video and LingBot LiveKit workflows.</span></a>
+<a href="configuration/"><strong>Runtime and Optimization</strong><span>Configuration, parallelism, attention, caching, quantization, and offload.</span></a>
+<a href="operations_reference/"><strong>Operations and Reference</strong><span>Metrics, logging, profiling, benchmarks, and troubleshooting.</span></a>
+<a href="adding_new_model/"><strong>Developer Guide</strong><span>Integrate models, stages, examples, and public operations.</span></a>
 <a href="blog/"><strong>Technical Blog</strong><span>Optimization design, profiling evidence, results, and related work.</span></a>
-<a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
-<a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
-<a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
-<a href="communication/"><strong>Communication Architecture</strong><span>NCCL collectives, CUDA IPC, ordering, and efficiency.</span></a>
-<a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
-<a href="profiler/"><strong>Profiler</strong><span>Performance analysis tools.</span></a>
 </div>
 
 ---

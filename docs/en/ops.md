@@ -62,6 +62,9 @@ TeleFuser follows a strict layered architecture for operations:
 - **Performance**: ops layer uses optimized Triton kernels in eager mode
 - **Separation of concerns**: kernel layer focuses on pure kernel implementation, ops layer handles dispatch logic
 
+On AMD ROCm, dispatch reuses the `forward_cuda` Triton path when no `forward_rocm` kernel is defined. See
+[Hardware Platforms](platforms.md) for the full per-platform dispatch behavior and `tf-kernel` gating.
+
 ### torch.compile Strategy by Operator Type
 
 TeleFuser uses a **mixed strategy** for torch.compile compatibility, optimizing based on operator characteristics:

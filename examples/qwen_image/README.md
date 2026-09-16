@@ -1,191 +1,172 @@
-# Qwen-Image Example
+# Qwen-Image Examples
 
-Text-to-Image and Image Editing using Qwen-Image models.
+These examples provide text-to-image generation, image editing, quantized inference, and feature-cache calibration
+with Qwen-Image checkpoints.
 
 ## Model Source
 
-| Model | HuggingFace | ModelScope |
-|-------|-------------|------------|
-| Qwen-Image | [Qwen/Qwen-Image](https://huggingface.co/Qwen/Qwen-Image) | [Qwen/Qwen-Image](https://modelscope.cn/models/Qwen/Qwen-Image) |
-| Qwen-Image-Lightning | [Qwen/Qwen-Image-Lightning](https://huggingface.co/Qwen/Qwen-Image-Lightning) | [Qwen/Qwen-Image-Lightning](https://modelscope.cn/models/Qwen/Qwen-Image-Lightning) |
-| Qwen-Image-Edit | [Qwen/Qwen-Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit) | [Qwen/Qwen-Image-Edit](https://modelscope.cn/models/Qwen/Qwen-Image-Edit) |
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| Qwen-Image | [Qwen/Qwen-Image](https://huggingface.co/Qwen/Qwen-Image) | [Qwen/Qwen-Image](https://modelscope.cn/models/Qwen/Qwen-Image) | Text-to-image base weights |
+| Qwen-Image-Lightning | [Qwen/Qwen-Image-Lightning](https://huggingface.co/Qwen/Qwen-Image-Lightning) | [Qwen/Qwen-Image-Lightning](https://modelscope.cn/models/Qwen/Qwen-Image-Lightning) | Distilled LoRA and FP8 variants |
+| Qwen-Image-Edit | [Qwen/Qwen-Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit) | [Qwen/Qwen-Image-Edit](https://modelscope.cn/models/Qwen/Qwen-Image-Edit) | Image editing |
 
 ## Feature Support
 
-| Feature | Support |
-|---------|---------|
-| CFG Parallel (CFGP) | ✔️ |
-| Ulysses Sequence Parallel (USP) | ✔️ |
-| LoRA | ✔️ |
-| FP8 Quantization | ✔️ |
-| FSDP | ✔️ |
-| Encoder Parallel | N/A |
-| Async Pipeline | ❔ |
-| Feature Cache (AdaTaylor) | ✔️ |
-| Distilled Model | ✔️ |
-| Server API | ✔️ |
+| Feature | Support | Notes |
+| --- | --- | --- |
+| Text-to-image | Supported | BF16, Lightning LoRA, TeleFuser FP8, and NF4 examples |
+| Image editing | Supported | TeleFuser and Diffusers reference paths |
+| Multi-GPU inference | Supported | CFG and Ulysses parallelism on scripts exposing `--gpu_num` |
+| LoRA | Supported | Lightning LoRA example |
+| Quantization | Supported | Pre-quantized FP8, online TeleFuser FP8, and NF4 |
+| CPU offload | Supported | Used by native Qwen pipelines |
+| Feature cache | Supported | Separate T2I and edit calibration tools |
+| Server API | Supported | Native examples expose standard pipeline functions |
 
-## Files
+## Requirements
 
-### Text-to-Image Examples
+- GPU: one H100-class CUDA GPU for the documented configurations; use supported multi-GPU degrees as needed
+- Software: the standard TeleFuser installation; Diffusers is required for the official reference scripts
+- Input assets: a readable image for editing; T2I requires no input asset
 
-#### qwen_image_t2i_h100.py
+Install TeleFuser by following the [development setup](../../CONTRIBUTING.md#development-setup).
 
-Standard T2I generation with Qwen-Image.
+## Model Directory
 
-**Purpose:** High-quality text-to-image generation.
-
-**Usage:**
-```bash
-# Basic usage
-python examples/qwen_image/qwen_image_t2i_h100.py
-
-# Custom prompt
-python examples/qwen_image/qwen_image_t2i_h100.py --prompt "A beautiful sunset over mountains"
-
-# Custom aspect ratio
-python examples/qwen_image/qwen_image_t2i_h100.py --aspect_ratio 16:9
-
-# Multi-GPU inference
-python examples/qwen_image/qwen_image_t2i_h100.py --gpu_num 2
+```text
+${TF_MODEL_ZOO_PATH}/
+|-- Qwen-Image-2512/
+|   |-- transformer/
+|   |-- vae/
+|   |-- text_encoder/
+|   \-- tokenizer/
+|-- Qwen-Image-2512-Lightning/
+|   \-- Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors
+|-- Qwen-Image-Edit-2509/
+\-- Qwen-Image-Edit-2511/
+    |-- transformer/
+    |-- vae/
+    |-- text_encoder/
+    \-- tokenizer/
 ```
 
-**Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--aspect_ratio` | 16:9 | Image aspect ratio |
-| `--gpu_num` | 1 | Number of GPUs |
-| `--prompt` | (default prompt) | Text prompt |
-| `--output` | auto | Output filename |
-
-**Features:**
-- 50 inference steps
-- CFG scale 4.0
-- Async CPU offloading for memory efficiency
-- CFG parallel for multi-GPU
-
-#### qwen_image_t2i_lora_h100.py
-
-T2I with Lightning LoRA acceleration.
-
-**Purpose:** Fast generation using LoRA-distilled weights.
-
-**Usage:**
 ```bash
-python examples/qwen_image/qwen_image_t2i_lora_h100.py --prompt "A portrait photo"
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
 ```
 
-**Features:**
-- 16 inference steps with Lightning LoRA
-- CFG scale 1.0 (no guidance needed with distilled model)
-- Faster generation with comparable quality
+## Quick Start
 
-#### qwen_image_t2i_lightning_fp8_h100.py
-
-T2I with FP8 quantized Lightning model.
-
-**Purpose:** Maximum speed with FP8 quantization.
-
-**Usage:**
 ```bash
-python examples/qwen_image/qwen_image_t2i_lightning_fp8_h100.py --prompt "A landscape photo"
+python examples/qwen_image/qwen_image_t2i_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --prompt "A sunset over snow-covered mountains" \
+  --output work_dirs/qwen-image.png
 ```
 
-**Features:**
-- FP8 (float8_e4m3fn) quantized weights
-- 16 inference steps
-- Reduced memory footprint
-- Multi-image generation per prompt
+The command writes the generated image to `work_dirs/qwen-image.png`.
 
-### Image Editing Examples
+## Examples
 
-#### qwen_image_edit_plus_h100.py
+### Text-To-Image
 
-Image editing with Qwen-Image-Edit.
+#### `qwen_image_t2i_h100.py`
 
-**Purpose:** Edit images based on text instructions.
-
-**Usage:**
 ```bash
-python examples/qwen_image/qwen_image_edit_plus_h100.py \
-    --image_path /path/to/image.jpg \
-    --prompt "Change the background to a beach scene"
+python examples/qwen_image/qwen_image_t2i_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --gpu_num 2 --aspect_ratio 16:9
 ```
 
-**Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--aspect_ratio` | 1:1 | Image aspect ratio |
-| `--gpu_num` | 1 | Number of GPUs |
-| `--prompt` | (default prompt) | Edit instruction |
-| `--image_path` | (default image) | Input image path |
-| `--output` | auto | Output filename |
+#### `qwen_image_t2i_lora_h100.py`
 
-**Features:**
-- 40 inference steps
-- CFG scale 4.0
-- Supports complex editing instructions
+Uses the Lightning LoRA configured in the script:
 
-### Cache Calibration
-
-#### qwen_image_cache_calibrate.py
-
-Calibration tool for Qwen-Image T2I AdaTaylorCache.
-
-**Purpose:** Generate calibration parameters for text-to-image feature caching.
-
-**Usage:**
 ```bash
-python examples/qwen_image/qwen_image_cache_calibrate.py \
-    --model_root /path/to/Qwen-Image-2512/ \
-    --num_inference_steps 50 \
-    --output_path ./cache_params.json
+python examples/qwen_image/qwen_image_t2i_lora_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --prompt "A portrait photograph"
 ```
 
-**Output:**
-Generates a JSON file with magnitude ratios for skip decisions.
+#### `qwen_image_t2i_lightning_fp8_h100.py`
 
-#### qwen_image_edit_plus_cache_calibrate.py
+Loads the pre-quantized Lightning FP8 transformer configured in `PPL_CONFIG`.
 
-Calibration tool for Qwen-Image-Edit-Plus AdaTaylorCache.
-
-**Purpose:** Generate calibration parameters for image editing feature caching.
-
-**Usage:**
 ```bash
-python examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py \
-    --model_root /path/to/Qwen-Image-Edit-2511/ \
-    --num_inference_steps 40 \
-    --output_path ./cache_params.json
+python examples/qwen_image/qwen_image_t2i_lightning_fp8_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --prompt "A mountain landscape"
 ```
 
-**Features:**
-- Uses `is_edit_plus=True` mode for optimal editing calibration
-- 40 inference steps with CFG scale 4.0
+#### `qwen_image_t2i_telefuser_fp8_h100.py`
 
-## Performance
+```bash
+python examples/qwen_image/qwen_image_t2i_telefuser_fp8_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --prompt "A ceramic vase in a studio"
+```
 
-### Text-to-Image
+#### `qwen_image_t2i_telefuser_nf4_h100.py`
 
-| Config | Device | Attn Type| Steps | CFG | Resolution | Dit Time (s) /iter | Max VRAM (GB) |
-|--------|--------|-------|-----|----|------------|----------|---------------|
-| T2I BF16 | H100*1 | SAGE_ATTN_2_8_8_SM90|40 | 4.0 | 1328x1328 | 0.72 | 45 |
-| T2I Lightning FP8 | H100*1 |  SAGE_ATTN_2_8_8_SM90|16 | 1.0 | 1328x1328 | 0.33 | 38 |
+```bash
+python examples/qwen_image/qwen_image_t2i_telefuser_nf4_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --prompt "A ceramic vase in a studio"
+```
 
 ### Image Editing
 
-| Config | Device | Steps | CFG | Resolution | Dit Time (s) /iter | Max VRAM (GB) |
-|--------|--------|-------|-----|------------|----------|---------------|
-| Edit BF16 | H100*1 | 40 | 4.0 | 1184x896 | 1 |  60|
+#### `qwen_image_edit_plus_h100.py`
 
-## Supported Aspect Ratios
+```bash
+python examples/qwen_image/qwen_image_edit_plus_h100.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-Edit-2511" \
+  --image_path /path/to/input.jpg \
+  --prompt "Change the background to a beach" \
+  --output work_dirs/qwen-image-edit.png
+```
 
-| Aspect Ratio | Resolution |
-|--------------|------------|
-| 1:1 | 1328x1328 |
-| 16:9 | 1664x928 |
-| 9:16 | 928x1664 |
-| 4:3 | 1472x1104 |
-| 3:4 | 1104x1472 |
-| 3:2 | 1584x1056 |
-| 2:3 | 1056x1584 |
+### Cache Calibration
+
+#### `qwen_image_cache_calibrate.py`
+
+```bash
+python examples/qwen_image/qwen_image_cache_calibrate.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-2512" \
+  --output_path work_dirs/qwen-image-cache.json
+```
+
+#### `qwen_image_edit_plus_cache_calibrate.py`
+
+```bash
+python examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-Edit-2511" \
+  --image_path /path/to/input.jpg \
+  --output_path work_dirs/qwen-image-edit-cache.json
+```
+
+### Diffusers References
+
+#### `qwen_image_t2i_official.py`
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo python examples/qwen_image/qwen_image_t2i_official.py
+```
+
+#### `qwen_image_edit_plus_official.py`
+
+```bash
+python examples/qwen_image/qwen_image_edit_plus_official.py \
+  --model_root "$TF_MODEL_ZOO_PATH/Qwen-Image-Edit-2509" \
+  --image_path /path/to/input.jpg \
+  --prompt "Replace the screen text" \
+  --output work_dirs/qwen-image-edit-official.png
+```
+
+This reference keeps the official fixed sampling parameters while making model, input, prompt, and output paths
+explicit.
+
+## Configuration
+
+Supported aspect ratios include `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, and `2:3`. The exact
+resolution mapping is defined in each entry point.

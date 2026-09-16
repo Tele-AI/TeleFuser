@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +61,7 @@ class TaskApplicationService:
         message: StructuredTaskRequest,
         *,
         explicit_fields: set[str],
+        validate_inputs: Callable[[StructuredTaskRequest, dict[str, Any] | None], Awaitable[None] | None] | None = None,
         ensure_processing: bool = True,
     ) -> StructuredTaskResponse:
         """Validate and enqueue a task whose result is returned as JSON."""
@@ -75,6 +76,10 @@ class TaskApplicationService:
                 )
             apply_task_contract_defaults(message, task_contract=contract, explicit_fields=explicit_fields)
             validate_required_task_parameters(message, task_contract=contract)
+            if validate_inputs is not None:
+                validation = validate_inputs(message, contract)
+                if validation is not None:
+                    await validation
 
             task_id = self.api.task_manager.create_task(message)
             message.task_id = task_id

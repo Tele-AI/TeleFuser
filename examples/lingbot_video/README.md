@@ -1,84 +1,106 @@
-# LingBot-Video
+# LingBot-Video Examples
 
-Dense 1.3B and MoE 30B are separate examples. Each module exposes
-`PPL_CONFIG`, `CONTRACT`, `get_pipeline`, `run`, and `run_with_file` for the
-shared CLI runner and TeleFuser service.
-Both examples default to the official five-second structured caption in `assets/t2v_5s.json.example` and the validated 832x480 LingBot landscape geometry.
-Their default checkpoints are resolved from `TF_MODEL_ZOO_PATH`, which defaults
-to `/hhb-data/aigc/model_zoo` in the current environment.
+These examples run the Dense 1.3B and MoE 30B LingBot-Video checkpoints for text-to-image, text-to-video, and
+text-and-image-to-video generation. The MoE path can refine the base result in memory.
 
-The model-specific files also contain their checkpoint loading, stage assembly, request
-handling, refiner lifecycle, and output encoding. Shared behavior uses TeleFuser contract
-templates and video utilities directly.
+## Model Source
 
-Use a structured JSON caption produced by the LingBot rewriter. Dense 1.3B T2V:
+| Model | HuggingFace | ModelScope | Purpose |
+| --- | --- | --- | --- |
+| LingBot-Video Dense 1.3B | [robbyant/lingbot-video-dense-1.3b](https://huggingface.co/robbyant/lingbot-video-dense-1.3b) | [Robbyant/lingbot-video-dense-1.3b](https://modelscope.cn/models/Robbyant/lingbot-video-dense-1.3b) | Dense base generation |
+| LingBot-Video MoE 30B A3B | [robbyant/lingbot-video-moe-30b-a3b](https://huggingface.co/robbyant/lingbot-video-moe-30b-a3b) | [Robbyant/lingbot-video-moe-30b-a3b](https://modelscope.cn/models/Robbyant/lingbot-video-moe-30b-a3b) | Mixture-of-experts base generation and refiner |
+
+## Feature Support
+
+| Feature | Support | Notes |
+| --- | --- | --- |
+| T2I, T2V, and TI2V | Supported | Select with `--task`; I2V requires `--first_image_path` |
+| Multi-GPU inference | Supported | One or four GPUs with FSDP plus CFG/Ulysses parallelism |
+| MoE refinement | Supported | MoE video tasks support an in-memory high-resolution refiner |
+| Quantization | Partial | MoE routed experts support an explicit memory-oriented FP8 backend |
+| CPU offload | Supported | Used by single-GPU paths and the sequential refiner lifecycle |
+| Feature cache | Unsupported | No feature cache is configured |
+| Server API | Supported | Both files declare standard pipeline contracts |
+
+## Requirements
+
+- GPU: one CUDA GPU, or four GPUs for the validated distributed layouts
+- Software: the standard TeleFuser installation with compatible Diffusers and Transformers versions
+- Input assets: a structured JSON caption; TI2V also requires a readable first image
+
+Install TeleFuser by following the [development setup](../../CONTRIBUTING.md#development-setup).
+
+## Model Directory
+
+```text
+${TF_MODEL_ZOO_PATH}/lingbot/
+|-- lingbot-video-dense-1.3b/
+|   |-- transformer/
+|   |-- processor/
+|   |-- text_encoder/
+|   |-- vae/
+|   \-- scheduler/
+\-- lingbot-video-moe-30b-a3b/
+    |-- transformer/
+    |-- refiner/
+    |-- processor/
+    |-- text_encoder/
+    |-- vae/
+    \-- scheduler/
+```
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+## Quick Start
 
 ```bash
 python examples/lingbot_video/lingbot_video_dense_1_3b.py \
-  --model_root /path/to/lingbot-video-dense-1.3b \
-  --prompt "$(cat /path/to/caption.json)" --output_path result.mp4
+  --model_root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-video-dense-1.3b" \
+  --prompt "$(cat examples/lingbot_video/assets/t2v_5s.json.example)" \
+  --task t2v --output_path work_dirs/lingbot-video-dense.mp4
 ```
 
-Pass `--task i2v --first_image_path first_frame.png` for TI2V.
+The command writes a five-second, 832x480 landscape video to `work_dirs/lingbot-video-dense.mp4`.
 
-For the MoE checkpoint refiner, use the in-memory base-to-refiner path:
+## Examples
+
+### Dense Generation
+
+#### `lingbot_video_dense_1_3b.py`
 
 ```bash
-python examples/lingbot_video/lingbot_video_moe_30b.py \
-  --model_root /path/to/lingbot-video-moe-30b-a3b --refine \
-  --prompt "$(cat /path/to/caption.json)" --output_path result.mp4
+python examples/lingbot_video/lingbot_video_dense_1_3b.py \
+  --gpu_num 4 --cfg_parallel_degree 2 \
+  --model_root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-video-dense-1.3b" \
+  --prompt "$(cat examples/lingbot_video/assets/t2v_5s.json.example)" \
+  --task t2v --output_path work_dirs/lingbot-video-dense-sp2.mp4
 ```
 
-On four GPUs the base and refiner DiTs remain resident together during refiner
-denoising by default. Both worker groups are released before the high-resolution
-VAE decode. Use `--no-refiner_co_resident` for the lower-memory sequential
-lifecycle, or `--no-refine` for MoE base-only generation. `expert_backend=auto` keeps
-the validated sorted eager path on one GPU and selects native grouped GEMM for
-four-GPU inference. The grouped path requires a CUDA PyTorch build that exposes
-`torch._grouped_mm`; use `--expert_backend sorted` as the explicit fallback.
-`--expert_backend fp8` quantizes routed expert weights per output channel and
-uses native dynamic W8A8 scaled GEMMs. It reduces expert residency but is an
-explicit memory-oriented backend until a grouped FP8 kernel is available.
+### MoE Generation And Refinement
 
-Four-GPU base and refiner stages can split the devices as CFG2 x SP2:
+#### `lingbot_video_moe_30b.py`
 
 ```bash
 python examples/lingbot_video/lingbot_video_moe_30b.py \
   --gpu_num 4 --cfg_parallel_degree 2 \
   --refiner_gpu_num 4 --refiner_cfg_parallel_degree 2 \
-  --refiner_co_resident --expert_backend fp8 \
-  --model_root /path/to/lingbot-video-moe-30b-a3b \
-  --output_path result.mp4
+  --refiner_co_resident --expert_backend fp8 --refine \
+  --model_root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-video-moe-30b-a3b" \
+  --prompt "$(cat examples/lingbot_video/assets/t2v_5s.json.example)" \
+  --task t2v --output_path work_dirs/lingbot-video-moe-refined.mp4
 ```
 
-CFG parallel and batch CFG are mutually exclusive. Use
-`--cfg_parallel_degree 2` for Dense or MoE base generation and
-`--refiner_cfg_parallel_degree 2` for the refiner. A degree of one retains SP4.
+CFG parallel and batch CFG are mutually exclusive. Use `--no-refiner_co_resident` when both DiTs do not fit, or
+`--no-refine` for base-only MoE generation. The `fp8` expert backend is a memory-oriented option and must be
+validated on the target GPU.
 
-Set `PPL_CONFIG["model_root"]` in the selected example, then serve structured-caption T2I/T2V/TI2V requests with:
+## Serving
 
 ```bash
 telefuser serve examples/lingbot_video/lingbot_video_dense_1_3b.py --port 8000
 ```
 
-Serve MoE independently with `lingbot_video_moe_30b.py`. Refiner requests are
-enabled by default and can override the `refine` contract parameter. Set
-`PPL_CONFIG["refiner_parallelism"] = 4` to select its distributed FSDP stage
-explicitly; otherwise it inherits service parallelism. The CFG degrees determine
-whether four workers use SP4 or CFG2 x SP2.
-
-```bash
-telefuser serve examples/lingbot_video/lingbot_video_moe_30b.py --port 8000
-```
-
-Dense and MoE base checkpoints support TeleFuser-native four-GPU FSDP plus Ulysses sequence parallelism:
-
-```bash
-telefuser serve examples/lingbot_video/lingbot_video_dense_1_3b.py --gpu-num 4 --port 8000
-```
-
-For MoE, set `PPL_CONFIG["model_root"]` in the MoE example and serve
-`lingbot_video_moe_30b.py`. Do not use `torchrun` for either service: TeleFuser
-creates and manages the workers. Configure `refiner_co_resident=False` when the
-selected dtype, CFG layout, or GPU memory cannot hold both DiTs during refiner
-denoising.
+Serve the MoE model by replacing the script path. TeleFuser creates its workers; do not launch these services with
+`torchrun`.

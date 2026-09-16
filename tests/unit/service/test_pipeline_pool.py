@@ -17,7 +17,7 @@ from telefuser.platforms import current_platform
 from telefuser.service.api.schema import TaskRequest
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.pipeline_pool import PipelinePool
-from telefuser.service.core.replica_worker import ReplicaDeadError, ReplicaHandle, _forward_cancel_fn
+from telefuser.service.core.replica_worker import ReplicaDeadError, ReplicaHandle, ReplicaVLAError, _forward_cancel_fn
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
 
 _DEVICE_ENV_VAR = current_platform.device_control_env_var
@@ -79,6 +79,31 @@ def test_replica_handle_converts_broken_pipe_to_dead_replica() -> None:
         asyncio.run(handle.run_task({}, threading.Event(), None, None))
 
     assert handle._dead is True
+
+
+def test_replica_handle_runs_vla_operation_and_preserves_remote_error_type() -> None:
+    process = MagicMock()
+    process.is_alive.return_value = True
+    connection = MagicMock()
+    handle = ReplicaHandle(
+        replica_id=0,
+        process=process,
+        conn=connection,
+        cancel_event=threading.Event(),
+        metadata={},
+    )
+    handle._recv_with_health_check = MagicMock(return_value=("ok", {"session_id": "session"}))
+
+    result = asyncio.run(handle.run_vla_operation("RESET", {"session_id": "session"}))
+    assert result == {"session_id": "session"}
+    connection.send.assert_called_once_with(("vla", "RESET", {"session_id": "session"}))
+
+    handle._recv_with_health_check = MagicMock(
+        return_value=("vla_error", {"type": "ValueError", "message": "action space mismatch"})
+    )
+    with pytest.raises(ReplicaVLAError, match="action space mismatch") as error:
+        asyncio.run(handle.run_vla_operation("OPEN", {}))
+    assert error.value.error_type == "ValueError"
 
 
 def test_pipeline_pool_evicts_exited_replica_and_uses_remaining_capacity() -> None:

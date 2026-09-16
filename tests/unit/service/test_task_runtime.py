@@ -4,7 +4,7 @@ import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 
-from telefuser.service.api.schema import TaskRequest, TaskResponse
+from telefuser.service.api.schema import StructuredTaskRequest, TaskRequest, TaskResponse
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
 from telefuser.service.core.task_processor import AsyncTaskProcessor
 
@@ -198,3 +198,75 @@ def test_concurrent_claims_pick_distinct_tasks() -> None:
     # Every task claimed at most once; all 20 eventually claimed.
     assert len(claimed) == len(set(claimed))
     assert set(claimed) == set(task_manager._tasks.keys())
+
+
+def test_terminal_tasks_release_original_structured_request_payloads() -> None:
+    task_manager = TaskManager(max_queue_size=10)
+
+    def request() -> StructuredTaskRequest:
+        return StructuredTaskRequest(
+            task="vla_action",
+            instruction="pick up the block",
+            state=[0.0] * 14,
+            camera_high="encoded-camera-payload",
+            camera_left_wrist="encoded-camera-payload",
+            camera_right_wrist="encoded-camera-payload",
+        )
+
+    completed_id = task_manager.create_task(request())
+    task_manager.complete_task(completed_id, result={"horizon": 1})
+    completed = task_manager.get_task(completed_id)
+    assert completed is not None
+    assert completed.message is None
+    completed_status = task_manager.get_task_status(completed_id)
+    assert completed_status is not None
+    assert completed_status["task"] == "vla_action"
+    assert completed_status["media_type"] == "structured"
+    assert "camera_high" not in completed_status
+
+    failed_id = task_manager.create_task(request())
+    task_manager.fail_task(failed_id, "inference failed")
+    failed = task_manager.get_task(failed_id)
+    assert failed is not None
+    assert failed.message is None
+
+    pending_cancel_id = task_manager.create_task(request())
+    assert task_manager.cancel_task(pending_cancel_id) is True
+    pending_cancelled = task_manager.get_task(pending_cancel_id)
+    assert pending_cancelled is not None
+    assert pending_cancelled.message is None
+
+    processing_cancel_id = task_manager.create_task(request())
+    assert task_manager.claim_next_pending_task() == processing_cancel_id
+    processing_cancelled = task_manager.get_task(processing_cancel_id)
+    assert processing_cancelled is not None
+    assert task_manager.cancel_task(processing_cancel_id) is True
+    assert processing_cancelled.message is not None
+    task_manager.release_processing_slot(processing_cancel_id)
+    assert processing_cancelled.message is None
+
+
+def test_timeout_stop_signal_fails_task_instead_of_leaving_it_processing() -> None:
+    class TimedOutMediaService:
+        async def generate_media_with_stop_event(self, message: TaskRequest, stop_event):
+            stop_event.set()
+            return None
+
+    async def scenario() -> None:
+        task_manager = TaskManager(max_queue_size=10)
+        processor = AsyncTaskProcessor(
+            task_manager=task_manager,
+            media_service=TimedOutMediaService(),
+            max_concurrent=1,
+        )
+        task_id = task_manager.create_task(TaskRequest(task="t2i"))
+        assert task_manager.claim_next_pending_task() == task_id
+
+        await processor._process_task(task_id)
+
+        status = task_manager.get_task_status(task_id)
+        assert status is not None
+        assert status["status"] == TaskStatus.FAILED.value
+        assert status["error"] == "Generation failed"
+
+    asyncio.run(scenario())

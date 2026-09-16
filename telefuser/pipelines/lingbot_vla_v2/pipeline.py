@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -76,9 +77,10 @@ class LingBotVlaV2Pipeline(BasePipeline):
         self,
         inputs: LingBotVlaV2Inputs,
         seed: int | None = None,
+        stop_event: Any | None = None,
     ) -> LingBotVlaV2CanonicalActionChunk:
         """Run prepared tensors and return normalized canonical actions."""
-        actions = self.policy_stage.process(inputs, seed=seed)
+        actions = self.policy_stage.process(inputs, seed=seed, stop_event=stop_event)
         if actions.shape[0] != 1:
             raise RuntimeError(f"LingBot-VLA v2 pipeline expects batch size 1, got {actions.shape[0]}")
         canonical_actions = actions[0]
@@ -97,9 +99,15 @@ class LingBotVlaV2Pipeline(BasePipeline):
         self,
         observation: LingBotVlaV2Observation,
         seed: int | None = None,
+        stop_event: Any | None = None,
     ) -> LingBotVlaV2CanonicalActionChunk:
         """Predict one normalized canonical action chunk."""
-        return self.predict(self.input_processor.prepare(observation), seed=seed)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
+        inputs = self.input_processor.prepare(observation)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
+        return self.predict(inputs, seed=seed, stop_event=stop_event)
 
     def prepare_for_inference(self) -> None:
         """Move the policy to its target device before the service becomes ready."""

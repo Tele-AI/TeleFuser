@@ -1391,8 +1391,11 @@ class FlowMatchingV2(FlowMatchingBase):
         state,
         noise=None,
         image_grid_thw=None,
+        stop_event=None,
     ) -> Tensor:
         """Do a full Qwen3-VL inference forward and compute the action."""
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
         bsize = state.shape[0]
         device = state.device
         dtype = state.dtype
@@ -1414,7 +1417,7 @@ class FlowMatchingV2(FlowMatchingBase):
                 raise RuntimeError("LingBot-VLA v2 CUDA Graph and torch.compile cannot be enabled together")
             if self._cuda_graph_runner is None:
                 self._cuda_graph_runner = LingBotVlaV2CudaGraphs(self)
-            return self._cuda_graph_runner.run(
+            result = self._cuda_graph_runner.run(
                 images,
                 img_masks,
                 lang_tokens,
@@ -1424,6 +1427,9 @@ class FlowMatchingV2(FlowMatchingBase):
                 image_grid_thw,
             )
 
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("LingBot-VLA v2 inference cancelled")
+            return result
         prefix_pad_masks, prefix_position_ids, past_key_values = self.build_prefix_cache(
             images,
             img_masks,
@@ -1433,6 +1439,8 @@ class FlowMatchingV2(FlowMatchingBase):
         )
 
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("LingBot-VLA v2 inference cancelled")
         x_t = noise
         time = torch.tensor(1.0, dtype=dtype, device=device)
         predict_velocity_fn = self.predict_velocity
@@ -1448,6 +1456,8 @@ class FlowMatchingV2(FlowMatchingBase):
                 self._compiled_predict_velocity = predict_velocity_fn
 
         for _ in range(int(self.config.num_steps)):
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("LingBot-VLA v2 inference cancelled")
             expanded_time = time.expand(bsize)
             v_t = predict_velocity_fn(
                 state,
