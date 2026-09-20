@@ -34,7 +34,8 @@ The public modules are:
 - `telefuser.vla.session`: transport-neutral OPEN, PREDICT, RESET, and CLOSE lifecycle.
 - `telefuser.vla.serialization`: versioned JSON/Base64 wire formats for action and observation spaces, observations,
   and chunks.
-- `telefuser.vla.runtime`: scheduling, deterministic chunk state, action trimming, age checks, and safety policies.
+- `telefuser.vla.runtime`: deterministic chunk state, action trimming, age checks, safety policies, and simulator
+  execution reports. Session admission and latest-wins request handling live in `telefuser.service.vla_session`.
 - `telefuser.integrations.sim`: simulator protocol and the dependency-free RoboTwin callback adapter.
 - `telefuser.service.vla_session`: the additive generic VLA WebSocket application factory.
 - `telefuser.service.vla_replica`: worker-local OPEN, PREDICT, RESET, and CLOSE dispatch for pipeline replicas.
@@ -52,6 +53,11 @@ action spaces are exported as `LINGBOT_VLA_V2_ACTION_SPACE` and `ROBOTWIN_ACTION
 The generic VLA WebSocket is the online integration path for both RoboTwin and MuJoCo clients. Each connection opens
 an explicit model and embodiment pair, while the shared HTTP structured-task route remains unchanged and continues to
 return the existing canonical JSON result.
+
+LingBot-VLA v2 exposes three access modes over the same pipeline: `lingbot_vla_v2_inference.py` is the direct offline
+baseline, `lingbot_vla_v2_native_service.py` is the existing structured HTTP compatibility path, and
+`lingbot_vla_v2_vla_server.py` is the continuous-control WebSocket path. Only the WebSocket path returns the decoded
+semantic `RobotActionChunk`; the direct and native paths retain the canonical normalized model result.
 
 ## Session Lifecycle
 
@@ -131,8 +137,33 @@ claim that a returned action was executed. `SimulatorChunkRuntime` runs on the s
 EXECUTING, EXECUTED, HOLD, and STOP transitions while calling a `SimulatorAdapter` one action at a time.
 
 The bundled RoboTwin statistics do not declare an authoritative simulator control frequency, so both exported
-LingBot/RoboTwin specs use `control_hz=None`. The remote simulator must resolve its actual control period rather than
+LingBot/RobotWin specs use `control_hz=None`. The remote simulator must resolve its actual control period rather than
 guessing one in the inference process.
+
+## LingBot-VLA v2 Verification Scope
+
+The TeleFuser integration consumes the official checkpoint as-is. It does not add post-training, fine-tuning, or
+model-specific camera-pose inputs. The supported verification path is:
+
+```text
+direct pipeline baseline
+    -> native structured HTTP compatibility
+    -> generic VLA WebSocket session
+    -> simulator-side RobotWin execution
+```
+
+The direct and native paths return the canonical normalized `50 x 55` action chunk. The generic session path applies
+`RobotWinProfile` and returns an absolute-position `50 x 14` `RobotActionChunk`. MuJoCo exercises the simulator-side
+execution boundary; it does not change model computation or action semantics.
+
+Keep inference speed comparisons and release artifacts separate from task-success claims. The maintained validation
+tools cover upstream tensor parity, runtime latency, quantization comparisons, structured-service behavior, replica
+faults, and shutdown/restart. Generated captures and reports belong under the ignored `work_dirs/` directory. A
+real-robot task-success evaluation is outside this integration and must not be represented by `policy_verified`.
+
+The generic WebSocket remains an explicit standalone service so existing `telefuser serve` routes and non-VLA
+pipelines stay unchanged. Deployment authentication, TLS, actuator feedback, and emergency-stop behavior remain
+outside the inference process and must be supplied by the deployment or simulator boundary.
 
 ## Simulator Boundary
 
