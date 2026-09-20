@@ -28,9 +28,9 @@ runtime path, supported workloads, and reproducible real-time gate.
 - ✨ **2026-09-14**: Established a general VLA session-serving abstraction with validated semantic observation and
   action contracts, extensible embodiment adapters, replica-affine sessions, continuous-control WebSocket serving,
   and simulator-side MuJoCo validation.
-- ✨ **2026-08-27**: Added **LingBot-VLA v2** 6B base-checkpoint support with RobotWin multi-camera, task-text,
-  robot-state, and normalized action I/O, together with native structured HTTP serving, BF16 eager, CUDA Graph,
-  and quantized inference support.
+- ✨ **2026-08-27**: Added [**LingBot-VLA v2**](examples/lingbot_vla_v2/README.md) 6B base-checkpoint support
+  with RobotWin multi-camera, task-text, robot-state, and normalized action I/O, together with native structured HTTP
+  serving, BF16 eager, CUDA Graph, and quantized inference support.
 - ✨ **2026-08-19**: Added [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V and I2V joint
   audio-video generation with a ModuleManager-backed six-stage pipeline, selectable dense attention backends, and
   Ulysses sequence parallelism on **1, 2, or 4 x H100** GPUs.

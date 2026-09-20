@@ -26,8 +26,8 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 
 - ✨ **2026-09-14**：建立通用 VLA 会话服务抽象，定义可校验的语义观测与动作契约，
   支持可扩展具身适配器、模型副本绑定会话、连续控制 WebSocket 服务及模拟器侧 MuJoCo 验证。
-- ✨ **2026-08-27**：接入 **LingBot-VLA v2** 6B base checkpoint，支持 RobotWin 多相机、任务文本、
-  机器人状态和归一化动作输入输出，并提供原生结构化 HTTP、BF16 eager、CUDA Graph 及量化推理支持。
+- ✨ **2026-08-27**：接入 [**LingBot-VLA v2**](examples/lingbot_vla_v2/README.md) 6B base checkpoint，支持 RobotWin 多相机、
+  任务文本、机器人状态和归一化动作输入输出，并提供原生结构化 HTTP、BF16 eager、CUDA Graph 及量化推理支持。
 - ✨ **2026-08-19**：新增 [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V 和 I2V 联合
   音视频生成，采用基于 ModuleManager 的六阶段 Pipeline，支持选择密集注意力后端，并可在
   **1、2 或 4 张 H100** 上使用 Ulysses 序列并行。

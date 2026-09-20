@@ -189,6 +189,47 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
   --output work_dirs/vla_quantization/bf16_vs_torchao.json
 ```
 
+## Performance
+
+The measurements below are point results from one NVIDIA H100 80 GB system with CUDA 13.0, PyTorch 2.11.0+cu130,
+Transformers 5.14.1, batch size 1, and fixed seed 7. Core-model timings reuse device-resident parity inputs and
+exclude image decoding and preprocessing. They are environment-specific measurements, not universal performance
+guarantees.
+
+### CUDA Graph A/B
+
+The graph captures only the fixed ten-step action-denoising loop; vision-language prefix encoding remains eager. The
+comparison used five warmup requests and twenty serial requests with the same SDPA configuration in both paths.
+
+| Scope | BF16 eager | BF16 denoising Graph | Change | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Direct core model | 649.790 ms | 164.226 ms | -74.73% | 3.957x |
+| Direct runtime request | 649.843 ms | 164.910 ms | -74.62% | 3.941x |
+| Service target inference | 1317.571 ms | 883.986 ms | -32.91% | 1.490x |
+| Service HTTP end-to-end | 1362.134 ms | 929.761 ms | -31.74% | 1.465x |
+
+### Quantization profiles
+
+The table reports core-model latency and peak allocated VRAM from the H100 release profiles. The relative value is
+`BF16 eager latency / profile latency`; values below `1.0x` are slower than BF16 eager. `fused-fp8-graph` combines
+quantization with CUDA Graph and must be compared with BF16 Graph when isolating the quantization effect.
+
+| Profile | Mean core latency | Relative to BF16 eager | Peak allocated VRAM | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| BF16 eager | 637.7 ms | 1.00x | 12,457 MiB | Reference |
+| BF16 CUDA Graph | 131.6 ms | 4.84x | 12,487 MiB | Graph-only reference |
+| `fused-fp8-graph` | 162.5 ms | 3.92x | 10,862 MiB | Combined FP8 + Graph path; 0.81x vs BF16 Graph |
+| `torchao-fp8` | 1335.0 ms | 0.48x | 8,438 MiB | Lower memory, slower than BF16 eager |
+| `bnb-nf4` | 924.7 ms | 0.69x | 6,479 MiB | Lower memory, slower than BF16 eager |
+
+The CUDA Graph A/B table and the release-profile table use separate benchmark harnesses and run sets; compare
+absolute timings only within the same table.
+
+The quantized profiles are capacity and memory trade-off profiles rather than release-validated speedup claims. The
+runnable profiles passed functional, numerical-threshold, AIPerf, fault, and shutdown checks, but did not produce
+bit-exact HTTP replays. The `tf-kernel-fp8` profile is excluded from this table because compatible hardware validation
+is still pending. Re-run the release suite to regenerate measurements for a different GPU or software environment.
+
 ## Serving
 
 The three inference entrypoints share one `LingBotVlaV2Pipeline`; they are access modes, not separate model
