@@ -309,6 +309,11 @@ server. This is a chain/physics smoke test, not a RoboTwin task-success or check
 The repository includes strict upstream parity, runtime, quantization, structured-service, fault, and AIPerf
 validators under `tools/validation/` and `benchmarks/telefuser_aiperf/`.
 
+This integration is inference-only: it consumes the official LingBot-VLA v2 checkpoint without post-training or
+fine-tuning. The MuJoCo example validates the simulator boundary and action execution path; it is not a substitute
+for physical robot task-success evaluation. Keep direct/HTTP/WebSocket speed comparisons and their generated reports
+under the ignored `work_dirs/` directory.
+
 Compare previously captured upstream and TeleFuser artifacts:
 
 ```bash
