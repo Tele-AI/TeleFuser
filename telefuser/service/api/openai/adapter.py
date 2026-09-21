@@ -361,13 +361,23 @@ class OpenAIResponseAdapter:
     ) -> VideoResponse:
         """Convert a TaskManager status dictionary and optional task message to VideoResponse."""
         status = task_status.get("status", "pending")
+
+        # TaskManager intentionally releases the original request object after a task
+        # reaches a terminal state. Keep the OpenAI response stable by falling back
+        # to the bounded request metadata retained in the status dictionary.
+        prompt = getattr(message, "prompt", None) or task_status.get("prompt", "")
+        size = getattr(message, "resolution", None) or task_status.get("resolution", "")
+        seconds = getattr(message, "target_video_length", None)
+        if seconds is None:
+            seconds = task_status.get("target_video_length", 4)
+        model = getattr(message, "model", None) or task_status.get("model") or "wan-video"
         response = OpenAIResponseAdapter.to_video_response(
             task_id=task_id,
             status=status,
-            prompt=getattr(message, "prompt", ""),
-            size=getattr(message, "resolution", ""),
-            seconds=getattr(message, "target_video_length", 4),
-            model=getattr(message, "model", None) or "wan-video",
+            prompt=prompt,
+            size=size,
+            seconds=seconds,
+            model=model,
             output_path=task_status.get("output_path"),
             url=url,
             progress=OpenAIResponseAdapter.progress_for_task_status(status),

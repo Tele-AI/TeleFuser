@@ -93,6 +93,10 @@ def test_generic_vla_server_starts_pool_with_optional_provider(monkeypatch) -> N
     app = lingbot_vla_v2_vla_server.create_app(parallelism=1, num_replicas=1)
 
     assert app is sentinel
+    pool = captured["pool"]
+    assert isinstance(pool, dict)
+    assert pool["security_level_name"] == "STRICT"
+    assert pool["config"].security_level.name == "STRICT"
     start = captured["start"]
     assert isinstance(start, dict)
     assert start["vla_provider_factory"] == "get_vla_provider"

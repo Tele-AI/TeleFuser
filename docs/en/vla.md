@@ -165,6 +165,9 @@ The generic WebSocket remains an explicit standalone service so existing `telefu
 pipelines stay unchanged. Deployment authentication, TLS, actuator feedback, and emergency-stop behavior remain
 outside the inference process and must be supplied by the deployment or simulator boundary.
 
+The standalone LingBot VLA server uses strict pipeline validation by default. `--skip-validation` is intended only for
+trusted local development after the pipeline file has been reviewed.
+
 ## Simulator Boundary
 
 `RoboTwinSimulatorAdapter` has no RoboTwin, SAPIEN, Vulkan, or ROS dependency. The RTX-side process provides observe,

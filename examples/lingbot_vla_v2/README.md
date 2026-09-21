@@ -292,6 +292,9 @@ CUDA_VISIBLE_DEVICES=0 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
   --parallelism 1 --num-replicas 1 --host 0.0.0.0 --port 8000
 ```
 
+The standalone server uses TeleFuser's default `STRICT` pipeline validation. Use `--skip-validation` only for trusted
+local development after reviewing the pipeline file.
+
 The service exposes `GET /healthz` and `/v1/vla/session`. Each `OPEN` reserves one pipeline replica for that session;
 `PREDICT`, `RESET`, and `CLOSE` are sent to the same worker-local `VLASession`. Closing or disconnecting releases the
 replica. The H100 cuDNN SDPA guard is applied inside each LingBot worker before model loading.

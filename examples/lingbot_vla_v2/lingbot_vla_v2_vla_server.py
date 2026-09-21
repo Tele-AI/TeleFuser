@@ -10,7 +10,6 @@ from fastapi import FastAPI
 
 from telefuser.service.core.config import ServerConfig
 from telefuser.service.core.pipeline_pool import PipelinePool
-from telefuser.service.security.security_validator import SecurityLevel
 from telefuser.service.vla_session import create_pipeline_pool_vla_session_app
 
 DEFAULT_PIPELINE_FILE = Path(__file__).with_name("lingbot_vla_v2_native_service.py")
@@ -24,7 +23,7 @@ def create_app(
     skip_validation: bool = False,
 ) -> FastAPI:
     """Load LingBot replicas and create the standalone generic VLA app."""
-    config = ServerConfig(num_replicas=num_replicas, security_level=SecurityLevel.NONE)
+    config = ServerConfig(num_replicas=num_replicas)
     replica_device_ids = config.resolve_replica_device_ids(parallelism)
     pool = PipelinePool(
         num_replicas=num_replicas,
