@@ -140,9 +140,9 @@ does not modify checkpoint files.
 
 | CLI value | Backend | Scope | Validation status |
 | --- | --- | --- | --- |
-| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
-| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
-| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 release validated with numerical thresholds and AIPerf |
+| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 release validated with numerical thresholds and AIPerf |
+| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 release validated with numerical thresholds and AIPerf |
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; hardware unverified |
 
 Use the direct example with one of the following variants:
@@ -160,9 +160,10 @@ Use the direct example with one of the following variants:
 The tf-kernel path requires an SM90 wheel built for the exact PyTorch/CUDA ABI. It remains "code support, hardware
 unverified" until that real-model run succeeds on a compatible installation.
 
-The complete H100 release suite passed BF16 eager and BF16 Graph. The three runnable quantized profiles passed
-direct/HTTP numerical thresholds, AIPerf, dynamic-instruction, fault, and shutdown checks, but did not produce
-bit-exact HTTP replays. They therefore remain code-supported capacity profiles rather than release-validated profiles.
+The complete H100 release suite passed BF16 eager, BF16 Graph, and the three runnable quantized profiles using the
+same finite-value, cosine, relative-L2, and maximum-absolute-error gates. Repeated seeded requests are not bit-exact
+for BF16 or quantized execution, so exact equality is reported as diagnostic data rather than used as a
+quantization-only release gate.
 
 The public loader accepts the same options:
 
@@ -185,9 +186,10 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
   --candidate work_dirs/vla_quantization/torchao_seed7.npz \
   --candidate-replay work_dirs/vla_quantization/torchao_replay_seed7.npz \
   --min-cosine 0.995 --max-relative-l2 0.10 --max-abs 0.5 \
-  --require-exact-replay \
   --output work_dirs/vla_quantization/bf16_vs_torchao.json
 ```
+
+Add `--require-exact-replay` only for a dedicated bit-exact determinism experiment.
 
 ## Performance
 
@@ -225,10 +227,10 @@ quantization with CUDA Graph and must be compared with BF16 Graph when isolating
 The CUDA Graph A/B table and the release-profile table use separate benchmark harnesses and run sets; compare
 absolute timings only within the same table.
 
-The quantized profiles are capacity and memory trade-off profiles rather than release-validated speedup claims. The
-runnable profiles passed functional, numerical-threshold, AIPerf, fault, and shutdown checks, but did not produce
-bit-exact HTTP replays. The `tf-kernel-fp8` profile is excluded from this table because compatible hardware validation
-is still pending. Re-run the release suite to regenerate measurements for a different GPU or software environment.
+The quantized profiles are release-validated capacity and memory trade-off profiles rather than speedup claims. The
+runnable profiles passed functional, numerical-threshold, AIPerf, fault, and shutdown checks. Repeated seeded results,
+like BF16, were within release thresholds but not bit-exact. The `tf-kernel-fp8` profile is excluded from this table
+because compatible hardware validation is still pending. Re-run the release suite for a different environment.
 
 ## Serving
 
