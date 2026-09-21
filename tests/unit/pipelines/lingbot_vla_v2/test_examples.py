@@ -99,5 +99,9 @@ def test_generic_vla_server_starts_pool_with_optional_provider(monkeypatch) -> N
     assert pool["config"].security_level.name == "STRICT"
     start = captured["start"]
     assert isinstance(start, dict)
+    assert start["skip_validation"] is False
     assert start["vla_provider_factory"] == "get_vla_provider"
     assert start["task"] == "vla_action"
+
+    lingbot_vla_v2_vla_server.create_app(parallelism=1, num_replicas=1, skip_validation=True)
+    assert captured["start"]["skip_validation"] is True
