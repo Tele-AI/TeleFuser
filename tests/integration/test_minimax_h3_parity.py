@@ -10,14 +10,13 @@ try:
 except ImportError:
     pytest.skip("safetensors is required for MiniMax H3 checkpoint tests", allow_module_level=True)
 
-from telefuser.models.minimax_h3_audio_vae import MiniMaxH3AudioVAE
-from telefuser.models.minimax_h3_dit import MiniMaxH3DiT
-from telefuser.models.minimax_h3_encoder import MiniMaxH3Encoder
-from telefuser.models.minimax_h3_video_vae import MiniMaxH3VideoVAE
-
-MODEL_ROOT = Path("/hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3")
-if not MODEL_ROOT.is_dir():
-    pytest.skip("the supplied MiniMax H3 checkpoint root is unavailable", allow_module_level=True)
+try:
+    from telefuser.models.minimax_h3_audio_vae import MiniMaxH3AudioVAE
+    from telefuser.models.minimax_h3_dit import MiniMaxH3DiT
+    from telefuser.models.minimax_h3_encoder import MiniMaxH3Encoder
+    from telefuser.models.minimax_h3_video_vae import MiniMaxH3VideoVAE
+except ImportError as exc:
+    pytest.skip(f"MiniMax H3 model dependencies are unavailable: {exc}", allow_module_level=True)
 
 
 def _metadata_state(paths: list[Path]) -> dict[str, torch.Tensor]:
@@ -52,8 +51,13 @@ def _assert_exact_contract(
 
 @pytest.mark.filesystem
 @pytest.mark.parametrize("partition", ["FL2VA", "Ref2VA"])
-def test_original_partition_checkpoint_contracts_are_exact(partition: str) -> None:
-    root = MODEL_ROOT / partition
+def test_original_partition_checkpoint_contracts_are_exact(partition: str, pytestconfig: pytest.Config) -> None:
+    model_root = pytestconfig.getoption("--minimax-h3-model-root")
+    if not model_root:
+        pytest.skip("pass --minimax-h3-model-root to run MiniMax H3 checkpoint tests")
+    root = Path(model_root).expanduser() / partition
+    if not root.is_dir():
+        pytest.skip(f"MiniMax H3 checkpoint partition does not exist: {root}")
     _assert_exact_contract(
         MiniMaxH3DiT,
         sorted((root / "transformer").glob("model-*.safetensors")),

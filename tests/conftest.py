@@ -44,10 +44,22 @@ GPU_ONLY_TESTS = [
     "unit/ops/test_long_context_attention.py",
     "unit/ops/test_parallel_shard_attention.py",
     "unit/offload/test_async_offload.py",
+    # Integration tests that import CUDA-only model and quantization stacks at collection time.
+    "integration/test_lingbot_vla_v2_quantization_lifecycle.py",
 ]
 
 collect_ignore = []
 TESTS_ROOT = Path(__file__).parent.resolve()
+
+
+def pytest_addoption(parser):
+    """Add optional paths for tests that require external model checkpoints."""
+    parser.addoption(
+        "--minimax-h3-model-root",
+        action="store",
+        default=None,
+        help="directory containing the MiniMax H3 checkpoint partitions",
+    )
 
 
 def _extend_collect_ignore(paths):
