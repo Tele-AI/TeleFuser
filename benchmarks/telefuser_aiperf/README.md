@@ -291,6 +291,29 @@ docker run -d --name aiperf-greptime --restart unless-stopped \
 Set `AIPERF_HISTORY_URL` and `AIPERF_RESOURCE_TARGET_PID` before the batch launcher to collect the target process
 tree. History failures do not silently fall back to an in-memory or file-only database.
 
+## Performance regression baselines
+
+AIPerf remains responsible for executing requests, excluding warmup, and producing the standard artifact. To make
+cross-run gates reproducible, normalize the measured records into the TeleFuser baseline schema and compare the
+result with `telefuser.metrics.baseline`:
+
+```bash
+python -m telefuser.metrics.baseline summarize \
+  --input artifacts/telefuser_aiperf/run/records.json \
+  --output artifacts/telefuser_aiperf/run/baseline.json \
+  --project-commit "$(git rev-parse HEAD)"
+
+python -m telefuser.metrics.baseline compare \
+  --baseline baselines/lingbot_world_v2.json \
+  --candidate artifacts/telefuser_aiperf/run/baseline.json \
+  --output artifacts/telefuser_aiperf/run/regression.json
+```
+
+One baseline file can contain independent entries for T2I, T2V, VLA, and `realtime_stream` workloads. It records
+first-frame latency, chunk p50/p95/p99, steady FPS, GPU peak memory, multi-request throughput, success rate, and output
+consistency. The comparison command returns exit code 1 for a missing workload, missing metric, or a configured
+regression. The module is dependency-free and its tests run on CPU; GPU collection stays in the existing adapters.
+
 ## Layout And Verification
 
 ```text

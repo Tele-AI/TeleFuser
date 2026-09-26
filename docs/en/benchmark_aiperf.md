@@ -169,3 +169,47 @@ driver, CUDA, PyTorch, dtype, complete workload config, warmup rule, success/fai
 offload/cache/attention settings.
 Use the dated validation above as one-run evidence, not a universal performance guarantee. Ongoing comparisons belong
 in GreptimeDB and replayable artifacts.
+
+## TeleFuser performance baselines
+
+The AIPerf result remains the source for workload execution and warmup exclusion. TeleFuser adds a small, versioned
+baseline file so CI and local runs can compare the same fields across T2I, T2V, VLA, and real-time streaming:
+
+- first-frame latency (`first_frame_latency_ms.p95`)
+- chunk latency (`p50`, `p95`, and `p99`, in milliseconds)
+- steady FPS (`steady_fps.p50`)
+- GPU peak memory (`gpu_peak_memory_mb.maximum`)
+- multi-request throughput (`throughput_per_second.p50`)
+- request success rate
+- output consistency (exact-match rate, maximum absolute error, and minimum cosine similarity)
+
+The implementation is dependency-free and lives in `telefuser.metrics.baseline`. It consumes normalized AIPerf records,
+accepts the existing stream aliases (`stream_fps`, `chunk_measurements`, and `first_frame_latency_s`), and never runs
+GPU code while creating or comparing a baseline. A normalized record file can be summarized with:
+
+Adapters that hold a reference output can produce the consistency fields with
+`compare_numeric_outputs()` or `compare_output_hashes()` before constructing a `BenchmarkRecord`; full output arrays
+are not written to the baseline artifact.
+
+```bash
+python -m telefuser.metrics.baseline summarize \
+  --input artifacts/telefuser_aiperf/run/records.json \
+  --output artifacts/telefuser_aiperf/run/baseline.json \
+  --project-commit "$(git rev-parse HEAD)"
+```
+
+Compare a candidate run with the checked-in or downloaded baseline. The command exits with status 1 when a regression
+is detected, which makes it suitable for a CI gate:
+
+```bash
+python -m telefuser.metrics.baseline compare \
+  --baseline baselines/lingbot_world_v2.json \
+  --candidate artifacts/telefuser_aiperf/run/baseline.json \
+  --output artifacts/telefuser_aiperf/run/regression.json
+```
+
+The default relative tolerance is 5%. Latency and memory regress when they increase; FPS and throughput regress when
+they decrease. Output consistency is checked independently and requires exact matches when the adapter provides an
+exact-match result, cosine similarity at least `0.9999`, and maximum absolute error at most `1e-4`. Missing metrics or
+workloads fail the comparison instead of being treated as zero. GPU collection and workload execution stay in the
+existing AIPerf adapters, so this layer can be unit-tested on CPU.

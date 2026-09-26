@@ -153,3 +153,41 @@ Target 完成全部 60 个 chunk，平均 compute 通过 16 FPS 门禁，但并�
 PyTorch、dtype、完整 workload、warmup 规则、成功/失败数量，以及 offload/cache/attention 设置。上面的日期化
 实测只代表单次验证，不是通用性能保证；持续对比结果应保存在 GreptimeDB 和可重放产物中。
 OOM 是被测配置的结果，不能用 mock 或改变 offload 策略后的结果替代。
+## TeleFuser 性能回归基线
+
+AIPerf 继续负责 workload 执行、warmup 排除和原始结果聚合。TeleFuser 在此之上增加一个带版本的基线文件，
+统一比较 T2I、T2V、VLA 和实时流四类 workload：
+
+- 首帧延迟 `first_frame_latency_ms.p95`
+- chunk 延迟 `p50/p95/p99`（毫秒）
+- 稳态 FPS `steady_fps.p50`
+- GPU 峰值显存 `gpu_peak_memory_mb.maximum`
+- 多请求吞吐 `throughput_per_second.p50`
+- 请求成功率
+- 输出一致性（精确匹配率、最大绝对误差、最小余弦相似度）
+
+实现位于 `telefuser.metrics.baseline`，不依赖 GPU 或 AIPerf，可以在 CPU CI 中生成和比较基线。它接受标准化
+AIPerf record，也兼容实时流已有的 `stream_fps`、`chunk_measurements` 和 `first_frame_latency_s` 字段：
+
+适配器如果保留参考输出，可以先调用 `compare_numeric_outputs()` 或 `compare_output_hashes()` 生成一致性字段，
+再构造 `BenchmarkRecord`；基线产物不会写入完整输出数组。
+
+```bash
+python -m telefuser.metrics.baseline summarize \
+  --input artifacts/telefuser_aiperf/run/records.json \
+  --output artifacts/telefuser_aiperf/run/baseline.json \
+  --project-commit "$(git rev-parse HEAD)"
+```
+
+使用候选结果进行回归检查：
+
+```bash
+python -m telefuser.metrics.baseline compare \
+  --baseline baselines/lingbot_world_v2.json \
+  --candidate artifacts/telefuser_aiperf/run/baseline.json \
+  --output artifacts/telefuser_aiperf/run/regression.json
+```
+
+默认相对容差为 5%。延迟和显存升高、FPS 和吞吐下降会触发失败；缺少指标或 workload 也会失败。输出一致性单独
+检查，适配器提供精确匹配结果时要求全部匹配，同时要求余弦相似度至少 `0.9999`、最大绝对误差不超过 `1e-4`。
+GPU 数据采集和 workload 执行仍由现有 AIPerf adapter 负责，因此本层测试不运行 GPU。
