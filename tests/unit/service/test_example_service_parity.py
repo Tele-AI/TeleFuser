@@ -27,6 +27,9 @@ from telefuser.service.core.task_service import MediaGenerationService
 from telefuser.service_types import PipelineRunStatus, TaskStatus
 
 SERVICE_EXAMPLES = {
+    "qwen_image_21_t2i": (Path("examples/qwen_image/qwen_image_21_t2i_h100.py"), "t2i", True),
+    "qwen_image_21_edit": (Path("examples/qwen_image/qwen_image_21_edit_h100.py"), "i2i", True),
+    "qwen_image_21_reference": (Path("examples/qwen_image/qwen_image_21_reference_h100.py"), "i2i", True),
     "wan21_i2v_service": (Path("examples/wan_video/wan21_14b_image_to_video_480p_service.py"), "i2v", True),
     "minimax_h3_fl2va": (Path("examples/minimax_h3/minimax_h3_fl2va_h100.py"), "t2v", True),
     "minimax_h3_ref2va": (Path("examples/minimax_h3/minimax_h3_ref2va_h100.py"), "s2v", True),
@@ -83,6 +86,21 @@ def _load_example(name: str) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_qwen_image_21_reuses_baseline_output_dimensions() -> None:
+    module = _load_example("qwen_image_21_t2i")
+    calls: list[dict[str, Any]] = []
+
+    def capture_pipeline(**kwargs: Any) -> list[Image.Image]:
+        calls.append(kwargs)
+        return [Image.new("RGB", (kwargs["width"], kwargs["height"]))]
+
+    images = module.run(capture_pipeline, module.PPL_CONFIG["prompt"])
+
+    assert images[0].size == (1664, 928)
+    assert (calls[0]["width"], calls[0]["height"]) == module.ASPECT_RATIO_TO_SIZE["16:9"]
+    assert module.PPL_CONFIG["aspect_ratio"] == "16:9"
 
 
 def _parameter_value(parameter_type: str) -> object:
