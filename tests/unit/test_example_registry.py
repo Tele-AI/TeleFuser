@@ -10,6 +10,9 @@ from examples.run_examples import load_config
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = PROJECT_ROOT / "examples"
 SERVICE_PARITY_EXAMPLES = {
+    "qwen_image/qwen_image_21_t2i_h100.py",
+    "qwen_image/qwen_image_21_edit_h100.py",
+    "qwen_image/qwen_image_21_reference_h100.py",
     "lingbot_vla_v2/lingbot_vla_v2_native_service.py",
     "wan_video/wan21_14b_image_to_video_480p_service.py",
     "wan_video/wan22_14b_image_to_video_distill_h100.py",
