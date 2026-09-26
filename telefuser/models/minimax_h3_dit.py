@@ -837,35 +837,9 @@ def _norm_modulate(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """Run the bit-compatible RMSNorm + indexed AdaLN fusion when supported."""
-    weight = norm.weight
-    use_fused = (
-        not torch.compiler.is_compiling()
-        and hidden.device.type == "cuda"
-        and hidden.dtype == torch.bfloat16
-        and hidden.ndim == 2
-        and hidden.is_contiguous()
-        and weight is not None
-        and weight.dtype == shift.dtype == scale.dtype == hidden.dtype
-        and weight.is_contiguous()
-        and shift.ndim == scale.ndim == 2
-        and shift.stride(-1) == scale.stride(-1) == 1
-        and indices.ndim == 1
-        and indices.device == hidden.device
-    )
-    if use_fused:
-        from telefuser.kernel.triton.indexed_rmsnorm_modulation import (
-            indexed_rmsnorm_scale_shift_bf16,
-        )
+    from telefuser.ops import indexed_rmsnorm_scale_shift
 
-        return indexed_rmsnorm_scale_shift_bf16(
-            hidden,
-            weight,
-            shift,
-            scale,
-            indices.contiguous(),
-            norm.eps,
-        )
-    return _modulate(norm(hidden), shift, scale, indices)
+    return indexed_rmsnorm_scale_shift(norm, hidden, shift, scale, indices)
 
 
 class MiniMaxH3TokenRefinerBlock(nn.Module):

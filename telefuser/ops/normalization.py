@@ -357,6 +357,43 @@ def indexed_scale_shift(
     return x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
 
 
+def indexed_rmsnorm_scale_shift(
+    norm: RMSNorm,
+    x: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply RMSNorm and indexed modulation through the public ops boundary.
+
+    The fused kernel is selected here so model implementations do not import
+    internal Triton modules or make compile-mode decisions themselves.
+    """
+    _validate_indexed_modulation_inputs(x, indices, row_parameters=(shift, scale))
+    if (
+        not torch.compiler.is_compiling()
+        and x.device.type == "cuda"
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.is_contiguous()
+        and norm.weight is not None
+        and norm.weight.dtype == shift.dtype == scale.dtype == x.dtype
+        and norm.weight.is_contiguous()
+        and shift.stride(-1) == scale.stride(-1) == 1
+    ):
+        from telefuser.kernel.triton.indexed_rmsnorm_modulation import indexed_rmsnorm_scale_shift_bf16
+
+        return indexed_rmsnorm_scale_shift_bf16(
+            x,
+            norm.weight,
+            shift,
+            scale,
+            indices.contiguous(),
+            norm.eps,
+        )
+    return indexed_scale_shift(norm(x), shift, scale, indices)
+
+
 def indexed_gate(
     x: torch.Tensor,
     gate: torch.Tensor,

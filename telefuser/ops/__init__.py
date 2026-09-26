@@ -25,6 +25,7 @@ from .normalization import (
     RMSNorm,
     fused_scale_shift,
     indexed_gate,
+    indexed_rmsnorm_scale_shift,
     indexed_scale_shift,
     modulate,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "modulate",
     "configure_neighborhood_attention_kv_parallelism",
     "indexed_gate",
+    "indexed_rmsnorm_scale_shift",
     "indexed_scale_shift",
     "route_topk",
     "grouped_expert_forward",

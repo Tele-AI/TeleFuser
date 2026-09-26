@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
+from telefuser import __version__
 from telefuser.utils.logging import logger
 
 from ..core.config import ServerConfig, server_config
@@ -50,7 +51,7 @@ class ApiServer:
             title="TeleFuser API",
             description="API for video and image generation using TeleFuser framework. "
             "OpenAI compatible endpoints available at /v1/images and /v1/videos.",
-            version="1.1.0",
+            version=__version__,
             docs_url="/docs",
             redoc_url="/redoc",
             openapi_url="/openapi.json",
@@ -84,7 +85,7 @@ class ApiServer:
         )
 
     @property
-    def task_manager(self):
+    def task_manager(self) -> TaskManager | None:
         """Get task manager (supports dependency injection)."""
         if self._task_manager is not None:
             return self._task_manager

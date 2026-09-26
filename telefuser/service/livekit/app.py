@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from telefuser import __version__
 from telefuser.metrics import get_service_metrics
 
 from .runtime import LiveKitServeRuntime, session_record_to_response
@@ -38,7 +39,7 @@ def create_livekit_app(runtime: LiveKitServeRuntime) -> FastAPI:
     app = FastAPI(
         title="TeleFuser Stream API",
         description="LiveKit-backed real-time TeleFuser stream API.",
-        version="0.1.0",
+        version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
