@@ -41,6 +41,11 @@ class _SessionWorkerEventSink:
         if callable(callback):
             callback(worker_id, session_id)
 
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None:
+        callback = getattr(self._owner.event_sink, "on_participant_event", None)
+        if callable(callback):
+            callback(session_id, event, identity, count)
+
     def on_chunk_published(
         self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
     ) -> None:

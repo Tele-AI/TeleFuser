@@ -13,6 +13,7 @@ from .data_protocol import TF_METRICS_TOPIC, TF_STATUS_TOPIC
 from .token_service import LiveKitDependencyError
 
 DataMessageHandler = Callable[[bytes | str | dict[str, Any], str, str], None]
+ParticipantEventHandler = Callable[[str, str, int], None]
 _VIDEO_MAX_BITRATE = 8_000_000
 
 _VIDEO_ENCODER_MIN_MAX_FRAMERATE = 30.0
@@ -22,6 +23,7 @@ class RoomClient(Protocol):
     """Minimal room operations required by a TeleFuser LiveKit worker."""
 
     async def connect(self, url: str, token: str, on_data: DataMessageHandler) -> None: ...
+    def set_participant_event_handler(self, handler: ParticipantEventHandler) -> None: ...
     async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None: ...
     async def publish_video_track(self, name: str, width: int, height: int, *, fps: float = 16.0) -> None: ...
     async def publish_video_frame(self, frame_rgb: np.ndarray, *, fps: float = 16.0) -> None: ...
@@ -49,6 +51,11 @@ class LiveKitRoomClient:
         self._audio_track: Any | None = None
         self._audio_track_sid: str | None = None
         self._audio_format: tuple[int, int] | None = None
+        self._participant_event_handler: ParticipantEventHandler | None = None
+
+    def set_participant_event_handler(self, handler: ParticipantEventHandler) -> None:
+        """Register a callback for remote participant joins and leaves."""
+        self._participant_event_handler = handler
 
     async def connect(self, url: str, token: str, on_data: DataMessageHandler) -> None:
         rtc = self._load_rtc()
@@ -62,6 +69,24 @@ class LiveKitRoomClient:
             identity = getattr(participant, "identity", "") if participant is not None else ""
             on_data(packet.data, packet.topic or "", identity)
 
+        @room.on("participant_connected")
+        def _on_participant_connected(participant: Any) -> None:
+            if self._participant_event_handler is not None:
+                self._participant_event_handler(
+                    "connected",
+                    str(getattr(participant, "identity", "")),
+                    len(room.remote_participants),
+                )
+
+        @room.on("participant_disconnected")
+        def _on_participant_disconnected(participant: Any) -> None:
+            if self._participant_event_handler is not None:
+                self._participant_event_handler(
+                    "disconnected",
+                    str(getattr(participant, "identity", "")),
+                    len(room.remote_participants),
+                )
+
         await room.connect(url, token)
 
     async def wait_for_participant(self, identity: str, *, timeout_s: float) -> None:
@@ -70,6 +95,15 @@ class LiveKitRoomClient:
             raise ValueError(f"Participant wait timeout must be positive, got {timeout_s}")
         room = self._require_room()
         if identity in room.remote_participants:
+            return
+
+        if self._participant_event_handler is not None:
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            while identity not in room.remote_participants:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(f"Timed out waiting for participant {identity}")
+                await asyncio.sleep(min(0.05, remaining))
             return
 
         joined = asyncio.Event()

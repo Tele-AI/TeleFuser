@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from pydantic import BaseModel, Field
 
@@ -124,3 +125,27 @@ class SessionRegistry:
         """Return copies of all known sessions."""
         with self._lock:
             return [record.model_copy(deep=True) for record in self._records.values()]
+
+    def expired_active_records(self, now: float | None = None) -> list[SessionRecord]:
+        """Return active records whose session lifetime has elapsed."""
+        current_time = time.time() if now is None else now
+        with self._lock:
+            return [
+                record.model_copy(deep=True)
+                for record in self._records.values()
+                if record.status not in TERMINAL_SESSION_STATUSES
+                and record.expires_at is not None
+                and record.expires_at <= current_time
+            ]
+
+    def prune_terminal(self, before: float) -> int:
+        """Remove terminal records older than ``before`` and return the count."""
+        with self._lock:
+            stale_ids = [
+                session_id
+                for session_id, record in self._records.items()
+                if record.status in TERMINAL_SESSION_STATUSES and record.updated_at < before
+            ]
+            for session_id in stale_ids:
+                del self._records[session_id]
+            return len(stale_ids)

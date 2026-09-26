@@ -28,6 +28,30 @@ def test_session_registry_lifecycle() -> None:
     assert closed.status == "closed"
 
 
+def test_session_registry_finds_expired_active_records_and_prunes_terminal_records() -> None:
+    registry = SessionRegistry()
+    expired = registry.create(
+        session_id="expired",
+        room_name="room-expired",
+        controller_identity="user-1",
+        config={},
+        timeout_s=1,
+    )
+    active = registry.create(
+        session_id="active",
+        room_name="room-active",
+        controller_identity="user-2",
+        config={},
+        timeout_s=3600,
+    )
+    assert [record.session_id for record in registry.expired_active_records(expired.expires_at + 1)] == ["expired"]
+    assert [record.session_id for record in registry.expired_active_records(active.created_at)] == []
+
+    registry.close("expired")
+    assert registry.prune_terminal(before=registry.require("expired").updated_at + 1) == 1
+    assert registry.get("expired") is None
+
+
 def test_session_registry_returns_copies() -> None:
     registry = SessionRegistry()
     record = registry.create(controller_identity="user-1", config={}, session_id="session-1")

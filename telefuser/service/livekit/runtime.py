@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+import time
 from dataclasses import dataclass
 
 from telefuser.service.security.security_validator import SecurityLevel
@@ -90,6 +91,9 @@ class LiveKitServeRuntime:
         self._closing = False
         self._closed = False
         self._finished_sessions: set[str] = set()
+        self._expiring_sessions: set[str] = set()
+        self._controller_deadlines: dict[str, float] = {}
+        self._room_empty_deadlines: dict[str, float] = {}
         self._reported_worker_capacities: dict[str, int] = {}
         self._worker_capacity_profiles: dict[str, dict[str, object]] = {}
         self._autoscaling_controller = TurboServeAutoscalingController(
@@ -105,6 +109,7 @@ class LiveKitServeRuntime:
             migration_penalty=config.turboserve_migration_penalty,
         )
         self._autoscale_task: asyncio.Task | None = None
+        self._session_reaper_task: asyncio.Task | None = None
         self._cluster_scheduler = TurboServeClusterScheduler(
             TurboServeSchedulerConfig(
                 enable_autoscaling=config.autoscaling_enabled,
@@ -150,6 +155,7 @@ class LiveKitServeRuntime:
         await self.worker_pool.start(skip_validation=self.skip_validation)
         with self._lock:
             self._started = True
+        self._session_reaper_task = asyncio.create_task(self._session_reaper_loop(), name="livekit-session-reaper")
         if self.config.autoscaling_enabled or self.config.turboserve_rebalance_enabled:
             self._autoscale_task = asyncio.create_task(self._autoscale_loop(), name="livekit-turboserve-control")
 
@@ -268,7 +274,23 @@ class LiveKitServeRuntime:
 
     def on_control_received(self, worker_id: str, session_id: str) -> None:
         """Record a validated controller action entering the serving pipeline."""
+        self._controller_deadlines.pop(session_id, None)
         self._serving_metrics.on_control_received(worker_id, session_id)
+
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None:
+        """Track room membership and schedule cleanup after controller departure."""
+        record = self.registry.get(session_id)
+        if record is None or record.status in TERMINAL_SESSION_STATUSES:
+            return
+        self.registry.set_participant_count(session_id, max(0, count))
+        if event == "connected" and identity == record.controller_identity:
+            self._controller_deadlines.pop(session_id, None)
+        elif event == "disconnected" and identity == record.controller_identity:
+            self._controller_deadlines[session_id] = time.time() + self.config.controller_timeout
+        if count == 0:
+            self._room_empty_deadlines[session_id] = time.time() + self.config.room_empty_timeout
+        else:
+            self._room_empty_deadlines.pop(session_id, None)
 
     def on_chunk_published(
         self,
@@ -424,6 +446,11 @@ class LiveKitServeRuntime:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._autoscale_task
                 self._autoscale_task = None
+            if self._session_reaper_task is not None:
+                self._session_reaper_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._session_reaper_task
+                self._session_reaper_task = None
             await self.worker_pool.aclose()
             for record in self.registry.list_records():
                 if record.status not in TERMINAL_SESSION_STATUSES:
@@ -481,6 +508,53 @@ class LiveKitServeRuntime:
                 raise
             except Exception as exc:
                 logger.exception(f"LiveKit autoscaling iteration failed: {exc}")
+
+    async def _session_reaper_loop(self) -> None:
+        """Enforce session TTLs and bound terminal registry growth."""
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                for record in self.registry.expired_active_records():
+                    logger.info("Expiring LiveKit session %s after its configured lifetime", record.session_id)
+                    with self._lock:
+                        self._expiring_sessions.add(record.session_id)
+                        if self.registry.require(record.session_id).status not in TERMINAL_SESSION_STATUSES:
+                            self.registry.update_status(record.session_id, "draining")
+                    try:
+                        with contextlib.suppress(Exception):
+                            await self.worker_pool.stop_session(record.session_id)
+                        self._finish_session(record.session_id, terminal_status="expired")
+                    finally:
+                        self._expiring_sessions.discard(record.session_id)
+                now = time.time()
+                deadline_ids = {
+                    session_id
+                    for session_id, deadline in (
+                        *self._controller_deadlines.items(),
+                        *self._room_empty_deadlines.items(),
+                    )
+                    if deadline <= now
+                }
+                for session_id in deadline_ids:
+                    record = self.registry.get(session_id)
+                    if record is None or record.status in TERMINAL_SESSION_STATUSES:
+                        continue
+                    with self._lock:
+                        self._expiring_sessions.add(session_id)
+                        self.registry.update_status(session_id, "draining")
+                    try:
+                        with contextlib.suppress(Exception):
+                            await self.worker_pool.stop_session(session_id)
+                        self._finish_session(session_id, terminal_status="expired")
+                    finally:
+                        self._expiring_sessions.discard(session_id)
+                        self._controller_deadlines.pop(session_id, None)
+                        self._room_empty_deadlines.pop(session_id, None)
+                self.registry.prune_terminal(before=time.time() - 3600.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("LiveKit session reaper iteration failed: %s", exc)
 
     async def _autoscale_once(self) -> TurboServeScaleDecision:
         active_count = getattr(self.worker_pool, "active_worker_count", None)
@@ -702,7 +776,13 @@ class LiveKitServeRuntime:
         self._last_migration_plan = plan
         self._last_migration_error = None
 
-    def _finish_session(self, session_id: str, *, error: str | None = None) -> SessionRecord:
+    def _finish_session(
+        self,
+        session_id: str,
+        *,
+        error: str | None = None,
+        terminal_status: SessionStatus | None = None,
+    ) -> SessionRecord:
         with self._lock:
             current = self.registry.require(session_id)
             if session_id in self._finished_sessions:
@@ -711,6 +791,8 @@ class LiveKitServeRuntime:
 
             if current.status in TERMINAL_SESSION_STATUSES:
                 record = current
+            elif terminal_status == "expired" or session_id in self._expiring_sessions:
+                record = self.registry.expire(session_id)
             elif error is not None and error != "cancelled":
                 record = self.registry.fail(session_id, error)
             else:

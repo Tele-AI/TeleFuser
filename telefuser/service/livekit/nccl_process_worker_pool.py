@@ -11,6 +11,7 @@ import contextlib
 import json
 import socket
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -265,6 +266,11 @@ class _ParentTransportSink:
         if callable(callback):
             callback(worker_id, session_id)
 
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None:
+        callback = getattr(self.pool._event_sink, "on_participant_event", None)
+        if callable(callback):
+            callback(session_id, event, identity, count)
+
     def on_chunk_published(
         self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
     ) -> None:
@@ -450,7 +456,7 @@ class NCCLProcessLiveKitWorkerPool(ProcessLiveKitWorkerPool):
             self._send(worker_id, {"type": "model_close", "session_id": session_id})
         self._close_model_output(session_id)
 
-    async def pull_model_chunks(self, session_id: str):
+    async def pull_model_chunks(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
         output = self._model_outputs.get(session_id)
         if output is None:
             return
