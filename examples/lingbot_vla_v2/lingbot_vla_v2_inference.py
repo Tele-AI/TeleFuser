@@ -1,4 +1,8 @@
-"""Run the LingBot-VLA v2 base checkpoint with a RobotWin observation adapter."""
+"""Run the LingBot-VLA v2 base checkpoint with a RobotWin observation adapter.
+
+This is the reference/offline entrypoint for model output checks. Continuous
+simulator control should use the generic VLA WebSocket service instead.
+"""
 
 from __future__ import annotations
 

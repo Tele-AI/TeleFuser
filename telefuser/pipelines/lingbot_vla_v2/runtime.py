@@ -8,6 +8,7 @@ from transformers import AutoProcessor
 from telefuser.core.config import ModelRuntimeConfig, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2
+from telefuser.utils.logging import logger
 
 from .pipeline import LingBotVlaV2Pipeline, LingBotVlaV2PipelineConfig
 
@@ -17,6 +18,24 @@ LINGBOT_VLA_V2_QUANTIZATION_CHOICES = ("fused-fp8-graph", "torchao-fp8", "tf-ker
 def _apply_cuda_runtime_flags(device: torch.device) -> None:
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
+
+
+def configure_lingbot_vla_v2_h100_sdpa(device: str) -> None:
+    """Avoid unsupported cuDNN SDPA plans in a LingBot H100 process."""
+    resolved_device = torch.device(device)
+    if resolved_device.type != "cuda" or not torch.cuda.is_available():
+        return
+    if "H100" not in torch.cuda.get_device_name(resolved_device):
+        return
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    logger.info("Disabled cuDNN SDPA for the LingBot-VLA v2 H100 policy process")
 
 
 def lingbot_vla_v2_quant_config(quantization: str | QuantType | None) -> QuantConfig:

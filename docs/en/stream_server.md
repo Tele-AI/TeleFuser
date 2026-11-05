@@ -268,11 +268,16 @@ remaining browser participants and the LiveKit deployment determine the transpor
 
 The current runtime has these deliberate documentation-visible limitations:
 
-- `session_timeout` records `expires_at`, but no background task currently changes the session to `expired`.
-- `controller_timeout` and `room_empty_timeout` are accepted configuration values but are not enforced.
-- Participant events are not monitored, so `participant_count` remains `0` and departure does not trigger cleanup.
-- Terminal records remain in the in-memory registry for the lifetime of the process. They are not shared or restored.
-- A controller should send `stop` or call DELETE. Closing a browser tab alone does not release capacity.
+- `session_timeout` is enforced by the runtime reaper. Expired sessions are drained, their worker capacity is released,
+  and the terminal record is retained for a bounded period for diagnosis.
+- `controller_timeout` starts after the controller participant disconnects; `room_empty_timeout` starts when the room
+  has no remote participants. Either deadline drains and expires the session. A controller that reconnects before the
+  deadline cancels the controller-disconnect deadline.
+- Participant joins and departures update `participant_count` and drive these cleanup deadlines.
+- Terminal records remain in the in-memory registry for a bounded diagnostic retention period. They are not shared or
+  restored across processes.
+- DELETE or an explicit `stop` remains the fastest cleanup path. A disconnected controller or empty room is reclaimed
+  after the configured grace period.
 
 ## HTTP API
 
@@ -397,7 +402,7 @@ This exposes physical GPUs 4-7 as local devices 0-3 and passes `gpu_num=4`; it s
 | `workers_failed` | Workers whose aggregate state is failed. |
 | `queued_sessions` | HTTP admission queue depth only; it excludes LingBot lease and pipeline artifact waits. |
 | `livekit_connected` | Derived from aggregate worker status being `starting_pipeline`, `running`, or `draining`; it is not a direct LiveKit server probe. |
-| `participant_count` | Currently always `0` because participant events are not wired into the registry. |
+| `participant_count` | Current remote participant count reported by LiveKit events. |
 | `lease_queued`, `lease_granted`, `lease_parked` | LingBot execution-lease transitions published through `tf.status`. |
 
 `livekit_connected=false` is expected before any room runner reaches pipeline startup and does not mean model loading

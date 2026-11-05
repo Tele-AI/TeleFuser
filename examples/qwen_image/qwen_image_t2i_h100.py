@@ -14,6 +14,15 @@ from telefuser.pipelines.qwen_image.qwen_image import ASPECT_RATIO_TO_SIZE
 from telefuser.utils.utils import get_example_name
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+DEFAULT_PROMPT = (
+    "A 20-year-old East Asian girl with delicate, charming features and large, bright brown eyes—expressive and "
+    "lively, with a cheerful or subtly smiling expression. Her naturally wavy long hair is either loose or tied "
+    "in twin ponytails. She has fair skin and light makeup accentuating her youthful freshness. She wears a modern, "
+    "cute dress or relaxed outfit in bright, soft colors—lightweight fabric, minimalist cut. She stands indoors at "
+    "an anime convention, surrounded by banners, posters, or stalls. Lighting is typical indoor illumination—no "
+    "staged lighting—and the image resembles a casual iPhone snapshot: unpretentious composition, yet brimming "
+    "with vivid, fresh, youthful charm."
+)
 PPL_CONFIG = dict(
     name="qwen_image_t2i",
     model_root=TF_MODEL_ZOO_PATH + "/Qwen-Image-2512",
@@ -38,7 +47,10 @@ PPL_CONFIG = dict(
         "text_encoder/model-00004-of-00004.safetensors",
     ],
     tokenizer_path="tokenizer",
-    negative_prompt="低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
+    negative_prompt=(
+        "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，"
+        "画面具有AI感。构图混乱。文字模糊，扭曲。"
+    ),
     attn_impl=AttnImplType.TORCH_SDPA,
     seed=42,
     sample_solver="euler",
@@ -115,7 +127,7 @@ def run(
 @click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
 @click.option(
     "--prompt",
-    default="A 20-year-old East Asian girl with delicate, charming features and large, bright brown eyes—expressive and lively, with a cheerful or subtly smiling expression. Her naturally wavy long hair is either loose or tied in twin ponytails. She has fair skin and light makeup accentuating her youthful freshness. She wears a modern, cute dress or relaxed outfit in bright, soft colors—lightweight fabric, minimalist cut. She stands indoors at an anime convention, surrounded by banners, posters, or stalls. Lighting is typical indoor illumination—no staged lighting—and the image resembles a casual iPhone snapshot: unpretentious composition, yet brimming with vivid, fresh, youthful charm.",
+    default=DEFAULT_PROMPT,
     help="Custom prompt text",
 )
 @click.option("--negative_prompt", default=PPL_CONFIG["negative_prompt"], help="Negative prompt")

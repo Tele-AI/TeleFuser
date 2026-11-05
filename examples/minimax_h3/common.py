@@ -182,6 +182,8 @@ def load_minimax_h3_pipeline(
     sol_threshold_type: str = "exact",
     sol_fp8_layer_start: int = 0,
     sol_fp8_layer_end: int | None = None,
+    sol_fp8_smoothing: str = "kv",
+    sol_fp8_v_bias_correction: bool = True,
     feature_cache_config: FeatureCacheConfig | None = None,
     adaln_cache_path: str | Path | None = None,
     online_adaln_cache: bool = False,
@@ -278,6 +280,8 @@ def load_minimax_h3_pipeline(
             sol_fp8_layer_end=sol_fp8_layer_end,
             attention_chunks=attention_chunks,
             ulysses_sequence_mode=ulysses_sequence_mode,
+            sol_fp8_smoothing=sol_fp8_smoothing,
+            sol_fp8_v_bias_correction=sol_fp8_v_bias_correction,
         )
         if attn_impl == AttnImplType.SOL_ATTN
         else AttentionConfig.dense_attention(

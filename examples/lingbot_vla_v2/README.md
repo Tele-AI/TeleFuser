@@ -25,10 +25,11 @@ The parity reference uses [Robbyant/lingbot-vla-v2](https://github.com/Robbyant/
 | CUDA Graph | Supported | Dynamic eager prefix with an opt-in fixed-shape action-denoising graph |
 | Quantization | Partial | Profile-specific release status; see Configuration and Performance |
 | Native server API | Supported | Asynchronous structured task API and `TFClient` |
-| RoboTwin policy protocol | Supported | Standalone persistent MessagePack WebSocket service |
 | Request replicas | Supported | One complete policy copy per GPU |
 | Single-policy FSDP, TP, or PP | Unsupported | The integration does not split one policy across GPUs |
 | RoboTwin action mapping | Supported | Unnormalizes canonical output to absolute-position `50 x 14` chunks |
+| Semantic VLA contract | Supported | Model and robot action spaces are explicit; see [VLA Action Integration](../../docs/en/vla.md) |
+| Generic VLA session server | Preferred | Versioned JSON WebSocket with replica-affine sessions |
 
 ## Requirements
 
@@ -139,9 +140,9 @@ does not modify checkpoint files.
 
 | CLI value | Backend | Scope | Validation status |
 | --- | --- | --- | --- |
-| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
-| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
-| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 functional/AIPerf validated; release gate failed exact HTTP replay |
+| `fused-fp8-graph` | Native scaled GEMM and Triton | Repeated denoising Linear and routed-MoE weights | H100 release validated with numerical thresholds and AIPerf |
+| `torchao-fp8` | TorchAO | 492 selected Qwen/action-expert Linear layers | H100 release validated with numerical thresholds and AIPerf |
+| `bnb-nf4` | bitsandbytes | Same 492 Linear-layer manifest, NF4 weights and BF16 compute | H100 release validated with numerical thresholds and AIPerf |
 | `tf-kernel-fp8` | TeleFuser tf-kernel | Per-token activation and per-output-channel weight FP8 | Code/unit tested; hardware unverified |
 
 Use the direct example with one of the following variants:
@@ -159,9 +160,10 @@ Use the direct example with one of the following variants:
 The tf-kernel path requires an SM90 wheel built for the exact PyTorch/CUDA ABI. It remains "code support, hardware
 unverified" until that real-model run succeeds on a compatible installation.
 
-The complete H100 release suite passed BF16 eager and BF16 Graph. The three runnable quantized profiles passed
-direct/HTTP numerical thresholds, AIPerf, dynamic-instruction, fault, and shutdown checks, but did not produce
-bit-exact HTTP replays. They therefore remain code-supported capacity profiles rather than release-validated profiles.
+The complete H100 release suite passed BF16 eager, BF16 Graph, and the three runnable quantized profiles using the
+same finite-value, cosine, relative-L2, and maximum-absolute-error gates. Repeated seeded requests are not bit-exact
+for BF16 or quantized execution, so exact equality is reported as diagnostic data rather than used as a
+quantization-only release gate.
 
 The public loader accepts the same options:
 
@@ -184,11 +186,65 @@ Compare a deterministic quantized capture with the corresponding TeleFuser BF16 
   --candidate work_dirs/vla_quantization/torchao_seed7.npz \
   --candidate-replay work_dirs/vla_quantization/torchao_replay_seed7.npz \
   --min-cosine 0.995 --max-relative-l2 0.10 --max-abs 0.5 \
-  --require-exact-replay \
   --output work_dirs/vla_quantization/bf16_vs_torchao.json
 ```
 
+Add `--require-exact-replay` only for a dedicated bit-exact determinism experiment.
+
+## Performance
+
+The measurements below are point results from one NVIDIA H100 80 GB system with CUDA 13.0, PyTorch 2.11.0+cu130,
+Transformers 5.14.1, batch size 1, and fixed seed 7. Core-model timings reuse device-resident parity inputs and
+exclude image decoding and preprocessing. They are environment-specific measurements, not universal performance
+guarantees.
+
+### CUDA Graph A/B
+
+The graph captures only the fixed ten-step action-denoising loop; vision-language prefix encoding remains eager. The
+comparison used five warmup requests and twenty serial requests with the same SDPA configuration in both paths.
+
+| Scope | BF16 eager | BF16 denoising Graph | Change | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Direct core model | 649.790 ms | 164.226 ms | -74.73% | 3.957x |
+| Direct runtime request | 649.843 ms | 164.910 ms | -74.62% | 3.941x |
+| Service target inference | 1317.571 ms | 883.986 ms | -32.91% | 1.490x |
+| Service HTTP end-to-end | 1362.134 ms | 929.761 ms | -31.74% | 1.465x |
+
+### Quantization profiles
+
+The table reports core-model latency and peak allocated VRAM from the H100 release profiles. The relative value is
+`BF16 eager latency / profile latency`; values below `1.0x` are slower than BF16 eager. `fused-fp8-graph` combines
+quantization with CUDA Graph and must be compared with BF16 Graph when isolating the quantization effect.
+
+| Profile | Mean core latency | Relative to BF16 eager | Peak allocated VRAM | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| BF16 eager | 637.7 ms | 1.00x | 12,457 MiB | Reference |
+| BF16 CUDA Graph | 131.6 ms | 4.84x | 12,487 MiB | Graph-only reference |
+| `fused-fp8-graph` | 162.5 ms | 3.92x | 10,862 MiB | Combined FP8 + Graph path; 0.81x vs BF16 Graph |
+| `torchao-fp8` | 1335.0 ms | 0.48x | 8,438 MiB | Lower memory, slower than BF16 eager |
+| `bnb-nf4` | 924.7 ms | 0.69x | 6,479 MiB | Lower memory, slower than BF16 eager |
+
+The CUDA Graph A/B table and the release-profile table use separate benchmark harnesses and run sets; compare
+absolute timings only within the same table.
+
+The quantized profiles are release-validated capacity and memory trade-off profiles rather than speedup claims. The
+runnable profiles passed functional, numerical-threshold, AIPerf, fault, and shutdown checks. Repeated seeded results,
+like BF16, were within release thresholds but not bit-exact. The `tf-kernel-fp8` profile is excluded from this table
+because compatible hardware validation is still pending. Re-run the release suite for a different environment.
+
 ## Serving
+
+The three inference entrypoints share one `LingBotVlaV2Pipeline`; they are access modes, not separate model
+implementations:
+
+| Entry point | Role | Recommendation |
+| --- | --- | --- |
+| `lingbot_vla_v2_inference.py` | Direct Python reference and offline baseline | Keep for regression/debugging |
+| `lingbot_vla_v2_native_service.py` via `telefuser serve` | Native HTTP structured requests | Keep for TeleFuser compatibility |
+| `lingbot_vla_v2_vla_server.py` | Stateful generic VLA WebSocket | **Primary simulator path** |
+
+For a production or simulation deployment, start only the generic WebSocket server. The other entries remain for
+baseline comparison and backward compatibility and do not change the model or session implementation.
 
 Start the native structured service:
 
@@ -228,152 +284,81 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 
 This creates one complete policy per GPU; it does not enable tensor or pipeline parallelism within a policy.
 
-### RoboTwin Policy Server
+### Generic VLA Session Server
 
-The standalone policy server implements the persistent MessagePack WebSocket protocol used by the upstream
-`WebsocketClientPolicy`. It is isolated from `telefuser serve`: no TeleFuser API routes, service schemas, or other
-model integrations are changed.
-
-Install the protocol dependency in the TeleFuser inference environment:
+Start the preferred additive WebSocket service without mounting routes into `telefuser serve`:
 
 ```bash
-.venv-vla/bin/python -m pip install -r examples/lingbot_vla_v2/requirements-robotwin.txt
+CUDA_VISIBLE_DEVICES=0 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+  .venv-vla/bin/python -m examples.lingbot_vla_v2.lingbot_vla_v2_vla_server \
+  --parallelism 1 --num-replicas 1 --host 0.0.0.0 --port 8000
 ```
 
-Start one resident policy process:
+The standalone server uses TeleFuser's default `STRICT` pipeline validation. Use `--skip-validation` only for trusted
+local development after reviewing the pipeline file.
+
+The service exposes `GET /healthz` and `/v1/vla/session`. Each `OPEN` reserves one pipeline replica for that session;
+`PREDICT`, `RESET`, and `CLOSE` are sent to the same worker-local `VLASession`. Closing or disconnecting releases the
+replica. The H100 cuDNN SDPA guard is applied inside each LingBot worker before model loading.
+
+This protocol returns semantic `RobotActionChunk` values. The simulator process should deserialize the chunk, pass it
+to `SimulatorChunkRuntime`, and then execute it through its own `SimulatorAdapter`. The inference server tracks
+pending/ready/expired inference only and does not infer simulator execution. The simulator side can call
+`execute_ready_with_report()` (or `execute_ready_async()` from an async client) to obtain a small transport-neutral
+report containing `executed`, `failed`, or `no_action`, the chunk sequence, and the executed step count. The report can
+be forwarded on an existing control channel; it is intentionally not a new WebSocket operation.
+
+For a minimal P0 check, use one fake adapter test for report status and one async test for non-blocking execution. A
+long-running soak, cross-machine clock comparison, and full simulator episode are not required to validate this
+runtime API.
+
+### RoboTwin via Generic VLA Session
+
+RoboTwin clients use the same `/v1/vla/session` endpoint as MuJoCo. The XPolicyLab-side `TeleFuser_VLA` policy maps
+RoboTwin observations to the negotiated `robotwin` embodiment contract and returns validated absolute-position action
+chunks. No model-specific server or MessagePack dependency is required in TeleFuser.
+
+Run the generic server on the inference host, then point the XPolicyLab adapter at
+`ws://INFERENCE_HOST:8000/v1/vla/session` with `model_id=lingbot-vla-v2` and `embodiment_id=robotwin`. Keep the generic
+WebSocket and the XPolicyLab policy server on a trusted private network or an SSH/VPN tunnel because neither endpoint
+provides authentication.
+
+## Local MuJoCo smoke simulation
+
+When the RTX RoboTwin workstation is unavailable, the generic VLA action path can be exercised locally with MuJoCo.
+The setup script installs MuJoCo into the existing TeleFuser `.venv` and stages EGL/OSMesa packages under the ignored
+`.venv-mujoco-libs` directory; it never runs `apt install` or changes system Python. The scene reads the existing
+RoboTwin ALOHA-Agilex URDF and meshes directly from `/data/RoboTwin` and adds a tabletop, cube, and three cameras.
 
 ```bash
-.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_robotwin_server.py \
-  --model-root "$TF_MODEL_ZOO_PATH/lingbot/lingbot-vla-v2-6b" \
-  --qwen3vl-root "$TF_MODEL_ZOO_PATH/Qwen3-VL-4B-Instruct" \
-  --device cuda:0 --host 0.0.0.0 --port 9330 --use-length 50
+bash examples/lingbot_vla_v2/setup_mujoco_local.sh
+
+# Physics + three-camera local smoke (no VLA model required)
+.venv/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_mujoco.py \
+  --mode local --image-size 256 --execute-horizon 8 \
+  --output-dir work_dirs/lingbot_vla_v2/mujoco_local
+
+# Complete local simulator -> generic VLA WebSocket -> simulator loop
+.venv/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_mujoco.py \
+  --mode websocket --server-url ws://127.0.0.1:8000/v1/vla/session \
+  --chunks 2 --execute-horizon 8 \
+  --output-dir work_dirs/lingbot_vla_v2/mujoco_websocket
 ```
 
-On NVIDIA H100, this dedicated entrypoint disables cuDNN SDPA before model warmup because the current
-PyTorch/cuDNN combination cannot build a valid vision-attention execution plan. Flash, memory-efficient, and math
-SDPA remain enabled. The override is process-local and is not applied to other TeleFuser pipelines.
-
-The server exposes `GET /healthz` and the policy WebSocket at `/`. On connection it sends a MessagePack metadata
-frame, including the explicit 16 MiB request limit, then accepts multiple binary MessagePack requests on the same
-connection. This matches the upstream client contract:
-
-```python
-from deploy.websocket_client_policy import WebsocketClientPolicy
-
-policy = WebsocketClientPolicy(host="127.0.0.1", port=9330)
-policy.reset("robotwin")
-result = policy.infer(
-    {
-        "observation.images.cam_high": camera_high,
-        "observation.images.cam_left_wrist": camera_left_wrist,
-        "observation.images.cam_right_wrist": camera_right_wrist,
-        "observation.state": state,
-        "task": instruction,
-    }
-)
-actions = result["action"]  # float32 [50, 14] when --use-length=50
-```
-
-The initial metadata frame describes protocol version `1.0`, `absolute_qpos` action semantics, `float32` dtype,
-horizon, dimension, and the exact dual-arm joint order. Inference requests may include an integer `seed` plus
-`request_id` and `episode_id`; the response echoes them and reports decode, lock-wait, pipeline, action-mapping, and
-adapter timings. Existing clients may omit all three request fields.
-
-The endpoint also advertises an additive, latest-wins action scheduler. A client that overlaps simulation and
-inference should send a monotonically increasing `sequence_id` within each `episode_id`, plus a positive
-`request_ttl_ms`. The server has one GPU worker, retains at most one pending request per connection/episode, and
-accepts new observations while inference is running. A newer observation replaces queued work; because an in-flight
-CUDA call cannot be cancelled, its result is discarded after completion when it has become stale. Successful
-responses use `scheduler_status="completed"`. Responses with `superseded`, `expired`, `stale_sequence`, or
-`overloaded` contain `action=None` and a structured `error`; clients must never execute those responses.
-
-`request_ttl_ms` starts when the H100 server receives the request. Do not compare monotonic timestamps between the
-H100 and RTX machines. The RTX client should separately enforce its round-trip deadline and hold the current joint
-positions when no fresh action is available.
-
-Validate this direct endpoint before a simulator is available. This sends reset and repeated inference requests to
-the resident model, validates the returned `[H, 14]` action contract, and optionally verifies exact fixed-seed replay:
-
-```bash
-.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
-  --host 127.0.0.1 --port 9330 \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --max-image-edge 640 \
-  --task "pick up the object" --seed 7 --requests 10 \
-  --output work_dirs/robotwin_ws_validation/smoke.json
-```
-
-The validator preserves aspect ratio and downsizes only images whose longest edge exceeds `--max-image-edge`, then
-checks the encoded MessagePack request against the limit advertised by the server before sending it. This keeps the
-large repository sample representative of normal RoboTwin camera payloads. Add `--require-exact-replay` only when
-validating a runtime profile that promises bitwise determinism; BF16 H100 inference is validated with numerical
-tolerances rather than identical action hashes.
-
-Exercise overlapping submissions and stale-action rejection without a simulator:
-
-```bash
-.venv-vla/bin/python -m tools.validation.validate_lingbot_vla_v2_robotwin_ws \
-  --host 127.0.0.1 --port 9330 \
-  --image examples/data/lingbot_world_fast/image.jpg \
-  --task "pick up the object" --seed 7 --requests 3 \
-  --request-ttl-ms 5000 --overlap-requests \
-  --output work_dirs/robotwin_ws_validation/overlap.json
-```
-
-This mode sends all observations before receiving responses, requires the newest request to return an action, and
-requires at least one older request to be reported as `superseded`.
-
-Each request runs the existing pipeline, converts normalized canonical `50 x 55` output through the bundled RoboTwin
-profile, and returns absolute-position actions in raw RoboTwin order. `--use-length` may truncate the returned chunk;
-start with 50 for upstream-equivalent open-loop execution. The adapter accepts episode reset messages but deliberately
-rejects runtime checkpoint switching.
-
-For split-machine deployment, run the model endpoint and the repository-owned XPolicyLab proxy on the H100 inference
-host. The proxy does not load a second model; it translates XPolicyLab observations to the direct TeleFuser protocol:
-
-```bash
-cd /data/RoboTwin
-bash XPolicyLab/policy/TeleFuser_LingBot_VLA/setup_eval_policy_server.sh \
-  RoboTwin lift_pot remote_base arx_x5 joint 0 0 \
-  /data/RoboTwin/.venv 19000 0.0.0.0 \
-  127.0.0.1 9330
-```
-
-On the remote RTX/Vulkan workstation, use the standard RoboTwin evaluation client and point it at the proxy. No
-TeleFuser files or model weights are required on that workstation:
-
-```bash
-cd /data/RoboTwin
-bash scripts/eval_policy.sh \
-  --bench_name RoboTwin \
-  --task_name lift_pot \
-  --env_cfg_type arx_x5 \
-  --policy_name TeleFuser_LingBot_VLA \
-  --host INFERENCE_HOST --port 19000 --protocol ws \
-  --eval_batch false --root_dir /data/RoboTwin --device_id 0 \
-  --additional_info ckpt_name=remote_base,action_type=joint \
-  --seed 0 --task_config demo_clean --test_num 1
-```
-
-The current XPolicyLab proxy calls `infer()` synchronously, so it remains compatible but does not yet overlap action
-execution with inference. Full overlap requires an incremental RTX-side change: execute chunk N while submitting a
-newer observation for chunk N+1, keep only the newest completed chunk in an atomic action buffer, and apply the same
-sequence/deadline checks before execution. That simulator-side change is outside this repository and is not required
-for the no-simulation server validation above.
-
-Keep ports `9330` and `19000` on a trusted private network or an SSH/VPN tunnel. These WebSocket endpoints do not
-provide authentication or transport encryption. The direct validator covers preprocessing, inference, mapping, and
-the inner WebSocket contract; only the RTX smoke episode can additionally establish XPolicyLab translation and one
-real SAPIEN simulation step.
-
-The base checkpoint remains marked `unverified_official_6b_base`. This endpoint establishes preprocessing, inference,
-action mapping, transport, and simulator execution continuity; it does not establish RoboTwin task success without
-an embodiment-validated checkpoint.
+The adapter uses a semantic 14-dimensional `absolute_qpos` contract, PD torque control, and the existing
+`SimulatorChunkRuntime`. `--mode local` validates model loading, rendering, action mapping, and execution without
+loading LingBot. `--mode websocket` additionally validates the live generic VLA session and requires a running VLA
+server. This is a chain/physics smoke test, not a RoboTwin task-success or checkpoint-quality evaluation.
 
 ## Validation
 
 The repository includes strict upstream parity, runtime, quantization, structured-service, fault, and AIPerf
 validators under `tools/validation/` and `benchmarks/telefuser_aiperf/`.
+
+This integration is inference-only: it consumes the official LingBot-VLA v2 checkpoint without post-training or
+fine-tuning. The MuJoCo example validates the simulator boundary and action execution path; it is not a substitute
+for physical robot task-success evaluation. Keep direct/HTTP/WebSocket speed comparisons and their generated reports
+under the ignored `work_dirs/` directory.
 
 Compare previously captured upstream and TeleFuser artifacts:
 

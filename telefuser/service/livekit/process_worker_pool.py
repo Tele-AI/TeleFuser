@@ -444,6 +444,15 @@ class ProcessLiveKitWorkerPool:
             callback = getattr(self._event_sink, "on_control_received", None)
             if callable(callback):
                 callback(worker_id, event["session_id"])
+        elif event_type == "participant_event":
+            callback = getattr(self._event_sink, "on_participant_event", None)
+            if callable(callback):
+                callback(
+                    event["session_id"],
+                    event["event"],
+                    event["identity"],
+                    int(event.get("count", 0)),
+                )
         elif event_type == "chunk_published":
             callback = getattr(self._event_sink, "on_chunk_published", None)
             if callable(callback):
@@ -870,6 +879,17 @@ class _ProcessEventSink:
 
     def on_control_received(self, worker_id: str, session_id: str) -> None:
         self.events.put({"type": "control_received", "worker_id": worker_id, "session_id": session_id})
+
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None:
+        self.events.put(
+            {
+                "type": "participant_event",
+                "session_id": session_id,
+                "event": event,
+                "identity": identity,
+                "count": count,
+            }
+        )
 
     def on_chunk_published(
         self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None

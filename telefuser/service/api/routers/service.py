@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 
+from telefuser import __version__
 from telefuser.metrics import get_service_metrics
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class ServiceRoutes:
             "status": "healthy",
             "ready": self._is_ready(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "1.0.0",
+            "version": __version__,
         }
 
         if self.api.inference_service:

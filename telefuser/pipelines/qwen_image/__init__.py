@@ -6,6 +6,14 @@ Provides pipelines for:
 """
 
 from .qwen_image import QwenImagePipeline, QwenImagePipelineConfig
+from .qwen_image_21 import QwenImage21Pipeline, QwenImage21PipelineConfig
 from .qwen_image_edit import QwenImageEditPipeline, QwenImageEditPipelineConfig
 
-__all__ = ["QwenImagePipeline", "QwenImagePipelineConfig", "QwenImageEditPipeline", "QwenImageEditPipelineConfig"]
+__all__ = [
+    "QwenImagePipeline",
+    "QwenImagePipelineConfig",
+    "QwenImage21Pipeline",
+    "QwenImage21PipelineConfig",
+    "QwenImageEditPipeline",
+    "QwenImageEditPipelineConfig",
+]

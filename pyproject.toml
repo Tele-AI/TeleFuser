@@ -168,9 +168,7 @@ omit = [
     # Modules that require GPU/models - temporarily excluded from coverage
     "*/models/*",
     "*/pipelines/*",
-    "*/orchestrator/*",
     "*/kernel/*",
-    "*/service/*.py",
     "*/worker/*",
     "*/utils/hf_utils.py",
     "*/utils/lora_loader.py",

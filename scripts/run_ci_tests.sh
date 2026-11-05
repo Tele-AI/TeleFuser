@@ -91,5 +91,13 @@ python -m pytest tests/server/ -v \
     --tb=short
 check_result "Server pytest tests (including OpenAI API)"
 
+# Run integration tests that do not require GPU, distributed workers, or external model files.
+print_section "Running CPU integration tests"
+python -m pytest tests/integration/ -v \
+    --ignore tests/integration/test_lingbot_vla_v2_quantization_lifecycle.py \
+    -m "not gpu and not distributed and not slow and not quant and not filesystem" \
+    --tb=short
+check_result "CPU integration tests"
+
 print_section "All CI tests passed!"
 echo -e "${GREEN}✓ Ready to push${NC}"

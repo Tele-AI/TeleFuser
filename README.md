@@ -25,6 +25,12 @@ runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 
+- ✨ **2026-09-14**: Established a general VLA session-serving abstraction with validated semantic observation and
+  action contracts, extensible embodiment adapters, replica-affine sessions, continuous-control WebSocket serving,
+  and simulator-side MuJoCo validation.
+- ✨ **2026-08-27**: Added [**LingBot-VLA v2**](examples/lingbot_vla_v2/README.md) 6B base-checkpoint support
+  with RobotWin multi-camera, task-text, robot-state, and normalized action I/O, together with native structured HTTP
+  serving, BF16 eager, CUDA Graph, and quantized inference support.
 - ✨ **2026-08-19**: Added [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V and I2V joint
   audio-video generation with a ModuleManager-backed six-stage pipeline, selectable dense attention backends, and
   Ulysses sequence parallelism on **1, 2, or 4 x H100** GPUs.
@@ -284,6 +290,23 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 
 The published site provides the same English and Chinese information architecture. Model-specific instructions are
 generated from registered example READMEs under **Models & Cookbook**. The build also publishes `/TeleFuser/llms.txt`.
+- [docs/en/blog/index.md](docs/en/blog/index.md): optimization design, profiling evidence, results, and related work
+- [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
+- [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
+- [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
+- [docs/en/vla.md](docs/en/vla.md): semantic VLA action contracts, embodiment mapping, sessions, runtime safety, and simulator adapters
+- [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
+- [docs/en/communication.md](docs/en/communication.md): collectives, CUDA IPC, synchronization, and transport lifecycle
+- [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
+- [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
+- [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns
+- [docs/en/attention.md](docs/en/attention.md): attention backends and configuration
+- [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
+- [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
+- [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
+- [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
+- [examples/lingbot_vla_v2/README.md](examples/lingbot_vla_v2/README.md): LingBot-VLA v2 inference, structured service, parity, and validation boundaries
+- [examples/swiftvr/README.md](examples/swiftvr/README.md): SwiftVR checkpoint loading, streaming usage, performance, and acceleration options
 
 ## Known Limitations
 

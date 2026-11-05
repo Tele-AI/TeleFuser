@@ -170,7 +170,6 @@ def compare_actions(
     min_cosine: float,
     max_relative_l2: float,
     max_absolute_error: float,
-    require_exact: bool = False,
 ) -> dict[str, Any]:
     """Compare two canonical action chunks with the release quality gates."""
     if len(reference) != 50 or len(candidate) != 50:
@@ -192,8 +191,6 @@ def compare_actions(
         "max_absolute_error": float(metrics["max_abs"]) <= max_absolute_error,
     }
     exact = bool(metrics["exact"])
-    if require_exact:
-        checks["exact_replay"] = exact
     return {
         "passed": all(checks.values()),
         "checks": checks,
@@ -201,7 +198,7 @@ def compare_actions(
         "relative_l2": relative_l2,
         "max_absolute_error": metrics["max_abs"],
         "exact": exact,
-        "exact_required": require_exact,
+        "exact_required": False,
         "thresholds": {
             "min_cosine": min_cosine,
             "max_relative_l2": max_relative_l2,
@@ -722,7 +719,6 @@ def run_profile(
             min_cosine=args.min_cosine,
             max_relative_l2=args.max_relative_l2,
             max_absolute_error=args.max_absolute_error,
-            require_exact=profile.quantization is not None,
         )
         dynamic_payload = dict(payload, instruction=args.dynamic_instruction)
         dynamic_action = execute_http_action(

@@ -45,6 +45,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      - name: Smoke test built wheel
+        run: |
+          python -m venv /tmp/telefuser-wheel-smoke
+          /tmp/telefuser-wheel-smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/telefuser-wheel-smoke/bin/python -c "import telefuser; assert telefuser.__version__"
+
   publish-pypi:
     name: Publish to PyPI
     needs: build

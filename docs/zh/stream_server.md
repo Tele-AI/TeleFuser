@@ -261,11 +261,12 @@ stateDiagram-v2
 
 当前 runtime 有以下需要显式说明的限制：
 
-- `session_timeout` 会记录 `expires_at`，但当前没有后台任务把 session 改为 `expired`；
-- `controller_timeout` 和 `room_empty_timeout` 可配置，但尚未执行；
-- 没有监听 participant 事件，因此 `participant_count` 始终为 `0`，participant 离开不会触发清理；
-- 终态记录在进程生命周期内保留于内存 registry，不在进程间共享，也不会在重启后恢复；
-- Controller 应发送 `stop` 或调用 DELETE；仅关闭浏览器页面不会释放容量。
+- `session_timeout` 由运行时回收任务执行。session 到期后会先排空、释放 worker 容量，并在有限诊断保留期内保留终态记录；
+- Controller participant 断开后开始执行 `controller_timeout`，房间没有远端 participant 后开始执行
+  `room_empty_timeout`；任一超时都会排空并使 session 过期，controller 在宽限期内重连会取消断开计时；
+- participant 加入和离开会更新 `participant_count`，并驱动上述清理计时；
+- 终态记录只在有限诊断保留期内保存在内存 registry，不在进程间共享，也不会在重启后恢复；
+- DELETE 或显式发送 `stop` 仍是最快的清理路径；controller 断开或房间为空后会在配置的宽限期内回收。
 
 ## HTTP API
 
@@ -388,7 +389,7 @@ telefuser stream-serve PIPE_PATH --worker-gpu-map 0,1,2,3
 | `workers_failed` | 聚合状态为 failed 的 worker 数。 |
 | `queued_sessions` | 只统计 HTTP 准入队列，不包括 LingBot lease 或 pipeline artifact 等待。 |
 | `livekit_connected` | 根据聚合 worker 状态是否为 `starting_pipeline`、`running` 或 `draining` 推导，并非对 LiveKit Server 的直接探测。 |
-| `participant_count` | 当前始终为 `0`，因为 participant 事件尚未写入 registry。 |
+| `participant_count` | LiveKit 事件报告的当前远端 participant 数量。 |
 | `lease_queued`、`lease_granted`、`lease_parked` | 通过 `tf.status` 发布的 LingBot execution-lease 状态变化。 |
 
 Room runner 尚未进入 pipeline startup 前，`livekit_connected=false` 是正常状态，并不表示模型加载失败。

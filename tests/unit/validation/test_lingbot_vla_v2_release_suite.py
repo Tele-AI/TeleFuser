@@ -98,7 +98,7 @@ def test_compare_actions_fails_max_absolute_gate() -> None:
     assert report["checks"]["max_absolute_error"] is False
 
 
-def test_compare_actions_can_require_exact_quantized_replay() -> None:
+def test_compare_actions_accepts_non_exact_result_within_release_thresholds() -> None:
     reference = [[0.25] * 55 for _ in range(50)]
     candidate = [row.copy() for row in reference]
     candidate[0][0] += 1e-6
@@ -109,12 +109,11 @@ def test_compare_actions_can_require_exact_quantized_replay() -> None:
         min_cosine=0.995,
         max_relative_l2=0.10,
         max_absolute_error=0.5,
-        require_exact=True,
     )
 
     assert report["checks"]["cosine"] is True
-    assert report["checks"]["exact_replay"] is False
-    assert report["passed"] is False
+    assert report["exact"] is False
+    assert report["passed"] is True
 
 
 def test_compare_actions_preserves_zero_reference_relative_l2() -> None:

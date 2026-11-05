@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Benchmark matched four-GPU MiniMax H3 baseline and FP8 Sol profiles."""
+"""Benchmark matched MiniMax H3 baseline and FP8 Sol profiles."""
 
 from __future__ import annotations
 
 import argparse
 import gc
 import json
+import os
 import subprocess
 import threading
 import time
@@ -28,7 +29,7 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _device_memory_mib() -> list[int]:
+def _device_memory_mib(device_indices: list[int]) -> list[int]:
     output = subprocess.run(
         [
             "nvidia-smi",
@@ -43,15 +44,25 @@ def _device_memory_mib() -> list[int]:
     for line in output.splitlines():
         index, used_mib = (int(value.strip()) for value in line.split(","))
         values[index] = used_mib
-    return [values[index] for index in range(4)]
+    return [values[index] for index in device_indices]
 
 
-def _sample_device_memory(stop: threading.Event, peaks_mib: list[int]) -> None:
+def _sample_device_memory(stop: threading.Event, peaks_mib: list[int], device_indices: list[int]) -> None:
     while not stop.is_set():
-        current = _device_memory_mib()
+        current = _device_memory_mib(device_indices)
         for index, used_mib in enumerate(current):
             peaks_mib[index] = max(peaks_mib[index], used_mib)
         stop.wait(0.1)
+
+
+def _physical_device_indices(gpu_num: int) -> list[int]:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        indices = [int(value.strip()) for value in visible.split(",") if value.strip()]
+        if len(indices) < gpu_num:
+            raise ValueError("CUDA_VISIBLE_DEVICES exposes fewer GPUs than --gpu-num")
+        return indices[:gpu_num]
+    return list(range(gpu_num))
 
 
 def _generate(pipeline: object, args: argparse.Namespace) -> MiniMaxH3Generation:
@@ -78,6 +89,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--profile", choices=("baseline", "optimized"), required=True)
+    parser.add_argument("--gpu-num", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument("--prompt", default=PPL_CONFIG["prompt"])
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--steps", type=int, default=50)
@@ -89,6 +101,12 @@ def main() -> None:
     parser.add_argument("--sol-threshold-type", choices=("exact", "diag"), default="exact")
     parser.add_argument("--sol-fp8-layer-start", type=int, default=0)
     parser.add_argument("--sol-fp8-layer-end", type=int)
+    parser.add_argument("--sol-fp8-smoothing", choices=("none", "k", "kv"), default="kv")
+    parser.add_argument(
+        "--sol-fp8-v-bias-correction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--metrics-json", type=Path)
@@ -97,7 +115,7 @@ def main() -> None:
     optimized = args.profile == "optimized"
     load_started = time.perf_counter()
     pipeline = get_pipeline(
-        4,
+        args.gpu_num,
         args.model_root,
         num_inference_steps=args.steps,
         enable_fsdp=False,
@@ -110,6 +128,8 @@ def main() -> None:
         sol_threshold_type=args.sol_threshold_type,
         sol_fp8_layer_start=args.sol_fp8_layer_start,
         sol_fp8_layer_end=args.sol_fp8_layer_end,
+        sol_fp8_smoothing=args.sol_fp8_smoothing,
+        sol_fp8_v_bias_correction=args.sol_fp8_v_bias_correction,
         quantization="tf-kernel-fp8" if optimized else None,
     )
     load_seconds = time.perf_counter() - load_started
@@ -123,10 +143,15 @@ def main() -> None:
             del warmup
             gc.collect()
 
-        resident_memory_mib = _device_memory_mib()
+        device_indices = _physical_device_indices(args.gpu_num)
+        resident_memory_mib = _device_memory_mib(device_indices)
         peaks_mib = resident_memory_mib.copy()
         stop_sampling = threading.Event()
-        sampler = threading.Thread(target=_sample_device_memory, args=(stop_sampling, peaks_mib), daemon=True)
+        sampler = threading.Thread(
+            target=_sample_device_memory,
+            args=(stop_sampling, peaks_mib, device_indices),
+            daemon=True,
+        )
         sampler.start()
         try:
             generation_started = time.perf_counter()
@@ -147,7 +172,11 @@ def main() -> None:
     report = {
         "schema_version": 1,
         "profile": args.profile,
-        "parallelism": {"world_size": 4, "ulysses_degree": 2, "tp_degree": 2},
+        "parallelism": {
+            "world_size": args.gpu_num,
+            "ulysses_degree": args.gpu_num // 2 if args.gpu_num == 4 else args.gpu_num,
+            "tp_degree": 2 if args.gpu_num == 4 else 1,
+        },
         "attention": "SOL_ATTN" if optimized else "FLASH_ATTN_4",
         "linear_quantization": "tf-kernel-fp8" if optimized else None,
         "sol": (
@@ -159,6 +188,8 @@ def main() -> None:
                 "threshold_type": args.sol_threshold_type,
                 "fp8_layer_start": args.sol_fp8_layer_start,
                 "fp8_layer_end": args.sol_fp8_layer_end,
+                "smoothing": args.sol_fp8_smoothing,
+                "v_bias_correction": args.sol_fp8_v_bias_correction,
             }
             if optimized
             else None

@@ -37,6 +37,7 @@ class WorkerEventSink(Protocol):
     def on_pipeline_session(self, session_id: str, pipeline_session_id: str) -> None: ...
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None: ...
     def on_control_received(self, worker_id: str, session_id: str) -> None: ...
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None: ...
     def on_chunk_published(
         self, worker_id: str, session_id: str, frames: int, first_frame_at: float | None = None
     ) -> None: ...
@@ -69,6 +70,9 @@ class NullWorkerEventSink:
         return None
 
     def on_control_received(self, worker_id: str, session_id: str) -> None:
+        return None
+
+    def on_participant_event(self, session_id: str, event: str, identity: str, count: int) -> None:
         return None
 
     def on_chunk_published(
@@ -146,6 +150,13 @@ class LiveKitWorker:
                 room_name=record.room_name,
                 role="worker",
             )
+            set_participant_event_handler = getattr(self.room_client, "set_participant_event_handler", None)
+            if callable(set_participant_event_handler):
+                set_participant_event_handler(
+                    lambda event, identity, count: self.event_sink.on_participant_event(
+                        record.session_id, event, identity, count
+                    )
+                )
             await self.room_client.connect(
                 self.config.livekit_url,
                 worker_token,

@@ -17,6 +17,8 @@ type / aspect-ratio / status string constants) are still exported by the
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from .tf_client import (
     TFClient,
     TaskCreationError,
@@ -25,10 +27,24 @@ from .tf_client import (
     TeleFuserError,
 )
 
+if TYPE_CHECKING:
+    from .vla import AsyncVLAClient, VLAClientError
+
 __all__ = [
     "TFClient",
+    "AsyncVLAClient",
     "TeleFuserError",
     "TaskCreationError",
     "TaskFailedError",
     "TaskTimeoutError",
+    "VLAClientError",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Load the optional VLA client without changing the existing HTTP client import path."""
+    if name in {"AsyncVLAClient", "VLAClientError"}:
+        from . import vla
+
+        return getattr(vla, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

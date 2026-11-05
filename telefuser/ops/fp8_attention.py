@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 
@@ -12,8 +14,11 @@ def quantize_fp8_qkv(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    *,
+    k_mean: torch.Tensor | None = None,
+    v_mean: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused SM90 block-scaled Q/K and layout-aware V-channel E4M3 quantization."""
+    """Run fused SM90 QKV quantization with optional sequence-mean shifts."""
 
     if q.shape != k.shape or q.shape != v.shape or q.ndim != 4:
         raise ValueError("q, k, and v must share shape [B, T, H, D]")
@@ -24,6 +29,16 @@ def quantize_fp8_qkv(
     from telefuser.kernel.triton.fp8_attention import quantize_fp8_qkv_triton
 
     return quantize_fp8_qkv_triton(q, k, v, FP8_ATTENTION_BLOCK_SIZE)
+
+
+def quantize_fp8_qkv(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused SM90 block-scaled Q/K and layout-aware V-channel E4M3 quantization."""
+
+    return _quantize_fp8_qkv_sm90(q, k, v)
 
 
 def quantize_fp8_per_block(
@@ -103,12 +118,154 @@ def dequantize_fp8_per_channel(
     return x.to(dtype) * scale.to(dtype).unsqueeze(1)
 
 
+def quantize_fp8_qkv_smoothed(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    smoothing: Literal["none", "k", "kv"] = "kv",
+    correct_v_bias: bool = True,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+]:
+    """Quantize QKV after attention-equivalent sequence-mean smoothing.
+
+    Subtracting one sequence mean from every key shifts each query's logits by
+    a constant, leaving softmax probabilities unchanged. Centering values is
+    also equivalent when their mean is added back to the attention output.
+    ``correct_v_bias`` additionally removes the mean error introduced when the
+    centered values are rounded to E4M3.
+    """
+
+    if smoothing not in ("none", "k", "kv"):
+        raise ValueError("FP8 attention smoothing must be 'none', 'k', or 'kv'")
+    if correct_v_bias and smoothing != "kv":
+        raise ValueError("FP8 value bias correction requires smoothing='kv'")
+    if q.shape != k.shape or q.shape != v.shape or q.ndim != 4:
+        raise ValueError("q, k, and v must share shape [B, T, H, D]")
+
+    if smoothing == "kv":
+        k_mean, v_mean = _sequence_means(k, v)
+    else:
+        k_mean = _sequence_mean(k) if smoothing == "k" else None
+        v_mean = None
+    native_sm90 = q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0)
+    if native_sm90:
+        quantized = _quantize_fp8_qkv_sm90(q, k, v, k_mean=k_mean, v_mean=v_mean)
+    else:
+        centered_k = k if k_mean is None else k - k_mean.to(k.dtype).unsqueeze(1)
+        centered_v = v if v_mean is None else v - v_mean.to(v.dtype).unsqueeze(1)
+        q_out, q_scale = quantize_fp8_per_block(q)
+        k_out, k_scale = quantize_fp8_per_block(centered_k.contiguous())
+        v_out, v_scale = quantize_fp8_per_block(centered_v.contiguous())
+        quantized = q_out, k_out, v_out, q_scale, k_scale, v_scale
+
+    q_out, k_out, v_out, q_scale, k_scale, v_scale = quantized
+    output_correction = None
+    if v_mean is not None:
+        output_correction = v_mean
+        if correct_v_bias:
+            if v_scale.shape == (v.shape[0], v.shape[2], v.shape[3]):
+                quantized_v_mean = _sequence_mean(v_out) * v_scale
+            else:
+                restored_v = dequantize_fp8_per_block(v_out, v_scale, torch.bfloat16)
+                quantized_v_mean = _sequence_mean(restored_v)
+            output_correction = output_correction - quantized_v_mean
+        output_correction = output_correction.unsqueeze(1).contiguous()
+    return q_out, k_out, v_out, q_scale, k_scale, v_scale, output_correction
+
+
+def apply_fp8_attention_output_correction(output: torch.Tensor, correction: torch.Tensor) -> torch.Tensor:
+    """Add an FP32 per-head value correction and store back in output dtype."""
+
+    if output.ndim != 4 or correction.shape != (output.shape[0], 1, output.shape[2], output.shape[3]):
+        raise ValueError("FP8 attention correction must have shape [B, 1, H, D] for a [B, T, H, D] output")
+    if correction.dtype != torch.float32 or correction.device != output.device:
+        raise ValueError("FP8 attention correction must be FP32 on the output device")
+    if not output.is_cuda:
+        return (output.float() + correction).to(output.dtype)
+    if not output.is_contiguous() or not correction.is_contiguous():
+        raise ValueError("FP8 attention output and correction must be contiguous")
+    batch, tokens, heads, head_dim = output.shape
+    elements = output.numel()
+    block = 256
+    _add_output_correction_kernel[(triton.cdiv(elements, block),)](
+        output,
+        correction,
+        elements,
+        tokens,
+        heads,
+        head_dim,
+        block,
+        num_warps=4,
+        num_stages=1,
+    )
+    return output
+
+
+def merge_fp8_attention_prefix(
+    dense_prefix: torch.Tensor,
+    output: torch.Tensor,
+    correction: torch.Tensor,
+) -> torch.Tensor:
+    """Merge a dense prefix with a corrected sparse suffix in one output pass."""
+
+    if dense_prefix.ndim != 4 or output.ndim != 4:
+        raise ValueError("attention prefix merge expects [B, T, H, D] tensors")
+    if dense_prefix.shape[0] != output.shape[0] or dense_prefix.shape[2:] != output.shape[2:]:
+        raise ValueError("dense prefix and sparse output must share batch, head, and head-dimension shapes")
+    prefix_tokens = dense_prefix.shape[1]
+    if not 0 < prefix_tokens <= output.shape[1]:
+        raise ValueError("dense attention prefix must be non-empty and no longer than the sparse output")
+    expected_correction = (output.shape[0], 1, output.shape[2], output.shape[3])
+    if correction.shape != expected_correction or correction.dtype != torch.float32:
+        raise ValueError("FP8 attention correction must be FP32 with shape [B, 1, H, D]")
+    if dense_prefix.device != output.device or correction.device != output.device:
+        raise ValueError("dense prefix, sparse output, and correction must be on the same device")
+    if dense_prefix.dtype != output.dtype:
+        raise ValueError("dense prefix and sparse output must have the same dtype")
+    if not output.is_cuda:
+        corrected_suffix = (output[:, prefix_tokens:].float() + correction).to(output.dtype)
+        return torch.cat((dense_prefix, corrected_suffix), dim=1)
+    if not (dense_prefix.is_contiguous() and output.is_contiguous() and correction.is_contiguous()):
+        raise ValueError("FP8 attention prefix merge inputs must be contiguous")
+
+    merged = torch.empty_like(output)
+    batch, tokens, heads, head_dim = output.shape
+    elements = output.numel()
+    block = 256
+    _merge_prefix_output_correction_kernel[(triton.cdiv(elements, block),)](
+        dense_prefix,
+        output,
+        correction,
+        merged,
+        elements,
+        prefix_tokens,
+        tokens,
+        heads,
+        head_dim,
+        block,
+        num_warps=4,
+        num_stages=1,
+    )
+    return merged
+
+
 __all__ = [
     "FP8_ATTENTION_BLOCK_SIZE",
+    "apply_fp8_attention_output_correction",
     "dequantize_fp8_per_block",
     "dequantize_fp8_per_channel",
     "dequantize_fp8_per_token",
     "quantize_fp8_qkv",
+    "quantize_fp8_qkv_smoothed",
+    "merge_fp8_attention_prefix",
     "quantize_fp8_per_block",
     "quantize_fp8_per_channel",
 ]

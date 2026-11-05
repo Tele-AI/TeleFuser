@@ -20,13 +20,13 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 
 1. **Clone the repository** locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/telefuser.git
+   git clone https://github.com/Tele-AI/TeleFuser.git
    cd telefuser
    ```
 
 2. **Set up the upstream remote**:
    ```bash
-   git remote add upstream https://github.com/ORIGINAL_OWNER/telefuser.git
+   git remote add upstream https://github.com/Tele-AI/TeleFuser.git
    ```
 
 ## Development Setup
@@ -363,18 +363,14 @@ class TestGPUFeature:
 
 ### Test Statistics
 
-Current test coverage:
-- **Total tests**: 300+ tests
-- **Unit tests**: 290+ tests
-- **Integration tests**: 10+ tests
-- **Test files**: 20+ files
+Test counts change as the project evolves. Use `pytest --collect-only -q` for the current collection count.
 
 ### CI Integration
 
 Tests run automatically in GitHub Actions:
 - **lint.yml**: Code style checks
 - **test.yml**: Unit tests on Python 3.10/3.11/3.12
-- **server-test.yml**: Server and integration tests
+- **test.yml**: Unit, server, and CPU integration tests
 - GPU, distributed, and quantization tests are skipped in CI
 
 ### Local CI Testing

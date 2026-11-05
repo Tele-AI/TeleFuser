@@ -160,6 +160,7 @@ work_dirs
 examples/regression_test/regression_outputs/
 INSTALL_HYS.md
 *.webp
+!examples/data/qwen_image_21/*.webp
 AGENTS.md
 _version.py.mcp.json
 telefuser/_version.py

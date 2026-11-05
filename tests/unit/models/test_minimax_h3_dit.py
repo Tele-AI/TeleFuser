@@ -220,15 +220,28 @@ def test_sol_fp8_passes_quantized_qkv_scales_to_attention() -> None:
         dense_layers=0,
         threshold_type="exact",
         sol_fp8=True,
+        sol_fp8_smoothing="kv",
+        sol_fp8_v_bias_correction=True,
     )
     state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
     scales = [torch.ones(1, 1, 4) * value for value in (1, 2, 3)]
 
-    def quantize(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return value.to(torch.float8_e4m3fn), scales.pop(0)
+    def quantize(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        **_: object,
+    ) -> tuple[torch.Tensor, ...]:
+        return (
+            query.to(torch.float8_e4m3fn),
+            key.to(torch.float8_e4m3fn),
+            value.to(torch.float8_e4m3fn),
+            *scales,
+            None,
+        )
 
     with (
-        patch("telefuser.models.minimax_h3_dit.quantize_fp8_per_block", side_effect=quantize),
+        patch("telefuser.models.minimax_h3_dit.quantize_fp8_qkv_smoothed", side_effect=quantize) as quantize_call,
         patch(
             "telefuser.models.minimax_h3_dit.attention",
             side_effect=lambda query, *_args, **_kwargs: query.float(),
@@ -246,6 +259,105 @@ def test_sol_fp8_passes_quantized_qkv_scales_to_attention() -> None:
     assert attention_call.call_args.kwargs["q_scale"].flatten()[0].item() == 1
     assert attention_call.call_args.kwargs["k_scale"].flatten()[0].item() == 2
     assert attention_call.call_args.kwargs["v_scale"].flatten()[0].item() == 3
+    assert quantize_call.call_args.kwargs == {"smoothing": "kv", "correct_v_bias": True}
+
+
+def test_sol_fp8_applies_value_smoothing_correction_before_output_projection() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    module.out_proj = torch.nn.Identity()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+    config = AttentionConfig.sol_attention(
+        dense_timesteps=0,
+        dense_layers=0,
+        threshold_type="exact",
+        sol_fp8=True,
+        sol_fp8_smoothing="kv",
+        sol_fp8_v_bias_correction=True,
+    )
+    state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
+    scale = torch.ones(1, 1, 4)
+
+    def quantize(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **_: object) -> tuple[torch.Tensor, ...]:
+        correction = torch.full((1, 1, 4, 8), 2.0)
+        return (
+            query.to(torch.float8_e4m3fn),
+            key.to(torch.float8_e4m3fn),
+            value.to(torch.float8_e4m3fn),
+            scale,
+            scale,
+            scale,
+            correction,
+        )
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.quantize_fp8_qkv_smoothed", side_effect=quantize),
+        patch(
+            "telefuser.models.minimax_h3_dit.attention",
+            side_effect=lambda query, *_args, **_kwargs: torch.zeros(query.shape, dtype=torch.bfloat16),
+        ),
+    ):
+        output = module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=config,
+            sparse_state=state,
+        )
+
+    torch.testing.assert_close(output[:61], torch.full_like(output[:61], 2.0))
+    assert torch.count_nonzero(output[61:]) == 0
+
+
+def test_sol_fp8_fuses_dense_prefix_with_corrected_sparse_suffix() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    module.out_proj = torch.nn.Identity()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+    config = AttentionConfig.sol_attention(
+        dense_timesteps=0,
+        dense_layers=0,
+        threshold_type="exact",
+        sol_fp8=True,
+        sol_fp8_smoothing="kv",
+        sol_fp8_v_bias_correction=True,
+    )
+    state = SparseAttentionState(config.sparse_config, mask_map=None, model_type="minimax_h3")
+    scale = torch.ones(1, 1, 4)
+
+    def quantize(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **_: object) -> tuple[torch.Tensor, ...]:
+        correction = torch.full((1, 1, 4, 8), 2.0)
+        return (
+            query.to(torch.float8_e4m3fn),
+            key.to(torch.float8_e4m3fn),
+            value.to(torch.float8_e4m3fn),
+            scale,
+            scale,
+            scale,
+            correction,
+        )
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.quantize_fp8_qkv_smoothed", side_effect=quantize),
+        patch(
+            "telefuser.models.minimax_h3_dit.attention",
+            side_effect=lambda query, *_args, **_kwargs: torch.zeros(query.shape, dtype=torch.bfloat16),
+        ),
+        patch(
+            "telefuser.models.minimax_h3_dit.F.scaled_dot_product_attention",
+            side_effect=lambda query, *_args, **_kwargs: torch.ones_like(query),
+        ),
+    ):
+        output = module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=config,
+            sparse_state=state,
+            prefix_tokens=13,
+        )
+
+    torch.testing.assert_close(output[:13], torch.ones_like(output[:13]))
+    torch.testing.assert_close(output[13:61], torch.full_like(output[13:61], 2.0))
+    assert torch.count_nonzero(output[61:]) == 0
 
 
 def test_minimax_h3_initializes_sol_runtime_state() -> None:
