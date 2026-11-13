@@ -569,6 +569,12 @@ class PAN2DiT(BaseModel, ConfigMixin):
             block.attn.sparse_state = self.sparse_attention_state
 
     def to(self, *args: Any, **kwargs: Any) -> "PAN2DiT":
+        requested_dtype = kwargs.get("dtype")
+        if requested_dtype is None:
+            requested_dtype = next((value for value in args if isinstance(value, torch.dtype)), None)
+        if requested_dtype is None:
+            return super().to(*args, **kwargs)
+
         def keep(name: str) -> bool:
             return (
                 name.startswith("time_embedder.")
