@@ -13,6 +13,7 @@ ModelScope 地址、所需文件、支持任务、硬件假设及可运行命令
 | [LingBot-World v2](/TeleFuser/zh/cookbook/lingbot-world/) | 双向世界模型流式推理 | 单机和 LiveKit |
 | [LingBot-World-Fast](/TeleFuser/zh/cookbook/lingbot-world/) | 因果交互式流推理 | 单机和 LiveKit |
 | [ABot-World-0-5B-LF](/TeleFuser/zh/cookbook/abot-world/) | 交互式生成 | HTTP 和 LiveKit |
+| [PAN 2](pan2.md) | T2V 和 I2V | Blackwell 上的 NVFP4 与分块 CPU offload |
 
 ## 视频、音视频与修复
 

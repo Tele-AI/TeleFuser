@@ -187,6 +187,7 @@ nav:
       - Basic Inference: quickstart.md
   - Models & Cookbook:
       - Supported Models: supported_models.md
+      - PAN 2 NVFP4 on Blackwell: pan2.md
   - Serving & APIs:
       - Overview: serving.md
       - Batch Service and API Reference: service.md

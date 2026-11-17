@@ -15,6 +15,7 @@ by the selected guide before changing optimization settings.
 | [LingBot-World v2](/TeleFuser/cookbook/lingbot-world/) | Bidirectional world-model streaming | Standalone and LiveKit |
 | [LingBot-World-Fast](/TeleFuser/cookbook/lingbot-world/) | Causal interactive streaming | Standalone and LiveKit |
 | [ABot-World-0-5B-LF](/TeleFuser/cookbook/abot-world/) | Interactive generation | HTTP and LiveKit |
+| [PAN 2](pan2.md) | T2V and I2V | NVFP4 with block CPU offload on Blackwell |
 
 ## Video, Audio, and Restoration
 

@@ -251,6 +251,7 @@ telefuser/
 |----------|------|------|
 | `Qwen-Image` | T2I, Edit | [examples/qwen_image/README.md](examples/qwen_image/README.md) |
 | `Z-Image` | T2I | [examples/z_image/README.md](examples/z_image/README.md) |
+| `PAN 2` | T2V、I2V | Blackwell 上的 NVFP4 + 分块 CPU offload，见 [PAN 2 指南](docs/zh/pan2.md) |
 | `Flux2 Klein` | T2I | [examples/flux2_klein/README.md](examples/flux2_klein/README.md) |
 
 [examples/README.md](examples/README.md) 中提供了统一的 example runner 与 baseline 对比流程说明。

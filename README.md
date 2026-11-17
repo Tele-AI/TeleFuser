@@ -273,6 +273,7 @@ telefuser/
 |----------|------|-------|
 | `Qwen-Image` | T2I, Edit | [examples/qwen_image/README.md](examples/qwen_image/README.md) |
 | `Z-Image` | T2I | [examples/z_image/README.md](examples/z_image/README.md) |
+| `PAN 2` | T2V, I2V | NVFP4 + block CPU offload on Blackwell; [PAN 2 guide](docs/en/pan2.md) |
 | `Flux2 Klein` | T2I | [examples/flux2_klein/README.md](examples/flux2_klein/README.md) |
 
 See [examples/README.md](examples/README.md) for the example runner and baseline comparison workflow.
