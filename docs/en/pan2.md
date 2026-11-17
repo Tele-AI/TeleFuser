@@ -27,3 +27,18 @@ MiniMax-H3-Image is not enabled by this profile. Its 33.1B transformer is
 released as approximately 66 GB of BF16 weights and requires a separate
 multi-component loader; it does not fit as a resident single-card TeleFuser
 pipeline on a 24 GB RTX 5090.
+
+## BF16 vs NVFP4 benchmark
+
+Run the matched benchmark after the PAN 2 weights are cached locally:
+
+```bash
+python tools/validation/benchmark_pan2_telefuser.py \
+  --num-frames 49 --steps 4 \
+  --output-dir outputs/pan2-benchmark
+```
+
+The command writes `official-bf16.mp4`, `telefuser-nvfp4.mp4`, and
+`report.json`. `generated_video_fps / 24` is the realtime ratio; values above
+`1.0` mean the run produces video faster than playback. Both runs use identical
+CPU offload, seed, prompt, resolution, frame count and scheduler steps.
