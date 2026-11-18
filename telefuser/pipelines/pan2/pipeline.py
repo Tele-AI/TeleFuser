@@ -66,6 +66,18 @@ class PAN2Pipeline:
                 config.layerwise_nvfp4_dir,
                 config.device,
             )
+            # Keep VAE decode on the GPU; only transformer blocks are explicitly
+            # streamed to CPU, and CPU VAE decode makes the official 241-frame
+            # workload needlessly slow.
+            if getattr(runner.pipe, "vae", None) is not None:
+                runner.pipe.vae.to(config.device)
+                vae = runner.pipe.vae
+                original_decode = vae.decode
+
+                def decode_on_device(latents, *args, **decode_kwargs):
+                    return original_decode(latents.to(config.device), *args, **decode_kwargs)
+
+                vae.decode = decode_on_device
         else:
             runner.pipe.load_components(dtype=config.torch_dtype, low_cpu_mem_usage=True)
         # The optional guardrail package is not required for performance
