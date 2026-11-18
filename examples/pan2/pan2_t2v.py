@@ -18,16 +18,22 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--output", type=Path, default=Path("pan2.mp4"))
     parser.add_argument("--nvfp4", action="store_true")
+    parser.add_argument("--layerwise-nvfp4-dir")
     args = parser.parse_args()
 
     pipe = PAN2Pipeline.from_pretrained(
-        PAN2PipelineConfig(model_id=args.model_id, nvfp4=args.nvfp4, cpu_offload=True)
+        PAN2PipelineConfig(
+            model_id=args.model_id,
+            nvfp4=args.nvfp4,
+            cpu_offload=True,
+            layerwise_nvfp4_dir=args.layerwise_nvfp4_dir,
+        )
     )
     request = {"prompt": args.prompt, "num_inference_steps": args.steps, "output_type": "np"}
     if args.image:
         request["image"] = str(args.image)
     result = pipe(**request)
-    frames = getattr(result, "frames", result)
+    frames = getattr(result, "frames", getattr(result, "videos", result))
     export_to_video(frames[0] if isinstance(frames, list) else frames, str(args.output), fps=24)
     print(args.output)
 

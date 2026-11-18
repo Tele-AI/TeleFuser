@@ -48,3 +48,15 @@ python tools/quantization/quantize_pan2_layerwise.py \
 ```
 
 该工具支持中断后继续，并按 block 写出 `block-XX.pt` 文件。
+
+使用已转换的 block 运行示例：
+
+```bash
+python examples/pan2/pan2_t2v.py \
+  --model-id /path/to/IFM/PAN2 \
+  --layerwise-nvfp4-dir /path/to/pan2-nvfp4-layerwise \
+  --steps 4 --output pan2-nvfp4.mp4
+```
+
+5090 实测报告和图表位于 `benchmarks/pan2/report.json` 与
+`benchmarks/pan2/pan2-nvfp4-results.png`。

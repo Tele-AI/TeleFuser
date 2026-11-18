@@ -52,3 +52,15 @@ python tools/quantization/quantize_pan2_layerwise.py \
 ```
 
 The converter is resumable and writes one `block-XX.pt` file at a time.
+
+Run the example against the converted blocks with:
+
+```bash
+python examples/pan2/pan2_t2v.py \
+  --model-id /path/to/IFM/PAN2 \
+  --layerwise-nvfp4-dir /path/to/pan2-nvfp4-layerwise \
+  --steps 4 --output pan2-nvfp4.mp4
+```
+
+The measured 5090 smoke result and chart are in
+`benchmarks/pan2/report.json` and `benchmarks/pan2/pan2-nvfp4-results.png`.
