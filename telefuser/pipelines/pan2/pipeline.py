@@ -16,6 +16,7 @@ class PAN2PipelineConfig:
     cpu_offload: bool = True
     nvfp4: bool = False
     nvfp4_use_triton: bool = True
+    layerwise_nvfp4_dir: str | None = None
 
 
 def _quantize_nvfp4(module: torch.nn.Module, use_triton_kernel: bool) -> None:
@@ -50,12 +51,26 @@ class PAN2Pipeline:
         runner.pipe = ModularPipeline.from_pretrained(config.model_id, **kwargs)
         # PAN2 keeps some modules in fp32 and therefore requires accelerate's
         # low-memory loader when loading the sharded checkpoint.
-        runner.pipe.load_components(dtype=config.torch_dtype, low_cpu_mem_usage=True)
+        if config.layerwise_nvfp4_dir:
+            # Do not materialize the BF16 transformer; restore its quantized
+            # blocks directly and load only the auxiliary pipeline components.
+            runner.pipe.load_components(
+                names=["text_encoder", "tokenizer", "vae", "video_processor", "scheduler", "guider"],
+                dtype=config.torch_dtype,
+                low_cpu_mem_usage=True,
+            )
+            from .layerwise import load_layerwise_transformer
+
+            runner.pipe.transformer = load_layerwise_transformer(
+                config.model_id, config.layerwise_nvfp4_dir, config.device
+            )
+        else:
+            runner.pipe.load_components(dtype=config.torch_dtype, low_cpu_mem_usage=True)
         # The optional guardrail package is not required for performance
         # benchmarking and is intentionally not a TeleFuser dependency.
         if hasattr(runner.pipe, "disable_safety_checker"):
             runner.pipe.disable_safety_checker()
-        if config.nvfp4:
+        if config.nvfp4 and not config.layerwise_nvfp4_dir:
             transformer = getattr(runner.pipe, "transformer", None)
             if transformer is None:
                 raise RuntimeError("PAN2 pipeline did not expose a transformer component")
