@@ -38,3 +38,13 @@ python tools/validation/benchmark_pan2_telefuser.py \
 命令会生成 `official-bf16.mp4`、`telefuser-nvfp4.mp4` 和 `report.json`。
 `generated_video_fps / 24` 是实时倍率，大于 `1.0` 表示生成速度超过播放速度。
 两次运行使用相同的 CPU offload、seed、prompt、分辨率、帧数和采样步数。
+
+完整 Transformer 的量化应逐个 block 执行，避免量化过程中同时驻留完整
+BF16 模型：
+
+```bash
+python tools/quantization/quantize_pan2_layerwise.py \
+  /path/to/IFM/PAN2 /path/to/pan2-nvfp4-layerwise
+```
+
+该工具支持中断后继续，并按 block 写出 `block-XX.pt` 文件。

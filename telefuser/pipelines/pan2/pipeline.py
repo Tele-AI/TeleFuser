@@ -48,7 +48,13 @@ class PAN2Pipeline:
             raise RuntimeError("PAN2 requires diffusers>=0.43.0") from exc
         runner = cls(config)
         runner.pipe = ModularPipeline.from_pretrained(config.model_id, **kwargs)
-        runner.pipe.load_components(dtype=config.torch_dtype)
+        # PAN2 keeps some modules in fp32 and therefore requires accelerate's
+        # low-memory loader when loading the sharded checkpoint.
+        runner.pipe.load_components(dtype=config.torch_dtype, low_cpu_mem_usage=True)
+        # The optional guardrail package is not required for performance
+        # benchmarking and is intentionally not a TeleFuser dependency.
+        if hasattr(runner.pipe, "disable_safety_checker"):
+            runner.pipe.disable_safety_checker()
         if config.nvfp4:
             transformer = getattr(runner.pipe, "transformer", None)
             if transformer is None:

@@ -62,7 +62,9 @@ def _run(label: str, pipe: object, args: argparse.Namespace) -> dict[str, object
 
 def _load_offloaded_official(model_id: str):
     pipe = ModularPipeline.from_pretrained(model_id)
-    pipe.load_components(dtype=torch.bfloat16)
+    pipe.load_components(dtype=torch.bfloat16, low_cpu_mem_usage=True)
+    if hasattr(pipe, "disable_safety_checker"):
+        pipe.disable_safety_checker()
     for component in (getattr(pipe, "transformer", None), getattr(pipe, "text_encoder", None)):
         if component is not None and hasattr(component, "enable_group_offload"):
             component.enable_group_offload(

@@ -42,3 +42,13 @@ The command writes `official-bf16.mp4`, `telefuser-nvfp4.mp4`, and
 `report.json`. `generated_video_fps / 24` is the realtime ratio; values above
 `1.0` mean the run produces video faster than playback. Both runs use identical
 CPU offload, seed, prompt, resolution, frame count and scheduler steps.
+
+For the full transformer, convert blocks one at a time to avoid a resident
+BF16 copy during quantization:
+
+```bash
+python tools/quantization/quantize_pan2_layerwise.py \
+  /path/to/IFM/PAN2 /path/to/pan2-nvfp4-layerwise
+```
+
+The converter is resumable and writes one `block-XX.pt` file at a time.
