@@ -11,7 +11,32 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 from diffusers.models.transformers.transformer_pan2 import PAN2Transformer3DModel, PAN2TransformerBlock
 from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
+from torchao.prototype.mx_formats import nvfp4_tensor as _nvfp4
 from torchao.quantization import quantize_
+
+
+_ORIGINAL_NVFP4_QUANTIZE = _nvfp4.nvfp4_quantize
+
+
+def _chunked_nvfp4_quantize(data_hp: torch.Tensor, block_size: int = 16, per_tensor_scale=None):
+    """Bound activation quantization peak memory without changing NVFP4 layout."""
+    if data_hp.ndim < 2 or data_hp.shape[-2] <= 256:
+        return _ORIGINAL_NVFP4_QUANTIZE(data_hp, block_size, per_tensor_scale)
+    leading = data_hp.shape[:-2]
+    rows, width = data_hp.shape[-2:]
+    flat = data_hp.reshape(-1, width)
+    q_parts, scale_parts = [], []
+    for start in range(0, flat.shape[0], 256):
+        scales, q = _ORIGINAL_NVFP4_QUANTIZE(flat[start : start + 256], block_size, per_tensor_scale)
+        q_parts.append(q)
+        scale_parts.append(scales)
+    return (
+        torch.cat(scale_parts, dim=0).reshape(*leading, rows, width // block_size),
+        torch.cat(q_parts, dim=0).reshape(*leading, rows, width // 2),
+    )
+
+
+_nvfp4.nvfp4_quantize = _chunked_nvfp4_quantize
 
 
 def _load_non_block_weights(model: torch.nn.Module, model_dir: Path, device: torch.device) -> None:
@@ -50,9 +75,6 @@ def load_layerwise_transformer(model_dir: str | Path, block_dir: str | Path, dev
         block.load_state_dict(
             torch.load(state_path, map_location="cpu", weights_only=False), assign=True
         )
-        # The CPU converter cannot invoke the MSLK Triton activation path.
-        # Enable it after restore so large Blackwell inference requests do not
-        # materialize the fallback full-precision activation tensor.
         for parameter in block.parameters():
             tensor = parameter.data
             if hasattr(tensor, "act_quant_kwargs") and tensor.act_quant_kwargs is not None:
