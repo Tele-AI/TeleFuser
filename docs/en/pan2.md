@@ -62,5 +62,9 @@ python examples/pan2/pan2_t2v.py \
   --steps 4 --output pan2-nvfp4.mp4
 ```
 
-The measured 5090 smoke result and chart are in
-`benchmarks/pan2/report.json` and `benchmarks/pan2/pan2-nvfp4-results.png`.
+For the official PAN2 example, pass `--prompt-json` with the repository's
+`inference/prompts/examples.json` and use `--height 704 --width 1248
+--num-frames 241 --fps 24 --seed 123 --steps 50`. Benchmark reports and
+plots are kept as pull-request attachments rather than committed model output.
+The layerwise loader uses the MSLK Triton NVFP4 activation path when MSLK is
+available; set `MSLK_PYTHON_ONLY=1` for the Python-only Triton package variant.

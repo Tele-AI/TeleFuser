@@ -58,5 +58,9 @@ python examples/pan2/pan2_t2v.py \
   --steps 4 --output pan2-nvfp4.mp4
 ```
 
-5090 实测报告和图表位于 `benchmarks/pan2/report.json` 与
-`benchmarks/pan2/pan2-nvfp4-results.png`。
+运行官方 PAN2 示例时，使用 `inference/prompts/examples.json` 中的同一条
+prompt，并指定 `--height 704 --width 1248 --num-frames 241 --fps 24
+--seed 123 --steps 50`。实测报告和图表作为 PR 附件保存，不写入仓库，也不
+把旧的 smoke/mock 输出当作质量结果。layerwise loader 在可用时使用 MSLK
+Triton NVFP4 activation 路径；Python-only Triton 包可通过
+`MSLK_PYTHON_ONLY=1` 启用。
