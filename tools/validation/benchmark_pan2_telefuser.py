@@ -43,7 +43,7 @@ def _run(label: str, pipe: object, args: argparse.Namespace) -> dict[str, object
     torch.cuda.reset_peak_memory_stats()
     generator = torch.Generator(device="cpu").manual_seed(args.seed)
     start = time.perf_counter()
-    result = pipe(
+    request = dict(
         prompt=args.prompt,
         height=args.height,
         width=args.width,
@@ -52,6 +52,9 @@ def _run(label: str, pipe: object, args: argparse.Namespace) -> dict[str, object
         generator=generator,
         output_type="np",
     )
+    if args.negative_prompt:
+        request["negative_prompt"] = args.negative_prompt
+    result = pipe(**request)
     torch.cuda.synchronize()
     latency = time.perf_counter() - start
     frames = _frames(result)
@@ -95,6 +98,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-id", default="IFM/PAN2")
     parser.add_argument("--prompt", default="A red car drives through a rainy city street.")
+    parser.add_argument("--negative-prompt")
     parser.add_argument("--height", type=int, default=704)
     parser.add_argument("--width", type=int, default=1248)
     parser.add_argument("--num-frames", type=int, default=49)
@@ -104,7 +108,16 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/pan2-benchmark"))
     parser.add_argument("--layerwise-nvfp4-dir", default=None)
     parser.add_argument("--only-telefuser", action="store_true")
+    parser.add_argument("--prompt-json", type=Path)
+    parser.add_argument("--prompt-index", type=int, default=0)
     args = parser.parse_args()
+    if args.prompt_json:
+        records = json.loads(args.prompt_json.read_text())
+        record = records[args.prompt_index]
+        args.prompt = record.get("refined_prompt") or record.get("prompt") or record.get("original_prompt")
+        args.negative_prompt = record.get("negative_prompt")
+        if record.get("duration_sec"):
+            args.num_frames = int(4 * np.ceil(record["duration_sec"] * args.fps / 4) + 1)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = []

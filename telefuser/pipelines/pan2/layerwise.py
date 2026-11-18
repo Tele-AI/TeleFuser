@@ -50,6 +50,13 @@ def load_layerwise_transformer(model_dir: str | Path, block_dir: str | Path, dev
         block.load_state_dict(
             torch.load(state_path, map_location="cpu", weights_only=False), assign=True
         )
+        # The CPU converter cannot invoke the MSLK Triton activation path.
+        # Enable it after restore so large Blackwell inference requests do not
+        # materialize the fallback full-precision activation tensor.
+        for parameter in block.parameters():
+            tensor = parameter.data
+            if hasattr(tensor, "act_quant_kwargs") and tensor.act_quant_kwargs is not None:
+                tensor.act_quant_kwargs.use_triton_kernel = True
         model.transformer_blocks[index] = block
         del empty_block
     del template
