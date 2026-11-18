@@ -62,7 +62,9 @@ class PAN2Pipeline:
             from .layerwise import load_layerwise_transformer
 
             runner.pipe.transformer = load_layerwise_transformer(
-                config.model_id, config.layerwise_nvfp4_dir, config.device
+                str(__import__("pathlib").Path(config.model_id) / "transformer"),
+                config.layerwise_nvfp4_dir,
+                config.device,
             )
         else:
             runner.pipe.load_components(dtype=config.torch_dtype, low_cpu_mem_usage=True)
@@ -70,12 +72,26 @@ class PAN2Pipeline:
         # benchmarking and is intentionally not a TeleFuser dependency.
         if hasattr(runner.pipe, "disable_safety_checker"):
             runner.pipe.disable_safety_checker()
+        if config.layerwise_nvfp4_dir and getattr(runner.pipe, "scheduler", None) is not None:
+            scheduler = runner.pipe.scheduler
+            original_step = scheduler.step
+
+            def cpu_step(model_output, timestep, sample, *args, **kwargs):
+                return original_step(
+                    model_output.to("cpu"),
+                    timestep.to("cpu") if hasattr(timestep, "to") else timestep,
+                    sample.to("cpu"),
+                    *args,
+                    **kwargs,
+                )
+
+            scheduler.step = cpu_step
         if config.nvfp4 and not config.layerwise_nvfp4_dir:
             transformer = getattr(runner.pipe, "transformer", None)
             if transformer is None:
                 raise RuntimeError("PAN2 pipeline did not expose a transformer component")
             _quantize_nvfp4(transformer, config.nvfp4_use_triton)
-        if config.cpu_offload:
+        if config.cpu_offload and not config.layerwise_nvfp4_dir:
             device = torch.device(config.device)
             for component in (getattr(runner.pipe, "transformer", None), getattr(runner.pipe, "text_encoder", None)):
                 if component is not None and hasattr(component, "enable_group_offload"):
@@ -87,7 +103,7 @@ class PAN2Pipeline:
                         use_stream=True,
                     )
             runner.pipe.to("cpu")
-        else:
+        elif not config.layerwise_nvfp4_dir:
             runner.pipe.to(config.device)
         return runner
 

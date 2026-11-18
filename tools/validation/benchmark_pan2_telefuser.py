@@ -21,10 +21,21 @@ from telefuser.pipelines.pan2 import PAN2Pipeline, PAN2PipelineConfig
 
 
 def _frames(result: object) -> np.ndarray:
-    value = getattr(result, "frames", result)
-    if isinstance(value, list):
+    value = getattr(result, "frames", None)
+    if value is None:
+        value = getattr(result, "videos", result)
+    if isinstance(value, dict) and "frames" in value:
+        value = value["frames"]
+    while isinstance(value, (list, tuple)) and len(value) == 1:
         value = value[0]
-    return np.asarray(value)
+    if torch.is_tensor(value):
+        value = value.detach().cpu().numpy()
+    value = np.asarray(value)
+    if value.ndim == 5:
+        value = value[0]
+    if value.ndim != 4:
+        raise ValueError(f"PAN2 returned unexpected frames shape: {value.shape}")
+    return value
 
 
 def _run(label: str, pipe: object, args: argparse.Namespace) -> dict[str, object]:
@@ -91,19 +102,28 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/pan2-benchmark"))
+    parser.add_argument("--layerwise-nvfp4-dir", default=None)
+    parser.add_argument("--only-telefuser", action="store_true")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    official = _load_offloaded_official(args.model_id)
-    bf16 = _run("official-bf16", official, args)
-    del official
-    torch.cuda.empty_cache()
+    runs = []
+    if not args.only_telefuser:
+        official = _load_offloaded_official(args.model_id)
+        runs.append(_run("official-bf16", official, args))
+        del official
+        torch.cuda.empty_cache()
 
     telefuser = PAN2Pipeline.from_pretrained(
-        PAN2PipelineConfig(model_id=args.model_id, nvfp4=True, cpu_offload=True)
+        PAN2PipelineConfig(
+            model_id=args.model_id,
+            nvfp4=True,
+            cpu_offload=True,
+            layerwise_nvfp4_dir=args.layerwise_nvfp4_dir,
+        )
     )
-    fp4 = _run("telefuser-nvfp4", telefuser, args)
-    report = {"hardware": torch.cuda.get_device_name(), "config": vars(args), "runs": [bf16, fp4]}
+    runs.append(_run("telefuser-nvfp4", telefuser, args))
+    report = {"hardware": torch.cuda.get_device_name(), "config": dict(vars(args)), "runs": runs}
     report["config"]["output_dir"] = str(report["config"]["output_dir"])
     (args.output_dir / "report.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     print(json.dumps(report, indent=2, default=str))
