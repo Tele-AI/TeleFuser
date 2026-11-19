@@ -261,6 +261,8 @@ telefuser/
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
+| `PAN2` | T2V, I2V | PAN2 pipeline with Ulysses SP, TP, FP8 GEMM and Sol-Attn; see [examples/pan2/README.md](examples/pan2/README.md) |
+| `LightX2V` | Wan2.2 I2V | Four-step distilled Wan2.2 path through the existing Wan pipeline; see [examples/lightx2v/README.md](examples/lightx2v/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `LTX-2.5 Distilled` | T2V, I2V + Audio | ModuleManager-backed six-stage pipeline with 1/2/4-H100 Ulysses SP; see [examples/ltx25_distilled/README.md](examples/ltx25_distilled/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
