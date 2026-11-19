@@ -242,8 +242,6 @@ telefuser/
 | `LTX Video` | I2V + Audio | 统一音视频生成，见 [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `LTX-2.5 Distilled` | T2V, I2V + Audio | 基于 ModuleManager 的六阶段 Pipeline，支持 1/2/4 张 H100 的 Ulysses SP，见 [examples/ltx25_distilled/README.md](examples/ltx25_distilled/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 联合音视频生成，见 [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
-| `MiniMax-H3-Image` | T2I、编辑 | 六步图像生成，支持 SP、TP、Sol-Attn 和 FP8，参见 [examples/minimax_h3_image/README.md](examples/minimax_h3_image/README.md) |
-| `PAN2` | T2V、I2V | 视频生成，支持 SP、TP、Sol-Attn 和 FP8，参见 [examples/pan2/README.md](examples/pan2/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 base-to-refiner，见 [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
