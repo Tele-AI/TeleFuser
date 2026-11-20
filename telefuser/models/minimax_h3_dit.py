@@ -714,18 +714,26 @@ class MiniMaxH3Attention(nn.Module):
                     sink_tokens=prefix_tokens,
                 )
                 if self._is_sol_active(sparse_state) and prefix_tokens:
-                    dense_prefix = F.scaled_dot_product_attention(
-                        live_query[:, :prefix_tokens].transpose(1, 2),
-                        live_key.transpose(1, 2),
-                        live_value.transpose(1, 2),
-                        scale=self.head_dim**-0.5,
-                    ).transpose(1, 2)
+                    dense_prefix = (
+                        F.scaled_dot_product_attention(
+                            live_query[:, :prefix_tokens].transpose(1, 2),
+                            live_key.transpose(1, 2),
+                            live_value.transpose(1, 2),
+                            scale=self.head_dim**-0.5,
+                        )
+                        .transpose(1, 2)
+                        .contiguous()
+                    )
                     if output_correction is None:
                         live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
                     else:
-                        live_output = merge_fp8_attention_prefix(dense_prefix, live_output, output_correction)
+                        live_output = merge_fp8_attention_prefix(
+                            dense_prefix.contiguous(), live_output.contiguous(), output_correction.contiguous()
+                        )
                 elif output_correction is not None:
-                    live_output = apply_fp8_attention_output_correction(live_output, output_correction)
+                    live_output = apply_fp8_attention_output_correction(
+                        live_output.contiguous(), output_correction.contiguous()
+                    )
                 if live_tokens == total_tokens:
                     output = live_output
                 else:
