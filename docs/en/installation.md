@@ -12,7 +12,7 @@ distribution are installed separately.
 | PyTorch | 2.6 or newer |
 | CUDA toolkit | 12.8 or newer for the maintained CUDA development path |
 | ROCm | 7.x with a PyTorch `+rocm` build for AMD GPUs; see the ROCm note under verification |
-| Ascend NPU | CANN 8.2 with matching `torch` and `torch_npu` builds; see the NPU note under verification |
+| Ascend NPU | Atlas 910B2 image candidate with CANN 9.3.0-beta.1. [Container installation](ascend_910b.md) |
 | GPU | Depends on the selected model; check its Cookbook guide |
 
 An example may impose stricter versions or GPU architecture requirements. In particular, locally built `tf-kernel`
@@ -44,7 +44,9 @@ artifacts are tied to their recorded PyTorch, CUDA, ABI, and GPU-family configur
     pre-commit install
     ```
 
-Optional dependency groups are `ui`, `distributed`, `docs`, and `dev`. Install only the groups required by the
+For NVIDIA acceleration and quantization, install `python -m pip install 'telefuser[cuda]'` or `python -m pip install -e ".[cuda]"` from source. The base wheel now leaves Triton, torchao and bitsandbytes to this extra. Use `.[dev,cuda]` for CUDA development. ROCm uses the Triton build supplied with its PyTorch distribution.
+
+Other optional dependency groups are `ui`, `distributed`, `docs`, and `dev`. Install only the groups required by the
 workflow, for example `python -m pip install -e ".[distributed]"` for Ray-backed execution.
 
 ## Verify the Installation
@@ -54,7 +56,7 @@ python -c "import torch, telefuser; print(torch.__version__); print(torch.cuda.i
 telefuser --help
 ```
 
-Model execution expects `torch.cuda.is_available()` to print `True`. If it does not, verify the installed PyTorch
+NVIDIA model execution expects `torch.cuda.is_available()` to print `True`. If it does not, verify the installed PyTorch
 build and visible NVIDIA driver before diagnosing TeleFuser.
 
 On AMD ROCm hosts, install a PyTorch `+rocm` build instead of the CUDA toolkit path. A HIP build also prints `True`
@@ -63,10 +65,7 @@ ROCm before CUDA. Examples ending in `_rocm.py` (for example `examples/wan_video
 are the validated entry points; see [Hardware Platforms](platforms.md) for per-platform capabilities and backend
 availability.
 
-On Huawei Ascend hosts, install a `torch_npu` build matching your PyTorch version instead of the CUDA toolkit
-path. The platform layer selects NPU when `torch_npu` imports and an Ascend device is visible
-(`ASCEND_RT_VISIBLE_DEVICES` controls visibility); `torch.cuda.is_available()` printing `False` is expected there.
-`examples/wan_video/wan22_t2v_5b.py` is the validated NPU entry point.
+For Atlas 910B2, the image includes CANN 9.3.0-beta.1, PyTorch 2.11.0+cpu, torch_npu 2.11.0.post4 and the Wan2.2 5B example. The runbook covers local builds, digest-based pulls after release, device checks, and 1/2/4-card generation. [Ascend 910B image and runbook](ascend_910b.md)
 
 ## Model Checkpoints
 

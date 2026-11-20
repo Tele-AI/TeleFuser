@@ -446,6 +446,9 @@ ulimit -n 65535
 
 #### `wan22_t2v_5b.py`
 
+For Ascend 910B2, see the [container build and 1/2/4-card runbook](../../docs/en/ascend_910b.md). For CUDA Triton and quantized examples, install the `cuda` extra.
+
+
 T2V with Wan2.2 TI2V 5B model.
 
 **Purpose:** High-quality text-to-video generation using Wan2.2 5B unified model.

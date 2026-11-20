@@ -71,16 +71,14 @@ The NPU platform targets Huawei Ascend devices through `torch_npu` with the HCCL
   `triton` installation is required.
 - The ops layer selects `forward_npu` where an op defines one and otherwise falls back to native PyTorch. No
   NPU-optimized kernels are integrated yet, so pipelines run entirely on the native paths.
-- Multi-card inference uses HCCL through the `hccl` backend string. Parallel-worker queues marshal tensors through
-  CPU because `torch_npu` has no reliable cross-process device IPC, and each spawned worker group receives a
-  distinct `HCCL_IF_BASE_PORT` so concurrent groups do not collide on HCCL's data-plane socket range.
-- `torch.compile` is not validated on NPU; NPU examples run eager.
-- The validated entry point is
-  [Wan2.2 TI2V-5B text-to-video](https://github.com/Tele-AI/TeleFuser/tree/main/examples/wan_video)
-  (`wan22_t2v_5b.py`), which auto-detects the platform and runs unmodified on an Atlas 910B (CANN 8.2, torch 2.9
-  with a matching `torch_npu`): single-card, and four-card CFG × Ulysses parallelism over HCCL. Wan2.2 A14B shares
-  these code paths but has not been exercised on NPU hardware; validate other examples on your target NPU before
-  production use.
+- Multi-rank NPU workers bind the visible device ID before initializing HCCL. Their ordinary queues and direct tensor channels stage NPU payloads through host memory. Each live HCCL worker group reserves its own 16-port block.
+
+| Device / host | Workload and mode | Cards | Software and qualification |
+| --- | --- | --- | --- |
+| Atlas 910B2 64 GB | Wan2.2 TI2V-5B offline T2V, eager BF16 / SDPA / UniPC, model CPU offload | 1, 2, 4 | CANN 8.2, torch 2.9.0, torch_npu 2.9.0.post1. [PR author’s hardware results](https://github.com/Tele-AI/TeleFuser/pull/42) |
+| Atlas 910B2 64 GB / Linux arm64 | Same recipe | 1, 2, 4 separately | CANN 9.3.0-beta.1, Python 3.11, torch 2.11.0+cpu, torch_npu 2.11.0.post4. Candidate pending hardware qualification. [Image runbook](ascend_910b.md) |
+
+NPU qualification for I2V, A14B, serving, streaming, cross-host inference and `torch.compile` is pending.
 
 The CPU platform is the fallback when no accelerator is detected; it is intended for tests and for pipelines that
 explicitly request CPU execution.

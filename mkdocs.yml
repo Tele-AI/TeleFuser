@@ -124,6 +124,7 @@ plugins:
           nav_translations:
             Home: 首页
             Get Started: 开始使用
+            Ascend 910B Image: 昇腾 910B 镜像
             Installation: 安装
             Core WebRTC Experience: WebRTC 核心体验
             Basic Inference: 基础推理
@@ -183,6 +184,7 @@ nav:
   - Get Started:
       - Overview: getting_started.md
       - Installation: installation.md
+      - Ascend 910B Image: ascend_910b.md
       - Core WebRTC Experience: streaming_quickstart.md
       - Basic Inference: quickstart.md
   - Models & Cookbook:

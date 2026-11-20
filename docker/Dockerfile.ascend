@@ -1,0 +1,30 @@
+ARG CANN_REPOSITORY=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann
+FROM ${CANN_REPOSITORY}:9.3.0-beta.1-910b-ubuntu22.04-py3.11@sha256:cf6ab60eefb56b8d0e3ecad6d03c30c457b4dff86bcbf5dd7ff1a90427348b7b
+
+ARG TELEFUSER_VERSION=0.0.0+local
+ARG SOURCE_REVISION=local
+LABEL org.opencontainers.image.source="https://github.com/Tele-AI/TeleFuser" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="${TELEFUSER_VERSION}"
+
+USER root
+RUN test "$(uname -m)" = aarch64 && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3.11 -m venv /opt/telefuser/venv
+ENV PATH="/opt/telefuser/venv/bin:${PATH}"
+COPY docker/ascend/requirements.lock /opt/telefuser/requirements.lock
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes \
+        --index-url https://pypi.org/simple -r /opt/telefuser/requirements.lock
+
+WORKDIR /opt/telefuser
+COPY pyproject.toml README.md LICENSE /tmp/telefuser-src/
+COPY telefuser /tmp/telefuser-src/telefuser
+RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFUSER="${TELEFUSER_VERSION}" \
+        python -m pip wheel --no-build-isolation --no-deps -w /tmp/telefuser-dist /tmp/telefuser-src \
+    && python -m pip install --no-deps /tmp/telefuser-dist/telefuser-*.whl \
+    && python -m pip check && rm -rf /tmp/telefuser-src /tmp/telefuser-dist \
+    && ffprobe -version > /dev/null && hf --version
+COPY examples/wan_video/wan22_t2v_5b.py ./examples/wan_video/wan22_t2v_5b.py
+# Inherit the pinned CANN image's entrypoint to initialize the toolkit, AscendNPU IR and ATB.
+CMD ["telefuser", "--help"]

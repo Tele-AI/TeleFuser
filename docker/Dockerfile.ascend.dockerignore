@@ -1,0 +1,15 @@
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!telefuser/
+!telefuser/**
+**/__pycache__
+**/*.pyc
+telefuser/_version.py
+!docker/
+!docker/ascend/
+!docker/ascend/requirements.lock
+!examples/
+!examples/wan_video/
+!examples/wan_video/wan22_t2v_5b.py
