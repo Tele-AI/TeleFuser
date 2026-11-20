@@ -299,3 +299,30 @@ def test_tensor_channel_uses_cuda_ipc_and_cross_gpu_peer_copy() -> None:
         metadata_queue.close()
         result_queue.close()
         channel.close()
+
+
+def test_ascend_payload_stages_once_before_sharding_and_keeps_source_metadata() -> None:
+    class NpuDevice:
+        type = "npu"
+
+        def __str__(self):
+            return "npu:1"
+
+    class NpuTensor(torch.Tensor):
+        device = NpuDevice()
+        copies = 0
+
+        def cpu(self):
+            self.copies += 1
+            return self.as_subclass(torch.Tensor)
+
+    channel = WorkerTensorChannel(consumer_world_size=2, shard_dim=0, timeout=1)
+    original = torch.arange(5)
+    source = original.as_subclass(NpuTensor)
+    try:
+        ref, duplicate = channel.send((source, [source]))
+        assert ref is duplicate[0] and ref.source_device == "npu:1" and source.copies == 1
+        parts = [channel.receive(ref, rank=i, device="cpu") for i in range(2)]
+        torch.testing.assert_close(torch.cat(parts), original)
+    finally:
+        channel.close()
