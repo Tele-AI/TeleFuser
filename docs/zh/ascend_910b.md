@@ -1,6 +1,6 @@
 # 使用镜像在 Ascend 910B 上运行 Wan2.2 文生视频
 
-本手册面向 Linux arm64 的 Atlas 910B2 64 GB。镜像将 CANN 9.3.0-beta.1 与昇腾同次发布的 TorchNPU 配套。当前可从包含 `docker/Dockerfile.ascend` 的 checkout 构建候选镜像，待 1、2、4 卡分别验收后，发布页提供可直接拉取的镜像摘要。[昇腾 CANN](https://www.hiascend.com/cann/download?versionId=822&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=0) · [TorchNPU 发布与附件](https://api.gitcode.com/api/v5/repos/Ascend/pytorch/releases/tags/v26.3.0-beta.1-pytorch2.11.0)
+本手册面向 Linux arm64 的 Atlas 910B2 64 GB。镜像将 CANN 9.3.0-beta.1 与昇腾同次发布的 TorchNPU 配套。该候选镜像已通过单卡与双卡 Wan 实机验收。可加载候选镜像归档，或从包含 `docker/Dockerfile.ascend` 的 checkout 构建。四卡仍待验收。[昇腾 CANN](https://www.hiascend.com/cann/download?versionId=822&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=0) · [TorchNPU 发布与附件](https://api.gitcode.com/api/v5/repos/Ascend/pytorch/releases/tags/v26.3.0-beta.1-pytorch2.11.0)
 
 ## 运行条件
 
@@ -11,9 +11,22 @@
 | 工作负载 | `Wan-AI/Wan2.2-TI2V-5B` 的离线 T2V，BF16、PyTorch SDPA、UniPC、模型级 CPU offload。首轮验收覆盖单机 1、2、4 卡。 |
 | 本地文件 | 官方模型目录约 34 GB，另预留镜像和输出空间。主存需容纳 offload 权重与 worker 队列。模型目录以只读方式传入，输出目录应对容器运行用户可写。 |
 
-请在同一个 **Bash** 会话执行各节。设备映射示例假定宿主分配的物理设备从 0 开始。设备节点、驱动库和 `npu-smi` 的宿主路径参照昇腾标准安装。[昇腾软件与固件下载](https://www.hiascend.com/developer/download) · [上游容器挂载示例](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/npu/)
+以下安装方式任选其一。准备权重、设备自检与生成使用同一个 **Bash** 会话。设备映射示例假定宿主分配的物理设备从 0 开始。设备节点、驱动库和 `npu-smi` 的宿主路径参照昇腾标准安装。[昇腾软件与固件下载](https://www.hiascend.com/developer/download) · [上游容器挂载示例](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/npu/)
 
 ## 安装镜像与准备权重
+
+### 从离线归档安装
+
+拿到已验收的镜像归档和同名校验文件时，在目标机的同一个目录执行下列命令，然后直接准备权重。Docker image ID 应与本页末尾的实机记录一致。该归档为 6,137,716,301 字节，SHA-256 为 `8a85baafb991f8640af6f3dba9f38ac8a76376ca669e7e64363c7eee8e9f2369`。
+
+```bash
+sha256sum -c telefuser-ascend910b-c27fabd.tar.gz.sha256
+docker load -i telefuser-ascend910b-c27fabd.tar.gz
+TF_IMAGE=telefuser:ascend910b-c27fabd
+docker image inspect --format '{{.Id}}' "$TF_IMAGE"
+```
+
+### 从源码构建
 
 在含本次改动的 TeleFuser checkout 根目录执行。Dockerfile 固定 910B 的 arm64 基础镜像，逐个校验 Python wheel 并安装同一份源码的示例。权重独立挂载。使用 Bash 执行下列命令。
 
@@ -30,12 +43,16 @@ docker build --platform linux/arm64 -f docker/Dockerfile.ascend \
 
 默认从昇腾境内仓下载 CANN 底座。使用 Docker Hub 时，在构建命令中加 `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`，两处清单的 arm64 摘要相同。
 
-发布后，使用发布页给出的完整 TeleFuser 镜像引用即可跳过源码构建。镜像将使用 `ghcr.io/tele-ai/telefuser:<release>-ascend910b`，按 digest 拉取可复现同一批验收结果。
+### 从发布仓拉取
+
+发布后，可使用发布页给出的完整 TeleFuser 镜像引用。镜像将使用 `ghcr.io/tele-ai/telefuser:<release>-ascend910b`，按 digest 拉取可复现同一批验收结果。
 
 ```bash
 read -r -p '粘贴发布页的 TeleFuser 镜像完整引用 > ' TF_IMAGE
 docker pull "$TF_IMAGE"
 ```
+
+### 准备权重与输出目录
 
 ```bash
 TF_MODEL_DIR="$PWD/models/Wan2.2-TI2V-5B"
@@ -58,7 +75,7 @@ docker run --rm --entrypoint hf \
 
 ## 挂载设备并自检
 
-以下步骤共用同一个 Bash 会话。下面的 `run_910b` 是当前 shell 的辅助函数。单卡传入 `davinci0`，双卡传入 `davinci0–1`，四卡传入 `davinci0–3`。把 `TF_DEVICE_IDS` 改成宿主分配的物理卡号，例如单用物理 5 号卡时设为 `TF_DEVICE_IDS=(5)`。示例在容器内使用从 0 起的逻辑编号。`--shm-size=64g` 是此多卡配方的共享内存上限，供 worker 经主存交换张量。
+以下步骤共用同一个 Bash 会话。下面的 `run_910b` 是当前 shell 的辅助函数。单卡传入 `davinci0`，双卡传入 `davinci0–1`，四卡传入 `davinci0–3`。把 `TF_DEVICE_IDS` 改成宿主分配的物理卡号，例如单用物理 5 号卡时设为 `TF_DEVICE_IDS=(5)`。Docker 通过设备节点限制可见范围，CANN 再从 0 编号。只挂载物理 5 号卡时，应用使用 `npu:0`。此时把宿主编号 5 写入 `ASCEND_RT_VISIBLE_DEVICES` 会触发 `207004`。`--shm-size=64g` 是此多卡配方的共享内存上限，供 worker 经主存交换张量。
 
 ```bash
 TF_DEVICE_IDS=(0 1 2 3)
@@ -71,12 +88,10 @@ run_910b() {
     *) echo '卡数取 1、2 或 4' >&2; return 2 ;;
   esac
   (( count <= ${#TF_DEVICE_IDS[@]} )) || { echo "Assigned devices: ${TF_DEVICE_IDS[*]}" >&2; return 2; }
-  local -a devices=() ids=()
+  local -a devices=()
   for ((i=0; i<count; i++)); do
     devices+=(--device "/dev/davinci${TF_DEVICE_IDS[i]}")
-    ids+=("${TF_DEVICE_IDS[i]}")
   done
-  local IFS=,
   docker run --rm -i --shm-size=64g \
     "${devices[@]}" \
     --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
@@ -87,7 +102,6 @@ run_910b() {
     --mount type=bind,src=/etc/ascend_install.info,dst=/etc/ascend_install.info,readonly \
     --mount "type=bind,src=$TF_MODEL_DIR,dst=/models/Wan2.2-TI2V-5B,readonly" \
     --mount "type=bind,src=$TF_OUTPUT_DIR,dst=/out" \
-    -e "ASCEND_RT_VISIBLE_DEVICES=${ids[*]}" \
     -e "TELEAI_EXAMPLE_OUTPUT_DIR=/out/${count}card" -e HF_HUB_OFFLINE=1 \
     "$TF_IMAGE" "$@"
 }
@@ -161,13 +175,21 @@ generate_wan 4 && inspect_video 4
 | --- | --- |
 | 宿主 `npu-smi info` 失败 | 检查宿主驱动、固件和设备状态，使用与该版本发布页匹配的组合。 |
 | 宿主能看到卡，容器 `import torch_npu` 或小张量运算失败 | 对照该镜像 digest 核对驱动 `lib64`、管理节点、设备权限和 CANN 环境初始化。保留原始 import / ACL 错误。 |
-| 卡数与 `--gpu_num` 不符 | 核对分配的 `/dev/davinciN` 和 `ASCEND_RT_VISIBLE_DEVICES`，在同一组挂载上执行 `check_910b`。并行 rank 使用容器可见的逻辑索引。 |
+| 卡数与 `--gpu_num` 不符 | 核对分配的 `/dev/davinciN`，清除从宿主带入的 `ASCEND_RT_VISIBLE_DEVICES`，在同一组挂载上执行 `check_910b`。并行 rank 使用容器可见的逻辑索引。 |
 | 单卡成功，多卡卡在初始化，日志出现 `EJ0003` | 检查 rank、设备映射和连续 16 个 TCP 端口。TeleFuser 将 `HCCL_IF_BASE_PORT`（默认 60000）作为搜索下限，按 16 对齐。共用网络命名空间的容器需共享临时锁目录（默认 `/tmp`），或由调度器隔离网络并预留互不重叠的范围。`MASTER_PORT` 与 HCCL host 端口段分别用于 rendezvous 和 HCCL 初始化。 |
 | worker 出现 `Bus error` 或 `/dev/shm` 空间不足 | 运行 `run_910b 4 df -h /dev/shm`（按实际卡数调整），同时检查容器内存上限、宿主可用 RAM 和 CPU offload。 |
 | 找不到权重或 tokenizer | 检查 `TF_MODEL_DIR` 的层级和模型 revision，目录根应直接含有 VAE、T5 和分片文件。 |
 
 ## 验收记录
 
-每个卡数单独记录 TeleFuser 源码提交、镜像 ID 或仓库摘要、CANN、Torch、TorchNPU、驱动/固件、权重 revision、卡号、并行度、生成时间和 `ffprobe` 输出。实卡报告另保留固定 seed 的编码前张量有限性检查和抽帧质量比较。
+每个卡数单独记录 TeleFuser 源码提交、镜像 ID 或仓库摘要、CANN、Torch、TorchNPU、驱动/固件、权重 revision、卡号、并行度、生成时间和 `ffprobe` 输出。本次候选源码为 `c27fabdcdf6f1156126e1bc22699f1af4580c97e`，910B2 上实测的 Docker image ID 为 `sha256:8c49e26c804c7691725506086aedf7bcf1770afdcd73b90947d243128ab058da`。宿主驱动为 25.2.0，固件为 7.7.0.6.236。
 
-公开 PR 的作者在 **CANN 8.2**、Torch 2.9.0、torch_npu 2.9.0.post1 上报告了 1 / 2 / 4 卡生成。CANN 9.3.0-beta.1 的结果按本页步骤重新采集。[#42 的实机报告](https://github.com/Tele-AI/TeleFuser/pull/42)
+| CANN 9.3.0-beta.1 | 并行配置 | 生成时间 | 结果 |
+| --- | --- | ---: | --- |
+| 1 卡 | 单卡，物理 5 | 157.07 秒 | 通过 |
+| 2 卡 | CFG 2，物理 2、3 | 92.05 秒 | 通过，两个 worker 正常退出 |
+| 4 卡 | CFG 2 × Ulysses 2 | — | 待验收 |
+
+2026-11-20 用本页红风筝提示词、seed 42 和 50 步 UniPC 在同一节点分卡同时运行。生成时间取自示例的 `Video generation time`。两次 VAE 输出在转为 RGB8 前均为有限值，`ffprobe` 均读出 864 × 480、24 fps、121 帧。两个 MP4 的 SHA-256 都是 `d0ad0b5452024e2a6373c6f670f4bad8e7e520a292720843d0d8eaac71c0895d`，独立解码后 121 帧逐像素相同。双卡还单独验证了 HCCL all-reduce、默认 NPU mesh、PP 发送和缺省接收缓冲区，以及真实 NPU 张量经主存分片并在目标设备重组。
+
+公开 PR 的作者在 **CANN 8.2**、Torch 2.9.0、torch_npu 2.9.0.post1 上报告了 1 / 2 / 4 卡生成。[#42 的实机报告](https://github.com/Tele-AI/TeleFuser/pull/42)

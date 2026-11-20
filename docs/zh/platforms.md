@@ -71,7 +71,7 @@ NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。
 | 设备与宿主 | 工作负载与执行模式 | 卡数 | 软件栈与验证状态 |
 | --- | --- | --- | --- |
 | Atlas 910B2 64 GB | Wan2.2 TI2V-5B 离线文生视频，eager BF16 / SDPA / UniPC，模型级 CPU offload | 1、2、4 | CANN 8.2、Torch 2.9.0、torch_npu 2.9.0.post1。[PR 作者实测](https://github.com/Tele-AI/TeleFuser/pull/42) |
-| Atlas 910B2 64 GB / Linux arm64 | 同上 | 1、2、4 卡分别验证 | CANN 9.3.0-beta.1、Python 3.11、Torch 2.11.0+cpu、torch_npu 2.11.0.post4。候选镜像，待实卡验收。[镜像运行手册](ascend_910b.md) |
+| Atlas 910B2 64 GB / Linux arm64 | 同上 | 1、2 卡已通过，4 卡待验 | CANN 9.3.0-beta.1、Python 3.11、Torch 2.11.0+cpu、torch_npu 2.11.0.post4。单、双卡运行输出的 121 帧逐像素相同。[镜像运行手册](ascend_910b.md) |
 
 I2V、A14B、服务、流式、跨机和 `torch.compile` 的 NPU 路径均待验证。
 

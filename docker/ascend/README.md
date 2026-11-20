@@ -69,3 +69,17 @@ docker buildx imagetools create --prefer-index=false \
   --tag "$TF_REPO:$TF_VERSION-ascend910b" "$TF_REPO@$TF_DIGEST"
 docker buildx imagetools inspect "$TF_REPO:$TF_VERSION-ascend910b"
 ```
+
+## Transfer a tested candidate without a registry
+
+Use the tag on the qualification host so the recipient loads the exact image that ran the tests. Transfer both files together. The first build qualified on one and two 910B2 devices used the tag below.
+
+```bash
+set -o pipefail
+TF_IMAGE=telefuser:ascend910b-c27fabd
+TF_ARCHIVE=telefuser-ascend910b-c27fabd.tar.gz
+docker save "$TF_IMAGE" | gzip -1 > "$TF_ARCHIVE"
+sha256sum "$TF_ARCHIVE" > "$TF_ARCHIVE.sha256"
+```
+
+On the target host, verify the archive, load it with `docker load -i` and compare the resulting image ID with the hardware qualification record. [Tested image and run instructions](../../docs/en/ascend_910b.md)

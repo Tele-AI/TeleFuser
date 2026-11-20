@@ -76,7 +76,7 @@ The NPU platform targets Huawei Ascend devices through `torch_npu` with the HCCL
 | Device / host | Workload and mode | Cards | Software and qualification |
 | --- | --- | --- | --- |
 | Atlas 910B2 64 GB | Wan2.2 TI2V-5B offline T2V, eager BF16 / SDPA / UniPC, model CPU offload | 1, 2, 4 | CANN 8.2, torch 2.9.0, torch_npu 2.9.0.post1. [PR author’s hardware results](https://github.com/Tele-AI/TeleFuser/pull/42) |
-| Atlas 910B2 64 GB / Linux arm64 | Same recipe | 1, 2, 4 separately | CANN 9.3.0-beta.1, Python 3.11, torch 2.11.0+cpu, torch_npu 2.11.0.post4. Candidate pending hardware qualification. [Image runbook](ascend_910b.md) |
+| Atlas 910B2 64 GB / Linux arm64 | Same recipe | 1 and 2 passed, 4 pending | CANN 9.3.0-beta.1, Python 3.11, torch 2.11.0+cpu, torch_npu 2.11.0.post4. The one- and two-card runs produced 121 pixel-identical frames. [Image runbook](ascend_910b.md) |
 
 NPU qualification for I2V, A14B, serving, streaming, cross-host inference and `torch.compile` is pending.
 

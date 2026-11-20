@@ -64,7 +64,7 @@ AMD ROCm 主机应安装 PyTorch `+rocm` 构建，而非 CUDA Toolkit 路径。H
 `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`）是已验证的入口；各平台能力与后端可用性见
 [硬件平台](platforms.md)。
 
-Atlas 910B2 镜像包含 CANN 9.3.0-beta.1、PyTorch 2.11.0+cpu、torch_npu 2.11.0.post4 和 Wan2.2 5B 示例。运行手册给出本地构建、发布后按摘要拉取、设备自检和单机 1/2/4 卡生成命令。[910B 镜像安装与运行](ascend_910b.md)
+Atlas 910B2 镜像包含 CANN 9.3.0-beta.1、PyTorch 2.11.0+cpu、torch_npu 2.11.0.post4 和 Wan2.2 5B 示例。运行手册给出离线镜像加载、源码构建、发布后按摘要拉取、设备自检和单机生成命令。1、2 卡已在实机上通过。[910B 镜像安装与运行](ascend_910b.md)
 
 ## 模型权重
 
