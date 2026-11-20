@@ -8,7 +8,7 @@
 | --- | --- |
 | 宿主机 | Linux arm64，Atlas 910B2 64 GB，已安装该 CANN 版本配套的昇腾驱动、固件及 Docker。`npu-smi info` 能看到分配给作业的空闲卡。 |
 | 容器 | Ubuntu 22.04、Python 3.11、CANN 9.3.0-beta.1、Torch 2.11.0+cpu、torch_npu 2.11.0.post4。候选镜像支持本地构建。 |
-| 工作负载 | `Wan-AI/Wan2.2-TI2V-5B` 的离线 T2V，BF16、PyTorch SDPA、UniPC、模型级 CPU offload。首轮验收覆盖单机 1、2、4 卡。 |
+| 工作负载 | `Wan-AI/Wan2.2-TI2V-5B` 的离线 T2V，BF16、PyTorch SDPA、UniPC、模型级 CPU offload。单机 1 卡和 2 卡已通过，4 卡待验收。 |
 | 本地文件 | 官方模型目录约 34 GB，另预留镜像和输出空间。主存需容纳 offload 权重与 worker 队列。模型目录以只读方式传入，输出目录应对容器运行用户可写。 |
 
 以下安装方式任选其一。准备权重、设备自检与生成使用同一个 **Bash** 会话。设备映射示例假定宿主分配的物理设备从 0 开始。设备节点、驱动库和 `npu-smi` 的宿主路径参照昇腾标准安装。[昇腾软件与固件下载](https://www.hiascend.com/developer/download) · [上游容器挂载示例](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/npu/)
