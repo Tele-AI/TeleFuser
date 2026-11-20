@@ -714,12 +714,16 @@ class MiniMaxH3Attention(nn.Module):
                     sink_tokens=prefix_tokens,
                 )
                 if self._is_sol_active(sparse_state) and prefix_tokens:
-                    dense_prefix = F.scaled_dot_product_attention(
-                        live_query[:, :prefix_tokens].transpose(1, 2),
-                        live_key.transpose(1, 2),
-                        live_value.transpose(1, 2),
-                        scale=self.head_dim**-0.5,
-                    ).transpose(1, 2).contiguous()
+                    dense_prefix = (
+                        F.scaled_dot_product_attention(
+                            live_query[:, :prefix_tokens].transpose(1, 2),
+                            live_key.transpose(1, 2),
+                            live_value.transpose(1, 2),
+                            scale=self.head_dim**-0.5,
+                        )
+                        .transpose(1, 2)
+                        .contiguous()
+                    )
                     if output_correction is None:
                         live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
                     else:
