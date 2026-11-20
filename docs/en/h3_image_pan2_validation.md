@@ -128,5 +128,5 @@ use the same declared noise, conditioning and schedule.
 Hosted prompt rewriting and guardrail services are outside this local generation integration. The command line
 examples do not offer LoRA, feature caching, FSDP, Ring SP or serving routes.
 
-See the [H3-Image example](../../examples/minimax_h3_image/README.md) and
-[PAN2 example](../../examples/pan2/README.md) for checkpoint layout and generation commands.
+See the [H3-Image example](https://github.com/Tele-AI/TeleFuser/tree/main/examples/minimax_h3_image) and
+[PAN2 example](https://github.com/Tele-AI/TeleFuser/tree/main/examples/pan2) for checkpoint layout and generation commands.
