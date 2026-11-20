@@ -10,7 +10,73 @@ import torch.nn.functional as F
 FP8_ATTENTION_BLOCK_SIZE = 64
 
 
-def quantize_fp8_qkv(
+def _sequence_mean(x: torch.Tensor) -> torch.Tensor:
+    """Reduce BTHD sequence means in FP32 without materializing an FP32 copy."""
+
+    if x.ndim != 4 or not x.is_floating_point():
+        raise ValueError("attention smoothing expects a floating-point [B, T, H, D] tensor")
+    if not x.is_cuda:
+        return x.float().mean(dim=1)
+    import triton
+
+    from telefuser.kernel.triton.fp8_attention import _sequence_mean_kernel
+
+    batch, tokens, heads, head_dim = x.shape
+    output = torch.empty((batch, heads, head_dim), device=x.device, dtype=torch.float32)
+    block_tokens = 128
+    block_dim = 32
+    _sequence_mean_kernel[(batch * heads, triton.cdiv(head_dim, block_dim))](
+        x,
+        output,
+        tokens,
+        heads,
+        head_dim,
+        *x.stride(),
+        block_tokens,
+        block_dim,
+        num_warps=4,
+        num_stages=1,
+    )
+    return output
+
+
+def _sequence_means(k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce matching K/V sequence means in one GPU kernel launch."""
+
+    if k.shape != v.shape or k.ndim != 4 or not (k.is_floating_point() and v.is_floating_point()):
+        raise ValueError("K/V attention smoothing expects matching floating-point [B, T, H, D] tensors")
+    if k.device != v.device:
+        raise ValueError("K and V must be on the same device")
+    if not k.is_cuda:
+        return k.float().mean(dim=1), v.float().mean(dim=1)
+    import triton
+
+    from telefuser.kernel.triton.fp8_attention import _sequence_mean_kv_kernel
+
+    batch, tokens, heads, head_dim = k.shape
+    k_output = torch.empty((batch, heads, head_dim), device=k.device, dtype=torch.float32)
+    v_output = torch.empty_like(k_output)
+    block_tokens = 128
+    block_dim = 32
+    _sequence_mean_kv_kernel[(batch * heads, triton.cdiv(head_dim, block_dim))](
+        k,
+        v,
+        k_output,
+        v_output,
+        tokens,
+        heads,
+        head_dim,
+        *k.stride(),
+        *v.stride(),
+        block_tokens,
+        block_dim,
+        num_warps=4,
+        num_stages=1,
+    )
+    return k_output, v_output
+
+
+def _quantize_fp8_qkv_sm90(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -24,11 +90,57 @@ def quantize_fp8_qkv(
         raise ValueError("q, k, and v must share shape [B, T, H, D]")
     if not (q.is_cuda and q.is_contiguous() and k.is_contiguous() and v.is_contiguous()):
         raise ValueError("fused FP8 QKV quantization requires contiguous CUDA tensors")
-    if q.shape[-1] != 128:
+    batch, tokens, heads, head_dim = q.shape
+    if head_dim != 128:
         raise ValueError("fused FP8 QKV quantization requires head dimension 128")
-    from telefuser.kernel.triton.fp8_attention import quantize_fp8_qkv_triton
+    import triton
 
-    return quantize_fp8_qkv_triton(q, k, v, FP8_ATTENTION_BLOCK_SIZE)
+    from telefuser.kernel.triton.fp8_attention import _quantize_qkv_fp8_stage1, _quantize_qkv_fp8_stage2_v
+
+    blocks = triton.cdiv(tokens, FP8_ATTENTION_BLOCK_SIZE)
+    q_out = torch.empty(q.shape, device=q.device, dtype=torch.float8_e4m3fn)
+    k_out = torch.empty_like(q_out)
+    v_storage = torch.empty((batch, heads, head_dim, tokens), device=q.device, dtype=torch.float8_e4m3fn)
+    q_scale = torch.empty((batch, blocks, heads), device=q.device, dtype=torch.float32)
+    k_scale = torch.ones_like(q_scale)
+    v_scale = torch.zeros((batch, heads, head_dim), device=q.device, dtype=torch.float32)
+    dummy_mean = torch.empty((1,), device=q.device, dtype=torch.float32)
+    grid = (blocks, batch * heads)
+    _quantize_qkv_fp8_stage1[grid](
+        q,
+        k,
+        v,
+        dummy_mean if k_mean is None else k_mean,
+        dummy_mean if v_mean is None else v_mean,
+        q_out,
+        k_out,
+        q_scale,
+        k_scale,
+        v_scale,
+        tokens,
+        heads,
+        head_dim,
+        FP8_ATTENTION_BLOCK_SIZE,
+        smooth_k=k_mean is not None,
+        smooth_v=v_mean is not None,
+        num_warps=8,
+        num_stages=1,
+    )
+    _quantize_qkv_fp8_stage2_v[grid](
+        v,
+        dummy_mean if v_mean is None else v_mean,
+        v_storage,
+        v_scale,
+        tokens,
+        heads,
+        head_dim,
+        FP8_ATTENTION_BLOCK_SIZE,
+        smooth_v=v_mean is not None,
+        num_warps=8,
+        num_stages=1,
+    )
+    v_out = v_storage.permute(0, 3, 1, 2)
+    return q_out, k_out, v_out, q_scale, k_scale, v_scale
 
 
 def quantize_fp8_qkv(
@@ -192,6 +304,10 @@ def apply_fp8_attention_output_correction(output: torch.Tensor, correction: torc
         return (output.float() + correction).to(output.dtype)
     if not output.is_contiguous() or not correction.is_contiguous():
         raise ValueError("FP8 attention output and correction must be contiguous")
+    import triton
+
+    from telefuser.kernel.triton.fp8_attention import _add_output_correction_kernel
+
     batch, tokens, heads, head_dim = output.shape
     elements = output.numel()
     block = 256
@@ -235,6 +351,10 @@ def merge_fp8_attention_prefix(
         return torch.cat((dense_prefix, corrected_suffix), dim=1)
     if not (dense_prefix.is_contiguous() and output.is_contiguous() and correction.is_contiguous()):
         raise ValueError("FP8 attention prefix merge inputs must be contiguous")
+
+    import triton
+
+    from telefuser.kernel.triton.fp8_attention import _merge_prefix_output_correction_kernel
 
     merged = torch.empty_like(output)
     batch, tokens, heads, head_dim = output.shape
