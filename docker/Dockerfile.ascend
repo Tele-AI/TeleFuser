@@ -1,18 +1,29 @@
 ARG CANN_REPOSITORY=swr.cn-south-1.myhuaweicloud.com/ascendhub/cann
-FROM ${CANN_REPOSITORY}:9.3.0-beta.1-910b-ubuntu22.04-py3.11@sha256:cf6ab60eefb56b8d0e3ecad6d03c30c457b4dff86bcbf5dd7ff1a90427348b7b
+ARG CANN_IMAGE=${CANN_REPOSITORY}:9.3.0-beta.1-910b-ubuntu22.04-py3.11@sha256:cf6ab60eefb56b8d0e3ecad6d03c30c457b4dff86bcbf5dd7ff1a90427348b7b
+FROM ${CANN_IMAGE} AS system
 
 USER root
 RUN test "$(uname -m)" = aarch64 && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-RUN python3.11 -m venv /opt/telefuser/venv
 ENV PATH="/opt/telefuser/venv/bin:${PATH}"
-COPY docker/ascend/requirements.lock /opt/telefuser/requirements.lock
-# The upstream PYTHONPATH also includes optional CANN development and profiling tools.
-# Resolve and validate the TeleFuser venv in isolation; retain the upstream runtime paths at launch.
-RUN python -I -m pip install --no-cache-dir --only-binary=:all: --require-hashes \
-        --index-url https://pypi.org/simple -r /opt/telefuser/requirements.lock
 
+FROM system AS python-runtime
+RUN python3.11 -m venv /opt/telefuser/venv
+COPY docker/ascend/ /tmp/ascend/
+# The upstream PYTHONPATH also includes optional CANN development and profiling tools.
+# Keep hashes in both modes, including the four wheels with explicit publisher URLs.
+RUN if [ -d /tmp/ascend/wheelhouse ]; then \
+        sed -E 's# @ https://[^ ]*/([^ ]+\.whl) # @ file:///tmp/ascend/wheelhouse/\1 #' \
+            /tmp/ascend/requirements.lock > /tmp/offline.lock && \
+        set -- --no-index --find-links=/tmp/ascend/wheelhouse -r /tmp/offline.lock; \
+    else \
+        set -- --index-url https://pypi.org/simple -r /tmp/ascend/requirements.lock; \
+    fi && python -I -m pip install --no-cache-dir --only-binary=:all: --require-hashes "$@"
+
+FROM system
+COPY --from=python-runtime /opt/telefuser/venv /opt/telefuser/venv
+COPY docker/ascend/requirements.lock /opt/telefuser/requirements.lock
 ARG TELEFUSER_VERSION=0.0.0+local
 ARG SOURCE_REVISION=local
 LABEL org.opencontainers.image.source="https://github.com/Tele-AI/TeleFuser" \

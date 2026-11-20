@@ -10,6 +10,8 @@ telefuser/_version.py
 !docker/
 !docker/ascend/
 !docker/ascend/requirements.lock
+!docker/ascend/wheelhouse/
+!docker/ascend/wheelhouse/*.whl
 !examples/
 !examples/wan_video/
 !examples/wan_video/wan22_t2v_5b.py

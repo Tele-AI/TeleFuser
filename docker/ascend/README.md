@@ -4,6 +4,16 @@ The 910B image targets Linux arm64 and CPython 3.11. The Dockerfile pins the arc
 
 The default registry is AscendHub in China. For Docker Hub, pass `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`. Both registries serve the same pinned arm64 manifest. [Ascend image repositories](https://github.com/Ascend/cann-container-image/blob/main/OVERVIEW.zh.md)
 
+If the upstream base was transferred by `docker save` / `docker load`, Docker may retain only its local tag. Verify the loaded arm64 image ID against `sha256:92ceaadada7011d9179f5854b08fc66981d3d604cfd72445bcbae756c777dee1`, the config referenced by the pinned manifest. Pass that verified local tag via `--build-arg CANN_IMAGE=<local-tag>` to reuse the cached layers.
+
+For a build host with limited access to Python package servers, prepare the wheels on a connected Linux arm64 machine with Python 3.11. Transfer the directory to the same path in the build checkout. The Dockerfile detects it, installs from disk, checks every hash in the release lock and leaves the wheel archives in the build stage. The system stage still needs Ubuntu packages for FFmpeg.
+
+```bash
+python3.11 -m pip download --only-binary=:all: --require-hashes \
+  --index-url https://pypi.org/simple -r docker/ascend/requirements.lock \
+  --dest docker/ascend/wheelhouse
+```
+
 ## Update the dependency lock
 
 Run from the repository root in a clean CPython 3.11 environment on Ubuntu 22.04 arm64. Match each of the four direct wheel URLs and hashes in `requirements.in` to their publisher before resolving. The pip report includes the source checkout as a separate local distribution.
