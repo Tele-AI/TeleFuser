@@ -79,6 +79,8 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 pip install -e .
 ```
 
+NVIDIA 的 Triton 与量化功能使用 `pip install -e ".[cuda]"`。Atlas 910B2 可从固定版本镜像运行 Wan 示例。[昇腾镜像安装](docs/zh/ascend_910b.md)
+
 开发环境安装：
 
 ```bash

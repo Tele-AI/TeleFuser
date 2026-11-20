@@ -65,13 +65,16 @@ dependencies = [
     "torchvision>=0.21.0",
     "tqdm>=4.66.0",
     "transformers==5.14.1",
-    "triton",
     "uvicorn>=0.30,<1.0",
-    "torchao==0.17.0",
-    "bitsandbytes==0.48.0",
 ]
 
 [project.optional-dependencies]
+
+cuda = [
+    "triton",
+    "torchao==0.17.0",
+    "bitsandbytes==0.48.0",
+]
 
 ui = [
     "gradio==5.50",

@@ -1,12 +1,18 @@
 import pytest
 import torch
 
-from telefuser.kernel.triton.ulysses_relayout import (
-    merge_ulysses_head_chunk,
-    pack_qkv_destination_major,
-    pack_qkv_qknorm_rope_destination_major,
-)
 from telefuser.ops.rotary import apply_qk_norm_rope_neox
+
+try:
+    from telefuser.kernel.triton.ulysses_relayout import (
+        merge_ulysses_head_chunk,
+        pack_qkv_destination_major,
+        pack_qkv_qknorm_rope_destination_major,
+    )
+except ModuleNotFoundError as error:
+    if error.name != "triton":
+        raise
+    pytest.skip("Ulysses CUDA kernels require Triton", allow_module_level=True)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA Triton kernels")
 

@@ -12,6 +12,7 @@ distribution are installed separately.
 | PyTorch | 2.6 or newer |
 | CUDA toolkit | 12.8 or newer for the maintained CUDA development path |
 | ROCm | 7.x with a PyTorch `+rocm` build for AMD GPUs; see the ROCm note under verification |
+| Ascend NPU | Atlas 910B2 image candidate with CANN 9.3.0-beta.1. [Container installation](ascend_910b.md) |
 | GPU | Depends on the selected model; check its Cookbook guide |
 
 An example may impose stricter versions or GPU architecture requirements. In particular, locally built `tf-kernel`
@@ -43,7 +44,9 @@ artifacts are tied to their recorded PyTorch, CUDA, ABI, and GPU-family configur
     pre-commit install
     ```
 
-Optional dependency groups are `ui`, `distributed`, `docs`, and `dev`. Install only the groups required by the
+For NVIDIA acceleration and quantization, install `python -m pip install 'telefuser[cuda]'` or `python -m pip install -e ".[cuda]"` from source. The base wheel now leaves Triton, torchao and bitsandbytes to this extra. Use `.[dev,cuda]` for CUDA development. ROCm uses the Triton build supplied with its PyTorch distribution.
+
+Other optional dependency groups are `ui`, `distributed`, `docs`, and `dev`. Install only the groups required by the
 workflow, for example `python -m pip install -e ".[distributed]"` for Ray-backed execution.
 
 ## Verify the Installation
@@ -53,7 +56,7 @@ python -c "import torch, telefuser; print(torch.__version__); print(torch.cuda.i
 telefuser --help
 ```
 
-Model execution expects `torch.cuda.is_available()` to print `True`. If it does not, verify the installed PyTorch
+NVIDIA model execution expects `torch.cuda.is_available()` to print `True`. If it does not, verify the installed PyTorch
 build and visible NVIDIA driver before diagnosing TeleFuser.
 
 On AMD ROCm hosts, install a PyTorch `+rocm` build instead of the CUDA toolkit path. A HIP build also prints `True`
@@ -61,6 +64,8 @@ for `torch.cuda.is_available()` (check `torch.version.hip` to distinguish it), a
 ROCm before CUDA. Examples ending in `_rocm.py` (for example `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`)
 are the validated entry points; see [Hardware Platforms](platforms.md) for per-platform capabilities and backend
 availability.
+
+For Atlas 910B2, the public Docker package supplies PyTorch 2.11.0+cpu, torch_npu 2.11.0.post4 and the Wan2.2 5B example. Docker assembles it with the official CANN 9.3.0-beta.1 base. The runbook covers installation, device checks and generation. One- and two-card generation passed on hardware. [Ascend 910B image and runbook](ascend_910b.md)
 
 ## Model Checkpoints
 

@@ -61,6 +61,18 @@ ROCm 支持面向使用 ROCm 7.x 与 PyTorch `+rocm` 构建的 AMD GPU；安装�
 
 ## NPU 与 CPU
 
-NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。平台层与算子分发层均已接入 NPU，但现有
-示例在 CUDA 上验证、部分示例在 ROCm 上验证 —— 生产使用前请先在目标 NPU 上完成验证。CPU 平台是未检测到
-加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。
+NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。
+
+- 注意力经原生回退路径使用 `TORCH_SDPA`；无需安装 `tf-kernel`、`flash_attn`、`sageattention` 或 `triton`。
+- 算子层在算子定义了 `forward_npu` 时优先选择，否则回退到 PyTorch 原生实现。目前尚未集成 NPU 优化内核，
+  Pipeline 完全运行在原生路径上。
+- 多 rank NPU worker 先绑定逻辑设备，再初始化 HCCL。普通队列和 worker 直连通道都通过主存传输 NPU 张量。每个活动的 HCCL worker 组预留 16 个连续端口。
+
+| 设备与宿主 | 工作负载与执行模式 | 卡数 | 软件栈与验证状态 |
+| --- | --- | --- | --- |
+| Atlas 910B2 64 GB | Wan2.2 TI2V-5B 离线文生视频，eager BF16 / SDPA / UniPC，模型级 CPU offload | 1、2、4 | CANN 8.2、Torch 2.9.0、torch_npu 2.9.0.post1。[PR 作者实测](https://github.com/Tele-AI/TeleFuser/pull/42) |
+| Atlas 910B2 64 GB / Linux arm64 | 同上 | 1、2 卡已通过，4 卡待验 | CANN 9.3.0-beta.1、Python 3.11、Torch 2.11.0+cpu、torch_npu 2.11.0.post4。单、双卡运行输出的 121 帧逐像素相同。[镜像运行手册](ascend_910b.md) |
+
+I2V、A14B、服务、流式、跨机和 `torch.compile` 的 NPU 路径均待验证。
+
+CPU 平台是未检测到加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。

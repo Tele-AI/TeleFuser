@@ -17,6 +17,7 @@ from telefuser.pipelines.wan_video.wan22_ti2v import (
     Wan22TI2VPipeline,
     Wan22TI2VPipelineConfig,
 )
+from telefuser.platforms import current_platform, resolve_device
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
@@ -58,6 +59,15 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     """
     ppl_config = PPL_CONFIG
 
+    if current_platform.device_type == "npu":
+        if parallelism not in (1, 2, 4):
+            raise ValueError("The Ascend 910B recipe supports 1, 2 or 4 visible NPUs")
+        resolve_device(f"npu:{parallelism - 1}")
+        print(
+            f"{current_platform.get_device_name()}: {parallelism} NPU(s), "
+            f"CFG={min(2, parallelism)}, Ulysses={max(1, parallelism // 2)}, BF16 TORCH_SDPA"
+        )
+
     # Load models using ModuleManager
     module_manager = ModuleManager(device="cpu")
 
@@ -80,7 +90,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     )
 
     # Create pipeline
-    pipe = Wan22TI2VPipeline(device="cuda", torch_dtype=torch.bfloat16)
+    pipe = Wan22TI2VPipeline(device=current_platform.device_type, torch_dtype=torch.bfloat16)
 
     # Configure pipeline
     pipe_config = Wan22TI2VPipelineConfig()
@@ -111,7 +121,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 
 
 @click.command()
-@click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
+@click.option("--gpu_num", default=1, help="Number of local accelerator devices (default: 1)")
 @click.option(
     "--prompt",
     default="A stylish little girl gently caressing her dog while they relax in a sunny, beautiful backyard. Perfect for pet and family content, or videos aiming to showcase love, style, and the bond between kids and their pets.",

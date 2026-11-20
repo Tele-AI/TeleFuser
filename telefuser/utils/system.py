@@ -10,6 +10,7 @@ import threading
 class PortAllocator:
     """Thread-safe port allocator for managing non-overlapping port interval allocation."""
 
+    _port_intervals: dict[int, tuple[int, int]] = {}
     _allocated_intervals: set[tuple[int, int]] = set()
     _lock = threading.RLock()  # Use reentrant lock to allow the same thread to acquire multiple times
 
@@ -57,7 +58,16 @@ class PortAllocator:
 
             # Randomly select a port within the chosen interval
             port = random.randint(chosen_interval[0], chosen_interval[1])
+            cls._port_intervals[port] = chosen_interval
             return port
+
+    @classmethod
+    def release_port(cls, port: int) -> None:
+        """Return the interval owned by a port from get_free_port_in_interval."""
+        with cls._lock:
+            interval = cls._port_intervals.pop(port, None)
+            if interval is not None:
+                cls._allocated_intervals.discard(interval)
 
     @classmethod
     def release_interval(cls, start_port: int, end_port: int):
@@ -71,6 +81,7 @@ class PortAllocator:
             interval = (start_port, end_port)
             if interval in cls._allocated_intervals:
                 cls._allocated_intervals.remove(interval)
+                cls._port_intervals = {p: v for p, v in cls._port_intervals.items() if v != interval}
 
     @classmethod
     def get_specific_interval(cls, start_port: int, end_port: int) -> int:
@@ -99,6 +110,7 @@ class PortAllocator:
         """Reset the allocator, releasing all allocated intervals (thread-safe)."""
         with cls._lock:
             cls._allocated_intervals.clear()
+            cls._port_intervals.clear()
 
     @classmethod
     def get_allocated_intervals(cls) -> set[tuple[int, int]]:

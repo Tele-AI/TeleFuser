@@ -84,6 +84,8 @@ The project treats a world model as more than a function that returns a single c
 pip install -e .
 ```
 
+For NVIDIA Triton and quantization support, install `pip install -e ".[cuda]"`. Ascend 910B2 users can build the pinned container and run the Wan example. [Ascend installation](docs/en/ascend_910b.md)
+
 For development:
 
 ```bash
