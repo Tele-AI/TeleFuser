@@ -12,7 +12,7 @@ FROM system AS python-runtime
 RUN python3.11 -m venv /opt/telefuser/venv
 COPY docker/ascend/ /tmp/ascend/
 # The upstream PYTHONPATH also includes optional CANN development and profiling tools.
-# Keep hashes in both modes, including the four wheels with explicit publisher URLs.
+# Keep hashes in both modes, including wheels with explicit publisher URLs.
 RUN if [ -d /tmp/ascend/wheelhouse ]; then \
         sed -E 's# @ https://[^ ]*/([^ ]+\.whl) # @ file:///tmp/ascend/wheelhouse/\1 #' \
             /tmp/ascend/requirements.lock > /tmp/offline.lock && \
@@ -37,7 +37,8 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFUSER="${TELEFUSER_VERSION}" \
         python -I -m pip wheel --no-build-isolation --no-deps -w /tmp/telefuser-dist /tmp/telefuser-src \
     && python -I -m pip install --no-deps /tmp/telefuser-dist/telefuser-*.whl \
     && python -I -m pip check && rm -rf /tmp/telefuser-src /tmp/telefuser-dist \
-    && ffprobe -version > /dev/null && hf --version
+    && ffprobe -version > /dev/null && hf --version \
+    && TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -I -c 'from torchcodec.decoders import VideoDecoder'
 COPY examples/wan_video/wan22_t2v_5b.py ./examples/wan_video/wan22_t2v_5b.py
 # Inherit the pinned CANN image's entrypoint to initialize the toolkit, AscendNPU IR and ATB.
 CMD ["telefuser", "--help"]

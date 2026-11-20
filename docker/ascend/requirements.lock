@@ -94,7 +94,7 @@ tokenizers==0.22.2 --hash=sha256:2249487018adec45d6e3554c71d46eb39fa8ea67156c640
 torch @ https://download.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp311-cp311-manylinux_2_28_aarch64.whl --hash=sha256:46fbb0aa257bb781efbfad648f5b045c0e232573b661f1461593db61342e9096
 torch-npu @ https://gitcode.com/Ascend/pytorch/releases/download/v26.3.0-beta.1-pytorch2.11.0/torch_npu-2.11.0.post4-cp311-cp311-manylinux_2_28_aarch64.whl --hash=sha256:10b3f58c8b9396b4be4027c35cf0e08ef6223699b9cf186c1d89fd5b75652536
 torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp311-cp311-manylinux_2_28_aarch64.whl --hash=sha256:7a5ecdd20fb26d8eb1d62135ddc6db0f806b17667c10e82df913fd509d1f5cfe
-torchcodec==0.11.0 --hash=sha256:5562c28dce8114597116f0884908745c29ce401e4a9d0ae46853cbcd858d4f52
+torchcodec @ https://download.pytorch.org/whl/cpu/torchcodec-0.13.0%2Bcpu-cp311-cp311-manylinux_2_28_aarch64.whl --hash=sha256:960577cfc46cafef1553dffcc529d19a0fcdb9423d374f504875c16dd5facfe5
 torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.26.0%2Bcpu-cp311-cp311-manylinux_2_28_aarch64.whl --hash=sha256:c11e55041f6b84a6c4fb28981b901475aa81c38695ccec6ddfcc54c3fa9fac4f
 tqdm==4.70.1 --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
 transformers==5.14.1 --hash=sha256:9db974c4079ede2d1a3ea7ca5a240df33f2cc26fc2b36ba64c5f2a4f43b6e725

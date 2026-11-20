@@ -16,7 +16,7 @@ python3.11 -m pip download --only-binary=:all: --require-hashes \
 
 ## Update the dependency lock
 
-Run from the repository root in a clean CPython 3.11 environment on Ubuntu 22.04 arm64. Match each of the four direct wheel URLs and hashes in `requirements.in` to their publisher before resolving. The pip report includes the source checkout as a separate local distribution.
+Run from the repository root in a clean CPython 3.11 environment on Ubuntu 22.04 arm64. Match each direct wheel URL and hash in `requirements.in` to its publisher before resolving. For TorchCodec, use the pinned arm64 CPU wheel. Its decoder must load against the system FFmpeg libraries during the image build. The pip report includes the source checkout as a separate local distribution. [TorchCodec CPU releases](https://download.pytorch.org/whl/cpu/torchcodec/)
 
 ```bash
 python -m pip install --dry-run --ignore-installed --only-binary=:all: \
