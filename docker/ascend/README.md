@@ -2,7 +2,7 @@
 
 The 910B image targets Linux arm64 and CPython 3.11. The Dockerfile pins the architecture-specific CANN manifest. The runtime lock combines the base dependencies from `pyproject.toml` and the stack from `requirements.in`. Every entry names one compatible wheel and its SHA-256. The Ascend release provides the wheel for torch_npu 2.11.0.post4. [Ascend release artifacts](https://api.gitcode.com/api/v5/repos/Ascend/pytorch/releases/tags/v26.3.0-beta.1-pytorch2.11.0)
 
-The default registry is AscendHub in China. For Docker Hub, pass `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`. Both registries serve the same pinned arm64 manifest. [Ascend image repositories](https://github.com/Ascend/cann-container-image/blob/main/OVERVIEW.zh.md)
+The default registry is AscendHub in China. For public pulls use `--build-arg CANN_REPOSITORY=quay.io/ascend/cann` or `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`. All three registries serve the same pinned arm64 manifest. [Ascend image repositories](https://github.com/Ascend/cann-container-image/blob/main/OVERVIEW.zh.md)
 
 If the upstream base was transferred by `docker save` / `docker load`, Docker may retain only its local tag. Verify the loaded arm64 image ID against `sha256:92ceaadada7011d9179f5854b08fc66981d3d604cfd72445bcbae756c777dee1`, the config referenced by the pinned manifest. Pass that verified local tag via `--build-arg CANN_IMAGE=<local-tag>` to reuse the cached layers.
 
@@ -46,31 +46,22 @@ header = "# Linux arm64, Ubuntu 22.04, CPython 3.11. One wheel hash per distribu
 PY
 ```
 
-## Build, qualify and publish
+## Publish the TeleFuser application image
 
-Build from a clean release checkout. Replace the version below with its PEP 440 version. Tag the candidate with the commit. Record the digest printed by `docker push`. Run the hardware checks on that digest, including separate 1-, 2- and 4-card Wan runs, before promoting a release. [Qualification procedure](../../docs/en/ascend_910b.md)
+Build the `runtime-payload` target from a clean release checkout. This target packages the Python environment and Wan example in a scratch image. The runnable image uses CANN layers pulled from the official Ascend registry. Record the source revision, checksums, tested driver and firmware, and validated card counts in the release. [CANN software license](https://www.hiascend.com/en/legal/cannua-download?isNewCon=true) · [Qualification procedure](../../docs/en/ascend_910b.md)
 
 ```bash
 read -r -p 'TeleFuser package version > ' TF_VERSION
 TF_REV=$(git rev-parse HEAD)
-TF_REPO=ghcr.io/tele-ai/telefuser
-TF_CANDIDATE="$TF_REPO:sha-$TF_REV-ascend910b"
-docker build --platform linux/arm64 -f docker/Dockerfile.ascend \
+TF_PAYLOAD="telefuser:ascend910b-${TF_REV:0:7}-payload"
+docker build --platform linux/arm64 --target runtime-payload -f docker/Dockerfile.ascend \
   --build-arg "TELEFUSER_VERSION=$TF_VERSION" --build-arg "SOURCE_REVISION=$TF_REV" \
-  -t "$TF_CANDIDATE" .
-docker push "$TF_CANDIDATE"
+  -t "$TF_PAYLOAD" .
 ```
 
-After qualification, point the public release tag at the tested manifest. Confirm anonymous access and publish the digest, driver and firmware versions and validated card counts alongside the release.
+Assemble the runnable image with `Dockerfile.ascend.install`. Pass `--build-arg TELEFUSER_PAYLOAD="$TF_PAYLOAD"` and the same version and revision arguments. Run the hardware checks on that image. For a GitHub Release, upload the compressed `docker save` archive, `Dockerfile.ascend.install` and their SHA-256 checksums. Verify anonymous download and repeat the documented install from those assets.
 
-```bash
-read -r -p 'Tested TeleFuser sha256 digest > ' TF_DIGEST
-docker buildx imagetools create --prefer-index=false \
-  --tag "$TF_REPO:$TF_VERSION-ascend910b" "$TF_REPO@$TF_DIGEST"
-docker buildx imagetools inspect "$TF_REPO:$TF_VERSION-ascend910b"
-```
-
-## Transfer a tested candidate without a registry
+## Save a complete image for an existing installation
 
 Use the tag on the qualification host so the recipient loads the exact image that ran the tests. Transfer both files together. The first build qualified on one and two 910B2 devices used the tag below.
 

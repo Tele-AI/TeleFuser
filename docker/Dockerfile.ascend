@@ -21,7 +21,7 @@ RUN if [ -d /tmp/ascend/wheelhouse ]; then \
         set -- --index-url https://pypi.org/simple -r /tmp/ascend/requirements.lock; \
     fi && python -I -m pip install --no-cache-dir --only-binary=:all: --require-hashes "$@"
 
-FROM system
+FROM system AS installed
 COPY --from=python-runtime /opt/telefuser/venv /opt/telefuser/venv
 COPY docker/ascend/requirements.lock /opt/telefuser/requirements.lock
 ARG TELEFUSER_VERSION=0.0.0+local
@@ -40,5 +40,16 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFUSER="${TELEFUSER_VERSION}" \
     && ffprobe -version > /dev/null && hf --version \
     && TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -I -c 'from torchcodec.decoders import VideoDecoder'
 COPY examples/wan_video/wan22_t2v_5b.py ./examples/wan_video/wan22_t2v_5b.py
+
+# Publish the application files separately from the vendor runtime.
+FROM scratch AS runtime-payload
+ARG SOURCE_REVISION=local
+ARG TELEFUSER_VERSION=0.0.0+local
+LABEL org.opencontainers.image.source="https://github.com/Tele-AI/TeleFuser" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="${TELEFUSER_VERSION}"
+COPY --from=installed /opt/telefuser/ /opt/telefuser/
+
+FROM installed
 # Inherit the pinned CANN image's entrypoint to initialize the toolkit, AscendNPU IR and ATB.
 CMD ["telefuser", "--help"]

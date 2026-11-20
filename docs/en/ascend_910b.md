@@ -4,6 +4,21 @@
 
 The candidate passed Wan generation on one and two Atlas 910B2 cards. Choose one installation method, then keep the same Bash session for checkpoint setup and generation.
 
+### Install the public Docker package
+
+On a Linux arm64 host, download the prebuilt TeleFuser application image from the public candidate release. Docker loads the frozen Python environment and assembles the runnable image with the official CANN base and Ubuntu FFmpeg packages. The commands require access to GitHub Releases, Quay and the Ubuntu package mirrors. [Public Docker package](https://github.com/yx0716/TeleFuser-upstream/releases/tag/ascend910b-c27fabd)
+
+```bash
+TF_RELEASE=https://github.com/yx0716/TeleFuser-upstream/releases/download/ascend910b-c27fabd
+TF_IMAGE=telefuser:ascend910b-c27fabd-public
+curl -fsSLO "$TF_RELEASE/telefuser-ascend910b-c27fabd-runtime.tar.gz"
+curl -fsSLO "$TF_RELEASE/Dockerfile.ascend.install"
+curl -fsSLO "$TF_RELEASE/SHA256SUMS"
+sha256sum -c SHA256SUMS &&
+  docker load -i telefuser-ascend910b-c27fabd-runtime.tar.gz &&
+  docker build --platform linux/arm64 -t "$TF_IMAGE" - < Dockerfile.ascend.install
+```
+
 ### Load the offline archive
 
 To install the tested image on a Linux arm64 host, place the archive and its checksum in one directory, run the commands below and proceed to the checkpoints. Compare the Docker image ID with the hardware record at the end of this page. The tested archive is 6,137,716,301 bytes with SHA-256 `8a85baafb991f8640af6f3dba9f38ac8a76376ca669e7e64363c7eee8e9f2369`.
@@ -31,15 +46,6 @@ docker build --platform linux/arm64 -f docker/Dockerfile.ascend \
 ```
 
 The build defaults to AscendHub in China. For Docker Hub add `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`. Both registries serve the same arm64 manifest.
-
-### Pull a published release
-
-After a qualified image is published, you can install it directly using the TeleFuser digest from its release page. The intended release tag is `ghcr.io/tele-ai/telefuser:<release>-ascend910b`.
-
-```bash
-read -r -p 'TeleFuser image digest from release page > ' TF_IMAGE
-docker pull "$TF_IMAGE"
-```
 
 ## Prepare checkpoints and outputs
 

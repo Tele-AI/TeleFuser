@@ -1,0 +1,19 @@
+ARG TELEFUSER_PAYLOAD=telefuser:ascend910b-c27fabd-payload
+ARG CANN_IMAGE=quay.io/ascend/cann:9.3.0-beta.1-910b-ubuntu22.04-py3.11@sha256:cf6ab60eefb56b8d0e3ecad6d03c30c457b4dff86bcbf5dd7ff1a90427348b7b
+FROM ${TELEFUSER_PAYLOAD} AS payload
+FROM ${CANN_IMAGE}
+
+USER root
+RUN test "$(uname -m)" = aarch64 && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/opt/telefuser/venv/bin:${PATH}"
+
+ARG SOURCE_REVISION=c27fabdcdf6f1156126e1bc22699f1af4580c97e
+ARG TELEFUSER_VERSION=0.0.0+gc27fabd.local
+LABEL org.opencontainers.image.source="https://github.com/Tele-AI/TeleFuser" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="${TELEFUSER_VERSION}"
+WORKDIR /opt/telefuser
+COPY --from=payload /opt/telefuser/ /opt/telefuser/
+CMD ["telefuser", "--help"]

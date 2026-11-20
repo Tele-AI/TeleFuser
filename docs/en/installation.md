@@ -65,7 +65,7 @@ ROCm before CUDA. Examples ending in `_rocm.py` (for example `examples/wan_video
 are the validated entry points; see [Hardware Platforms](platforms.md) for per-platform capabilities and backend
 availability.
 
-For Atlas 910B2, the image includes CANN 9.3.0-beta.1, PyTorch 2.11.0+cpu, torch_npu 2.11.0.post4 and the Wan2.2 5B example. The runbook covers offline image loading, source builds, digest-based pulls after release and device checks. One- and two-card generation passed on hardware. [Ascend 910B image and runbook](ascend_910b.md)
+For Atlas 910B2, the public Docker package supplies PyTorch 2.11.0+cpu, torch_npu 2.11.0.post4 and the Wan2.2 5B example. Docker assembles it with the official CANN 9.3.0-beta.1 base. The runbook covers installation, device checks and generation. One- and two-card generation passed on hardware. [Ascend 910B image and runbook](ascend_910b.md)
 
 ## Model Checkpoints
 

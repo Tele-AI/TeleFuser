@@ -1,6 +1,6 @@
 # 使用镜像在 Ascend 910B 上运行 Wan2.2 文生视频
 
-本手册面向 Linux arm64 的 Atlas 910B2 64 GB。镜像将 CANN 9.3.0-beta.1 与昇腾同次发布的 TorchNPU 配套。该候选镜像已通过单卡与双卡 Wan 实机验收。可加载候选镜像归档，或从包含 `docker/Dockerfile.ascend` 的 checkout 构建。四卡仍待验收。[昇腾 CANN](https://www.hiascend.com/cann/download?versionId=822&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=0) · [TorchNPU 发布与附件](https://api.gitcode.com/api/v5/repos/Ascend/pytorch/releases/tags/v26.3.0-beta.1-pytorch2.11.0)
+本手册面向 Linux arm64 的 Atlas 910B2 64 GB。镜像将 CANN 9.3.0-beta.1 与昇腾同次发布的 TorchNPU 配套。该候选版本已通过单卡与双卡 Wan 实机验收，四卡仍待验收。[昇腾 CANN](https://www.hiascend.com/cann/download?versionId=822&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=0) · [TorchNPU 发布与附件](https://api.gitcode.com/api/v5/repos/Ascend/pytorch/releases/tags/v26.3.0-beta.1-pytorch2.11.0)
 
 ## 运行条件
 
@@ -14,6 +14,21 @@
 以下安装方式任选其一。准备权重、设备自检与生成使用同一个 **Bash** 会话。设备映射示例假定宿主分配的物理设备从 0 开始。设备节点、驱动库和 `npu-smi` 的宿主路径参照昇腾标准安装。[昇腾软件与固件下载](https://www.hiascend.com/developer/download) · [上游容器挂载示例](https://docs.vllm.ai/projects/vllm-omni/en/latest/getting_started/installation/npu/)
 
 ## 安装镜像与准备权重
+
+### 从公开 Docker 包安装
+
+在 Linux arm64 宿主机上下载公开候选版本。Docker 加载预装好的 TeleFuser 和 Python 依赖，从昇腾官方仓拉取固定版本的 CANN 底座，并安装 Ubuntu 的 FFmpeg 包。安装需要访问 GitHub Releases、Quay 和 Ubuntu 软件源。[公开 Docker 包](https://github.com/yx0716/TeleFuser-upstream/releases/tag/ascend910b-c27fabd)
+
+```bash
+TF_RELEASE=https://github.com/yx0716/TeleFuser-upstream/releases/download/ascend910b-c27fabd
+TF_IMAGE=telefuser:ascend910b-c27fabd-public
+curl -fsSLO "$TF_RELEASE/telefuser-ascend910b-c27fabd-runtime.tar.gz"
+curl -fsSLO "$TF_RELEASE/Dockerfile.ascend.install"
+curl -fsSLO "$TF_RELEASE/SHA256SUMS"
+sha256sum -c SHA256SUMS &&
+  docker load -i telefuser-ascend910b-c27fabd-runtime.tar.gz &&
+  docker build --platform linux/arm64 -t "$TF_IMAGE" - < Dockerfile.ascend.install
+```
 
 ### 从离线归档安装
 
@@ -42,15 +57,6 @@ docker build --platform linux/arm64 -f docker/Dockerfile.ascend \
 ```
 
 默认从昇腾境内仓下载 CANN 底座。使用 Docker Hub 时，在构建命令中加 `--build-arg CANN_REPOSITORY=docker.io/ascendai/cann`，两处清单的 arm64 摘要相同。
-
-### 从发布仓拉取
-
-发布后，可使用发布页给出的完整 TeleFuser 镜像引用。镜像将使用 `ghcr.io/tele-ai/telefuser:<release>-ascend910b`，按 digest 拉取可复现同一批验收结果。
-
-```bash
-read -r -p '粘贴发布页的 TeleFuser 镜像完整引用 > ' TF_IMAGE
-docker pull "$TF_IMAGE"
-```
 
 ### 准备权重与输出目录
 
