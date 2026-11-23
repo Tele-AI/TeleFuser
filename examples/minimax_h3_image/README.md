@@ -20,7 +20,7 @@ The pipeline uses TeleFuser model loading, stages, workers, attention dispatch a
 | FP8 linear quantization | Supported | Existing tf-kernel FP8 backend; FP32 boundary projections retained |
 | CPU offload | Supported | Model CPU offload, including sharded DiT; sequential conditioning phases |
 | LoRA / feature cache / compilation / FSDP | Unsupported | Not exposed by this initial image integration |
-| Server API | Unsupported | Local pipeline and command line example only |
+| Server API | Unsupported | Local Python and CLI entrypoints; service schema not validated |
 
 Numerical feature checks use small models, including SP2, TP2 and SP2×TP2 with FP8 and Sol-Attn together.
 See [validation notes](../../docs/en/h3_image_pan2_validation.md) for the distinction between these checks and full weights.
@@ -59,10 +59,18 @@ MiniMax-H3-Image/
 `--text_encoder_path` can point to an existing identical H3 Qwen3-VL text encoder to avoid duplicating weights.
 It must contain the released encoder configuration and all fourteen shards.
 
+Set the shared model root (the default is `/hhb-data/aigc/model_zoo`):
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+The default checkpoint directory is `$TF_MODEL_ZOO_PATH/MiniMaxAI_MiniMax-H3-Image`. Use `--model_root` to override it.
+
 ## Quick Start
 
 ```bash
-python examples/minimax_h3_image/generate.py \
+python examples/minimax_h3_image/minimax_h3_image_t2i_h100.py \
   --model_root /path/to/MiniMax-H3-Image \
   --text_encoder_path /path/to/MiniMax-H3-Image/text_encoder \
   --prompt "A red fox in a snowy forest, detailed natural photograph." \
@@ -75,28 +83,33 @@ The command writes a 2048×2048 PNG using all six published heads and the publis
 
 ### Image generation and editing
 
-#### `generate.py`
+#### `minimax_h3_image_t2i_h100.py`
 
 Use the same command for text-only generation or image editing; the prompt can refer to `<Picture 1>`, etc.
 
 ```bash
-python examples/minimax_h3_image/generate.py \
+python examples/minimax_h3_image/minimax_h3_image_t2i_h100.py \
   --model_root /path/to/MiniMax-H3-Image \
   --text_encoder_path /path/to/MiniMax-H3-Image/text_encoder \
   --prompt "Change the sky in <Picture 1> to sunset." \
   --image inputs/landscape.png --output_path work_dirs/edit.png
 
-python examples/minimax_h3_image/generate.py \
+python examples/minimax_h3_image/minimax_h3_image_t2i_h100.py \
   --model_root /path/to/MiniMax-H3-Image \
   --text_encoder_path /path/to/MiniMax-H3-Image/text_encoder \
   --prompt "A red fox in a snowy forest." \
-  --device_ids 0 1 2 3 --sp 2 --tp 2 --fp8 --sol --sol_fp8
+  --gpu_num 4 --sp 2 --tp 2 --fp8 --sol --sol_fp8
 ```
+
+Key options:
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--device_ids` | `0` | Visible CUDA device IDs; count must equal SP×TP |
-| `--sp`, `--tp` | `1`, `1` | Ulysses and tensor parallel degrees |
+| `--model_root` | `PPL_CONFIG["model_root"]` | Released checkpoint directory |
+| `--text_encoder_path` | `MODEL_ROOT/text_encoder` | Optional shared Qwen3-VL encoder directory |
+| `--gpu_num` | `1` | Number of GPUs; defaults to Ulysses SP unless `--tp` is set |
+| `--device_ids` | first `gpu_num` devices | Optional explicit visible CUDA IDs; count must equal SP×TP |
+| `--sp`, `--tp` | `gpu_num / tp`, `1` | Ulysses and tensor parallel degrees |
 | `--fp8` | off | Online linear weight/activation FP8 through tf-kernel |
 | `--sol`, `--sol_fp8` | off | Sol-Attn; optional post-RoPE FP8 attention |
 | `--height`, `--width` | `2048`, `2048` | Returned image dimensions |
@@ -104,7 +117,29 @@ python examples/minimax_h3_image/generate.py \
 | `--seed` | `0` | CPU request generator seed |
 | `--image` | empty | Ordered reference paths, at most sixteen |
 
+Key behavior:
+
+- `PPL_CONFIG` declares the example defaults. `get_pipeline(parallelism, model_root, ...)` loads one reusable pipeline.
+- `run()` returns a PIL image; `run_with_file()` saves the output and returns `{"output_path": ...}`.
+- The CLI stops workers in `finally`. Python callers must call `pipeline.stop()` when finished.
+- These local entrypoints do not claim a validated `telefuser serve` contract.
+
 ## Configuration
+
+### Python entrypoints
+
+```python
+from examples.minimax_h3_image.minimax_h3_image_t2i_h100 import get_pipeline, run_with_file
+
+pipeline = get_pipeline(parallelism=2, model_root="/path/to/MiniMax-H3-Image")
+try:
+    result = run_with_file(pipeline, prompt="A red fox in a snowy forest.")
+    print(result["output_path"])
+finally:
+    pipeline.stop()
+```
+
+### Sampling and parallel configuration
 
 Text is encoded verbatim without a chat template. Image references retain their own aspect ratio and are resized
 separately for the VAE (short edge 1024–2048) and vision conditioner (short edge 1024). The image VAE uses ImageNet
