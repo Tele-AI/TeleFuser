@@ -57,4 +57,4 @@ NCCL_IB_DISABLE=1 python tools/validation/validate_pan2_sampling.py \
   --output work_dirs/pan2-sampling.json
 ```
 
-See the [example](https://github.com/Tele-AI/TeleFuser/tree/main/examples/pan2) for released-checkpoint generation commands.
+See the [example](README.md) for released-checkpoint generation commands.

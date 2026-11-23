@@ -23,7 +23,7 @@ The transformer supports the existing Ulysses SP, TP, Sol-Attn and tf-kernel FP8
 | Server API | Unsupported | Local Python and CLI entrypoints; service schema not validated |
 
 Numerical checks cover SP2, TP2 and SP2×TP2, including FP8+Sol-Attn and repeated CPU offload.
-See [validation notes](../../docs/en/pan2_validation.md) for full checkpoint verification status.
+See [validation notes](VALIDATION.md) for full checkpoint verification status.
 
 ## Requirements
 

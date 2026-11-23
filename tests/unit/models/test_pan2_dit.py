@@ -28,6 +28,7 @@ def tiny_model() -> PAN2DiT:
 
 
 def test_released_pan2_meta_shapes() -> None:
+    """Verify released pan2 meta shapes."""
     with torch.device("meta"):
         model = PAN2DiT()
     assert len(model.transformer_blocks) == 44
@@ -37,6 +38,7 @@ def test_released_pan2_meta_shapes() -> None:
 
 
 def test_precision_does_not_round_modulation_weights() -> None:
+    """Verify precision does not round modulation weights."""
     model = tiny_model()
     original = model.transformer_blocks[0].norm1.linear.weight.detach().clone()
     model.to(dtype=torch.bfloat16)
@@ -46,6 +48,7 @@ def test_precision_does_not_round_modulation_weights() -> None:
 
 
 def test_tiny_pan2_reference_when_installed() -> None:
+    """Verify tiny pan2 reference when installed."""
     try:
         from diffusers.models.transformers.transformer_pan2 import PAN2Transformer3DModel
     except ImportError:
@@ -64,6 +67,7 @@ def test_tiny_pan2_reference_when_installed() -> None:
 
 
 def test_converter_uses_checkpoint_architecture(tmp_path) -> None:
+    """Verify converter uses checkpoint architecture."""
     model = tiny_model()
     path = tmp_path / "config.json"
     path.write_text(json.dumps(dict(model.config)))
@@ -74,6 +78,7 @@ def test_converter_uses_checkpoint_architecture(tmp_path) -> None:
 
 
 def test_device_only_move_does_not_clone_modulation_weights(monkeypatch) -> None:
+    """Verify device only move does not clone modulation weights."""
     model = tiny_model()
 
     def reject_clone(*args, **kwargs):
