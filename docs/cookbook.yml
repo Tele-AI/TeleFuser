@@ -158,6 +158,13 @@ pages:
       zh: LTX-2.5 参考输入
     sources:
       en: examples/data/ltx25/README.md
+  - slug: pan2-validation
+    category: video-generation
+    title:
+      en: PAN2 validation
+      zh: PAN2 验证记录
+    sources:
+      en: examples/pan2/VALIDATION.md
 guides:
   - category: services
     title:

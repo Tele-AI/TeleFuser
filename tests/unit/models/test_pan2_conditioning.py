@@ -12,6 +12,7 @@ except ImportError as exc:
 
 @pytest.mark.parametrize("model_class", [PAN2TextEncoder])
 def test_conditioner_cast_preserves_rotary_frequencies(model_class) -> None:
+    """Verify conditioner cast preserves rotary frequencies."""
     model = model_class.__new__(model_class)
     BaseModel.__init__(model)
     model.model = torch.nn.Linear(4, 4)

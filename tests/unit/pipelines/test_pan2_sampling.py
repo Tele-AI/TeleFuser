@@ -36,6 +36,7 @@ class ConstantVideoVelocity(torch.nn.Module):
 
 
 def test_pan2_cfg_first_frame_and_fp32_accumulation(tmp_path) -> None:
+    """Verify pan2 cfg first frame and fp32 accumulation."""
     (tmp_path / "scheduler_config.json").write_text(json.dumps({"shift": 9.0, "num_train_timesteps": 1000}))
     model = ConstantVideoVelocity()
     stage = PAN2DenoisingStage(
@@ -52,6 +53,7 @@ def test_pan2_cfg_first_frame_and_fp32_accumulation(tmp_path) -> None:
 
 
 def test_pan2_negative_prompt_duration_is_request_specific() -> None:
+    """Verify pan2 negative prompt duration is request specific."""
     a = get_pan2_default_negative_prompt(121, 24)
     b = get_pan2_default_negative_prompt(241, 24)
     assert '"time_range_sec":"0 to 5"' in a
@@ -72,6 +74,7 @@ class CapturingVAE(torch.nn.Module):
 
 
 def test_pan2_vae_preprocess_and_denormalization_cast_order() -> None:
+    """Verify pan2 vae preprocess and denormalization cast order."""
     from PIL import Image
     from diffusers.image_processor import VaeImageProcessor
 
