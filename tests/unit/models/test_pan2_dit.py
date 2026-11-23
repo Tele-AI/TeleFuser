@@ -71,3 +71,13 @@ def test_converter_uses_checkpoint_architecture(tmp_path) -> None:
     loaded = PAN2DiT(**kwargs)
     loaded.load_state_dict(weights, strict=True)
     assert loaded.config.out_channels == 2
+
+
+def test_device_only_move_does_not_clone_modulation_weights(monkeypatch) -> None:
+    model = tiny_model()
+
+    def reject_clone(*args, **kwargs):
+        raise AssertionError("Device-only moves must not duplicate FP32 modulation weights")
+
+    monkeypatch.setattr(torch.Tensor, "clone", reject_clone)
+    model.to("cpu")

@@ -5,13 +5,12 @@ import torch
 
 try:
     from telefuser.core.base_model import BaseModel
-    from telefuser.models.minimax_h3_image_encoder import MiniMaxH3ImageEncoder
     from telefuser.models.pan2_conditioning import PAN2TextEncoder
 except ImportError as exc:
     pytest.skip(f"Optional conditioning dependencies unavailable: {exc}", allow_module_level=True)
 
 
-@pytest.mark.parametrize("model_class", [MiniMaxH3ImageEncoder, PAN2TextEncoder])
+@pytest.mark.parametrize("model_class", [PAN2TextEncoder])
 def test_conditioner_cast_preserves_rotary_frequencies(model_class) -> None:
     model = model_class.__new__(model_class)
     BaseModel.__init__(model)

@@ -16,14 +16,14 @@ The transformer supports the existing Ulysses SP, TP, Sol-Attn and tf-kernel FP8
 | Text to video / image to video | Supported | One prompt and optional first RGB frame |
 | Sequence parallel | Supported | Ulysses; odd video/text lengths are padded and compacted before attention |
 | Tensor parallel | Supported | Joint attention, refiner, FFNs and modulation projections; combines with SP |
-| Sol-Attn | Supported | Joint layers; text-only refiner stays dense; optional FP8 attention |
+| Sol-Attn | Supported | Joint layers; text-only refiner stays dense; BF16 attention |
 | FP8 linear quantization | Supported | Existing tf-kernel FP8 backend, FP32 modulation retained |
 | CPU offload | Supported | Model CPU offload including SP/TP shards and repeated requests |
 | LoRA / feature cache / compilation / FSDP / Ring SP | Unsupported | Not exposed by this integration |
 | Server API | Unsupported | Local Python and CLI entrypoints; service schema not validated |
 
 Numerical checks cover SP2, TP2 and SP2×TP2, including FP8+Sol-Attn and repeated CPU offload.
-See [validation notes](../../docs/en/h3_image_pan2_validation.md) for full checkpoint verification status.
+See [validation notes](../../docs/en/pan2_validation.md) for full checkpoint verification status.
 
 ## Requirements
 
@@ -88,7 +88,7 @@ python examples/pan2/pan2_text_to_video_h100.py \
 
 python examples/pan2/pan2_text_to_video_h100.py \
   --model_root /path/to/PAN2 --prompt "A red fox walks through snow." \
-  --gpu_num 4 --sp 2 --tp 2 --fp8 --sol --sol_fp8 \
+  --gpu_num 4 --sp 2 --tp 2 --fp8 --sol \
   --num_frames 241 --output_path work_dirs/pan2-10s.mp4
 ```
 
@@ -101,7 +101,7 @@ Key options:
 | `--device_ids` | first `gpu_num` devices | Optional explicit visible CUDA IDs; count must equal SP×TP |
 | `--sp`, `--tp` | `gpu_num / tp`, `1` | Ulysses and tensor parallel degrees |
 | `--fp8` | off | tf-kernel FP8 linear quantization |
-| `--sol`, `--sol_fp8` | off | Sparse joint attention and optional FP8 Q/K/V |
+| `--sol` | off | Sparse joint BF16 attention |
 | `--height`, `--width` | `704`, `1248` | Positive multiples of 32 |
 | `--num_frames` | `121` | `4*k+1`; 241 frames span 10 seconds at 24 fps |
 | `--num_inference_steps` | `50` | Number of flow-matching Euler steps |
@@ -155,3 +155,5 @@ FP32. The example uses five initial dense steps and one dense layer before Sol-A
 The source model is [ifm-ai/PAN2](https://github.com/ifm-ai/PAN2).
 The transformer and preprocessing preserve Apache-2.0 notices from the pinned Diffusers implementation.
 This example integrates local generation components; it does not port the hosted prompt-rewriting or guardrail service.
+
+FP8 in this example refers to linear GEMM quantization. FP8 Q/K/V Sol attention is not validated for this model and is not exposed by this example.
