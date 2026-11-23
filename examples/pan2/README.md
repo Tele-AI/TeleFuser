@@ -20,7 +20,7 @@ The transformer supports the existing Ulysses SP, TP, Sol-Attn and tf-kernel FP8
 | FP8 linear quantization | Supported | Existing tf-kernel FP8 backend, FP32 modulation retained |
 | CPU offload | Supported | Model CPU offload including SP/TP shards and repeated requests |
 | LoRA / feature cache / compilation / FSDP / Ring SP | Unsupported | Not exposed by this integration |
-| Server API | Unsupported | Local pipeline and command line example only |
+| Server API | Unsupported | Local Python and CLI entrypoints; service schema not validated |
 
 Numerical checks cover SP2, TP2 and SP2×TP2, including FP8+Sol-Attn and repeated CPU offload.
 See [validation notes](../../docs/en/h3_image_pan2_validation.md) for full checkpoint verification status.
@@ -52,10 +52,18 @@ PAN2/
 
 Use the **provided text-only encoder** in `IFM/PAN2`; a separate complete Qwen3.5 multimodal checkpoint is unnecessary.
 
+Set the shared model root (the default is `/hhb-data/aigc/model_zoo`):
+
+```bash
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+```
+
+The default checkpoint directory is `$TF_MODEL_ZOO_PATH/IFM_PAN2`. Use `--model_root` to override it.
+
 ## Quick Start
 
 ```bash
-python examples/pan2/generate.py \
+python examples/pan2/pan2_text_to_video_h100.py \
   --model_root /path/to/PAN2 \
   --prompt "A red fox walks through a snowy forest, tracking camera, natural light." \
   --output_path work_dirs/pan2.mp4
@@ -69,25 +77,29 @@ The example encodes the supplied string directly and does not call an external c
 
 ### Video generation
 
-#### `generate.py`
+#### `pan2_text_to_video_h100.py`
 
 Pass `--image` for first-frame conditioning. Frame counts must be `4*k+1`; both spatial dimensions must divide 32.
 
 ```bash
-python examples/pan2/generate.py \
+python examples/pan2/pan2_text_to_video_h100.py \
   --model_root /path/to/PAN2 --image inputs/fox.png \
   --prompt "The fox walks forward through the snow." --output_path work_dirs/pan2-i2v.mp4
 
-python examples/pan2/generate.py \
+python examples/pan2/pan2_text_to_video_h100.py \
   --model_root /path/to/PAN2 --prompt "A red fox walks through snow." \
-  --device_ids 0 1 2 3 --sp 2 --tp 2 --fp8 --sol --sol_fp8 \
+  --gpu_num 4 --sp 2 --tp 2 --fp8 --sol --sol_fp8 \
   --num_frames 241 --output_path work_dirs/pan2-10s.mp4
 ```
 
+Key options:
+
 | Option | Default | Description |
 | --- | --- | --- |
-| `--device_ids` | `0` | Visible device IDs; count must equal SP×TP |
-| `--sp`, `--tp` | `1`, `1` | Ulysses and tensor parallel degrees |
+| `--model_root` | `PPL_CONFIG["model_root"]` | Released checkpoint directory |
+| `--gpu_num` | `1` | Number of GPUs; defaults to Ulysses SP unless `--tp` is set |
+| `--device_ids` | first `gpu_num` devices | Optional explicit visible CUDA IDs; count must equal SP×TP |
+| `--sp`, `--tp` | `gpu_num / tp`, `1` | Ulysses and tensor parallel degrees |
 | `--fp8` | off | tf-kernel FP8 linear quantization |
 | `--sol`, `--sol_fp8` | off | Sparse joint attention and optional FP8 Q/K/V |
 | `--height`, `--width` | `704`, `1248` | Positive multiples of 32 |
@@ -98,7 +110,29 @@ python examples/pan2/generate.py \
 | `--negative_prompt` | released default | Optional replacement negative caption |
 | `--seed` | `0` | CPU noise generator seed |
 
+Key behavior:
+
+- `PPL_CONFIG` declares the example defaults. `get_pipeline(parallelism, model_root, ...)` loads one reusable pipeline.
+- `run()` returns RGB frames as a `[T,H,W,C]` tensor in `[0,1]`; `run_with_file()` saves the output and returns `{"output_path": ...}`.
+- The CLI stops workers in `finally`. Python callers must call `pipeline.stop()` when finished.
+- These local entrypoints do not claim a validated `telefuser serve` contract.
+
 ## Configuration
+
+### Python entrypoints
+
+```python
+from examples.pan2.pan2_text_to_video_h100 import get_pipeline, run_with_file
+
+pipeline = get_pipeline(parallelism=2, model_root="/path/to/PAN2")
+try:
+    result = run_with_file(pipeline, prompt="A red fox in a snowy forest.")
+    print(result["output_path"])
+finally:
+    pipeline.stop()
+```
+
+### Sampling and parallel configuration
 
 The text conditioner applies the released chat template, reads `hidden_states[-3]` and removes the system/user
 header tokens, with the released 1536-token budget. The default negative caption has time ranges filled from the requested clip length.
