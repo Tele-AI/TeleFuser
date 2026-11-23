@@ -29,18 +29,13 @@ def build_pipeline(
     tp: int = 1,
     fp8: bool = False,
     sol: bool = False,
-    sol_fp8: bool = False,
 ) -> PAN2Pipeline:
     root = Path(model_root)
     torch.cuda.set_device(device_ids[0])
     parallel = ParallelConfig(device_ids=device_ids, sp_ulysses_degree=sp, tp_degree=tp)
     parallel.validate()
-    if sol_fp8 and not sol:
-        raise ValueError("--sol_fp8 requires --sol")
     offload = OffloadConfig(offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD, pin_cpu_memory=False)
-    attention = (
-        AttentionConfig.sol_attention(dense_timesteps=5, dense_layers=1, sol_fp8=sol_fp8) if sol else AttentionConfig()
-    )
+    attention = AttentionConfig.sol_attention(dense_timesteps=5, dense_layers=1) if sol else AttentionConfig()
     quant = QuantConfig(enabled=fp8, quant_type=QuantType.FP8, kernel_backend=QuantKernelBackend.TF_KERNEL)
     runtime = ModelRuntimeConfig(
         device_id=device_ids[0],

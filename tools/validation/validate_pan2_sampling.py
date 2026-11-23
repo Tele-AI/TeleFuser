@@ -25,12 +25,22 @@ from telefuser.core.config import (
     QuantType,
     WeightOffloadType,
 )
-from telefuser.models.minimax_h3_dit import MiniMaxH3DiTConfig
-from telefuser.models.minimax_h3_image_dit import MiniMaxH3ImageDiT
 from telefuser.models.pan2_dit import PAN2DiT
-from telefuser.pipelines.minimax_h3_image.stages import MiniMaxH3ImageDenoisingStage
+from telefuser.ops.attention import attention_impl
 from telefuser.pipelines.pan2.stages import PAN2DenoisingStage
 from telefuser.worker import ParallelWorker
+
+_original_warning = attention_impl.logger.warning
+
+
+def _strict_attention_warning(message: str, *args: object, **kwargs: object) -> None:
+    if "Sol-Attn execution failed" in message or ("SOL_ATTN" in message and "falling back" in message):
+        detail = message % args if args else message
+        raise AssertionError(f"Requested Sol-Attn did not execute: {detail}")
+    _original_warning(message, *args, **kwargs)
+
+
+attention_impl.logger.warning = _strict_attention_warning
 
 
 class FixtureManager:
@@ -45,7 +55,7 @@ class FixtureManager:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=["pan2", "h3-image"], required=True)
+    parser.add_argument("--model", choices=["pan2"], default="pan2")
     parser.add_argument("--scheduler-config", type=Path, help="Released PAN2 scheduler_config.json")
     parser.add_argument("--device-ids", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--sp", type=int, default=2)
@@ -57,7 +67,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.model == "pan2" and args.scheduler_config is None:
         parser.error("PAN2 requires --scheduler-config")
-    if args.sol_fp8 and not args.sol:
+    if args.sol_fp8 and (not args.sol):
         parser.error("--sol-fp8 requires --sol")
     parallel = ParallelConfig(device_ids=args.device_ids, sp_ulysses_degree=args.sp, tp_degree=args.tp)
     parallel.validate()
@@ -79,52 +89,23 @@ def main() -> None:
         if args.sol
         else AttentionConfig(),
     )
-    if args.model == "h3-image":
-        model = MiniMaxH3ImageDiT(
-            MiniMaxH3DiTConfig(
-                hidden_size=256,
-                num_layers=2,
-                token_refiner_num_layers=1,
-                num_attention_heads=4,
-                attention_head_dim=128,
-                ffn_hidden_size=512,
-                latents_dim=2,
-                text_dim=32,
-                time_embed_hidden_size=256,
-                time_embed_dim=128,
-                rope_inv_freq_len=16,
-            )
-        )
-        inputs = [
-            {"hidden_states": torch.randn(5, 32), "token_tags": torch.ones(5, dtype=torch.long)},
-            [torch.randn(1, 2, 4, 4)],
-            256,
-            512,
-            torch.Generator().manual_seed(71).get_state(),
-        ]
+    model = PAN2DiT(
+        in_channels=5,
+        out_channels=2,
+        num_attention_heads=4,
+        attention_head_dim=128,
+        num_layers=2,
+        num_refiner_layers=1,
+        text_embed_dim=32,
+        rope_axes_dim=(16, 56, 56),
+        mlp_ratio=2,
+        context_mlp_ratio=2,
+        refiner_mlp_ratio=2,
+    ).to(dtype=torch.bfloat16)
+    inputs = [torch.randn(1, 5, 32), torch.randn(1, 3, 32), torch.randn(1, 2, 1, 8, 16), 128, 256, 5, 3, 2.5, 71]
 
-        def build(m: BaseModel, config: ModelRuntimeConfig) -> MiniMaxH3ImageDenoisingStage:
-            return MiniMaxH3ImageDenoisingStage(
-                FixtureManager(m), config, [1.0, 0.967523694, 0.887548506, 0.75, 0.532773912, 0.232008874, 0.0]
-            )
-    else:
-        model = PAN2DiT(
-            in_channels=5,
-            out_channels=2,
-            num_attention_heads=4,
-            attention_head_dim=128,
-            num_layers=2,
-            num_refiner_layers=1,
-            text_embed_dim=32,
-            rope_axes_dim=(16, 56, 56),
-            mlp_ratio=2,
-            context_mlp_ratio=2,
-            refiner_mlp_ratio=2,
-        ).to(dtype=torch.bfloat16)
-        inputs = [torch.randn(1, 5, 32), torch.randn(1, 3, 32), torch.randn(1, 2, 1, 8, 16), 128, 256, 5, 3, 2.5, 71]
-
-        def build(m: BaseModel, config: ModelRuntimeConfig) -> PAN2DenoisingStage:
-            return PAN2DenoisingStage(FixtureManager(m), config, str(args.scheduler_config))
+    def build(m: BaseModel, config: ModelRuntimeConfig) -> PAN2DenoisingStage:
+        return PAN2DenoisingStage(FixtureManager(m), config, str(args.scheduler_config))
 
     worker_stage = build(copy.deepcopy(model), runtime)
     expected = build(model, baseline_config).denoise(*inputs)

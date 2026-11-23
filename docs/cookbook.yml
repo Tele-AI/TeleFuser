@@ -116,13 +116,6 @@ pages:
       zh: PAN2 视频生成
     sources:
       en: examples/pan2/README.md
-  - slug: minimax-h3-image
-    category: image-generation
-    title:
-      en: MiniMax H3 Image
-      zh: MiniMax H3 图像生成
-    sources:
-      en: examples/minimax_h3_image/README.md
   - slug: minimax-h3
     category: audio-video
     title:

@@ -47,7 +47,6 @@ def get_pipeline(
     tp: int = 1,
     fp8: bool = False,
     sol: bool = False,
-    sol_fp8: bool = False,
 ) -> PAN2Pipeline:
     """Load the released checkpoint with TeleFuser model CPU offload and SP/TP workers."""
     if parallelism < 1 or tp < 1:
@@ -67,7 +66,6 @@ def get_pipeline(
         tp=tp,
         fp8=fp8,
         sol=sol,
-        sol_fp8=sol_fp8,
     )
 
 
@@ -141,7 +139,6 @@ def main() -> None:
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--fp8", action="store_true")
     parser.add_argument("--sol", action="store_true")
-    parser.add_argument("--sol_fp8", action="store_true")
     parser.add_argument("--output_path", default=PPL_CONFIG["output_path"])
     args = parser.parse_args()
     pipeline = get_pipeline(
@@ -152,7 +149,6 @@ def main() -> None:
         tp=args.tp,
         fp8=args.fp8,
         sol=args.sol,
-        sol_fp8=args.sol_fp8,
     )
     try:
         result = run_with_file(
