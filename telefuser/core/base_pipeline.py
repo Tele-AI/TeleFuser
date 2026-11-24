@@ -371,8 +371,8 @@ class BasePipeline(ABC):
                     resize_frames, size=(height, width), mode="bicubic", align_corners=False, antialias=True
                 )
                 frames = frames.to(resize_dtype)
-        frames = rearrange(frames, "C T H W -> T H W C")
-        frames = ((frames.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)
+        frames = frames.permute(1, 2, 3, 0)  # C T H W -> T H W C
+        frames = ((frames.float() + 1.0) * 127.5).clamp_(0, 255).to(torch.uint8).contiguous().cpu().numpy()
         return [Image.fromarray(frame) for frame in frames]
 
     def generate_noise(

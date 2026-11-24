@@ -253,8 +253,15 @@ class Wan22TI2VPipeline(BasePipeline):
         )
         latents = latents_handler()
 
-        # Decode video
-        frames_handler = auto_async_call(self.vae_stage.process, "decode_video", latents, **tiler_kwargs)
+        # Decode video (keep on device for single-process decode so uint8 conversion runs before D2H)
+        keep_on_device = not self.config.enable_vae_parallel and not self.config.enable_vae_ray
+        frames_handler = auto_async_call(
+            self.vae_stage.process,
+            "decode_video",
+            latents,
+            return_cpu=not keep_on_device,
+            **tiler_kwargs,
+        )
         frames = frames_handler()
         frames = self.tensor2video(frames[0])
 

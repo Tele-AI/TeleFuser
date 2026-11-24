@@ -8,6 +8,7 @@ Supports both T2V and I2V generation with:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from functools import partial
 from typing import Any
 
@@ -313,6 +314,19 @@ class TI2VDenoisingStage(BaseStage):
                 # The mask already has last frame = 0, so we need to manually set it
                 latents[0, :, -1:] = end_latent
 
+        if prompt_emb_posi is not None and prompt_emb_posi.dtype != self.torch_dtype:
+            prompt_emb_posi = prompt_emb_posi.to(dtype=self.torch_dtype)
+        if prompt_emb_nega is not None and prompt_emb_nega.dtype != self.torch_dtype:
+            prompt_emb_nega = prompt_emb_nega.to(dtype=self.torch_dtype)
+
+        model_param = next(self.dit.parameters(), None)
+        skip_autocast = (
+            self.device_type == "npu"
+            and getattr(self.dit, "quant_type", None) is None
+            and model_param is not None
+            and model_param.dtype == self.torch_dtype
+        )
+
         for progress_id, timestep in enumerate(tqdm(self.scheduler.timesteps, desc="TI2V denoise")):
             # For I2V, create per-token timestep where conditioned frames get 0
             if mask is not None:
@@ -326,7 +340,10 @@ class TI2VDenoisingStage(BaseStage):
             else:
                 timestep_tensor = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
 
-            with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
+            autocast_ctx = (
+                nullcontext() if skip_autocast else torch.autocast(device_type=self.device_type, dtype=self.torch_dtype)
+            )
+            with autocast_ctx:
                 latents_input = latents.to(self.torch_dtype)
                 noise_pred = self.predict_noise_with_cfg(
                     latents=latents_input,

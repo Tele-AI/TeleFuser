@@ -135,6 +135,20 @@ class RMSNorm(CustomOp):
             return norm_infer(hidden_states, self.weight, None, self.eps, is_rms_norm=True)
         return self.forward_native(hidden_states)
 
+    def forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """NPU-optimized implementation using torch_npu.npu_rms_norm."""
+        if (
+            hidden_states.device.type == "npu"
+            and self.elementwise_affine
+            and self.bias is None
+            and self.weight is not None
+            and hidden_states.dtype == self.weight.dtype
+        ):
+            import torch_npu
+
+            return torch_npu.npu_rms_norm(hidden_states, self.weight, self.eps)[0]
+        return self.forward_native(hidden_states)
+
     def forward_native(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation for compile compatibility."""
         input_dtype = hidden_states.dtype
