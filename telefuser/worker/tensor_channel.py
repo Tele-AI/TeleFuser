@@ -13,6 +13,8 @@ from typing import Any
 import torch
 import torch.multiprocessing as mp
 
+from telefuser.platforms import requires_host_tensor_queue
+
 _MAX_CUDA_IPC_POOL_PROFILES = 8
 
 
@@ -75,7 +77,7 @@ class WorkerTensorChannel:
     """Point-to-point tensor path that bypasses the parent process.
 
     CUDA tensors use persistent IPC pools whose rank-local metadata travels in
-    :class:`WorkerTensorRef`. CPU tensors and dynamic-profile CUDA fallbacks use
+    :class:`WorkerTensorRef`. Ascend tensors are staged on CPU. Host tensors and dynamic-profile CUDA fallbacks use
     one multiprocessing queue per consumer rank. The parent never materializes
     tensor contents.
     """
@@ -166,23 +168,15 @@ class WorkerTensorChannel:
                     shard_dim=shard_dim,
                 )
                 tensor_index += 1
-                if item.device.type == "cuda":
-                    rank_payloads = self._stage_cuda_tensor(ref, item)
-                    if rank_payloads is not None:
-                        ref = dataclass_replace(ref, _cuda_payloads=rank_payloads)
-                    else:
-                        rank_tensors = (
-                            (item,) * self.consumer_world_size
-                            if shard_dim is None
-                            else torch.tensor_split(item, self.consumer_world_size, dim=shard_dim)
-                        )
-                        for queue, rank_tensor in zip(self._queues, rank_tensors):
-                            queue.put((ref, rank_tensor))
+                rank_payloads = self._stage_cuda_tensor(ref, item) if item.device.type == "cuda" else None
+                if rank_payloads is not None:
+                    ref = dataclass_replace(ref, _cuda_payloads=rank_payloads)
                 else:
+                    payload = item.cpu() if requires_host_tensor_queue(item.device.type) else item
                     rank_tensors = (
-                        (item,) * self.consumer_world_size
+                        (payload,) * self.consumer_world_size
                         if shard_dim is None
-                        else torch.tensor_split(item, self.consumer_world_size, dim=shard_dim)
+                        else torch.tensor_split(payload, self.consumer_world_size, dim=shard_dim)
                     )
                     for queue, rank_tensor in zip(self._queues, rank_tensors):
                         queue.put((ref, rank_tensor))
@@ -231,7 +225,9 @@ class WorkerTensorChannel:
                     raise RuntimeError(
                         f"Tensor channel {self.channel_id} received incompatible tensor metadata for {item}"
                     )
-                if not isinstance(received, _CudaIpcPayload) and str(tensor.device) != item.source_device:
+                source_type = item.source_device.partition(":")[0]
+                queue_device = "cpu" if requires_host_tensor_queue(source_type) else item.source_device
+                if not isinstance(received, _CudaIpcPayload) and str(tensor.device) != queue_device:
                     raise RuntimeError(
                         f"Tensor channel {self.channel_id} received incompatible tensor metadata for {item}"
                     )
