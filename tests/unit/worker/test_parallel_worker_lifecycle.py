@@ -99,3 +99,26 @@ def test_close_after_failure_does_not_submit_more_worker_commands() -> None:
     for queue in worker.queue_in:
         queue.put.assert_not_called()
         queue.close.assert_called_once_with()
+
+
+def test_hccl_spawn_failure_returns_lease_and_closes_queues(monkeypatch) -> None:
+    from telefuser.worker import parallel_worker as module
+
+    lock = MagicMock()
+    mp = MagicMock()
+    first_rank = MagicMock()
+    mp.spawn.side_effect = [SimpleNamespace(processes=[first_rank]), RuntimeError("failed spawn")]
+    stage = MagicMock()
+    config = stage.model_runtime_config.parallel_config
+    config.world_size, config.device_ids = 2, [1, 2]
+    monkeypatch.setattr(module, "current_platform", SimpleNamespace(device_type="npu", dist_backend="hccl"))
+    monkeypatch.setattr(module, "resolve_device", MagicMock())
+    monkeypatch.setattr(module, "reserve_hccl_ports", lambda: (60000, lock))
+    monkeypatch.setattr(module, "mp", mp)
+    with pytest.raises(RuntimeError, match="failed spawn"):
+        ParallelWorker(stage)
+    assert mp.spawn.call_args.kwargs["args"][-1] == 60000
+    first_rank.kill.assert_called_once_with()
+    first_rank.join.assert_called_once_with()
+    lock.close.assert_called_once()
+    assert mp.get_context.return_value.SimpleQueue.return_value.close.call_count == 3

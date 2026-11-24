@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 import torch
 
 from telefuser.cache.session_memory import DeviceMemorySnapshot, capture_device_memory_snapshot
-from telefuser.platforms import current_platform
+from telefuser.platforms import current_platform, resolve_device
 from telefuser.utils.logging import logger
 
 from .config import FeatureCacheConfig, ModelRuntimeConfig, WeightOffloadType
@@ -89,7 +89,10 @@ class BaseStage(ABC):
         self.model_runtime_config = model_runtime_config
         self.torch_dtype = model_runtime_config.torch_dtype
         self.device_type = model_runtime_config.device_type or current_platform.device_type
-        self.device = torch.device(type=self.device_type, index=model_runtime_config.device_id)
+        if self.device_type == "npu":
+            self.device = resolve_device(f"npu:{model_runtime_config.device_id}")
+        else:
+            self.device = torch.device(type=self.device_type, index=model_runtime_config.device_id)
         self.model_names: list[str] = []
         self.onload_models_flag = False
         self._metrics_hook: StageMetricContext | None = None
