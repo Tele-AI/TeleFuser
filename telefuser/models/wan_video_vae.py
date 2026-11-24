@@ -17,6 +17,7 @@ from telefuser.distributed.vae_spatial import (
     _spatial_causal_conv3d_forward,
     _spatial_world_size,
     _split_height,
+    conv3d_activation_layout,
 )
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
@@ -119,7 +120,7 @@ class CausalConv3d(nn.Conv3d):
             x = torch.cat([cache_x, x], dim=2)
             padding[4] -= cache_x.shape[2]
         x = F.pad(x, padding)
-        x = x.contiguous(memory_format=torch.channels_last_3d)
+        x = conv3d_activation_layout(x)
         return super().forward(x)
 
 
