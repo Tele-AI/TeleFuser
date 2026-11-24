@@ -2,10 +2,28 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
 from telefuser.models import wan22_video_vae
+
+
+@pytest.mark.parametrize("tiled, expected_method", [(False, "2d_split"), (True, "tile_dist")])
+def test_parallel_decode_accepts_batched_latents_and_lists(monkeypatch, tiled, expected_method) -> None:
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    device = torch.device("cpu")
+    batch = torch.arange(48).reshape(2, 3, 2, 2, 2)
+
+    def decode_parallel(latents, target_device, method):
+        assert target_device == device
+        assert method == expected_method
+        return latents
+
+    vae = SimpleNamespace(parallelism=2, decode_parallel=decode_parallel)
+    decode = wan22_video_vae.Wan22VideoVAE.decode
+    assert decode(vae, batch, device, tiled=tiled) is batch
+    torch.testing.assert_close(decode(vae, list(batch.unbind()), device, tiled=tiled), batch)
 
 
 class _RecordingDecoder(nn.Module):

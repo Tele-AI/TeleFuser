@@ -10,6 +10,12 @@ import torch.nn.functional as F
 from .collectives import all_gather_stacked
 
 
+def conv3d_activation_layout(tensor: torch.Tensor) -> torch.Tensor:
+    """Keep NCDHW on Ascend and use the existing channels-last layout elsewhere."""
+    layout = torch.contiguous_format if tensor.device.type == "npu" else torch.channels_last_3d
+    return tensor.contiguous(memory_format=layout)
+
+
 def _spatial_rank() -> int:
     return dist.get_rank() if dist.is_initialized() else 0
 
@@ -128,7 +134,7 @@ def _spatial_causal_conv3d_forward(
     if any(padding):
         tensor = F.pad(tensor, padding)
     tensor = _exchange_height_halo(module, tensor, module._height_halo_size)
-    tensor = tensor.contiguous(memory_format=torch.channels_last_3d)
+    tensor = conv3d_activation_layout(tensor)
     return F.conv3d(
         tensor,
         module.weight,
