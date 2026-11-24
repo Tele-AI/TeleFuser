@@ -397,6 +397,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             # for order 2, we use a simplified version
             if order == 2:
                 rhos_p = torch.tensor([0.5], dtype=x.dtype, device=device)
+            elif device.type == "npu":
+                rhos_p = torch.linalg.solve(R[:-1, :-1].cpu(), b[:-1].cpu()).to(device=device, dtype=x.dtype)
             else:
                 rhos_p = torch.linalg.solve(R[:-1, :-1], b[:-1]).to(device).to(x.dtype)
         else:
@@ -512,6 +514,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         # for order 1, we use a simplified version
         if order == 1:
             rhos_c = torch.tensor([0.5], dtype=x.dtype, device=device)
+        elif device.type == "npu":
+            rhos_c = torch.linalg.solve(R.cpu(), b.cpu()).to(device=device, dtype=x.dtype)
         else:
             rhos_c = torch.linalg.solve(R, b).to(device).to(x.dtype)
 

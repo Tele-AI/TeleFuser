@@ -47,11 +47,13 @@ from telefuser.utils.model_weight import hash_state_dict_keys
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     """Create sinusoidal position embeddings."""
+    # Ascend NPU does not natively support float64 and emits fallback warnings.
+    compute_dtype = torch.float32 if position.device.type == "npu" else torch.float64
     sinusoid = torch.outer(
-        position.type(torch.float64),
+        position.type(compute_dtype),
         torch.pow(
             10000,
-            -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(dim // 2),
+            -torch.arange(dim // 2, dtype=compute_dtype, device=position.device).div(dim // 2),
         ),
     )
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
@@ -84,16 +86,17 @@ def rope_apply(x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
     implementation based on compile state and platform.
 
     Args:
-        x: Input tensor [B, S, D] or [B, S, num_heads * head_dim]
-        freqs_cos: Cosine frequencies [seq_len, 1, head_size//2] (real tensor, not complex)
-        freqs_sin: Sine frequencies [seq_len, 1, head_size//2] (real tensor, not complex)
+        x: Input tensor [B, S, D] or [B, S, H, head_dim]
+        freqs_cos: Cosine frequencies [seq_len, 1, head_size//2] or [seq_len, 1, head_size]
+        freqs_sin: Sine frequencies [seq_len, 1, head_size//2] or [seq_len, 1, head_size]
         num_heads: Number of attention heads
 
     Returns:
-        Tensor with RoPE applied, same shape as input
+        Tensor with RoPE applied, matching the input shape
     """
-    x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
-    # apply_rotary_emb expects x: [B, S, H, D], freqs: (cos, sin)
+    if x.ndim == 4:
+        return apply_rotary_emb(x, (freqs_cos, freqs_sin))
+    x = x.unflatten(2, (num_heads, x.shape[-1] // num_heads))
     x_rope = apply_rotary_emb(x, (freqs_cos, freqs_sin))
     return x_rope.flatten(2)
 
@@ -194,13 +197,13 @@ class SelfAttention(nn.Module):
             v = self.v(x)
             q = self.norm_q(self.q(x))
             k = self.norm_k(self.k(x))
-        v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
+        v = v.unflatten(2, (self.num_heads, self.head_dim))
         v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False, communicator=self.ulysses_communicator)
+        q = q.unflatten(2, (self.num_heads, self.head_dim))
         q = rope_apply(q, freqs_cos, freqs_sin, self.num_heads)
-        q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False, communicator=self.ulysses_communicator)
+        k = k.unflatten(2, (self.num_heads, self.head_dim))
         k = rope_apply(k, freqs_cos, freqs_sin, self.num_heads)
-        k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         k_wait = ulysses_scatter_heads(k, group, tag="k", communicator=self.ulysses_communicator)
         v = v_wait()
         q = q_wait()
@@ -228,7 +231,7 @@ class SelfAttention(nn.Module):
         )
         out_wait = ulysses_gather_heads(x, group, num_heads=self.num_heads)
         out = out_wait()
-        out = rearrange(out, "b s n d -> b s (n d)", n=self.num_heads)
+        out = out.flatten(2)
         if projection_dtype != input_dtype:
             out = self.o(out)
             return out.to(input_dtype)
@@ -267,11 +270,11 @@ class SelfAttention(nn.Module):
             q = self.norm_q(self.q(x))
             k = self.norm_k(self.k(x))
             v = self.v(x)
+        q = q.unflatten(2, (self.num_heads, self.head_dim))
+        k = k.unflatten(2, (self.num_heads, self.head_dim))
+        v = v.unflatten(2, (self.num_heads, self.head_dim))
         q = rope_apply(q, freqs_cos, freqs_sin, self.num_heads)
         k = rope_apply(k, freqs_cos, freqs_sin, self.num_heads)
-        q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
-        k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
-        v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
         q, k, v, scales = self._prepare_sol_qkv(q, k, v, sparse_state)
         if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
@@ -290,7 +293,7 @@ class SelfAttention(nn.Module):
             k_scale=None if scales is None else scales[1],
             v_scale=None if scales is None else scales[2],
         )
-        x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
+        x = x.flatten(2)
         if projection_dtype != input_dtype:
             x = self.o(x)
             return x.to(input_dtype)
@@ -328,12 +331,9 @@ class CrossAttention(nn.Module):
             ctx = y[:, 257:]
         else:
             ctx = y
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(ctx))
-        v = self.v(ctx)
-        q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
-        k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
-        v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
+        q = self.norm_q(self.q(x)).unflatten(2, (self.num_heads, self.head_dim))
+        k = self.norm_k(self.k(ctx)).unflatten(2, (self.num_heads, self.head_dim))
+        v = self.v(ctx).unflatten(2, (self.num_heads, self.head_dim))
         # CrossAttention always uses dense attention
         if self.attention_config.is_sparse():
             from telefuser.core.config import AttentionConfig
@@ -342,12 +342,10 @@ class CrossAttention(nn.Module):
             x = attn_func(q, k, v, attention_config=dense_config, input_layout="BSND", output_layout="BSND")
         else:
             x = attn_func(q, k, v, attention_config=self.attention_config, input_layout="BSND", output_layout="BSND")
-        x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
+        x = x.flatten(2)
         if self.has_image_input:
-            k_img = self.norm_k_img(self.k_img(img))
-            v_img = self.v_img(img)
-            k_img = rearrange(k_img, "b s (n d) -> b s n d", n=self.num_heads)
-            v_img = rearrange(v_img, "b s (n d) -> b s n d", n=self.num_heads)
+            k_img = self.norm_k_img(self.k_img(img)).unflatten(2, (self.num_heads, self.head_dim))
+            v_img = self.v_img(img).unflatten(2, (self.num_heads, self.head_dim))
             if self.attention_config.is_sparse():
                 from telefuser.core.config import AttentionConfig
 
@@ -357,7 +355,7 @@ class CrossAttention(nn.Module):
                 y = attn_func(
                     q, k_img, v_img, attention_config=self.attention_config, input_layout="BSND", output_layout="BSND"
                 )
-            y = rearrange(y, "b s n d -> b s (n d)", n=self.num_heads)
+            y = y.flatten(2)
             x = x + y
         return self.o(x)
 
@@ -366,6 +364,8 @@ class GateModule(nn.Module):
     """Gated residual connection."""
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        if x.device.type == "npu":
+            return torch.addcmul(x, residual, gate)
         return x + gate * residual
 
 
@@ -416,7 +416,10 @@ class DiTBlock(nn.Module):
         scale_mlp = scale_mlp.squeeze(2)
         gate_mlp = gate_mlp.squeeze(2)
 
-        input_x = modulate(self.norm1(x), shift_msa, scale_msa)
+        if x.device.type == "npu" and not torch.compiler.is_compiling():
+            input_x = self.norm1(x).mul_(1.0 + scale_msa).add_(shift_msa)
+        else:
+            input_x = modulate(self.norm1(x), shift_msa, scale_msa)
         if sparse_state is not None:
             attn_output = self.self_attn(
                 input_x,
@@ -429,7 +432,10 @@ class DiTBlock(nn.Module):
             attn_output = self.self_attn(input_x, freqs_cos, freqs_sin, device_mesh=device_mesh)
         x = self.gate(x, gate_msa, attn_output)
         x = x + self.cross_attn(self.norm3(x), context)
-        input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
+        if x.device.type == "npu" and not torch.compiler.is_compiling():
+            input_x = self.norm2(x).mul_(1.0 + scale_mlp).add_(shift_mlp)
+        else:
+            input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
         return x
 
@@ -524,6 +530,66 @@ class WanModel(BaseModel):
         self.y_camera = None
         self.async_offload_manager = None
         self.layer_name_list = ["blocks"]
+        self._rope_freqs_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def _get_rope_freqs(
+        self,
+        f: int,
+        h: int,
+        w: int,
+        freq_start_idx: int,
+        freq_interval: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return cached (freqs_cos, freqs_sin) tensors on the target device."""
+        is_npu = device.type == "npu"
+        target_dtype = dtype if is_npu else torch.float32
+        cache_key = (
+            id(self.freqs),
+            f,
+            h,
+            w,
+            freq_start_idx,
+            freq_interval,
+            device,
+            target_dtype,
+            is_npu,
+        )
+        cached = self._rope_freqs_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        freqs = torch.cat(
+            [
+                self.freqs[0][freq_start_idx : freq_interval * f + freq_start_idx : freq_interval]
+                .view(f, 1, 1, -1)
+                .expand(f, h, w, -1),
+                self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
+            ],
+            dim=-1,
+        ).reshape(f * h * w, 1, -1)
+        freqs_cos = freqs.real.to(dtype=target_dtype, device=device)
+        freqs_sin = freqs.imag.to(dtype=target_dtype, device=device)
+        if is_npu:
+            # torch_npu.npu_rotary_mul(rotary_mode="interleave") expects full head_dim
+            # with each half-dim entry repeated adjacently: [c0, c0, c1, c1, ...].
+            freqs_cos = freqs_cos.repeat_interleave(2, dim=-1).contiguous()
+            freqs_sin = freqs_sin.repeat_interleave(2, dim=-1).contiguous()
+        else:
+            freqs_cos = freqs_cos.contiguous()
+            freqs_sin = freqs_sin.contiguous()
+
+        # Keep cache bounded to avoid retaining stale shapes across resolutions.
+        if len(self._rope_freqs_cache) >= 4:
+            self._rope_freqs_cache.clear()
+        self._rope_freqs_cache[cache_key] = (freqs_cos, freqs_sin)
+        return freqs_cos, freqs_sin
+
+    def offload_device(self, pin_memory: bool | None = None) -> None:
+        self._rope_freqs_cache.clear()
+        super().offload_device(pin_memory=pin_memory)
 
     def check_y_camera_status(self):
         return self.y_camera
@@ -877,13 +943,13 @@ class WanModel(BaseModel):
             seq_len = f * h * w
 
             # Time embedding
-            with amp.autocast("cuda", dtype=torch.float32):
+            with amp.autocast(x.device.type, dtype=torch.float32):
                 if timestep.dim() == 1:
                     # Scalar timestep: compute global time embedding and modulation
                     t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
                     t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
-                    # Expand t_mod to [B, seq_len, 6, dim] for uniform processing
-                    t_mod = t_mod.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                    # Keep seq_len=1 for broadcasting in DiTBlock to avoid materializing [B, seq_len, 6, dim]
+                    t_mod = t_mod.unsqueeze(1)
                     # Expand t to [B, 1, dim] for uniform processing in Head
                     t = t.unsqueeze(1)
                 else:
@@ -922,32 +988,19 @@ class WanModel(BaseModel):
                 condition = (condition - mean_condition) * (std_x / (std_condition + 1e-5)) + mean_x
                 x = x + condition * 0.2
 
-            # Compute frequency embeddings
-            freqs = (
-                torch.cat(
-                    [
-                        self.freqs[0][freq_start_idx : freq_interval * f + freq_start_idx : freq_interval]
-                        .view(f, 1, 1, -1)
-                        .expand(f, h, w, -1),
-                        self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                        self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                    ],
-                    dim=-1,
-                )
-                .reshape(f * h * w, 1, -1)
-                .to(x.device)
-            )
-
-            # Precompute cos/sin from complex freqs to avoid complex tensor in compiled region
-            freqs_cos = freqs.real.contiguous()
-            freqs_sin = freqs.imag.contiguous()
+            # Compute or reuse cached frequency embeddings
+            freqs_cos, freqs_sin = self._get_rope_freqs(f, h, w, freq_start_idx, freq_interval, x.device, x.dtype)
 
             # Sequence parallel shard if enabled
             if self.usp_flag:
-                # Shard t_mod and t (if per-token) along seq_len dimension (dim 1)
-                # For scalar timestep, t has seq_len=1 which broadcasts with any seq_len
-                # For per-token timestep, t needs sharding to match x
-                sequence_parallel_shard(self.device_mesh, [x, t_mod, t, freqs_cos, freqs_sin], seq_dims=[1, 1, 1, 0, 0])
+                # Shard t_mod and t only when per-token; clone cached freqs before in-place shard
+                sharded_t_mod = t_mod if t_mod.shape[1] > 1 else None
+                sharded_t = t if t.shape[1] > 1 else None
+                freqs_cos = freqs_cos.clone()
+                freqs_sin = freqs_sin.clone()
+                sequence_parallel_shard(
+                    self.device_mesh, [x, sharded_t_mod, sharded_t, freqs_cos, freqs_sin], seq_dims=[1, 1, 1, 0, 0]
+                )
 
             # Feature cache handling - step ID is managed internally
             ori_x = x
@@ -993,13 +1046,13 @@ class WanModel(BaseModel):
 
             # Time embedding (needed for modulation in blocks)
             batch_size = timestep.shape[0]
-            with amp.autocast("cuda", dtype=torch.float32):
+            with amp.autocast(x.device.type, dtype=torch.float32):
                 if timestep.dim() == 1:
                     # Scalar timestep: compute global time embedding and modulation
                     t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
                     t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
-                    # Expand t_mod to [B, seq_len, 6, dim] for uniform processing
-                    t_mod = t_mod.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                    # Keep seq_len=1 for broadcasting in DiTBlock
+                    t_mod = t_mod.unsqueeze(1)
                     # Expand t to [B, 1, dim] for uniform processing in Head
                     t = t.unsqueeze(1)
                 else:
@@ -1019,29 +1072,18 @@ class WanModel(BaseModel):
                 clip_embdding = self.img_emb(clip_feature)
                 context = torch.cat([clip_embdding, context], dim=1)
 
-            # Compute frequency embeddings using broadcasted grid_size
-            freqs = (
-                torch.cat(
-                    [
-                        self.freqs[0][freq_start_idx : freq_interval * f + freq_start_idx : freq_interval]
-                        .view(f, 1, 1, -1)
-                        .expand(f, h, w, -1),
-                        self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                        self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                    ],
-                    dim=-1,
-                )
-                .reshape(f * h * w, 1, -1)
-                .to(x.device)
-            )
-
-            # Precompute cos/sin from complex freqs to avoid complex tensor in compiled region
-            freqs_cos = freqs.real.contiguous()
-            freqs_sin = freqs.imag.contiguous()
+            # Compute or reuse cached frequency embeddings using broadcasted grid_size
+            freqs_cos, freqs_sin = self._get_rope_freqs(f, h, w, freq_start_idx, freq_interval, x.device, x.dtype)
 
             # Apply sequence parallel shard to freqs, t_mod and t if enabled (x is already sharded from previous stage)
             if self.usp_flag:
-                sequence_parallel_shard(self.device_mesh, [t_mod, t, freqs_cos, freqs_sin], seq_dims=[1, 1, 0, 0])
+                sharded_t_mod = t_mod if t_mod.shape[1] > 1 else None
+                sharded_t = t if t.shape[1] > 1 else None
+                freqs_cos = freqs_cos.clone()
+                freqs_sin = freqs_sin.clone()
+                sequence_parallel_shard(
+                    self.device_mesh, [sharded_t_mod, sharded_t, freqs_cos, freqs_sin], seq_dims=[1, 1, 0, 0]
+                )
 
             # Save grid size for unpatchify in last stage
             self._pp_grid_size = (f, h, w)
@@ -1302,13 +1344,13 @@ class WanModel(BaseModel):
         # timestep can be:
         # - 1D tensor [B]: scalar timestep (T2V mode) -> global modulation
         # - 2D tensor [B, seq_len]: per-token timestep (I2V mode) -> per-token modulation
-        with amp.autocast("cuda", dtype=torch.float32):
+        with amp.autocast(x.device.type, dtype=torch.float32):
             if timestep.dim() == 1:
                 # Scalar timestep: compute global time embedding and modulation
                 t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
                 t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
-                # Expand t_mod to [B, seq_len, 6, dim] for uniform processing in DiTBlock
-                t_mod = t_mod.unsqueeze(1).expand(-1, seq_len, -1, -1)
+                # Keep seq_len=1 so DiTBlock broadcasts [B, 1, 6, dim] instead of materializing [B, seq_len, 6, dim]
+                t_mod = t_mod.unsqueeze(1)
                 # Expand t to [B, 1, dim] for uniform processing in Head
                 t = t.unsqueeze(1)
             else:
@@ -1339,25 +1381,7 @@ class WanModel(BaseModel):
             std_condition = torch.std(condition, dim=(1, 2), keepdim=True)
             condition = (condition - mean_condition) * (std_x / (std_condition + 1e-5)) + mean_x
             x = x + condition * 0.2
-        freqs = (
-            torch.cat(
-                [
-                    self.freqs[0][freq_start_idx : freq_interval * f + freq_start_idx : freq_interval]
-                    .view(f, 1, 1, -1)
-                    .expand(f, h, w, -1),
-                    self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                    self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-                ],
-                dim=-1,
-            )
-            .reshape(f * h * w, 1, -1)
-            .to(x.device)
-        )
-
-        # Precompute cos/sin from complex freqs to avoid complex tensor in compiled region
-        # freqs is complex tensor, convert to real cos/sin tensors
-        freqs_cos = freqs.real.contiguous()
-        freqs_sin = freqs.imag.contiguous()
+        freqs_cos, freqs_sin = self._get_rope_freqs(f, h, w, freq_start_idx, freq_interval, x.device, x.dtype)
 
         sol_tokens_preordered = self.usp_flag and sparse_state is not None and sparse_state.config.sparse_impl == "sol"
         if sol_tokens_preordered:
@@ -1377,13 +1401,17 @@ class WanModel(BaseModel):
                 t = t.index_select(1, perm)
 
         if self.usp_flag:
-            # Shard t_mod and t (if per-token) along seq_len dimension (dim 1)
-            # For scalar timestep, t has seq_len=1 which broadcasts with any seq_len
+            # Shard t_mod and t only when per-token (seq_len > 1).
+            # For scalar timestep, seq_len=1 broadcasts with any sharded seq_len
             # and must stay replicated instead of being padded and sharded.
+            sharded_t_mod = t_mod if t_mod.shape[1] > 1 else None
             sharded_t = t if t.shape[1] > 1 else None
+            if not sol_tokens_preordered:
+                freqs_cos = freqs_cos.clone()
+                freqs_sin = freqs_sin.clone()
             sequence_parallel_shard(
                 self.device_mesh,
-                [x, t_mod, sharded_t, freqs_cos, freqs_sin],
+                [x, sharded_t_mod, sharded_t, freqs_cos, freqs_sin],
                 seq_dims=[1, 1, 1, 0, 0],
             )
 

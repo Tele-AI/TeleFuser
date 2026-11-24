@@ -1315,7 +1315,8 @@ class Wan22VideoVAE(BaseModel):
 
     def single_decode(self, hidden_state: torch.Tensor, device: torch.device) -> torch.Tensor:
         """Decode single latent without parallelism."""
-        hidden_state = hidden_state.to(device)
+        model_dtype = next(self.model.parameters()).dtype
+        hidden_state = hidden_state.to(device=device, dtype=model_dtype)
         scale = self._get_scale_on_device(device, hidden_state.dtype)
         video = self.model.decode(hidden_state, scale)
         # unpatchify is already called in VideoVAE.decode()
@@ -1378,6 +1379,7 @@ class Wan22VideoVAE(BaseModel):
         tiled: bool = False,
         tile_size: tuple[int, int] = (34, 34),
         tile_stride: tuple[int, int] = (18, 16),
+        return_cpu: bool = True,
     ) -> torch.Tensor:
         """Decode latents to video frames.
 
@@ -1411,15 +1413,15 @@ class Wan22VideoVAE(BaseModel):
             return self.decode_parallel(hidden_states_tensor, device, method=method)
 
         # Single GPU processing
-        hidden_states = [hidden_state.to("cpu") for hidden_state in hidden_states]
         videos = []
         for hidden_state in hidden_states:
             hidden_state = hidden_state.unsqueeze(0)
             if tiled:
-                video = self.tiled_decode(hidden_state, device, tile_size, tile_stride)
+                video = self.tiled_decode(hidden_state.to("cpu"), device, tile_size, tile_stride)
             else:
                 video = self.single_decode(hidden_state, device)
-            video = video.cpu()
+            if return_cpu:
+                video = video.cpu()
             videos.append(video)
         videos = torch.cat(videos, dim=0)
         return videos

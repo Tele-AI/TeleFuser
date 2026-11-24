@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -168,6 +169,7 @@ class VAEStage(BaseStage):
         tiled: bool = False,
         tile_size: tuple[int, int] = (34, 34),
         tile_stride: tuple[int, int] = (18, 16),
+        return_cpu: bool = True,
     ) -> torch.Tensor:
         """Decode latents to video frames.
 
@@ -176,14 +178,26 @@ class VAEStage(BaseStage):
             tiled: Enable tiled processing
             tile_size: Tile size for tiled processing
             tile_stride: Tile stride for tiled processing
+            return_cpu: Move decoded video tensor to CPU before returning
 
         Returns:
-            Decoded video frames tensor on CPU
+            Decoded video frames tensor
         """
-        with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
+        model_param = next(self.vae.parameters(), None)
+        skip_autocast = self.device_type == "npu" and model_param is not None and model_param.dtype == self.torch_dtype
+        autocast_ctx = (
+            nullcontext() if skip_autocast else torch.autocast(device_type=self.device_type, dtype=self.torch_dtype)
+        )
+        with autocast_ctx:
             # Unified decode() handles both single and batched tensors
+            decode_kwargs = {"return_cpu": return_cpu} if not return_cpu else {}
             frames = self.vae.decode(
-                latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
+                latents,
+                device=self.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+                **decode_kwargs,
             )
         return frames
 

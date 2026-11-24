@@ -36,6 +36,8 @@ class BaseModel(torch.nn.Module):
         self.layer_name_list: list[str] = []
         # Whether to use pinned CPU memory for faster H2D transfer
         self._use_pinned_memory: bool = True
+        # Persistent pinned CPU parameter mirror for zero-D2H inference offload
+        self._cpu_pinned_param_cache: dict[str, torch.Tensor] = {}
         # Feature cache (lazy initialization)
         self._feature_cache: BaseFeatureCache | None = None
         self._ulysses_communicator: UlyssesCommunicator | None = None
@@ -103,15 +105,25 @@ class BaseModel(torch.nn.Module):
             return
 
         # Standard offload: move all tensors to device
-        use_non_blocking = (
-            non_blocking if non_blocking is not None else self._use_pinned_memory
-        ) and device.type == "cuda"
+        use_pin_memory = non_blocking if non_blocking is not None else self._use_pinned_memory
+        use_non_blocking = use_pin_memory and device.type in ("cuda", "npu")
         from telefuser.offload import move_tensors_to_device
 
-        move_tensors_to_device(self.parameters(), device, use_non_blocking)
+        if use_non_blocking and not self.training:
+            for name, param in self.named_parameters():
+                if param.device.type == "cpu":
+                    cached = self._cpu_pinned_param_cache.get(name)
+                    if cached is None or cached.shape != param.shape or cached.dtype != param.dtype:
+                        cached = param.data if param.data.is_pinned() else param.data.pin_memory()
+                        self._cpu_pinned_param_cache[name] = cached
+                    param.data = cached.to(device, non_blocking=True)
+        else:
+            move_tensors_to_device(self.parameters(), device, use_non_blocking)
         move_tensors_to_device(self.buffers(), device, use_non_blocking)
         if use_non_blocking:
-            torch.cuda.current_stream().synchronize()
+            from telefuser.platforms import current_platform
+
+            current_platform.synchronize(device)
 
     def offload_device(self, pin_memory: bool | None = None) -> None:
         """Offload model to CPU to free GPU memory.
@@ -139,13 +151,23 @@ class BaseModel(torch.nn.Module):
         # Standard offload: move all tensors to CPU
         use_pin_memory = pin_memory if pin_memory is not None else self._use_pinned_memory
         if use_pin_memory:
-            import gc
-
             from telefuser.offload import move_tensors_to_pinned_cpu
 
-            move_tensors_to_pinned_cpu(self.parameters())
+            uncached_params = []
+            for name, param in self.named_parameters():
+                cached = self._cpu_pinned_param_cache.get(name)
+                if (
+                    not self.training
+                    and cached is not None
+                    and cached.shape == param.shape
+                    and cached.dtype == param.dtype
+                ):
+                    param.data = cached
+                else:
+                    uncached_params.append(param)
+            if uncached_params:
+                move_tensors_to_pinned_cpu(uncached_params)
             move_tensors_to_pinned_cpu(self.buffers())
-            gc.collect()
         else:
             self.to("cpu")
 

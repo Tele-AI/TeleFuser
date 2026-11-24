@@ -33,6 +33,44 @@ def _apply_rotary_emb_cuda(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     return apply_rotary_embedding(x, cos, sin, interleaved=True)
 
 
+def _apply_rotary_emb_npu(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """NPU-optimized implementation using torch_npu.npu_rotary_mul."""
+    import torch_npu
+
+    head_size = x.shape[-1]
+    batch_size = x.shape[0]
+
+    # Normalize cos/sin to [B or 1, S, 1, D_cos] for BNSD/BSND broadcasting with x [B, S, H, D].
+    if cos.dim() == 2:
+        cos = cos.unsqueeze(0).unsqueeze(-2)
+        sin = sin.unsqueeze(0).unsqueeze(-2)
+    elif cos.dim() == 3:
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
+    elif cos.dim() == 4:
+        if cos.shape[0] != batch_size and cos.shape[1] == batch_size:
+            cos = cos.swapaxes(0, 1)
+            sin = sin.swapaxes(0, 1)
+        elif cos.shape[0] != batch_size and cos.shape[0] != 1:
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+
+    if cos.device != x.device:
+        cos = cos.to(x.device)
+    if sin.device != x.device:
+        sin = sin.to(x.device)
+    if cos.dtype != x.dtype:
+        cos = cos.to(x.dtype)
+    if sin.dtype != x.dtype:
+        sin = sin.to(x.dtype)
+
+    if cos.shape[-1] == head_size // 2:
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+
+    return torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode="interleave")
+
+
 def _apply_rotary_emb_native(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """PyTorch-native implementation for compile compatibility.
 
@@ -231,9 +269,11 @@ def apply_rotary_emb(
     """
     cos, sin = freqs
 
-    # Use Triton kernel on CUDA for optimal performance
+    # Use Triton kernel on CUDA and fused rotary op on Ascend NPU
     if x.device.type == "cuda":
         return _apply_rotary_emb_cuda(x, cos, sin)
+    if x.device.type == "npu":
+        return _apply_rotary_emb_npu(x, cos, sin)
 
     return _apply_rotary_emb_native(x, cos, sin)
 
