@@ -18,6 +18,52 @@ HIP 构建同样暴露 `torch.cuda` API，因此 ROCm 平台复用它（`device_
 `torch.version.hip` 区分 ROCm 主机与 NVIDIA 主机。HIP 或 CUDA 构建在没有可见 GPU 时同样回退到 CPU。
 两块 GPU 平台通过 `CUDA_VISIBLE_DEVICES` 控制设备可见性，NPU 使用 `ASCEND_RT_VISIBLE_DEVICES`。
 
+## 跨设备代码复用与分派架构
+
+上层入口、Pipeline 编排、Stage 状态机、扩散调度器、CPU Offload 以及 DiT / VAE / T5 模型结构在所有硬件平台上共用同一套代码；硬件差异收敛在 `current_platform` 单例与四个显式运行边界：
+
+```mermaid
+flowchart TB
+    subgraph Shared["100% 共享设备无关层 (Shared Core)"]
+        Entry["统一入口与服务层 (CLI / FastAPI / LiveKit / wan22_t2v_5b.py)"]
+        Pipe["Pipeline 与 Stage 编排 (BasePipeline / BaseStage / ModuleManager / Offload)"]
+        Models["模型与采样数学逻辑 (WanDiT / Wan22VideoVAE / T5 / UniPC)"]
+        Entry --> Pipe --> Models
+    end
+
+    subgraph Platform["平台探测与校验中枢 (telefuser/platforms/)"]
+        Probe["导入期探测 _resolve_current_platform(): ROCm -> CUDA -> NPU -> CPU"]
+        Validate["启动前校验 resolve_device(): 核对可见卡数与后端一致性"]
+        Probe --> Validate
+    end
+
+    Shared --> Platform
+
+    Platform --> Sw1["切换点 1: 算子与注意力 (telefuser/ops/)"]
+    Platform --> Sw2["切换点 2: 3D 卷积布局 (vae_spatial.py)"]
+    Platform --> Sw3["切换点 3: 分布式 Mesh 与集合通信 (distributed/ + hccl.py)"]
+    Platform --> Sw4["切换点 4: 跨进程张量通道 (worker/parallel_worker + tensor_channel)"]
+
+    Sw1 --> Cuda1["CUDA: forward_cuda + 按需懒加载 Triton / tf-kernel / FlashAttn / FP8"]
+    Sw1 --> Npu1["NPU: forward_npu -> forward_native + TORCH_SDPA (免装 Triton)"]
+
+    Sw2 --> Cuda2["CUDA / ROCm / CPU: channels_last_3d (NDHWC)"]
+    Sw2 --> Npu2["NPU: contiguous_format (标准 NCDHW)"]
+
+    Sw3 --> Cuda3["CUDA / ROCm: NCCL / RCCL + MASTER_PORT"]
+    Sw3 --> Npu3["NPU: 预绑定逻辑卡 + HCCL + 16 端口块 flock 租约与回收"]
+
+    Sw4 --> Cuda4["CUDA: 设备句柄 IPC 直传 + 持久化 CUDA IPC 缓冲池"]
+    Sw4 --> Npu4["NPU: requires_host_tensor_queue -> CPU 共享内存中转与按 rank 切分还原"]
+```
+
+| 切换边界 | 统一接口 / 入口 | CUDA / ROCm 路径 | Ascend NPU 路径 |
+| --- | --- | --- | --- |
+| **1. 算子与 Attention** | `CustomOp`、`CustomOpFunction`、Attention 注册表 | Eager 走 `forward_cuda` / `forward_rocm`，调用时才懒加载 `kernel/triton/*` 与 `tf-kernel` | 优先 `forward_npu`，缺省回退 `forward_native` 与 `TORCH_SDPA`，导入期零 Triton 依赖 |
+| **2. VAE 激活内存布局** | `conv3d_activation_layout(tensor)` | `torch.channels_last_3d`（匹配 cuDNN 3D 卷积优化） | `torch.contiguous_format`（NCDHW，规避 CANN `ERR01007` 非连续限制） |
+| **3. 分布式通信与端口** | `create_device_mesh_from_config`、`PipelineP2PComm`、`ParallelWorker` | `device_type="cuda"`、`nccl` 后端、分配 `MASTER_PORT` | `device_type="npu"`、初始化前 `set_device`、`hccl` 后端 + `reserve_hccl_ports()` 独占 16 端口段 |
+| **4. 跨进程张量传输** | `requires_host_tensor_queue(device_type)` | `False`：队列设备 IPC 直传 / `_CudaIpcPayload` 零拷贝池 | `True`：父子队列与 `WorkerTensorChannel` 双向经 CPU `share_memory_()` 中转 |
+
 ## 平台矩阵
 
 | 平台 | `device_type` | 分布式后端 | 算子分发 | `tf-kernel` | torch.compile |
@@ -61,6 +107,18 @@ ROCm 支持面向使用 ROCm 7.x 与 PyTorch `+rocm` 构建的 AMD GPU；安装�
 
 ## NPU 与 CPU
 
-NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。平台层与算子分发层均已接入 NPU，但现有
-示例在 CUDA 上验证、部分示例在 ROCm 上验证 —— 生产使用前请先在目标 NPU 上完成验证。CPU 平台是未检测到
-加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。
+NPU 平台通过 `torch_npu` 与 HCCL 分布式后端支持华为昇腾设备。
+
+- 注意力经原生回退路径使用 `TORCH_SDPA`；无需安装 `tf-kernel`、`flash_attn`、`sageattention` 或 `triton`。
+- 算子层在算子定义了 `forward_npu` 时优先选择，否则回退到 PyTorch 原生实现。目前尚未集成 NPU 优化内核，
+  Pipeline 完全运行在原生路径上。
+- 多 rank NPU worker 先绑定逻辑设备，再初始化 HCCL。普通队列和 worker 直连通道都通过主存传输 NPU 张量。每个活动的 HCCL worker 组预留 16 个连续端口。
+
+| 设备与宿主 | 工作负载与执行模式 | 卡数 | 软件栈与验证状态 |
+| --- | --- | --- | --- |
+| Atlas 910B2 64 GB | Wan2.2 TI2V-5B 离线文生视频，eager BF16 / SDPA / UniPC，模型级 CPU offload | 1、2、4 | CANN 8.2、Torch 2.9.0、`torch_npu` 2.9.0.post1，1 / 2 / 4 卡均已通过验证。 |
+| Atlas 910B2 64 GB / Linux arm64 | 同上 | 1、2 卡已通过 | CANN 9.3.0-beta.1、Torch 2.11.0+cpu、`torch_npu` 2.11.0.post4，单卡与双卡输出的 121 帧逐像素相同；容器部署默认复用 `quay.io/ascend/vllm-omni:v0.34.0`（CANN 9.3.0）。[镜像运行手册](ascend_910b.md) |
+
+I2V、A14B、服务、流式、跨机和 `torch.compile` 的 NPU 路径均待验证。
+
+CPU 平台是未检测到加速器时的回退，面向测试以及显式请求 CPU 执行的 Pipeline。

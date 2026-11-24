@@ -1,0 +1,47 @@
+ARG BASE_IMAGE=quay.io/ascend/vllm-omni:v0.34.0
+FROM ${BASE_IMAGE}
+
+USER root
+# vllm-omni already ships ffmpeg and libjemalloc2; install them only when building on a bare vllm-ascend base.
+RUN command -v ffprobe > /dev/null || (apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg libjemalloc2 \
+    && rm -rf /var/lib/apt/lists/*)
+
+RUN python3 -m venv --system-site-packages /opt/telefuser/venv
+ENV PATH="/opt/telefuser/venv/bin:${PATH}"
+
+ARG TELEFUSER_VERSION=0.0.0+local
+ARG SOURCE_REVISION=local
+ARG PIP_INDEX_URL
+LABEL org.opencontainers.image.source="https://github.com/Tele-AI/TeleFuser" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="${TELEFUSER_VERSION}"
+
+WORKDIR /opt/telefuser
+COPY pyproject.toml README.md LICENSE /tmp/telefuser-src/
+COPY telefuser /tmp/telefuser-src/telefuser
+RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFUSER="${TELEFUSER_VERSION}" \
+        python -m pip install --no-cache-dir --no-build-isolation \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        /tmp/telefuser-src \
+    && rm -rf /tmp/telefuser-src \
+    && ffprobe -version > /dev/null \
+    && hf --version \
+    && LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib:${LD_LIBRARY_PATH}" \
+        TORCH_DEVICE_BACKEND_AUTOLOAD=0 telefuser --help > /dev/null
+COPY examples/wan_video/wan22_t2v_5b.py ./examples/wan_video/wan22_t2v_5b.py
+
+# Initialize the CANN toolkit, AscendNPU IR and ATB in non-interactive runs while keeping the app venv first on PATH.
+ENTRYPOINT ["/bin/bash", "-c", "\
+    for f in \
+        /usr/local/Ascend/ascend-toolkit/set_env.sh \
+        /usr/local/Ascend/cann/share/info/ascendnpu-ir/bin/set_env.sh \
+        \"/usr/local/Ascend/cann-${CANN_VERSION:-}/share/info/ascendnpu-ir/bin/set_env.sh\"; do \
+        [ -f \"$f\" ] && source \"$f\"; \
+    done && \
+    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then \
+        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=${ATB_CXX_ABI:-1}; \
+    fi && \
+    export PATH=\"/opt/telefuser/venv/bin:${PATH}\" && \
+    exec \"$@\"", "--"]
+CMD ["telefuser", "--help"]
