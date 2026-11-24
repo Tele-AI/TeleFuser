@@ -8,6 +8,7 @@ from telefuser.ops.fp8_attention import (
     apply_fp8_attention_output_correction,
     dequantize_fp8_per_channel,
     merge_fp8_attention_prefix,
+    quantize_fp8_qkv,
     quantize_fp8_qkv_smoothed,
 )
 
@@ -24,6 +25,19 @@ def test_kv_sequence_mean_smoothing_is_attention_equivalent() -> None:
     smoothed = F.scaled_dot_product_attention(query, key - key_mean, value - value_mean) + value_mean
 
     torch.testing.assert_close(smoothed, reference, atol=2e-6, rtol=2e-6)
+
+
+def test_eager_cpu_helpers_work_without_triton() -> None:
+    q = torch.randn(1, 5, 2, 8)
+    with pytest.raises(ValueError, match="contiguous CUDA tensors"):
+        quantize_fp8_qkv(q, q, q)
+    *_, correction = quantize_fp8_qkv_smoothed(q, q, q, smoothing="kv", correct_v_bias=False)
+    torch.testing.assert_close(correction, q.mean(dim=1, keepdim=True))
+    corrected = apply_fp8_attention_output_correction(q, correction)
+    torch.testing.assert_close(corrected, q + correction)
+    torch.testing.assert_close(
+        merge_fp8_attention_prefix(q[:, :2], q, correction), torch.cat([q[:, :2], corrected[:, 2:]], dim=1)
+    )
 
 
 @pytest.mark.gpu

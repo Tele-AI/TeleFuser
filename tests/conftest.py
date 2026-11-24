@@ -12,7 +12,7 @@ from PIL import Image
 # Collection Ignore - Skip modules that require unavailable dependencies
 # ============================================================================
 
-# Check if triton is available (required by telefuser.distributed and telefuser.kernel.triton)
+# Only skip suites that import Triton-dependent operations.
 try:
     import triton  # noqa: F401
 
@@ -21,10 +21,8 @@ except ImportError:
     HAS_TRITON = False
 
 TRITON_REQUIRED_TESTS = [
-    # Distributed tests require triton
-    "unit/distributed/test_device_mesh.py",
+    # Distributed attention and sharding tests
     "unit/distributed/test_parallel_shard.py",
-    "unit/distributed/test_pp_comm.py",
     "unit/distributed/test_ulysses_comm.py",
     # Kernel tests require triton
     "unit/kernel/test_rmsnorm.py",
