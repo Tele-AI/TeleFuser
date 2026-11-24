@@ -11,6 +11,7 @@
 | PyTorch | 2.6 或更高版本 |
 | CUDA Toolkit | 当前 CUDA 开发路径要求 12.8 或更高版本 |
 | ROCm | AMD GPU 使用 ROCm 7.x 与 PyTorch `+rocm` 构建，详见验证安装一节的说明 |
+| 昇腾 NPU | Atlas 910B2 推荐使用 `vllm-omni` / `vllm-ascend` 公共镜像。[镜像安装与运行](ascend_910b.md) |
 | GPU | 取决于所选模型，以对应 Cookbook 为准 |
 
 具体示例可能要求更严格的软件版本或 GPU 架构。特别是本地构建的 `tf-kernel` 产物与其记录的 PyTorch、
@@ -42,7 +43,9 @@ CUDA、ABI 和 GPU 架构族绑定。
     pre-commit install
     ```
 
-可选依赖组包括 `ui`、`distributed`、`docs` 和 `dev`。只安装当前工作流需要的依赖，例如使用 Ray
+NVIDIA 加速与量化使用 `python -m pip install 'telefuser[cuda]'`，源码安装使用 `python -m pip install -e ".[cuda]"`。Triton、torchao 和 bitsandbytes 已移入这个 extra。CUDA 开发环境使用 `.[dev,cuda]`。ROCm 使用其 PyTorch 发行版配套的 Triton。
+
+其他可选依赖组包括 `ui`、`distributed`、`docs` 和 `dev`。只安装当前工作流需要的依赖，例如使用 Ray
 分布式执行时运行 `python -m pip install -e ".[distributed]"`。
 
 ## 验证安装
@@ -52,7 +55,7 @@ python -c "import torch, telefuser; print(torch.__version__); print(torch.cuda.i
 telefuser --help
 ```
 
-模型执行要求 `torch.cuda.is_available()` 输出 `True`。否则应先检查 PyTorch CUDA 构建和 NVIDIA 驱动，
+NVIDIA 模型执行要求 `torch.cuda.is_available()` 输出 `True`。否则应先检查 PyTorch CUDA 构建和 NVIDIA 驱动，
 再排查 TeleFuser。
 
 AMD ROCm 主机应安装 PyTorch `+rocm` 构建，而非 CUDA Toolkit 路径。HIP 构建下
@@ -60,6 +63,8 @@ AMD ROCm 主机应安装 PyTorch `+rocm` 构建，而非 CUDA Toolkit 路径。H
 检测 ROCm 再检测 CUDA。以 `_rocm.py` 结尾的示例（例如
 `examples/wan_video/wan21_1_3b_text_to_video_rocm.py`）是已验证的入口；各平台能力与后端可用性见
 [硬件平台](platforms.md)。
+
+Atlas 910B2 可直接复用 `quay.io/ascend/vllm-omni:v0.34.0`（或 `vllm-ascend`）公共镜像运行 Wan2.2 5B 示例，亦可基于 `docker/Dockerfile.ascend` 构建轻量派生镜像。安装、设备自检与多卡生成命令见[910B 镜像安装与运行](ascend_910b.md)。
 
 ## 模型权重
 
