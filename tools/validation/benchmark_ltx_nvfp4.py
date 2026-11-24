@@ -1,4 +1,7 @@
-"""Run the official Diffusers LTX-Video text-to-video workload."""
+"""Run the official Diffusers LTX-Video text-to-video workload.
+
+Workload source: https://huggingface.co/docs/diffusers/api/pipelines/ltx_video
+"""
 
 from __future__ import annotations
 
