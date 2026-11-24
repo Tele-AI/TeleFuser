@@ -18,9 +18,6 @@ limitations under the License.
 
 import torch
 
-from telefuser.kernel.triton.quant_per_block import per_block_int8
-from telefuser.kernel.triton.sparse_int8_attn import forward as sparse_sageattn_fwd
-
 
 def sparse_sageattn(
     q: torch.Tensor,
@@ -43,6 +40,9 @@ def sparse_sageattn(
     Returns:
         Output tensor with same shape and layout as input.
     """
+    from telefuser.kernel.triton.quant_per_block import per_block_int8
+    from telefuser.kernel.triton.sparse_int8_attn import forward as sparse_sageattn_fwd
+
     seq_dim = 2 if tensor_layout == "HND" else 1
 
     if mask_id is None:
