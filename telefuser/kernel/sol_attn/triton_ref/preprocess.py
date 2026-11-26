@@ -12,6 +12,74 @@ THRESHOLD_GROUP_SIZE = 64
 SUMMARY_PAD = 64
 
 
+@triton.jit
+def _pad_fp8_qkv_kernel(
+    q,
+    k,
+    v,
+    q_out,
+    k_out,
+    v_out,
+    tokens: tl.constexpr,
+    padded: tl.constexpr,
+    heads: tl.constexpr,
+    dim: tl.constexpr,
+    elements: tl.constexpr,
+    vs0,
+    vs1,
+    vs2,
+    vs3,
+    block: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block + tl.arange(0, block)
+    valid = offsets < elements
+    if tl.program_id(1) == 0:
+        d = offsets % dim
+        h = offsets // dim % heads
+        t = offsets // (dim * heads) % padded
+        b = offsets // (dim * heads * padded)
+        source = ((b * tokens + t) * heads + h) * dim + d
+        qv = tl.load(q + source, valid & (t < tokens), 0.0)
+        kv = tl.load(k + source, valid & (t < tokens), 0.0)
+        tl.store(q_out + offsets, qv, valid)
+        tl.store(k_out + offsets, kv, valid)
+    else:
+        t = offsets % padded
+        d = offsets // padded % dim
+        h = offsets // (padded * dim) % heads
+        b = offsets // (padded * dim * heads)
+        source = b * vs0 + t * vs1 + h * vs2 + d * vs3
+        vv = tl.load(v + source, valid & (t < tokens), 0.0)
+        tl.store(v_out + offsets, vv, valid)
+
+
+def pad_fp8_qkv(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, padded_tokens: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Copy Q/K/V and zero their tails in one launch, preserving TMA layouts."""
+    batch, tokens, heads, dim = q.shape
+    q_out = torch.empty((batch, padded_tokens, heads, dim), device=q.device, dtype=q.dtype)
+    k_out = torch.empty_like(q_out)
+    v_out = torch.empty((batch, heads, dim, padded_tokens), device=v.device, dtype=v.dtype)
+    _pad_fp8_qkv_kernel[(triton.cdiv(q_out.numel(), 4096), 2)](
+        q,
+        k,
+        v,
+        q_out,
+        k_out,
+        v_out,
+        tokens,
+        padded_tokens,
+        heads,
+        dim,
+        q_out.numel(),
+        *v.stride(),
+        4096,
+        num_warps=4,
+    )
+    return q_out, k_out, v_out.permute(0, 3, 1, 2)
+
+
 @triton.autotune(
     configs=[triton.Config({}, num_warps=warps, num_stages=stages) for warps in (4, 8) for stages in (1, 2)],
     key=["T"],

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from telefuser.ops.fp8_attention import (
     _quantize_fp8_qkv_sm90,
     _sequence_mean,
+    _sequence_means,
     apply_fp8_attention_output_correction,
     dequantize_fp8_per_channel,
     merge_fp8_attention_prefix,
@@ -131,3 +132,22 @@ def test_value_bias_correction_requires_value_smoothing() -> None:
 
     with pytest.raises(ValueError, match="requires smoothing='kv'"):
         quantize_fp8_qkv_smoothed(query, query, query, smoothing="k", correct_v_bias=True)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("tokens", [1024, 4114])
+def test_parallel_long_sequence_statistics_and_fp8_layout(tokens: int) -> None:
+    """Check ragged reductions and token-major FP8 values against independent FP32 sums."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Requires H100 FP8 attention kernels")
+    torch.manual_seed(17)
+    q = torch.randn((2, tokens, 3, 128), device="cuda", dtype=torch.bfloat16)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+    km, vm = _sequence_means(k, v)
+    torch.testing.assert_close(km, k.float().mean(1), atol=2e-6, rtol=2e-6)
+    torch.testing.assert_close(vm, v.float().mean(1), atol=2e-6, rtol=2e-6)
+    _, _, v8, _, _, vs, correction = quantize_fp8_qkv_smoothed(q, k, v)
+    assert v8.stride(1) == 1
+    torch.testing.assert_close(_sequence_mean(v8), v8.float().mean(1), atol=2e-6, rtol=2e-6)
+    restored = dequantize_fp8_per_channel(v8, vs, torch.float32) + correction
+    torch.testing.assert_close(restored.mean(1), v.float().mean(1), atol=2e-6, rtol=2e-6)

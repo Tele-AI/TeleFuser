@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,6 +16,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
@@ -41,6 +43,7 @@ from telefuser.ops.fp8_attention import (
     merge_fp8_attention_prefix,
     quantize_fp8_qkv_smoothed,
 )
+from telefuser.ops.fp8_attention_replay import FP8SolAttentionReplay
 from telefuser.ops.rotary import apply_rotary_emb_neox
 from telefuser.utils.logging import logger
 
@@ -490,6 +493,7 @@ class MiniMaxH3Attention(nn.Module):
         self.ulysses_group: dist.ProcessGroup | None = None
         self.ulysses_communicator: Any | None = None
         self.tp_group: dist.ProcessGroup | None = None
+        self._sol_replay: FP8SolAttentionReplay | None = None
 
     def set_ulysses_group(self, group: dist.ProcessGroup | None, communicator: Any | None = None) -> None:
         self.ulysses_group = group
@@ -560,6 +564,83 @@ class MiniMaxH3Attention(nn.Module):
             correct_v_bias=config.sol_fp8_v_bias_correction,
         )
         return query, key, value, (q_scale, k_scale, v_scale), output_correction
+
+    def _attend_live(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_config: AttentionConfig,
+        sparse_state: SparseAttentionState | None,
+        prefix_tokens: int,
+    ) -> torch.Tensor:
+        scales = None
+        output_correction = None
+        runtime_attention_config = attention_config
+        runtime_sparse_state = sparse_state
+        if attention_config.attn_impl == AttnImplType.SOL_ATTN:
+            if sparse_state is None:
+                raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
+            if not 0 <= prefix_tokens <= query.shape[1]:
+                raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
+            sol_query, sol_key, sol_value, scales, output_correction = self._prepare_sol_qkv(
+                query,
+                key,
+                value,
+                sparse_state,
+            )
+            if sparse_state.should_use_dense():
+                runtime_attention_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
+                runtime_sparse_state = None
+        else:
+            sol_query, sol_key, sol_value = query, key, value
+        live_output = attention(
+            sol_query,
+            sol_key,
+            sol_value,
+            attention_config=runtime_attention_config,
+            sparse_state=runtime_sparse_state,
+            scale=self.head_dim**-0.5,
+            q_scale=None if scales is None else scales[0],
+            k_scale=None if scales is None else scales[1],
+            v_scale=None if scales is None else scales[2],
+            sink_start=0,
+            sink_tokens=prefix_tokens,
+        )
+        if self._is_sol_active(sparse_state) and prefix_tokens:
+            # The short exact prefix benefits from Flash SDPA; large prefixes retain normal dispatch.
+            backend = (
+                sdpa_kernel(SDPBackend.FLASH_ATTENTION)
+                if (
+                    query.is_cuda
+                    and query.dtype == torch.bfloat16
+                    and prefix_tokens <= 64
+                    and torch.cuda.get_device_capability(query.device) == (9, 0)
+                )
+                else nullcontext()
+            )
+            with backend:
+                dense_prefix = (
+                    F.scaled_dot_product_attention(
+                        query[:, :prefix_tokens].transpose(1, 2),
+                        key.transpose(1, 2),
+                        value.transpose(1, 2),
+                        scale=self.head_dim**-0.5,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+            if output_correction is None:
+                live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
+            else:
+                live_output = merge_fp8_attention_prefix(
+                    dense_prefix.contiguous(), live_output.contiguous(), output_correction.contiguous()
+                )
+        elif output_correction is not None:
+            live_output = apply_fp8_attention_output_correction(
+                live_output.contiguous(), output_correction.contiguous()
+            )
+        return live_output
 
     def forward(
         self,
@@ -680,52 +761,36 @@ class MiniMaxH3Attention(nn.Module):
                 live_query = query[:, :live_tokens].contiguous()
                 live_key = key[:, :live_tokens].contiguous()
                 live_value = value[:, :live_tokens].contiguous()
-                scales = None
-                output_correction = None
-                runtime_attention_config = attention_config
-                runtime_sparse_state = sparse_state
-                if attention_config.attn_impl == AttnImplType.SOL_ATTN:
-                    if sparse_state is None:
-                        raise RuntimeError("MiniMax H3 Sol-Attn requires sparse runtime state")
-                    if not 0 <= prefix_tokens <= live_tokens:
-                        raise ValueError("MiniMax H3 Sol-Attn prefix must be within the live packed sequence")
-                    sol_query, sol_key, sol_value, scales, output_correction = self._prepare_sol_qkv(
-                        live_query,
-                        live_key,
-                        live_value,
-                        sparse_state,
-                    )
-                    if sparse_state.should_use_dense():
-                        runtime_attention_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4)
-                        runtime_sparse_state = None
-                else:
-                    sol_query, sol_key, sol_value = live_query, live_key, live_value
-                live_output = attention(
-                    sol_query,
-                    sol_key,
-                    sol_value,
-                    attention_config=runtime_attention_config,
-                    sparse_state=runtime_sparse_state,
-                    scale=self.head_dim**-0.5,
-                    q_scale=None if scales is None else scales[0],
-                    k_scale=None if scales is None else scales[1],
-                    v_scale=None if scales is None else scales[2],
-                    sink_start=0,
-                    sink_tokens=prefix_tokens,
+                config = None if sparse_state is None else sparse_state.config
+                replay = self._sol_replay
+                use_replay = (
+                    replay is not None
+                    and attention_config.attn_impl == AttnImplType.SOL_ATTN
+                    and self._is_sol_active(sparse_state)
+                    and config.sol_fp8
+                    and config.sol_kv_splits in ("auto", 1)
+                    and live_query.shape[1] < 16384
+                    and sparse_state.layer_idx >= config.sol_fp8_layer_start
+                    and (config.sol_fp8_layer_end is None or sparse_state.layer_idx < config.sol_fp8_layer_end)
+                    and live_query.is_cuda
+                    and torch.cuda.get_device_capability(live_query.device) == (9, 0)
                 )
-                if self._is_sol_active(sparse_state) and prefix_tokens:
-                    dense_prefix = F.scaled_dot_product_attention(
-                        live_query[:, :prefix_tokens].transpose(1, 2),
-                        live_key.transpose(1, 2),
-                        live_value.transpose(1, 2),
-                        scale=self.head_dim**-0.5,
-                    ).transpose(1, 2)
-                    if output_correction is None:
-                        live_output = torch.cat((dense_prefix, live_output[:, prefix_tokens:]), dim=1)
-                    else:
-                        live_output = merge_fp8_attention_prefix(dense_prefix, live_output, output_correction)
-                elif output_correction is not None:
-                    live_output = apply_fp8_attention_output_correction(live_output, output_correction)
+
+                def compute(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+                    return self._attend_live(q, k, v, attention_config, sparse_state, prefix_tokens)
+
+                if use_replay:
+                    replay_key = (
+                        prefix_tokens,
+                        config.sol_tau,
+                        config.sol_threshold_type,
+                        config.sol_kv_splits,
+                        config.sol_fp8_smoothing,
+                        config.sol_fp8_v_bias_correction,
+                    )
+                    live_output = replay.run(compute, live_query, live_key, live_value, key=replay_key)
+                else:
+                    live_output = compute(live_query, live_key, live_value)
                 if live_tokens == total_tokens:
                     output = live_output
                 else:

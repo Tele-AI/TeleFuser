@@ -19,6 +19,11 @@ from cutlass.cute.runtime import from_dlpack
 from telefuser.kernel.sol_attn.sm90._compat import activation
 
 _MIXER_ATTRS = ("__vec_size__",)
+# The NVVM Python bindings may come from a different DSL wheel than CUDA_VERSION.
+_FMAX_EXPLICIT_RESULT = sum(
+    p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    for p in inspect.signature(nvvm.fmax).parameters.values()
+) == 3
 
 # Obtained from sollya:
 # fpminimax(exp(x * log(2.0)), 1, [|1,24...|],[0;1],relative);
@@ -281,10 +286,8 @@ def smid(*, loc=None, ip=None) -> Int32:
 def fmax(
     a: float | Float32, b: float | Float32, c: float | Float32 | None = None, *, loc=None, ip=None
 ) -> Float32:
-    from cutlass import CUDA_VERSION
-
-    # * NVVM call based on nvvm version
-    if CUDA_VERSION.major == 12 and CUDA_VERSION.minor == 9:
+    # Select the actual binding ABI instead of inferring it from the CUDA toolkit.
+    if _FMAX_EXPLICIT_RESULT:
         # Old API: requires explicit result type as first positional argument
         return Float32(
             nvvm.fmax(

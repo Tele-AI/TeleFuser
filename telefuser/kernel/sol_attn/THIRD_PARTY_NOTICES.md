@@ -21,3 +21,7 @@ The SM120 warp-MMA/TMA execution skeleton and online-softmax helpers are
 adapted from NVIDIA cuDNN Frontend's block-sparse-attention reference at commit
 `74785165de2da954a2c879a5e3e6f95411c2292d`. That source is licensed under the
 Apache License 2.0; adapted files retain the corresponding SPDX header.
+
+The vendored FlashAttention `fmax` wrapper also detects the NVVM Python
+binding signature directly. CUDA toolkit version alone does not identify
+whether that binding accepts an explicit result type.
