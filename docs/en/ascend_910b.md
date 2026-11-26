@@ -217,4 +217,5 @@ model-level CPU offload, 121 frames):
 | Same stack | 720p | 1 / 4 cards | 477.8 / 173.9 s | Passed |
 
 Separate two-rank hardware checks also verified HCCL all-reduce, default NPU mesh selection, pipeline send/receive with
-implicit receive buffers, and host-staged NPU tensor channel sharding and reassembly.
+implicit receive buffers, and host-staged NPU tensor channel sharding and reassembly. For head-to-head latency and
+multi-card scaling comparisons against `vLLM-Omni`, see [Ascend NPU Benchmarks](benchmark_ascend_npu.md).

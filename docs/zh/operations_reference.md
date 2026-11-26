@@ -14,6 +14,7 @@
 | 配置进程和请求日志 | [日志](logging.md) |
 | 捕获阶段耗时和 GPU trace | [性能分析](profiler.md) |
 | 复现批量与流式基准 | [TeleFuser 与 AIPerf](benchmark_aiperf.md) |
+| 查看昇腾 910B2 / 910B4 同底座对标基准 | [昇腾 NPU 性能基准](benchmark_ascend_npu.md) |
 | 运行 CPU、GPU、分布式或回归测试 | [测试](testing.md) |
 | 排查常见故障 | [故障排查](troubleshooting.md) |
 
