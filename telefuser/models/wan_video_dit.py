@@ -45,6 +45,10 @@ from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
 
 
+def _step_cache_version(tensor: torch.Tensor) -> int:
+    return -1 if tensor.is_inference() else tensor._version
+
+
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     """Create sinusoidal position embeddings."""
     # Ascend NPU does not natively support float64 and emits fallback warnings.
@@ -325,15 +329,30 @@ class CrossAttention(nn.Module):
             self.v_img = nn.Linear(dim, dim)
             self.norm_k_img = RMSNorm(dim, eps=eps)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        kv_cache: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None = None,
+    ) -> torch.Tensor:
         if self.has_image_input:
             img = y[:, :257]
             ctx = y[:, 257:]
         else:
             ctx = y
         q = self.norm_q(self.q(x)).unflatten(2, (self.num_heads, self.head_dim))
-        k = self.norm_k(self.k(ctx)).unflatten(2, (self.num_heads, self.head_dim))
-        v = self.v(ctx).unflatten(2, (self.num_heads, self.head_dim))
+        if kv_cache is not None and not torch.compiler.is_compiling():
+            ctx_key = (id(self), ctx.data_ptr(), _step_cache_version(ctx))
+            cached_kv = kv_cache.get(ctx_key)
+            if cached_kv is None:
+                k = self.norm_k(self.k(ctx)).unflatten(2, (self.num_heads, self.head_dim))
+                v = self.v(ctx).unflatten(2, (self.num_heads, self.head_dim))
+                kv_cache[ctx_key] = (ctx, k, v)
+            else:
+                _, k, v = cached_kv
+        else:
+            k = self.norm_k(self.k(ctx)).unflatten(2, (self.num_heads, self.head_dim))
+            v = self.v(ctx).unflatten(2, (self.num_heads, self.head_dim))
         # CrossAttention always uses dense attention
         if self.attention_config.is_sparse():
             from telefuser.core.config import AttentionConfig
@@ -344,8 +363,18 @@ class CrossAttention(nn.Module):
             x = attn_func(q, k, v, attention_config=self.attention_config, input_layout="BSND", output_layout="BSND")
         x = x.flatten(2)
         if self.has_image_input:
-            k_img = self.norm_k_img(self.k_img(img)).unflatten(2, (self.num_heads, self.head_dim))
-            v_img = self.v_img(img).unflatten(2, (self.num_heads, self.head_dim))
+            if kv_cache is not None and not torch.compiler.is_compiling():
+                img_key = (-id(self), img.data_ptr(), _step_cache_version(img))
+                cached_img_kv = kv_cache.get(img_key)
+                if cached_img_kv is None:
+                    k_img = self.norm_k_img(self.k_img(img)).unflatten(2, (self.num_heads, self.head_dim))
+                    v_img = self.v_img(img).unflatten(2, (self.num_heads, self.head_dim))
+                    kv_cache[img_key] = (img, k_img, v_img)
+                else:
+                    _, k_img, v_img = cached_img_kv
+            else:
+                k_img = self.norm_k_img(self.k_img(img)).unflatten(2, (self.num_heads, self.head_dim))
+                v_img = self.v_img(img).unflatten(2, (self.num_heads, self.head_dim))
             if self.attention_config.is_sparse():
                 from telefuser.core.config import AttentionConfig
 
@@ -401,23 +430,20 @@ class DiTBlock(nn.Module):
         freqs_sin: torch.Tensor,
         sparse_state: SparseAttentionState | None = None,
         device_mesh: DeviceMesh | None = None,
+        kv_cache: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None = None,
     ) -> torch.Tensor:
         # t_mod is expected to be preprocessed to [B, seq_len, 6, dim] format
         # by WanModel._prepare_modulation() to avoid dynamic dimension checks.
         # The caller ensures t_mod has shape [B, seq_len, 6, dim] where seq_len=1 for global.
-        modulation = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
-        t_mod_with_bias = modulation.unsqueeze(0) + t_mod  # [B, seq_len, 6, dim]
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = t_mod_with_bias.chunk(6, dim=2)
-        # Squeeze the modulation dimension: [B, seq_len, 1, dim] -> [B, seq_len, dim]
-        shift_msa = shift_msa.squeeze(2)
-        scale_msa = scale_msa.squeeze(2)
-        gate_msa = gate_msa.squeeze(2)
-        shift_mlp = shift_mlp.squeeze(2)
-        scale_mlp = scale_mlp.squeeze(2)
-        gate_mlp = gate_mlp.squeeze(2)
+        modulation = (
+            self.modulation
+            if self.modulation.dtype == t_mod.dtype and self.modulation.device == t_mod.device
+            else self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
+        )
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (modulation.unsqueeze(0) + t_mod).unbind(2)
 
         if x.device.type == "npu" and not torch.compiler.is_compiling():
-            input_x = self.norm1(x).mul_(1.0 + scale_msa).add_(shift_msa)
+            input_x = torch.addcmul(shift_msa, self.norm1(x), 1.0 + scale_msa)
         else:
             input_x = modulate(self.norm1(x), shift_msa, scale_msa)
         if sparse_state is not None:
@@ -431,9 +457,9 @@ class DiTBlock(nn.Module):
         else:
             attn_output = self.self_attn(input_x, freqs_cos, freqs_sin, device_mesh=device_mesh)
         x = self.gate(x, gate_msa, attn_output)
-        x = x + self.cross_attn(self.norm3(x), context)
+        x = x + self.cross_attn(self.norm3(x), context, kv_cache=kv_cache)
         if x.device.type == "npu" and not torch.compiler.is_compiling():
-            input_x = self.norm2(x).mul_(1.0 + scale_mlp).add_(shift_mlp)
+            input_x = torch.addcmul(shift_mlp, self.norm2(x), 1.0 + scale_mlp)
         else:
             input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
@@ -477,13 +503,15 @@ class Head(nn.Module):
         # t is expected to be preprocessed to [B, seq_len, dim] format
         # by WanModel._prepare_head_t() to avoid dynamic dimension checks.
         # The caller ensures t has shape [B, seq_len, dim] where seq_len=1 for global.
-        modulation = self.modulation.to(dtype=t.dtype, device=t.device)
-        t_mod = modulation.unsqueeze(0) + t.unsqueeze(2)  # [B, seq_len, 2, dim]
-        shift, scale = t_mod.chunk(2, dim=2)
-        shift = shift.squeeze(2)
-        scale = scale.squeeze(2)
-        x = self.head(self.norm(x) * (1 + scale) + shift)
-        return x
+        modulation = (
+            self.modulation
+            if self.modulation.dtype == t.dtype and self.modulation.device == t.device
+            else self.modulation.to(dtype=t.dtype, device=t.device)
+        )
+        shift, scale = (modulation.unsqueeze(0) + t.unsqueeze(2)).unbind(2)
+        if x.device.type == "npu" and not torch.compiler.is_compiling():
+            return self.head(torch.addcmul(shift, self.norm(x), 1.0 + scale))
+        return self.head(self.norm(x) * (1 + scale) + shift)
 
 
 class WanModel(BaseModel):
@@ -531,6 +559,32 @@ class WanModel(BaseModel):
         self.async_offload_manager = None
         self.layer_name_list = ["blocks"]
         self._rope_freqs_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._context_cache_enabled: bool = False
+        self._text_emb_cache: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._cross_kv_cache: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+    def enable_step_context_cache(self) -> None:
+        """Enable step-scoped caching of static text embeddings and cross-attention K/V projections."""
+        self._text_emb_cache.clear()
+        self._cross_kv_cache.clear()
+        self._context_cache_enabled = True
+
+    def clear_step_context_cache(self) -> None:
+        """Disable and release step-scoped text embedding and cross-attention K/V caches."""
+        self._context_cache_enabled = False
+        self._text_emb_cache.clear()
+        self._cross_kv_cache.clear()
+
+    def _encode_text_context(self, context: torch.Tensor) -> torch.Tensor:
+        if self._context_cache_enabled and not self.training and not torch.compiler.is_compiling():
+            key = (context.data_ptr(), _step_cache_version(context))
+            cached = self._text_emb_cache.get(key)
+            if cached is None:
+                encoded = self.text_embedding(context)
+                self._text_emb_cache[key] = (context, encoded)
+                return encoded
+            return cached[1]
+        return self.text_embedding(context)
 
     def _get_rope_freqs(
         self,
@@ -589,6 +643,7 @@ class WanModel(BaseModel):
 
     def offload_device(self, pin_memory: bool | None = None) -> None:
         self._rope_freqs_cache.clear()
+        self.clear_step_context_cache()
         super().offload_device(pin_memory=pin_memory)
 
     def check_y_camera_status(self):
@@ -705,10 +760,23 @@ class WanModel(BaseModel):
                 sparse_state,
                 reorder_tokens=True,
             )
+        if x.device.type == "npu" and freqs_cos.ndim == 3 and freqs_cos.shape[-1] == self.head_dim:
+            freqs_cos = freqs_cos.unsqueeze(0)
+            freqs_sin = freqs_sin.unsqueeze(0)
+        kv_cache = self._cross_kv_cache if (self._context_cache_enabled and not self.training) else None
         for block_id, block in enumerate(self.blocks):
             if sparse_state is not None:
                 sparse_state.update(layer_idx=block_id)
-            x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
+            x = block(
+                x,
+                context,
+                t_mod,
+                freqs_cos,
+                freqs_sin,
+                sparse_state=sparse_state,
+                device_mesh=self.device_mesh,
+                kv_cache=kv_cache,
+            )
         return self._restore_sol_token_order(x, sparse_state, enabled=not sol_tokens_preordered)
 
     def forward_blocks_pp(
@@ -732,10 +800,23 @@ class WanModel(BaseModel):
             sparse_state,
             reorder_tokens=self.pp_start_idx == 0,
         )
+        if x.device.type == "npu" and freqs_cos.ndim == 3 and freqs_cos.shape[-1] == self.head_dim:
+            freqs_cos = freqs_cos.unsqueeze(0)
+            freqs_sin = freqs_sin.unsqueeze(0)
+        kv_cache = self._cross_kv_cache if (self._context_cache_enabled and not self.training) else None
         for block_id, block in enumerate(self.blocks[self.pp_start_idx : self.pp_end_idx]):
             if sparse_state is not None:
                 sparse_state.update(layer_idx=self.pp_start_idx + block_id)
-            x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
+            x = block(
+                x,
+                context,
+                t_mod,
+                freqs_cos,
+                freqs_sin,
+                sparse_state=sparse_state,
+                device_mesh=self.device_mesh,
+                kv_cache=kv_cache,
+            )
         return self._restore_sol_token_order(x, sparse_state, enabled=self.pp_end_idx == len(self.blocks))
 
     def _apply_sol_token_order(
@@ -964,7 +1045,7 @@ class WanModel(BaseModel):
             t_mod = t_mod.to(self.dtype)
 
             # Text embedding
-            context = self.text_embedding(context)
+            context = self._encode_text_context(context)
 
             # Image embedding (for I2V models)
             if self.has_image_input and clip_feature is not None:
@@ -1067,7 +1148,7 @@ class WanModel(BaseModel):
             t_mod = t_mod.to(self.dtype)
 
             # Text embedding (needed for cross attention)
-            context = self.text_embedding(context)
+            context = self._encode_text_context(context)
             if self.has_image_input and clip_feature is not None:
                 clip_embdding = self.img_emb(clip_feature)
                 context = torch.cat([clip_embdding, context], dim=1)
@@ -1121,6 +1202,10 @@ class WanModel(BaseModel):
         """Set attention implementation configuration."""
         logger.info(f"wan dit set attention config to {attention_config.attn_impl}")
         SelfAttention.attention_config = attention_config
+        CrossAttention.attention_config = attention_config
+        for block in self.blocks:
+            block.self_attn.attention_config = attention_config
+            block.cross_attn.attention_config = attention_config
 
     def enable_radial_attention(
         self,
@@ -1365,7 +1450,7 @@ class WanModel(BaseModel):
 
         t = t.to(self.dtype)
         t_mod = t_mod.to(self.dtype)
-        context = self.text_embedding(context)
+        context = self._encode_text_context(context)
 
         if self.has_image_input and clip_feature is not None:
             clip_embdding = self.img_emb(clip_feature)

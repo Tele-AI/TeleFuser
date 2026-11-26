@@ -74,7 +74,14 @@ def test_apply_rotary_emb_npu_handles_half_and_full_dim(monkeypatch) -> None:
     sin_full = _FakeNPUTensor(torch.zeros(6, 1, 8))
     _apply_rotary_emb_npu(x, cos_full, sin_full)  # type: ignore[arg-type]
 
+    cos_4d = _FakeNPUTensor(torch.ones(1, 6, 1, 8))
+    cos_4d.device = x.device
+    sin_4d = _FakeNPUTensor(torch.zeros(1, 6, 1, 8))
+    sin_4d.device = x.device
+    _apply_rotary_emb_npu(x, cos_4d, sin_4d)  # type: ignore[arg-type]
+
     assert calls == [
+        ((1, 6, 2, 8), (1, 6, 1, 8), (1, 6, 1, 8), "interleave"),
         ((1, 6, 2, 8), (1, 6, 1, 8), (1, 6, 1, 8), "interleave"),
         ((1, 6, 2, 8), (1, 6, 1, 8), (1, 6, 1, 8), "interleave"),
     ]
@@ -119,3 +126,52 @@ def test_wan_model_rope_freqs_cache_reuses_and_clears_on_offload() -> None:
 
     model.offload_device(pin_memory=False)
     assert len(model._rope_freqs_cache) == 0
+
+
+def test_wan_model_step_context_cache_parity_and_cleanup() -> None:
+    from telefuser.core.config import AttentionConfig, AttnImplType
+
+    torch.manual_seed(7)
+    model = WanModel(
+        dim=24,
+        in_dim=4,
+        ffn_dim=48,
+        out_dim=4,
+        text_dim=16,
+        freq_dim=16,
+        eps=1e-6,
+        patch_size=(1, 2, 2),
+        num_heads=2,
+        num_layers=2,
+        has_image_input=False,
+    ).eval()
+    model.dtype = torch.float32
+
+    cfg = AttentionConfig.dense_attention(AttnImplType.MINDIE_ATTN)
+    model.set_attention_config(cfg)
+    assert model.blocks[0].self_attn.attention_config.attn_impl == AttnImplType.MINDIE_ATTN
+    assert model.blocks[0].cross_attn.attention_config.attn_impl == AttnImplType.MINDIE_ATTN
+    model.set_attention_config(AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA))
+
+    x1 = torch.randn(1, 4, 2, 4, 4)
+    x2 = torch.randn(1, 4, 2, 4, 4)
+    ts1 = torch.tensor([800.0])
+    ts2 = torch.tensor([600.0])
+    ctx = torch.randn(1, 5, 16)
+
+    with torch.inference_mode():
+        ref1 = model(x1, ts1, ctx)
+        ref2 = model(x2, ts2, ctx)
+
+        model.enable_step_context_cache()
+        opt1 = model(x1, ts1, ctx)
+        opt2 = model(x2, ts2, ctx)
+        assert len(model._text_emb_cache) == 1
+        assert len(model._cross_kv_cache) == 2
+
+    assert torch.equal(ref1, opt1)
+    assert torch.equal(ref2, opt2)
+
+    model.clear_step_context_cache()
+    assert len(model._text_emb_cache) == 0
+    assert len(model._cross_kv_cache) == 0

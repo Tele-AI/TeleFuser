@@ -60,12 +60,12 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     ppl_config = PPL_CONFIG
 
     if current_platform.device_type == "npu":
-        if parallelism not in (1, 2, 4):
-            raise ValueError("The Ascend 910B recipe supports 1, 2 or 4 visible NPUs")
+        if parallelism not in (1, 2, 4, 8):
+            raise ValueError("The Ascend 910B recipe supports 1, 2, 4 or 8 visible NPUs")
         resolve_device(f"npu:{parallelism - 1}")
         print(
             f"{current_platform.get_device_name()}: {parallelism} NPU(s), "
-            f"CFG={min(2, parallelism)}, Ulysses={max(1, parallelism // 2)}, BF16 TORCH_SDPA"
+            f"CFG={min(2, parallelism)}, Ulysses={max(1, parallelism // 2)}, BF16"
         )
 
     # Load models using ModuleManager
