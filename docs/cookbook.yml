@@ -109,6 +109,13 @@ pages:
       zh: LTX-2.3 音视频生成
     sources:
       en: examples/ltx_video/README.md
+  - slug: ltx-video-2b
+    category: video-generation
+    title:
+      en: LTX-Video 2B NVFP4
+      zh: LTX-Video 2B NVFP4
+    sources:
+      en: examples/ltx_video_2b/README.md
   - slug: pan2
     category: video-generation
     title:

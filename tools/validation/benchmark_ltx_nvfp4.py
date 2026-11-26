@@ -10,12 +10,10 @@ import json
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
-from diffusers import LTXPipeline
 from diffusers.utils import export_to_video
-from torchao.prototype.mx_formats import NVFP4DynamicActivationNVFP4WeightConfig
-from torchao.quantization import quantize_
+
+from telefuser.pipelines.ltx_video_2b import LTXVideo2BPipeline
 
 
 def main() -> None:
@@ -48,77 +46,23 @@ def main() -> None:
         default="quality",
         help="Quality quantizes FFN GEMMs only; full quantizes every supported Linear.",
     )
-    parser.add_argument(
-        "--quantize-text-encoder",
-        action="store_true",
-        help="Quantize T5 as well as the transformer (lower residency, potentially lower fidelity).",
-    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/ltx-nvfp4"))
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     model_id = str(args.model_dir or args.model_id)
-    pipe = LTXPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-    prompt_embeds = negative_prompt_embeds = prompt_attention_mask = negative_prompt_attention_mask = None
-    nvfp4_linear_count = 0
-    if args.quantization == "nvfp4":
-        nvfp4 = NVFP4DynamicActivationNVFP4WeightConfig(use_triton_kernel=False)
-        if args.nvfp4_profile == "quality":
-            # Dynamic activation scales on temporal/cross-attention and output
-            # projections visibly amplify frame-to-frame lighting changes.
-            # FFNs contain most DiT GEMM FLOPs and tolerate W4A4 substantially
-            # better, so keep the motion/conditioning paths in BF16.
-            def should_quantize(module: torch.nn.Module, fqn: str) -> bool:
-                return isinstance(module, torch.nn.Linear) and ".ff." in fqn
-
-        else:
-
-            def should_quantize(module: torch.nn.Module, _fqn: str) -> bool:
-                return isinstance(module, torch.nn.Linear)
-
-        nvfp4_linear_count = sum(should_quantize(module, fqn) for fqn, module in pipe.transformer.named_modules())
-        quantize_(pipe.transformer, nvfp4, filter_fn=should_quantize)
-        if args.quantize_text_encoder and pipe.text_encoder is not None:
-            quantize_(pipe.text_encoder, nvfp4)
-        pipe.transformer.to("cuda")
-        pipe.vae.to("cuda")
-        for module in (pipe.transformer, pipe.text_encoder if args.quantize_text_encoder else None):
-            if module is None:
-                continue
-            for parameter in module.parameters():
-                tensor = parameter.data
-                if hasattr(tensor, "act_quant_kwargs") and tensor.act_quant_kwargs is not None:
-                    tensor.act_quant_kwargs.use_triton_kernel = True
-        if not args.quantize_text_encoder:
-            # Keep T5 in BF16 for prompt fidelity, then release its 19 GB
-            # resident footprint before denoising with the NVFP4 transformer.
-            pipe.text_encoder.to("cuda")
-            (
-                prompt_embeds,
-                prompt_attention_mask,
-                negative_prompt_embeds,
-                negative_prompt_attention_mask,
-            ) = pipe.encode_prompt(
-                args.prompt,
-                negative_prompt=args.negative_prompt,
-                device=torch.device("cuda"),
-                dtype=torch.bfloat16,
-            )
-            pipe.text_encoder.to("cpu")
-            # Decode temporal tiles sequentially so the BF16 T5-preserving
-            # path does not transiently exceed a 24 GiB card during VAE decode.
-            pipe.vae.use_framewise_decoding = True
-            torch.cuda.empty_cache()
-    else:
-        pipe.enable_model_cpu_offload()
-    pipe.transformer.eval()
+    pipe = LTXVideo2BPipeline.from_pretrained(
+        model_id,
+        quantization=args.quantization,
+        nvfp4_profile=args.nvfp4_profile,
+        torch_dtype=torch.bfloat16,
+    )
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    generator = torch.Generator(device="cuda").manual_seed(args.seed)
     start = time.perf_counter()
-    result = pipe(
-        prompt=None if prompt_embeds is not None else args.prompt,
-        negative_prompt=None if prompt_embeds is not None else args.negative_prompt,
+    frames = pipe(
+        prompt=args.prompt,
+        negative_prompt=args.negative_prompt,
         height=args.height,
         width=args.width,
         num_frames=args.num_frames,
@@ -127,16 +71,10 @@ def main() -> None:
         guidance_scale=3.0,
         decode_timestep=args.decode_timestep,
         decode_noise_scale=args.decode_noise_scale,
-        generator=generator,
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        prompt_attention_mask=prompt_attention_mask,
-        negative_prompt_attention_mask=negative_prompt_attention_mask,
-        output_type="np",
+        seed=args.seed,
     )
     torch.cuda.synchronize()
     latency = time.perf_counter() - start
-    frames = result.frames[0]
     # Diffusers' ``output_type="np"`` returns float frames in [0, 1], which
     # export_to_video scales itself. Avoid converting to uint8 beforehand,
     # otherwise export_to_video would multiply by 255 a second time.
@@ -146,11 +84,10 @@ def main() -> None:
         "model": model_id,
         "quantization": args.quantization,
         "nvfp4_profile": args.nvfp4_profile if args.quantization == "nvfp4" else None,
-        "nvfp4_linear_count": nvfp4_linear_count,
+        "runtime": "TeleFuser LTXVideo2BPipeline",
+        "nvfp4_linear_count": pipe.nvfp4_linear_count,
         "offload": args.quantization == "bf16",
-        "text_encoder_quantization": ("nvfp4" if args.quantize_text_encoder else "bf16_encode_then_cpu")
-        if args.quantization == "nvfp4"
-        else "bf16_cpu_offload",
+        "text_encoder_quantization": "bf16_encode_then_cpu" if args.quantization == "nvfp4" else "bf16_cpu_offload",
         "prompt": args.prompt,
         "height": args.height,
         "width": args.width,
