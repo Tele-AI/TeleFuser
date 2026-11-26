@@ -24,8 +24,17 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 
 ## News 📰
 
+- ✨ **2026-11-24**：Wan2.2-TI2V-5B 支持在昇腾 910B 上使用 BF16 和模型级 CPU 卸载运行文生视频推理。
+  [昇腾部署指南](https://github.com/Tele-AI/TeleFuser/blob/ed6c682a03b8266b08e0f3b75311972d8deaeed4/docs/zh/ascend_910b.md) 提供 Docker 环境搭建及单卡、双卡和四卡推理步骤。
+- ✨ **2026-11-13**：新增 **PAN2** 文生视频和首帧图生视频，支持组合使用序列并行与张量并行，可选用 FP8 线性层和 BF16 Sol-Attn。见 [PAN2 示例](examples/pan2/README.md)。
+- ✨ **2026-09-26**：**Qwen-Image 2.1** 支持在同一条流水线中完成文生图、图像编辑和参考图引导生成，最多可输入 10 张参考图。见 [Qwen-Image 示例](examples/qwen_image/README.md)。
 - ✨ **2026-09-14**：建立通用 VLA 会话服务抽象，定义可校验的语义观测与动作契约，
   支持可扩展具身适配器、模型副本绑定会话、连续控制 WebSocket 服务及模拟器侧 MuJoCo 验证。
+- ✨ **2026-09-10**：Wan2.1 1.3B 文生视频新增 AMD ROCm 支持，已在单张 Radeon RX 9070 上验证。见 [Wan Video 示例](examples/wan_video/README.md#wan21_1_3b_text_to_video_rocmpy)。
+
+<details>
+<summary>历史动态</summary>
+
 - ✨ **2026-08-27**：接入 [**LingBot-VLA v2**](examples/lingbot_vla_v2/README.md) 6B base checkpoint，支持 RobotWin 多相机、
   任务文本、机器人状态和归一化动作输入输出，并提供原生结构化 HTTP、BF16 eager、CUDA Graph 及量化推理支持。
 - ✨ **2026-08-19**：新增 [**LTX-2.5 Distilled**](examples/ltx25_distilled/README.md) T2V 和 I2V 联合
@@ -46,6 +55,8 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 - ✨ **2026-07-15**：新增 [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) 支持，支持离线生成、交互式 WebRTC 流和多卡推理。
 
 - ✨ **2026-07-06**：新增外部 **CacheSeek** latent cache 集成，支持服务模式下跨请求复用；命中后可跳过前 N 步去噪。Wan2.2 服务示例默认快照 `[5, 10, 15, 20, 25]`。配置和安装方式见 [docs/zh/latent_cache.md](docs/zh/latent_cache.md)。
+
+</details>
 
 ## 为什么是 TeleFuser
 

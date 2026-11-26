@@ -25,9 +25,22 @@ runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 
+- ✨ **2026-11-24**: Wan2.2-TI2V-5B now runs text-to-video inference on Ascend 910B with BF16 and model CPU offload.
+  The [Ascend guide](https://github.com/Tele-AI/TeleFuser/blob/ed6c682a03b8266b08e0f3b75311972d8deaeed4/docs/en/ascend_910b.md)
+  covers Docker setup and inference on one, two, or four cards.
+- ✨ **2026-11-13**: Added **PAN2** text-to-video and first-frame image-to-video generation with combined sequence
+  and tensor parallelism, optional FP8 linear layers, and BF16 Sol-Attn. See the [PAN2 examples](examples/pan2/README.md).
+- ✨ **2026-09-26**: **Qwen-Image 2.1** now supports text-to-image generation, image editing, and generation
+  guided by up to ten reference images in one pipeline. See the [Qwen-Image examples](examples/qwen_image/README.md).
 - ✨ **2026-09-14**: Established a general VLA session-serving abstraction with validated semantic observation and
   action contracts, extensible embodiment adapters, replica-affine sessions, continuous-control WebSocket serving,
   and simulator-side MuJoCo validation.
+- ✨ **2026-09-10**: Added AMD ROCm support for Wan2.1 1.3B text-to-video inference, validated on a single
+  Radeon RX 9070. See the [Wan Video examples](examples/wan_video/README.md#wan21_1_3b_text_to_video_rocmpy).
+
+<details>
+<summary>Earlier news</summary>
+
 - ✨ **2026-08-27**: Added [**LingBot-VLA v2**](examples/lingbot_vla_v2/README.md) 6B base-checkpoint support
   with RobotWin multi-camera, task-text, robot-state, and normalized action I/O, together with native structured HTTP
   serving, BF16 eager, CUDA Graph, and quantized inference support.
@@ -51,6 +64,8 @@ runtime path, supported workloads, and reproducible real-time gate.
 - ✨ **2026-08-06**: Added [**ABot-World-0-5B-LF**](docs/en/abot_world.md) single-GPU browser interaction with persistent causal KV state and bounded RoPE positions.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
+
+</details>
 
 ## Why TeleFuser
 
