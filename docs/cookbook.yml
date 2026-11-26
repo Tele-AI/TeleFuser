@@ -109,13 +109,13 @@ pages:
       zh: LTX-2.3 音视频生成
     sources:
       en: examples/ltx_video/README.md
-  - slug: pan2
-    category: video-generation
+  - slug: minimax-h3-image
+    category: image-generation
     title:
-      en: PAN2
-      zh: PAN2 视频生成
+      en: MiniMax H3 Image
+      zh: MiniMax H3 图像生成
     sources:
-      en: examples/pan2/README.md
+      en: examples/minimax_h3_image/README.md
   - slug: minimax-h3
     category: audio-video
     title:
@@ -158,6 +158,20 @@ pages:
       zh: LTX-2.5 参考输入
     sources:
       en: examples/data/ltx25/README.md
+  - slug: minimax-h3-image-validation
+    category: image-generation
+    title:
+      en: MiniMax H3 Image validation
+      zh: MiniMax H3 图像模型验证记录
+    sources:
+      en: examples/minimax_h3_image/VALIDATION.md
+  - slug: pan2
+    category: video-generation
+    title:
+      en: PAN2
+      zh: PAN2 视频生成
+    sources:
+      en: examples/pan2/README.md
   - slug: pan2-validation
     category: video-generation
     title:

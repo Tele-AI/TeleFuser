@@ -10,6 +10,51 @@ import torch.nn.functional as F
 FP8_ATTENTION_BLOCK_SIZE = 64
 
 
+def _parallel_sequence_mean(x: torch.Tensor, y: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split long reductions across SMs; preserve FP32 accumulation and input layout."""
+    import triton
+
+    from telefuser.kernel.triton.fp8_attention import _sequence_mean_finish_kernel, _sequence_mean_partials_kernel
+
+    batch, tokens, heads, dims = x.shape
+    chunks = triton.cdiv(tokens, 256)
+    partials = torch.empty((chunks, batch * heads, dims), device=x.device, dtype=torch.float32)
+    y_partials = torch.empty_like(partials) if y is not None else partials
+    output = torch.empty((batch, heads, dims), device=x.device, dtype=torch.float32)
+    y_output = torch.empty_like(output) if y is not None else output
+    other = x if y is None else y
+    _sequence_mean_partials_kernel[(chunks, batch * heads, triton.cdiv(dims, 32))](
+        x,
+        other,
+        partials,
+        y_partials,
+        tokens,
+        heads,
+        dims,
+        *x.stride(),
+        *other.stride(),
+        y is not None,
+        y is None and x.stride(1) == 1,
+        256,
+        32,
+        num_warps=4,
+    )
+    _sequence_mean_finish_kernel[(batch * heads, triton.cdiv(dims, 32))](
+        partials,
+        y_partials,
+        output,
+        y_output,
+        tokens,
+        chunks,
+        batch * heads,
+        dims,
+        y is not None,
+        32,
+        num_warps=4,
+    )
+    return output, y_output
+
+
 def _sequence_mean(x: torch.Tensor) -> torch.Tensor:
     """Reduce BTHD sequence means in FP32 without materializing an FP32 copy."""
 
@@ -17,6 +62,8 @@ def _sequence_mean(x: torch.Tensor) -> torch.Tensor:
         raise ValueError("attention smoothing expects a floating-point [B, T, H, D] tensor")
     if not x.is_cuda:
         return x.float().mean(dim=1)
+    if x.shape[1] >= 1024:
+        return _parallel_sequence_mean(x)[0]
     import triton
 
     from telefuser.kernel.triton.fp8_attention import _sequence_mean_kernel
@@ -49,6 +96,8 @@ def _sequence_means(k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, tor
         raise ValueError("K and V must be on the same device")
     if not k.is_cuda:
         return k.float().mean(dim=1), v.float().mean(dim=1)
+    if k.shape[1] >= 1024:
+        return _parallel_sequence_mean(k, v)
     import triton
 
     from telefuser.kernel.triton.fp8_attention import _sequence_mean_kv_kernel

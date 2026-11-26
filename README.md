@@ -290,6 +290,7 @@ telefuser/
 
 | Pipeline | Task | Notes |
 |----------|------|-------|
+| `MiniMax-H3-Image` | T2I, image editing | Six-step PDD image generation, SP/TP, FP8 GEMM and BF16 Sol-Attn; see [examples/minimax_h3_image/README.md](examples/minimax_h3_image/README.md) |
 | `Qwen-Image` | T2I, Edit | [examples/qwen_image/README.md](examples/qwen_image/README.md) |
 | `Z-Image` | T2I | [examples/z_image/README.md](examples/z_image/README.md) |
 | `Flux2 Klein` | T2I | [examples/flux2_klein/README.md](examples/flux2_klein/README.md) |

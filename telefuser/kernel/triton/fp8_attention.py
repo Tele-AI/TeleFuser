@@ -231,3 +231,77 @@ def _quantize_qkv_fp8_stage2_v(
     if smooth_v:
         values = values - tl.load(v_mean + scale_offsets)[None, :]
     tl.store(v_out + output_offsets, values / scale[None, :], mask=valid[:, None])
+
+
+@triton.jit
+def _sequence_mean_partials_kernel(
+    x,
+    y,
+    x_partials,
+    y_partials,
+    tokens: tl.constexpr,
+    heads: tl.constexpr,
+    dims: tl.constexpr,
+    xs0,
+    xs1,
+    xs2,
+    xs3,
+    ys0,
+    ys1,
+    ys2,
+    ys3,
+    paired: tl.constexpr,
+    token_contiguous: tl.constexpr,
+    block_tokens: tl.constexpr,
+    block_dims: tl.constexpr,
+):
+    chunk, batch_head, dim_block = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    batch, head = batch_head // heads, batch_head % heads
+    t = chunk * block_tokens + tl.arange(0, block_tokens)
+    d = dim_block * block_dims + tl.arange(0, block_dims)
+    if token_contiguous:
+        offsets = batch * xs0 + t[None, :] * xs1 + head * xs2 + d[:, None] * xs3
+        values = tl.load(x + offsets, (t[None, :] < tokens) & (d[:, None] < dims), 0.0).to(tl.float32)
+        x_sum = tl.sum(values, 1)
+    else:
+        offsets = batch * xs0 + t[:, None] * xs1 + head * xs2 + d[None, :] * xs3
+        mask = (t[:, None] < tokens) & (d[None, :] < dims)
+        values = tl.load(x + offsets, mask, 0.0).to(tl.float32)
+        x_sum = tl.sum(values, 0)
+        if paired:
+            y_offsets = batch * ys0 + t[:, None] * ys1 + head * ys2 + d[None, :] * ys3
+            y_values = tl.load(y + y_offsets, mask, 0.0).to(tl.float32)
+            y_sum = tl.sum(y_values, 0)
+    partial_offset = (chunk * tl.num_programs(1) + batch_head) * dims + d
+    tl.store(x_partials + partial_offset, x_sum, d < dims)
+    if paired:
+        tl.store(y_partials + partial_offset, y_sum, d < dims)
+
+
+@triton.jit
+def _sequence_mean_finish_kernel(
+    x_partials,
+    y_partials,
+    x_output,
+    y_output,
+    tokens: tl.constexpr,
+    chunks: tl.constexpr,
+    batch_heads: tl.constexpr,
+    dims: tl.constexpr,
+    paired: tl.constexpr,
+    block_dims: tl.constexpr,
+):
+    bh, dim_block = tl.program_id(0), tl.program_id(1)
+    d = dim_block * block_dims + tl.arange(0, block_dims)
+    c = tl.arange(0, 32)
+    x_total = tl.zeros((block_dims,), tl.float32)
+    y_total = tl.zeros((block_dims,), tl.float32)
+    for start in range(0, chunks, 32):
+        offsets = ((start + c[:, None]) * batch_heads + bh) * dims + d[None, :]
+        mask = (start + c[:, None] < chunks) & (d[None, :] < dims)
+        x_total += tl.sum(tl.load(x_partials + offsets, mask, 0), 0)
+        if paired:
+            y_total += tl.sum(tl.load(y_partials + offsets, mask, 0), 0)
+    tl.store(x_output + bh * dims + d, x_total / tokens, d < dims)
+    if paired:
+        tl.store(y_output + bh * dims + d, y_total / tokens, d < dims)

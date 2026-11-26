@@ -258,23 +258,10 @@ def _sol_attn_cute(
             dummy_scale = torch.ones((1,), device=q.device, dtype=torch.float32)
             q_scale = k_scale = v_scale = kc_scale = dummy_scale
         if fp8_inputs and tokens % BLOCK_SIZE:
+            from .triton_ref.preprocess import pad_fp8_qkv
+
             padded_tokens = ((tokens + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
-            q_padded = torch.zeros(
-                (batch, padded_tokens, heads, q.shape[-1]),
-                device=q.device,
-                dtype=q.dtype,
-            )
-            k_padded = torch.zeros_like(q_padded)
-            q_padded[:, :tokens].copy_(q)
-            k_padded[:, :tokens].copy_(k)
-            v_storage = torch.zeros(
-                (batch, heads, v.shape[-1], padded_tokens),
-                device=v.device,
-                dtype=v.dtype,
-            )
-            v_storage[..., :tokens].copy_(v.permute(0, 2, 3, 1))
-            q, k = q_padded, k_padded
-            v = v_storage.permute(0, 3, 1, 2)
+            q, k, v = pad_fp8_qkv(q, k, v, padded_tokens)
         output = torch.empty(v.shape, device=v.device, dtype=torch.bfloat16)
         lse = torch.empty(
             (batch, q.shape[1], heads),
