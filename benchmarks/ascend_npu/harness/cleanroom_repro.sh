@@ -3,16 +3,18 @@
 # Gate G4: Execute a clean-room reproduction script with stripped env and zero source-tree mounts.
 set -euo pipefail
 
+MODEL_KIND="wan22"
 IMAGE_REF=""
 MODEL_DIR=""
 DEVICES_CSV="0"
 ALLOWED_CSV=""
 RUN_DIR=""
-ENTRYPOINT_SCRIPT="/opt/telefuser/examples/wan_video/wan22_t2v_5b.py"
-EXPECTED_MP4_GLOB="wan_video_wan22_t2v_5b*.mp4"
+ENTRYPOINT_SCRIPT=""
+EXPECTED_MP4_GLOB=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --model) MODEL_KIND="$2"; shift 2 ;;
     --image) IMAGE_REF="$2"; shift 2 ;;
     --model-dir) MODEL_DIR="$2"; shift 2 ;;
     --devices) DEVICES_CSV="$2"; shift 2 ;;
@@ -23,6 +25,21 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -z "$ENTRYPOINT_SCRIPT" ]]; then
+  if [[ "$MODEL_KIND" == "minimax_h3" ]]; then
+    ENTRYPOINT_SCRIPT="/opt/telefuser/examples/minimax_h3/minimax_h3_fl2va_h100.py"
+  else
+    ENTRYPOINT_SCRIPT="/opt/telefuser/examples/wan_video/wan22_t2v_5b.py"
+  fi
+fi
+if [[ -z "$EXPECTED_MP4_GLOB" ]]; then
+  if [[ "$MODEL_KIND" == "minimax_h3" ]]; then
+    EXPECTED_MP4_GLOB="minimax_h3_*.mp4"
+  else
+    EXPECTED_MP4_GLOB="wan_video_wan22_t2v_5b*.mp4"
+  fi
+fi
 
 if [[ -z "$IMAGE_REF" || -z "$MODEL_DIR" || -z "$RUN_DIR" ]]; then
   echo "Usage: $0 --image <tag_or_id> --model-dir <abs_path> --devices <0,1,...> --run-dir <dir>" >&2
@@ -36,6 +53,27 @@ bash "$SCRIPT_DIR/preflight_check.sh" "${PREFLIGHT_ARGS[@]}" > /dev/null
 
 mkdir -p "$RUN_DIR"
 REPRO_SH="$RUN_DIR/REPRODUCE.sh"
+
+if [[ "$MODEL_KIND" == "minimax_h3" ]]; then
+  MODEL_CLI_BLOCK="    --model-root /models/checkpoint \\
+    --mode t2va \\
+    --gpu-num \"\$CARD_COUNT\" \\
+    --duration 5 --aspect-ratio 16:9 \\
+    --seed 1101 \\
+    --prompt 'In a snowy blue-purple forest, Ori carefully walks past a sleeping giant; footsteps crunch in the snow while the creature breathes and softly snorts.' \\
+    --output-path /out/minimax_h3_cleanroom.mp4"
+  AUDIO_PROBE_BLOCK="docker run --rm --entrypoint ffprobe \\
+  --mount \"type=bind,src=\$OUT_DIR,dst=/out,readonly\" \\
+  \"\$TF_IMAGE\" -v error -select_streams a:0 \\
+  -show_entries stream=codec_name,sample_rate,channels \\
+  -of default=noprint_wrappers=1 \"/out/\$(basename \"\$MP4_FILE\")\""
+else
+  MODEL_CLI_BLOCK="    --model_root /models/checkpoint \\
+    --gpu_num \"\$CARD_COUNT\" \\
+    --resolution 480p --aspect_ratio 16:9 --num_frames 121 \\
+    --prompt 'A red kite flying over a green field'"
+  AUDIO_PROBE_BLOCK=":"
+fi
 
 cat > "$REPRO_SH" <<EOF
 #!/usr/bin/env bash
@@ -55,7 +93,7 @@ done
 CARD_COUNT="\${#DEV_IDS[@]}"
 
 mkdir -p "\$OUT_DIR"
-docker run --rm --shm-size=64g \\
+docker run --rm --shm-size=128g \\
   "\${DEV_ARGS[@]}" \\
   --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \\
   --mount type=bind,src=/usr/local/dcmi,dst=/usr/local/dcmi,readonly \\
@@ -65,12 +103,10 @@ docker run --rm --shm-size=64g \\
   --mount type=bind,src=/etc/ascend_install.info,dst=/etc/ascend_install.info,readonly \\
   --mount "type=bind,src=\$TF_MODEL_DIR,dst=/models/checkpoint,readonly" \\
   --mount "type=bind,src=\$OUT_DIR,dst=/out" \\
-  -e TELEAI_EXAMPLE_OUTPUT_DIR=/out -e HF_HUB_OFFLINE=1 \\
+  -e TELEAI_EXAMPLE_OUTPUT_DIR=/out -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \\
+  -e PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \\
   "\$TF_IMAGE" python "$ENTRYPOINT_SCRIPT" \\
-    --model_root /models/checkpoint \\
-    --gpu_num "\$CARD_COUNT" \\
-    --resolution 480p --aspect_ratio 16:9 --num_frames 121 \\
-    --prompt 'A red kite flying over a green field'
+$MODEL_CLI_BLOCK
 
 MP4_FILE="\$(ls -1 "\$OUT_DIR"/$EXPECTED_MP4_GLOB | head -n 1)"
 docker run --rm --entrypoint ffprobe \\
@@ -78,6 +114,7 @@ docker run --rm --entrypoint ffprobe \\
   "\$TF_IMAGE" -v error -select_streams v:0 -count_frames \\
   -show_entries stream=width,height,r_frame_rate,nb_read_frames \\
   -of default=noprint_wrappers=1 "/out/\$(basename "\$MP4_FILE")"
+$AUDIO_PROBE_BLOCK
 echo "CLEANROOM_PASS: \$MP4_FILE"
 EOF
 chmod +x "$REPRO_SH"

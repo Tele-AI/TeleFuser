@@ -1,0 +1,50 @@
+{
+  "record_id": "20261127_minimax_h3_t2va_4x_910b2_x86_64_cann93",
+  "recorded_date": "2026-11-27",
+  "model": "MiniMax-H3",
+  "task": "T2VA",
+  "chip_model": "Ascend 910B2 (64GB)",
+  "card_count": 4,
+  "parallel_spec": "Resident Ulysses4",
+  "cpu_arch": "x86_64",
+  "cann_version": "9.3.0",
+  "torch_version": "2.10.0+cpu / torch_npu 2.10.0.post7",
+  "base_image": "vllm-omni:v0.34.0",
+  "workload": {
+    "resolution": "1344x768",
+    "num_frames": 124,
+    "fps": 24,
+    "audio": "32kHz 2ch AAC",
+    "steps": 50,
+    "solver": "Euler (shift 12.0/3.0)",
+    "precision": "BF16 eager + MindIE LaserAttention"
+  },
+  "telefuser": {
+    "version_or_commit": "87cd1d2",
+    "cold_s": 351.53,
+    "warm_runs_s": [220.98, 220.67, 220.88],
+    "warm_median_s": 220.88,
+    "denoise_s": 211.17,
+    "non_denoise_s": 9.71,
+    "gen_fps": 0.56,
+    "peak_hbm_mb": 63514
+  },
+  "vllm_omni": {
+    "version_or_commit": "v0.34.0",
+    "cold_s": 307.55,
+    "warm_runs_s": [246.41, 246.38, 246.29],
+    "warm_median_s": 246.38,
+    "denoise_s": 236.53,
+    "non_denoise_s": 9.85,
+    "gen_fps": 0.50,
+    "peak_hbm_mb": 25383
+  },
+  "quality_gate": {
+    "nan_or_inf": false,
+    "psnr_db": 25.07,
+    "mae_255": 6.72,
+    "audio_cosine": 0.9950,
+    "deterministic_warm_hash": false
+  },
+  "gate_status": "VERIFIED"
+}
