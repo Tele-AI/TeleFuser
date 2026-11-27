@@ -40,6 +40,18 @@ def _apply_rotary_emb_npu(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor)
     head_size = x.shape[-1]
     batch_size = x.shape[0]
 
+    # Zero-overhead fast path when caller supplies pre-expanded 4D [1 or B, S, 1, D] on target device/dtype.
+    if (
+        cos.dim() == 4
+        and cos.shape[-1] == head_size
+        and (cos.shape[0] == 1 or cos.shape[0] == batch_size)
+        and cos.device == x.device
+        and sin.device == x.device
+        and cos.dtype == x.dtype
+        and sin.dtype == x.dtype
+    ):
+        return torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode="interleave")
+
     # Normalize cos/sin to [B or 1, S, 1, D_cos] for BNSD/BSND broadcasting with x [B, S, H, D].
     if cos.dim() == 2:
         cos = cos.unsqueeze(0).unsqueeze(-2)

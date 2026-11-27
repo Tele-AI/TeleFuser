@@ -211,4 +211,4 @@ generate_wan 4 && inspect_video 4
 | CANN 8.2（Torch 2.9.0，`torch_npu` 2.9.0.post1） | 480p（864 × 480） | 1 / 2 / 4 卡（CFG 2 × Ulysses 2） | 180.9 / 120.8 / 87.0 秒 | 通过 |
 | 同上 | 720p | 1 / 4 卡 | 477.8 / 173.9 秒 | 通过 |
 
-双卡实机还单独验证了 HCCL all-reduce、默认 NPU mesh、流水线并行（PP）发送与缺省接收缓冲区，以及真实 NPU 张量经主存分片并在目标设备重组。
+双卡实机还单独验证了 HCCL all-reduce、默认 NPU mesh、流水线并行（PP）发送与缺省接收缓冲区，以及真实 NPU 张量经主存分片并在目标设备重组。与 `vLLM-Omni` 的同底座延迟对标及多卡扩展结果见[《昇腾 NPU 性能基准》](benchmark_ascend_npu.md)。

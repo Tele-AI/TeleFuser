@@ -153,6 +153,8 @@ docs/**/modelzoo.md
 !benchmarks/telefuser_aiperf/configs/*.json
 !benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json
 !benchmarks/baseline/sglang_lingbot_stream/configs/*.json
+!benchmarks/ascend_npu/planned_slots.json
+!benchmarks/ascend_npu/records/*.json
 
 project
 output

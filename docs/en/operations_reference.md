@@ -14,6 +14,7 @@ logging, profiling, testing, and symptom-based diagnostics without mixing them i
 | Configure process and request logging | [Logging](logging.md) |
 | Capture stage timings and GPU traces | [Profiler](profiler.md) |
 | Reproduce batch and streaming benchmarks | [TeleFuser and AIPerf](benchmark_aiperf.md) |
+| Inspect Ascend 910B2 / 910B4 head-to-head benchmarks | [Ascend NPU Benchmarks](benchmark_ascend_npu.md) |
 | Run CPU, GPU, distributed, or regression tests | [Testing](testing.md) |
 | Diagnose common failures | [Troubleshooting](troubleshooting.md) |
 

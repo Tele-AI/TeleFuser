@@ -298,6 +298,19 @@ def attention(
     # - Flash Attention expects BSND (NHD) layout
     # - PyTorch SDPA variants expect BNSD (HND) layout
     # - SageAttention can accept both via tensor_layout parameter
+    # Promote default eager TORCH_SDPA on Ascend NPU to MindIE-SD attention when eligible.
+    if (
+        attn_impl == AttnImplType.TORCH_SDPA
+        and MINDIE_ATTN_AVAILABLE
+        and q.device.type == "npu"
+        and sequence_lengths is None
+        and not is_causal
+        and not return_lse
+        and attn_mask is None
+        and q.dtype in (torch.float16, torch.bfloat16)
+    ):
+        attn_impl = AttnImplType.MINDIE_ATTN
+
     BNSD_IMPLS = {AttnImplType.TORCH_CUDNN, AttnImplType.TORCH_SDPA, AttnImplType.SPARGE_ATTN, AttnImplType.MINDIE_ATTN}
 
     # Track current layout after potential conversions

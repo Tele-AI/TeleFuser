@@ -1,0 +1,98 @@
+[
+  {
+    "slot_id": "wan22_ti2v_5b_1x_910b2_x86_64_cann93",
+    "model": "Wan2.2-TI2V-5B",
+    "task": "T2V",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 1,
+    "parallel_spec": "Offload (Single-Card)",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "864x480, 121f, 50 steps, BF16"
+  },
+  {
+    "slot_id": "wan22_ti2v_5b_2x_910b2_x86_64_cann93",
+    "model": "Wan2.2-TI2V-5B",
+    "task": "T2V",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 2,
+    "parallel_spec": "CFG2",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "864x480, 121f, 50 steps, BF16"
+  },
+  {
+    "slot_id": "wan22_ti2v_5b_4x_910b2_x86_64_cann93",
+    "model": "Wan2.2-TI2V-5B",
+    "task": "T2V",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 4,
+    "parallel_spec": "CFG2 x Ulysses2",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "864x480, 121f, 50 steps, BF16"
+  },
+  {
+    "slot_id": "wan22_ti2v_5b_8x_910b2_x86_64_cann93",
+    "model": "Wan2.2-TI2V-5B",
+    "task": "T2V",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 8,
+    "parallel_spec": "CFG2 x Ulysses4",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "864x480, 121f, 50 steps, BF16"
+  },
+  {
+    "slot_id": "minimax_h3_t2va_1x_910b2_x86_64_cann93",
+    "model": "MiniMax-H3",
+    "task": "T2VA",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 1,
+    "parallel_spec": "Offload (Single-Card)",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "768p, 5s (24fps + 32kHz), 50 steps, BF16"
+  },
+  {
+    "slot_id": "minimax_h3_t2va_2x_910b2_x86_64_cann93",
+    "model": "MiniMax-H3",
+    "task": "T2VA",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 2,
+    "parallel_spec": "Resident TP2",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "768p, 5s (24fps + 32kHz), 50 steps, BF16"
+  },
+  {
+    "slot_id": "minimax_h3_t2va_4x_910b2_x86_64_cann93",
+    "model": "MiniMax-H3",
+    "task": "T2VA",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 4,
+    "parallel_spec": "Resident Ulysses4",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "768p, 5s (24fps + 32kHz), 50 steps, BF16"
+  },
+  {
+    "slot_id": "minimax_h3_t2va_8x_910b2_x86_64_cann93",
+    "model": "MiniMax-H3",
+    "task": "T2VA",
+    "chip_model": "Ascend 910B2 (64GB)",
+    "card_count": 8,
+    "parallel_spec": "Resident Ulysses8",
+    "cpu_arch": "x86_64",
+    "cann_version": "9.3.0",
+    "base_image": "vllm-omni:v0.34.0",
+    "workload_summary": "768p, 5s (24fps + 32kHz), 50 steps, BF16"
+  }
+]
