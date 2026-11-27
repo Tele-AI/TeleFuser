@@ -68,11 +68,16 @@ class MiniMaxH3TextEncodingStage(BaseStage):
                 raise ValueError("MiniMax H3 text encoder TP requires a dedicated one-dimensional TP mesh")
             if parallel_config.enable_fsdp:
                 raise ValueError("MiniMax H3 text encoder TP cannot be combined with FSDP")
-            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+            if (
+                self.device.type != "npu"
+                and self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD
+            ):
                 raise ValueError("MiniMax H3 text encoder TP cannot be combined with model CPU offload")
             logger.info(f"Enabling tensor parallelism for {self.name}")
             self.text_encoder.enable_tp(device_mesh)
-            self.text_encoder.to(self.device)
+            if self.model_runtime_config.offload_config.offload_type == WeightOffloadType.NO_CPU_OFFLOAD:
+                self.text_encoder.to(self.device)
+                self.onload_models_flag = True
         else:
             if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
                 raise ValueError("MiniMax H3 text encoder FSDP inference cannot be combined with model CPU offload")
@@ -82,7 +87,7 @@ class MiniMaxH3TextEncodingStage(BaseStage):
                 device_mesh=device_mesh,
                 wrap_module_names=self.text_encoder.get_fsdp_module_names(),
             )
-        self.onload_models_flag = True
+            self.onload_models_flag = True
         current_platform.empty_cache()
 
     @with_model_offload(["text_encoder"])

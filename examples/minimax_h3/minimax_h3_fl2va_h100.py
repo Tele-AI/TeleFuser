@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     load_minimax_h3_pipeline,
@@ -14,9 +16,11 @@ from examples.minimax_h3.common import (
 from telefuser.core.config import AttnImplType, FeatureCacheConfig
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Generation, MiniMaxH3Pipeline
 from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
+from telefuser.platforms import current_platform
 from telefuser.service.core.contract_templates import build_pipeline_manifest, build_task_contract_template
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
+_IS_NPU = current_platform.device_type == "npu"
 PPL_CONFIG: dict[str, Any] = {
     "name": "minimax_h3_fl2va_h100",
     "model_root": TF_MODEL_ZOO_PATH + "/MiniMaxAI_MiniMax-H3",
@@ -31,10 +35,10 @@ PPL_CONFIG: dict[str, Any] = {
     "seed": 0,
     "flow_shift": None,
     "audio_flow_shift": None,
-    "device": "cuda:0",
+    "device": "npu:0" if _IS_NPU else "cuda:0",
     "enable_fsdp": None,
     "online_adaln_cache": True,
-    "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "attn_impl": AttnImplType.MINDIE_ATTN if _IS_NPU else AttnImplType.FLASH_ATTN_4,
     "attention_chunks": 2,
     "ulysses_sequence_mode": "valid_only",
     "sol_fp8": False,
@@ -109,8 +113,15 @@ def get_pipeline(
     adapter_path: str | None = PPL_CONFIG["adapter_path"],
     adapter_strength: float = PPL_CONFIG["adapter_strength"],
 ) -> MiniMaxH3Pipeline:
-    """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
-    tp_degree = 2 if parallelism == 4 else 1
+    """Load the FL2VA checkpoint partition for 1, 2, 4, or 8 accelerators."""
+    is_npu_target = str(device).partition(":")[0].strip().lower() == "npu"
+    tp_degree = (2 if parallelism == 2 else 1) if is_npu_target else (2 if parallelism in {4, 8} else 1)
+    resolved_enable_fsdp = False if (is_npu_target and enable_fsdp is None) else enable_fsdp
+    resolved_attn_impl = (
+        AttnImplType.MINDIE_ATTN
+        if is_npu_target and attn_impl in (AttnImplType.FLASH_ATTN_4, "FLASH_ATTN_4")
+        else attn_impl
+    )
     return load_minimax_h3_pipeline(
         model_root,
         partition=PPL_CONFIG["partition"],
@@ -119,9 +130,9 @@ def get_pipeline(
         ulysses_degree=parallelism // tp_degree,
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
-        enable_fsdp=enable_fsdp,
+        enable_fsdp=resolved_enable_fsdp,
         online_adaln_cache=online_adaln_cache,
-        attn_impl=attn_impl,
+        attn_impl=resolved_attn_impl,
         attention_chunks=attention_chunks,
         ulysses_sequence_mode=ulysses_sequence_mode,
         sol_fp8=sol_fp8,
@@ -313,7 +324,7 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         default=default_quantization,
         help="Online DiT Linear quantization backend (tf-kernel FP8 supports SP/TP; other backends are single-GPU).",
     )
-    parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--attention-chunks", type=int, choices=(1, 2), default=PPL_CONFIG["attention_chunks"])
     parser.add_argument(
         "--ulysses-sequence-mode",
@@ -322,7 +333,7 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
     )
     parser.add_argument(
         "--attn-impl",
-        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN"),
+        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN", "MINDIE_ATTN", "TORCH_SDPA"),
         default=PPL_CONFIG["attn_impl"].name,
     )
     parser.add_argument("--sol-fp8", action="store_true", help="Use FP8 Q/K/V in active Sol-Attn layers.")

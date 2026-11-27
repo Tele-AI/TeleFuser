@@ -390,7 +390,16 @@ def attention(
 
     # MindIE-SD attention (Ascend NPU)
     elif sequence_lengths is None and attn_impl == AttnImplType.MINDIE_ATTN and MINDIE_ATTN_AVAILABLE:
-        output = mindie_attn(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
+        laser_input_scale = kwargs.get("laser_input_scale")
+        output = mindie_attn(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            scale=scale,
+            is_causal=is_causal,
+            input_scale=float(laser_input_scale) if isinstance(laser_input_scale, (int, float)) else None,
+        )
 
     # PyTorch SDPA
     elif sequence_lengths is None and attn_impl == AttnImplType.TORCH_CUDNN and SDPA_AVAILABLE:

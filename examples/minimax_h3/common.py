@@ -37,6 +37,7 @@ from telefuser.pipelines.minimax_h3.pipeline import (
 )
 from telefuser.pipelines.minimax_h3.task_profiles import minimax_h3_task_profile, partition_for_task
 from telefuser.pipelines.minimax_h3.time_request import minimax_h3_time_shift_sigmas
+from telefuser.platforms import resolve_device
 from telefuser.utils.audio import save_wav
 from telefuser.utils.video import save_video
 
@@ -196,16 +197,16 @@ def load_minimax_h3_pipeline(
 
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
-    if ulysses_degree not in {1, 2, 4}:
-        raise ValueError("ulysses_degree must be 1, 2, or 4")
-    if tp_degree not in {1, 2, 4}:
-        raise ValueError("tp_degree must be 1, 2, or 4")
+    if ulysses_degree not in {1, 2, 4, 8}:
+        raise ValueError("ulysses_degree must be 1, 2, 4, or 8")
+    if tp_degree not in {1, 2, 4, 8}:
+        raise ValueError("tp_degree must be 1, 2, 4, or 8")
     world_size = ulysses_degree * tp_degree
-    if world_size not in {1, 2, 4}:
-        raise ValueError("ulysses_degree * tp_degree must be 1, 2, or 4")
+    if world_size not in {1, 2, 4, 8}:
+        raise ValueError("ulysses_degree * tp_degree must be 1, 2, 4, or 8")
     resolved_encoder_tp = world_size if text_encoder_tp_degree is None else text_encoder_tp_degree
-    if resolved_encoder_tp not in {1, 2, 4}:
-        raise ValueError("text_encoder_tp_degree must be 1, 2, or 4")
+    if resolved_encoder_tp not in {1, 2, 4, 8}:
+        raise ValueError("text_encoder_tp_degree must be 1, 2, 4, or 8")
     resolved_enable_fsdp = world_size == 4 and tp_degree == 1 if enable_fsdp is None else enable_fsdp
     if resolved_enable_fsdp and (world_size == 1 or tp_degree > 1):
         raise ValueError("enable_fsdp requires multi-GPU sequence parallelism without tensor parallelism")
@@ -233,7 +234,7 @@ def load_minimax_h3_pipeline(
     component_root = Path(model_root) / partition
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
-    runtime_device = torch.device(device)
+    runtime_device = resolve_device(device) if str(device).startswith("npu") else torch.device(device)
     if quant_config.enabled and runtime_device.type != "cuda":
         raise ValueError("MiniMax H3 online quantization requires a CUDA device")
     use_resident_modules = world_size > 1 or resolved_enable_fsdp
@@ -241,7 +242,12 @@ def load_minimax_h3_pipeline(
         offload_type=(
             WeightOffloadType.NO_CPU_OFFLOAD if use_resident_modules else WeightOffloadType.MODEL_CPU_OFFLOAD
         ),
-        pin_cpu_memory=False,
+        pin_cpu_memory=(not use_resident_modules and runtime_device.type == "npu"),
+    )
+    text_offload = (
+        OffloadConfig(offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD, pin_cpu_memory=True)
+        if runtime_device.type == "npu" and not resolved_enable_fsdp
+        else resident_offload
     )
     dit_offload = (
         OffloadConfig(offload_type=WeightOffloadType.NO_CPU_OFFLOAD, pin_cpu_memory=False)
@@ -266,7 +272,7 @@ def load_minimax_h3_pipeline(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
-        offload_config=resident_offload,
+        offload_config=text_offload,
         parallel_config=text_parallel,
     )
     attention_config = (

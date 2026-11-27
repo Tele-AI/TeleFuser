@@ -211,4 +211,28 @@ generate_wan 4 && inspect_video 4
 | CANN 8.2（Torch 2.9.0，`torch_npu` 2.9.0.post1） | 480p（864 × 480） | 1 / 2 / 4 卡（CFG 2 × Ulysses 2） | 180.9 / 120.8 / 87.0 秒 | 通过 |
 | 同上 | 720p | 1 / 4 卡 | 477.8 / 173.9 秒 | 通过 |
 
-双卡实机还单独验证了 HCCL all-reduce、默认 NPU mesh、流水线并行（PP）发送与缺省接收缓冲区，以及真实 NPU 张量经主存分片并在目标设备重组。与 `vLLM-Omni` 的同底座延迟对标及多卡扩展结果见[《昇腾 NPU 性能基准》](benchmark_ascend_npu.md)。
+双卡实机还单独验证了 HCCL all-reduce、默认 NPU mesh、流水线并行（PP）发送与缺省接收缓冲区，以及真实 NPU 张量经主存分片并在目标设备重组。
+
+## 运行 MiniMax-H3 音视频联合生成
+
+同一 `telefuser:ascend910b` 镜像内置了 `MiniMax-H3` 音视频联合生成示例（`T2VA`、`FL2VA`、`Ref2VA`），支持 `1`、`2`、`4` 或 `8` 张 Ascend 910B2 64 GB 运行（多卡建议 `--shm-size=128g`）。将包含 `FL2VA/` 与 `Ref2VA/` 子目录的权重根目录挂载至 `/models/MiniMax-H3`：
+
+```bash
+docker run --rm --shm-size=128g \
+  --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+  --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+  --mount type=bind,src=/usr/local/dcmi,dst=/usr/local/dcmi,readonly \
+  --mount type=bind,src=/usr/local/bin/npu-smi,dst=/usr/local/bin/npu-smi,readonly \
+  --mount type=bind,src=/usr/local/Ascend/driver/lib64,dst=/usr/local/Ascend/driver/lib64,readonly \
+  --mount type=bind,src=/usr/local/Ascend/driver/version.info,dst=/usr/local/Ascend/driver/version.info,readonly \
+  --mount type=bind,src=/etc/ascend_install.info,dst=/etc/ascend_install.info,readonly \
+  --mount "type=bind,src=$H3_MODEL_DIR,dst=/models/MiniMax-H3,readonly" \
+  --mount "type=bind,src=$TF_OUTPUT_DIR,dst=/out" \
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+  "$TF_IMAGE" python /opt/telefuser/examples/minimax_h3/minimax_h3_fl2va_h100.py \
+  --model-root /models/MiniMax-H3 --mode t2va --gpu-num 4 --duration 5 --aspect-ratio 16:9 \
+  --prompt 'In a snowy blue-purple forest, Ori carefully walks past a sleeping giant; footsteps crunch in the snow while the creature breathes and softly snorts.' \
+  --output-path /out/minimax_h3_t2va.mp4
+```
+
+输出文件同时包含 24 FPS H.264 视频流（`1344×768`，`124` 帧）与 `32000 Hz` 双声道立体声 AAC 音轨，可通过 `ffprobe` 分别核验 `v:0` 与 `a:0`。与 `vLLM-Omni` 的同底座延迟对标及多卡扩展结果见[《昇腾 NPU 性能基准》](benchmark_ascend_npu.md)。

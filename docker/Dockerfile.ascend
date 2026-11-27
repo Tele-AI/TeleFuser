@@ -30,6 +30,8 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFUSER="${TELEFUSER_VERSION}" \
     && LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib:${LD_LIBRARY_PATH}" \
         TORCH_DEVICE_BACKEND_AUTOLOAD=0 telefuser --help > /dev/null
 COPY examples/wan_video/wan22_t2v_5b.py ./examples/wan_video/wan22_t2v_5b.py
+COPY examples/minimax_h3 ./examples/minimax_h3
+COPY examples/data/minimax-h3 ./examples/data/minimax-h3
 
 # Initialize the CANN toolkit, AscendNPU IR and ATB in non-interactive runs while keeping the app venv first on PATH.
 ENTRYPOINT ["/bin/bash", "-c", "\

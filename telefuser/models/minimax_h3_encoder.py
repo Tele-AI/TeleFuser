@@ -31,7 +31,7 @@ def _is_unconsumed_checkpoint_weight(name: str) -> bool:
 def load_minimax_h3_encoder_config(path: str | Path) -> Qwen3VLConfig:
     config_path = Path(path)
     source = config_path.parent if config_path.is_file() else config_path
-    config = Qwen3VLConfig.from_pretrained(source, local_files_only=True)
+    config = Qwen3VLConfig.from_pretrained(source, local_files_only=True, attn_implementation="sdpa")
     config.text_config.num_hidden_layers = MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER
     config.text_config.output_hidden_states = False
     config.text_config.use_cache = False
