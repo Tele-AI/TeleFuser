@@ -368,6 +368,10 @@ def indexed_scale_shift(
     ):
         kernel = _get_triton_kernel("indexed_scale_shift_bf16_")
         return kernel(x, shift, scale, indices.contiguous())
+    if not torch.compiler.is_compiling() and x.device.type == "npu":
+        scale_plus_one = (scale + 1).index_select(0, indices)
+        out = shift.index_select(0, indices)
+        return out.addcmul_(x, scale_plus_one)
     return x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
 
 
@@ -428,6 +432,8 @@ def indexed_gate(
     ):
         kernel = _get_triton_kernel("indexed_gate_bf16_")
         return kernel(x, gate, other, indices.contiguous())
+    if not torch.compiler.is_compiling() and x.device.type == "npu":
+        return torch.addcmul(x, gate.index_select(0, indices), other)
     return x + gate.index_select(0, indices) * other
 
 

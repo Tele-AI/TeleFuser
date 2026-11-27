@@ -183,13 +183,18 @@ class RMS_norm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
+        out = F.normalize(x, dim=(1 if self.channel_first else -1)) * (self.scale * self.gamma)
+        if isinstance(self.bias, torch.Tensor):
+            out = out + self.bias
+        return out
 
 
 class Upsample(nn.Upsample):
     """Upsample that fixes bfloat16 support for nearest neighbor."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type == "npu":
+            return super().forward(x)
         return super().forward(x.float()).type_as(x)
 
 

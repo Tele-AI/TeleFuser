@@ -647,17 +647,15 @@ class VideoVAE(nn.Module):
 
         iter_ = z.shape[2]
         x = self.conv2(z)
-        out = None
+        chunks: list[torch.Tensor] = []
 
         for i in range(iter_):
             feat_idx[0] = 0  # Reset index for each frame
-            if i == 0:
-                out = self.decoder(x[:, :, i : i + 1, :, :], feat_cache=feat_cache, feat_idx=feat_idx, first_chunk=True)
-            else:
-                out_ = self.decoder(x[:, :, i : i + 1, :, :], feat_cache=feat_cache, feat_idx=feat_idx)
-                out = torch.cat([out, out_], 2)
+            chunks.append(
+                self.decoder(x[:, :, i : i + 1, :, :], feat_cache=feat_cache, feat_idx=feat_idx, first_chunk=(i == 0))
+            )
 
-        out = unpatchify(out, patch_size=2)
+        out = unpatchify(torch.cat(chunks, dim=2), patch_size=2)
         return out
 
 

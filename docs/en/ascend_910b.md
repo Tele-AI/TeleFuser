@@ -218,3 +218,31 @@ model-level CPU offload, 121 frames):
 
 Separate two-rank hardware checks also verified HCCL all-reduce, default NPU mesh selection, pipeline send/receive with
 implicit receive buffers, and host-staged NPU tensor channel sharding and reassembly.
+
+## Run MiniMax-H3 audio-video generation
+
+The same `telefuser:ascend910b` image also bundles the `MiniMax-H3` joint video-and-audio examples (`T2VA`, `FL2VA`, and
+`Ref2VA`) across `1`, `2`, `4`, or `8` Ascend 910B2 64 GB cards (`--shm-size=128g` recommended for multi-card runs). Mount
+the `MiniMax-H3` root directory containing `FL2VA/` and `Ref2VA/` at `/models/MiniMax-H3`:
+
+```bash
+docker run --rm --shm-size=128g \
+  --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+  --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+  --mount type=bind,src=/usr/local/dcmi,dst=/usr/local/dcmi,readonly \
+  --mount type=bind,src=/usr/local/bin/npu-smi,dst=/usr/local/bin/npu-smi,readonly \
+  --mount type=bind,src=/usr/local/Ascend/driver/lib64,dst=/usr/local/Ascend/driver/lib64,readonly \
+  --mount type=bind,src=/usr/local/Ascend/driver/version.info,dst=/usr/local/Ascend/driver/version.info,readonly \
+  --mount type=bind,src=/etc/ascend_install.info,dst=/etc/ascend_install.info,readonly \
+  --mount "type=bind,src=$H3_MODEL_DIR,dst=/models/MiniMax-H3,readonly" \
+  --mount "type=bind,src=$TF_OUTPUT_DIR,dst=/out" \
+  -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+  "$TF_IMAGE" python /opt/telefuser/examples/minimax_h3/minimax_h3_fl2va_h100.py \
+  --model-root /models/MiniMax-H3 --mode t2va --gpu-num 4 --duration 5 --aspect-ratio 16:9 \
+  --prompt 'In a snowy blue-purple forest, Ori carefully walks past a sleeping giant; footsteps crunch in the snow while the creature breathes and softly snorts.' \
+  --output-path /out/minimax_h3_t2va.mp4
+```
+
+Verify both the 24 FPS H.264 video stream (`1344x768`, `124` frames) and the synchronized `32000 Hz` stereo AAC audio
+stream with `ffprobe`. For head-to-head latency and multi-card scaling comparisons against `vLLM-Omni`, see
+[Ascend NPU Benchmarks](benchmark_ascend_npu.md).

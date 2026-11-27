@@ -1,0 +1,50 @@
+{
+  "record_id": "20261126_wan22_ti2v_5b_4x_910b2_x86_64_cann93",
+  "recorded_date": "2026-11-26",
+  "model": "Wan2.2-TI2V-5B",
+  "task": "T2V",
+  "chip_model": "Ascend 910B2 (64GB)",
+  "card_count": 4,
+  "parallel_spec": "CFG2 x Ulysses2",
+  "cpu_arch": "x86_64",
+  "cann_version": "9.3.0",
+  "torch_version": "2.10.0+cpu / torch_npu 2.10.0.post7",
+  "base_image": "vllm-omni:v0.34.0",
+  "workload": {
+    "resolution": "864x480",
+    "num_frames": 121,
+    "fps": 24,
+    "steps": 50,
+    "solver": "UniPC",
+    "cfg_scale": 5.0,
+    "precision": "BF16 eager + MindIE-SD"
+  },
+  "telefuser": {
+    "version_or_commit": "66aa679",
+    "cold_s": 86.13,
+    "warm_runs_s": [33.86, 33.85, 33.82],
+    "warm_median_s": 33.85,
+    "denoise_s": 26.30,
+    "non_denoise_s": 7.55,
+    "gen_fps": 3.57,
+    "peak_hbm_mb": 19039
+  },
+  "vllm_omni": {
+    "version_or_commit": "v0.34.0",
+    "cold_s": 39.07,
+    "warm_runs_s": [38.66, 38.62, 39.16],
+    "warm_median_s": 38.66,
+    "denoise_s": 29.80,
+    "non_denoise_s": 8.86,
+    "gen_fps": 3.13,
+    "peak_hbm_mb": 25814
+  },
+  "quality_gate": {
+    "nan_or_inf": false,
+    "psnr_db": 21.65,
+    "mae_255": 6.95,
+    "audio_cosine": null,
+    "deterministic_warm_hash": true
+  },
+  "gate_status": "VERIFIED"
+}

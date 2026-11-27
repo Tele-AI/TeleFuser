@@ -57,6 +57,10 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """
     if _has_tf_kernel and x.device.type == "cuda":
         return _tf_silu_and_mul(x)
+    if not torch.compiler.is_compiling() and x.device.type == "npu":
+        import torch_npu
+
+        return torch_npu.npu_swiglu(x, dim=-1)
     # Fallback to PyTorch
     gate, val = x.chunk(2, dim=-1)
     return F.silu(gate) * val

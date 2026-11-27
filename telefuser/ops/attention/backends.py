@@ -185,6 +185,27 @@ def _try_import_mindie_attn() -> None:
     logger.debug("MindIE-SD attention available")
 
 
+_LASER_MIN_SELF_SEQLEN = 4000
+_LASER_MAX_HEAD_DIM = 128
+
+
+def _can_use_ascend_laser_attention(q: Tensor, k: Tensor, attn_mask: Tensor | None) -> bool:
+    """Return True when BNSD Q/K fit MindIE-SD's AscendLaserAttention self-attention contract."""
+    if attn_mask is not None or q.ndim != 4 or k.ndim != 4:
+        return False
+    q_seqlen, head_dim = int(q.shape[2]), int(q.shape[3])
+    if q_seqlen != int(k.shape[2]) or q_seqlen < _LASER_MIN_SELF_SEQLEN or head_dim > _LASER_MAX_HEAD_DIM:
+        return False
+    try:
+        from mindiesd.utils.get_platform import is_a5_device
+
+        if is_a5_device():
+            return False
+    except ImportError:
+        pass
+    return True
+
+
 def mindie_attn(
     q: Tensor,
     k: Tensor,
@@ -193,11 +214,35 @@ def mindie_attn(
     attn_mask: Tensor | None = None,
     scale: float | None = None,
     is_causal: bool = False,
+    input_scale: float | None = None,
 ) -> Tensor:
     """MindIE-SD attention wrapper for BNSD inputs on Ascend NPU."""
     if is_causal:
         raise ValueError("MINDIE_ATTN does not support causal attention")
-    return mindiesd_attention_forward(q, k, v, attn_mask=attn_mask, scale=scale, head_first=True)
+    resolved_scale = scale
+    use_input_scale = input_scale is not None and input_scale > 1.0
+    if use_input_scale:
+        factor = float(input_scale)
+        base_scale = float(q.shape[-1] ** -0.5) if scale is None else float(scale)
+        q = q / factor
+        k = k / factor
+        v = v / factor
+        resolved_scale = base_scale * (factor * factor)
+    if _can_use_ascend_laser_attention(q, k, attn_mask):
+        output = mindiesd_attention_forward(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            scale=resolved_scale,
+            head_first=True,
+            opt_mode="manual",
+            op_type="ascend_laser_attention",
+            layout="BNSD",
+        )
+    else:
+        output = mindiesd_attention_forward(q, k, v, attn_mask=attn_mask, scale=resolved_scale, head_first=True)
+    return output * float(input_scale) if use_input_scale else output
 
 
 _try_import_flash_attn()

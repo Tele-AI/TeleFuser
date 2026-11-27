@@ -28,6 +28,8 @@ class GELU(nn.Module):
     """Tanh-approximated GELU activation."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type == "npu" and not torch.compiler.is_compiling():
+            return F.gelu(x, approximate="tanh")
         return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
@@ -41,6 +43,10 @@ class T5LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type == "npu" and not torch.compiler.is_compiling() and x.dtype == self.weight.dtype:
+            import torch_npu
+
+            return torch_npu.npu_rms_norm(x, self.weight, self.eps)[0]
         x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
             x = x.type_as(self.weight)

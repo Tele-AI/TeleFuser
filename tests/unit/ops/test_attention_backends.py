@@ -309,3 +309,23 @@ def test_mindie_attn_dispatch_converts_to_bnsd_and_back() -> None:
     called_q = forward.call_args.args[0]
     assert called_q.shape == (1, 2, 3, 4)
     assert forward.call_args.kwargs == {"attn_mask": None, "scale": None, "head_first": True}
+
+
+def test_torch_sdpa_promotes_to_mindie_attn_on_npu_when_eligible() -> None:
+    class _FakeNPUAttnTensor(torch.Tensor):
+        @property
+        def device(self):  # type: ignore[override]
+            return type("FakeDev", (), {"type": "npu"})()
+
+    q = torch.randn(1, 3, 2, 4, dtype=torch.bfloat16).as_subclass(_FakeNPUAttnTensor)
+    forward = MagicMock(side_effect=lambda q_, k_, v_, **kwargs: torch.Tensor(q_))
+
+    with (
+        patch.object(attention_impl, "MINDIE_ATTN_AVAILABLE", True),
+        patch.object(backends, "mindiesd_attention_forward", forward),
+    ):
+        output = attention_impl.attention(q, q, q, attn_impl=attention_impl.AttnImplType.TORCH_SDPA)
+
+    assert output.shape == (1, 3, 2, 4)
+    forward.assert_called_once()
+    assert forward.call_args.kwargs == {"attn_mask": None, "scale": None, "head_first": True}

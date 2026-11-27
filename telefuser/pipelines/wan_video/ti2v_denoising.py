@@ -327,59 +327,69 @@ class TI2VDenoisingStage(BaseStage):
             and model_param.dtype == self.torch_dtype
         )
 
-        for progress_id, timestep in enumerate(tqdm(self.scheduler.timesteps, desc="TI2V denoise")):
-            # For I2V, create per-token timestep where conditioned frames get 0
-            if mask is not None:
-                timestep_tensor = self._create_per_token_timestep(
-                    timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device),
-                    mask,
-                    latent_t,
-                    latent_h,
-                    latent_w,
-                )
-            else:
-                timestep_tensor = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
+        use_ctx_cache = hasattr(self.dit, "enable_step_context_cache") and hasattr(self.dit, "clear_step_context_cache")
+        if use_ctx_cache:
+            self.dit.enable_step_context_cache()
 
-            autocast_ctx = (
-                nullcontext() if skip_autocast else torch.autocast(device_type=self.device_type, dtype=self.torch_dtype)
-            )
-            with autocast_ctx:
-                latents_input = latents.to(self.torch_dtype)
-                noise_pred = self.predict_noise_with_cfg(
-                    latents=latents_input,
-                    timestep=timestep_tensor,
-                    prompt_emb_posi=prompt_emb_posi,
-                    prompt_emb_nega=prompt_emb_nega,
-                    cfg_scale=cfg_scale,
-                )
-
-            # In PP mode, only last stage computes scheduler.step
-            if is_pp_enabled:
-                pp_group = self.dit.device_mesh.get_group("pp")
-                pp_world_size = dist.get_world_size(pp_group)
-                last_stage_rank = pp_world_size - 1
-
-                if is_pp_last_stage:
-                    latents = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], latents)
-                    # Re-blend to keep conditioned frames fixed (I2V)
-                    if mask is not None and start_latent is not None:
-                        latents = (1.0 - mask) * start_latent + mask * latents[0]
-                        latents = latents.unsqueeze(0)
-                        if end_latent is not None:
-                            latents[0, :, -1:] = end_latent
-                    dist.broadcast(latents, src=last_stage_rank, group=pp_group)
+        try:
+            for progress_id, timestep in enumerate(tqdm(self.scheduler.timesteps, desc="TI2V denoise")):
+                # For I2V, create per-token timestep where conditioned frames get 0
+                if mask is not None:
+                    timestep_tensor = self._create_per_token_timestep(
+                        timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device),
+                        mask,
+                        latent_t,
+                        latent_h,
+                        latent_w,
+                    )
                 else:
-                    dist.broadcast(latents, src=last_stage_rank, group=pp_group)
-            else:
-                # Non-PP mode: all ranks compute scheduler.step
-                if noise_pred is not None:
-                    latents = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], latents)
-                    # Re-blend to keep conditioned frames fixed (I2V)
-                    if mask is not None and start_latent is not None:
-                        latents = (1.0 - mask) * start_latent + mask * latents[0]
-                        latents = latents.unsqueeze(0)
-                        if end_latent is not None:
-                            latents[0, :, -1:] = end_latent
+                    timestep_tensor = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
+
+                autocast_ctx = (
+                    nullcontext()
+                    if skip_autocast
+                    else torch.autocast(device_type=self.device_type, dtype=self.torch_dtype)
+                )
+                with autocast_ctx:
+                    latents_input = latents.to(self.torch_dtype)
+                    noise_pred = self.predict_noise_with_cfg(
+                        latents=latents_input,
+                        timestep=timestep_tensor,
+                        prompt_emb_posi=prompt_emb_posi,
+                        prompt_emb_nega=prompt_emb_nega,
+                        cfg_scale=cfg_scale,
+                    )
+
+                # In PP mode, only last stage computes scheduler.step
+                if is_pp_enabled:
+                    pp_group = self.dit.device_mesh.get_group("pp")
+                    pp_world_size = dist.get_world_size(pp_group)
+                    last_stage_rank = pp_world_size - 1
+
+                    if is_pp_last_stage:
+                        latents = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], latents)
+                        # Re-blend to keep conditioned frames fixed (I2V)
+                        if mask is not None and start_latent is not None:
+                            latents = (1.0 - mask) * start_latent + mask * latents[0]
+                            latents = latents.unsqueeze(0)
+                            if end_latent is not None:
+                                latents[0, :, -1:] = end_latent
+                        dist.broadcast(latents, src=last_stage_rank, group=pp_group)
+                    else:
+                        dist.broadcast(latents, src=last_stage_rank, group=pp_group)
+                else:
+                    # Non-PP mode: all ranks compute scheduler.step
+                    if noise_pred is not None:
+                        latents = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], latents)
+                        # Re-blend to keep conditioned frames fixed (I2V)
+                        if mask is not None and start_latent is not None:
+                            latents = (1.0 - mask) * start_latent + mask * latents[0]
+                            latents = latents.unsqueeze(0)
+                            if end_latent is not None:
+                                latents[0, :, -1:] = end_latent
+        finally:
+            if use_ctx_cache:
+                self.dit.clear_step_context_cache()
 
         return latents
 

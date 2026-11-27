@@ -97,7 +97,8 @@ class RotaryEmbeddingND(nn.Module):
         if D != self.n_dim:
             raise ValueError(f"Expected {self.n_dim} dimensions, got {D}")
 
-        with torch.autocast("cuda", enabled=False):
+        autocast_device = img_ids.device.type if img_ids.device.type in ("cuda", "npu") else "cuda"
+        with torch.autocast(autocast_device, enabled=False):
             angles = self.angle_scale * img_ids[:, :, :, None] * self.inv_freq.to(img_ids.device)[None, None, None, :]
             angles = angles.flatten(2, 3)
             angles = angles.tile(2)

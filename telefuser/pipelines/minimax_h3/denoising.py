@@ -169,7 +169,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
                 raise ValueError("MiniMax H3 DiT tensor parallelism cannot be combined with model CPU offload")
             logger.info(f"Enabling tensor parallelism for {self.name}")
             self.transformer.enable_tp(device_mesh)
-            self.transformer.to(self.device)
+            if self.device.type == "npu":
+                self.transformer.onload_device(self.device, non_blocking=False)
+            else:
+                self.transformer.to(self.device)
             self.onload_models_flag = True
             current_platform.empty_cache()
         if parallel_config.sp_ulysses_degree > 1:
@@ -343,6 +346,8 @@ class MiniMaxH3DenoisingStage(BaseStage):
         device = next(self.transformer.parameters()).device
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
+        elif device.type == "npu":
+            torch.npu.reset_peak_memory_stats(device)
         denoising_started = time.perf_counter()
         video_rows = torch.zeros(len(packed["img_pos"]), 96, dtype=torch.float32, device=device)
         audio_rows = torch.zeros(len(packed["audio_pos"]), 32, dtype=torch.float32, device=device)
@@ -433,6 +438,21 @@ class MiniMaxH3DenoisingStage(BaseStage):
                     block_combined_indices,
                 )
             )
+
+        all_schedule_timesteps: torch.Tensor | None = None
+        materialize_online_adaln = getattr(self.transformer, "materialize_online_adaln_cache_for_timesteps", None)
+        if (
+            device.type == "npu"
+            and callable(materialize_online_adaln)
+            and bool(getattr(self.transformer, "_online_adaln_cache_enabled", False))
+            and getattr(self.transformer, "_adaln_cache", None) is None
+        ):
+            all_schedule_timesteps = torch.cat([step_items[0].detach().cpu() for step_items in timestep_plan])
+            materialize_online_adaln(all_schedule_timesteps, device=device)
+            current_platform.empty_cache()
+        elif device.type == "npu" and getattr(self.transformer, "_adaln_cache", None) is not None:
+            all_schedule_timesteps = torch.cat([step_items[0].detach().cpu() for step_items in timestep_plan])
+            self.transformer._adaln_cache._cpu_indices_for(all_schedule_timesteps)
 
         video_step_t = torch.tensor(
             [float(1.0 - sigma) for sigma in video_sigmas[:-1]],
@@ -559,6 +579,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
             torch.cuda.synchronize(device)
             peak_allocated = int(torch.cuda.max_memory_allocated(device))
             peak_reserved = int(torch.cuda.max_memory_reserved(device))
+        elif device.type == "npu":
+            torch.npu.synchronize(device)
+            peak_allocated = int(torch.npu.max_memory_allocated(device))
+            peak_reserved = int(torch.npu.max_memory_reserved(device))
         else:
             peak_allocated = 0
             peak_reserved = 0

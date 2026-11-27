@@ -21,15 +21,15 @@ def _apply_qk_norm(module, hidden_states):
         isinstance(module, (nn.LayerNorm, nn.RMSNorm))
         and getattr(module, "weight", None) is None
         and getattr(module, "bias", None) is None
-        and hidden_states.is_cuda
+        and hidden_states.device.type in ("cuda", "npu")
         and hidden_states.dtype in (torch.float16, torch.bfloat16)
         and not torch.is_grad_enabled()
         and not torch.compiler.is_compiling()
     ):
-        # CUDA LayerNorm/RMSNorm accumulates half/bfloat16 inputs in FP32.
+        # CUDA/NPU LayerNorm/RMSNorm accumulates half/bfloat16 inputs in FP32.
         # With no affine parameters its half output is bit-identical to the
         # released FP32-norm-then-cast recipe, without two full-tensor casts.
-        with torch.autocast("cuda", enabled=False):
+        with torch.autocast(hidden_states.device.type, enabled=False):
             return module(hidden_states)
     return module(_vit_norm_input(module, hidden_states)).to(hidden_states.dtype)
 

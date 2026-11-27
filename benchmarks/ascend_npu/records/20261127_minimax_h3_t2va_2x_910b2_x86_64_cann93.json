@@ -1,0 +1,50 @@
+{
+  "record_id": "20261127_minimax_h3_t2va_2x_910b2_x86_64_cann93",
+  "recorded_date": "2026-11-27",
+  "model": "MiniMax-H3",
+  "task": "T2VA",
+  "chip_model": "Ascend 910B2 (64GB)",
+  "card_count": 2,
+  "parallel_spec": "Resident TP2",
+  "cpu_arch": "x86_64",
+  "cann_version": "9.3.0",
+  "torch_version": "2.10.0+cpu / torch_npu 2.10.0.post7",
+  "base_image": "vllm-omni:v0.34.0",
+  "workload": {
+    "resolution": "1344x768",
+    "num_frames": 124,
+    "fps": 24,
+    "audio": "32kHz 2ch AAC",
+    "steps": 50,
+    "solver": "Euler (shift 12.0/3.0)",
+    "precision": "BF16 eager + MindIE LaserAttention"
+  },
+  "telefuser": {
+    "version_or_commit": "87cd1d2",
+    "cold_s": 624.00,
+    "warm_runs_s": [497.94, 498.45, 498.34],
+    "warm_median_s": 498.34,
+    "denoise_s": 482.72,
+    "non_denoise_s": 15.62,
+    "gen_fps": 0.25,
+    "peak_hbm_mb": 44435
+  },
+  "vllm_omni": {
+    "version_or_commit": "v0.34.0",
+    "cold_s": 577.52,
+    "warm_runs_s": [516.95, 517.26, 517.44],
+    "warm_median_s": 517.26,
+    "denoise_s": 502.16,
+    "non_denoise_s": 15.10,
+    "gen_fps": 0.24,
+    "peak_hbm_mb": 25942
+  },
+  "quality_gate": {
+    "nan_or_inf": false,
+    "psnr_db": 17.77,
+    "mae_255": 19.90,
+    "audio_cosine": 0.9655,
+    "deterministic_warm_hash": true
+  },
+  "gate_status": "VERIFIED"
+}

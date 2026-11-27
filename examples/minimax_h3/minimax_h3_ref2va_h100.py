@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
@@ -14,11 +16,14 @@ from examples.minimax_h3.common import (
     run_minimax_h3_request,
     save_generation,
 )
+from telefuser.core.config import AttnImplType
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Generation, MiniMaxH3Pipeline
 from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
+from telefuser.platforms import current_platform
 from telefuser.service.core.contract_templates import build_pipeline_manifest, build_task_contract_template
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
+_IS_NPU = current_platform.device_type == "npu"
 PPL_CONFIG: dict[str, Any] = {
     "name": "minimax_h3_ref2va_h100",
     "model_root": TF_MODEL_ZOO_PATH + "/MiniMaxAI_MiniMax-H3",
@@ -33,7 +38,7 @@ PPL_CONFIG: dict[str, Any] = {
     "seed": 0,
     "flow_shift": None,
     "audio_flow_shift": None,
-    "device": "cuda:0",
+    "device": "npu:0" if _IS_NPU else "cuda:0",
     "enable_fsdp": None,
     "online_adaln_cache": True,
     "attention_chunks": 2,
@@ -98,8 +103,10 @@ def get_pipeline(
     ulysses_sequence_mode: str = PPL_CONFIG["ulysses_sequence_mode"],
     quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
-    """Load the Ref2VA checkpoint partition for one, two, or four GPUs."""
-    tp_degree = 2 if parallelism == 4 else 1
+    """Load the Ref2VA checkpoint partition for 1, 2, 4, or 8 accelerators."""
+    is_npu_target = str(device).partition(":")[0].strip().lower() == "npu"
+    tp_degree = (2 if parallelism in {2, 4, 8} else 1) if is_npu_target else (2 if parallelism in {4, 8} else 1)
+    extra_kwargs = {"attn_impl": AttnImplType.MINDIE_ATTN} if is_npu_target else {}
     return load_minimax_h3_pipeline(
         model_root,
         partition=PPL_CONFIG["partition"],
@@ -113,6 +120,7 @@ def get_pipeline(
         attention_chunks=attention_chunks,
         ulysses_sequence_mode=ulysses_sequence_mode,
         quantization=quantization,
+        **extra_kwargs,
     )
 
 
@@ -270,7 +278,7 @@ def main() -> None:
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--quantization", choices=("fp8", "torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
-    parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--attention-chunks", type=int, choices=(1, 2), default=PPL_CONFIG["attention_chunks"])
     parser.add_argument(
         "--ulysses-sequence-mode",

@@ -17,7 +17,7 @@ Regenerate-2K services are not implemented or implied.
 | --- | --- | --- |
 | T2VA and FL2VA | Supported | `FL2VA` checkpoint partition |
 | Ref2VA | Supported | Reference video, audio, and voice conditioning |
-| Multi-GPU inference | Supported | Ulysses, tensor parallelism, and supported FSDP layouts on 2 or 4 GPUs |
+| Multi-GPU inference | Supported | Ulysses, tensor parallelism, and supported FSDP layouts on 2, 4, or 8 accelerators |
 | LoRA | Supported | Separate Turbo LoRA entry point |
 | Quantization | Partial | Backend and parallelism constraints are documented below |
 | CPU offload | Supported | Default for one-GPU execution |
@@ -398,15 +398,18 @@ policy or first FL2VA keyframe.
 `--gpu-num` selects the total worker count. `--ulysses-degree` remains a compatibility alias for the same CLI option;
 it no longer means that every selected GPU is necessarily an Ulysses rank.
 
-| `--gpu-num` | DiT | Text encoder | Video VAE | Residency |
-|---:|---|---|---|---|
-| 1 | single GPU | single GPU | single GPU | sequential model CPU offload |
-| 2 | Ulysses2 | TP2 | TP2 tiling | resident |
-| 4 | Ulysses2 x TP2 | TP4 | TP4 tiling | resident |
+| `--gpu-num` | DiT (CUDA H100) | DiT (Ascend 910B2 64GB, FL2VA) | Text encoder | Video VAE | Residency |
+|---:|---|---|---|---|---|
+| 1 | single GPU | single NPU | single accelerator | single accelerator | sequential model CPU offload |
+| 2 | Ulysses2 | TP2 | TP2 | TP2 tiling | resident DiT + VAE (pinned encoder offload on NPU) |
+| 4 | Ulysses2 x TP2 | Ulysses4 | TP4 | TP4 tiling | resident DiT + VAE (pinned encoder offload on NPU) |
+| 8 | Ulysses4 x TP2 | Ulysses8 | TP8 | TP8 tiling | resident DiT + VAE (pinned encoder offload on NPU) |
 
 The Ulysses degree must divide 56 attention heads. Scripts must run from their guarded entry points so worker
 processes can spawn safely. H100 examples request packed FlashAttention 4 and fall back to packed PyTorch SDPA when
-FlashAttention 4 is unavailable.
+FlashAttention 4 is unavailable; Ascend 910B2 runs automatically select `MINDIE_ATTN` (`ascend_laser_attention` with
+exact power-of-two input pre-scaling) and CPU-staged online AdaLN cache materialization (see
+[Ascend NPU Benchmarks](../../docs/en/benchmark_ascend_npu.md)).
 
 The H100 examples also enable the lossless MiniMax-H3 Ulysses optimizations with
 `--attention-chunks 2 --ulysses-sequence-mode valid_only`. Two balanced head chunks overlap Ulysses communication
@@ -549,7 +552,7 @@ python examples/minimax_h3/minimax_h3_ref2va_h100.py \
 
 The standard four-GPU profile already uses Ulysses2 x TP2 and therefore leaves FSDP disabled. Use
 `load_minimax_h3_pipeline` directly to construct another supported combination; the product of Ulysses and TP degrees
-must be 1, 2, or 4.
+must be 1, 2, 4, or 8.
 
 Ring attention, CFG parallelism, pipeline parallelism, sparse attention, and `torch.compile` are not enabled for H3.
 Video-VAE parallelism is spatial tiling over the existing TP process group, not parameter tensor parallelism. The

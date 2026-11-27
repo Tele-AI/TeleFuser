@@ -205,6 +205,8 @@ class MiniMaxH3Pipeline(BasePipeline):
         device = torch.device(self.device)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
+        elif device.type == "npu":
+            torch.npu.synchronize(device)
 
     def _timed_call(self, function: Any, /, *args: Any, **kwargs: Any) -> tuple[Any, float]:
         self._synchronize()
